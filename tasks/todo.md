@@ -24,9 +24,13 @@
 - [x] `record_important_decision` tool — MCP E2E verified (records typed instance; rejects unknown kinds); test `tests/write_path.rs`
 - [x] `LlmClient` (OpenAI-compatible, env-config: `src/llm/mod.rs`) + `OntologyResolver` (`src/ontology/mod.rs`)
 - [x] `query` tool → `execute_graph_walk_nlq_with_context` (answer + reasoning trace); pure-symbolic test (`tests/query.rs`) + **live LLM smoke** against `endor`
-- [ ] `get_relevant_context` tool ← **next (finishes M1)**
+- [x] `get_relevant_context` tool — symbolic structured retrieval (topic via the coherent entity index, else list-all); MCP-verified; test `tests/context.rs`
 - [ ] CategoryMappings (L0 → fixed BFO/CCO IRIs) — deferred to M2 (needs the generated ontology's CCO roots)
 - [x] Key E2E **verified live**: record → NLQ → synthesized answer + 10-stage trace (LLM fired only as the extraction *sensor*; symbolic pipeline did the reasoning). Persistence proven (M0).
+- [x] **Record → restart → read-back** verified with the real binary across two separate processes sharing a data dir.
+
+**M1 complete** ✅ — tools live: `ping`, `record_important_decision`, `query` (+trace), `get_relevant_context`. 5 tests green, clippy clean.
+- Note: rmcp dispatches tool calls concurrently; cross-call read-after-write relies on the client awaiting each response (true for real MCP clients). Not a concern for v1; revisit if batched/streamed calls are added.
 
 ## M2 — Alignment
 - [ ] `scripts/precompute-vectors` → `ontology_vectors` SQLite for shipped ontologies

@@ -24,6 +24,20 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message.into())])
 }
 
+/// Render structured context items into a readable block for the agent.
+fn format_context(items: &[graph::ContextItem]) -> String {
+    let plural = if items.len() == 1 { "" } else { "s" };
+    let mut out = format!("Relevant recorded knowledge ({} item{plural}):\n", items.len());
+    for item in items {
+        out.push_str(&format!("\n• {} — \"{}\"\n", item.kind, item.label));
+        for (key, value) in &item.properties {
+            out.push_str(&format!("  {key}: {value}\n"));
+        }
+        out.push_str(&format!("  {}\n", item.iri));
+    }
+    out
+}
+
 /// Arguments for the `record_important_decision` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecordDecisionArgs {
@@ -43,6 +57,15 @@ pub struct RecordDecisionArgs {
 pub struct QueryArgs {
     /// Natural-language question to answer over the project knowledge graph.
     pub question: String,
+}
+
+/// Arguments for the `get_relevant_context` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetRelevantContextArgs {
+    /// Topic/focus to retrieve context for. Omit to list all recorded knowledge.
+    pub topic: Option<String>,
+    /// Maximum number of items to return (default 10).
+    pub limit: Option<usize>,
 }
 
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
@@ -130,6 +153,22 @@ impl MooseDevServer {
                 r.answer, r.confidence, r.trace
             ))),
             Err(e) => Ok(tool_error(format!("query failed: {e}"))),
+        }
+    }
+
+    /// Retrieve recorded project knowledge relevant to a topic (or all of it).
+    #[tool(
+        description = "Retrieve recorded project knowledge relevant to a topic (or all of it) as structured context. Symbolic — no LLM."
+    )]
+    async fn get_relevant_context(
+        &self,
+        Parameters(args): Parameters<GetRelevantContextArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(10).clamp(1, 100);
+        match graph::relevant_context(&self.state, args.topic.as_deref(), limit) {
+            Ok(items) if items.is_empty() => Ok(tool_ok("No recorded knowledge found.")),
+            Ok(items) => Ok(tool_ok(format_context(&items))),
+            Err(e) => Ok(tool_error(format!("failed to retrieve context: {e}"))),
         }
     }
 }

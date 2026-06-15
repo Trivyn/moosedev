@@ -15,6 +15,7 @@ use moose::moose_ontology::MooseOntologyCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
 use moose::traits::EngineConfig;
 use moose::types::{CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, WalkBudgets};
+use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
 use crate::llm::{LlmConfig, OpenAiCompatClient};
@@ -227,13 +228,126 @@ fn render_trace(t: &PipelineTimings) -> String {
         ));
     }
     for st in &t.stage_traces {
-        let stage = st
-            .stage_iri
-            .rsplit(['/', '#'])
-            .next()
-            .unwrap_or(st.stage_iri.as_str());
+        let stage = local_name(&st.stage_iri);
         let detail = st.detail.as_deref().unwrap_or("");
         lines.push(format!("  • {stage} ({:.1}ms) {detail}", st.duration_ms));
     }
     lines.join("\n")
+}
+
+/// Extract the local name of an IRI (after the last `/` or `#`).
+fn local_name(iri: &str) -> &str {
+    iri.rsplit(['/', '#']).next().unwrap_or(iri)
+}
+
+/// A recorded knowledge item returned as structured context.
+pub struct ContextItem {
+    pub iri: String,
+    pub kind: String,
+    pub label: String,
+    pub properties: Vec<(String, String)>,
+}
+
+/// Retrieve recorded knowledge relevant to `topic` (label-matched via the
+/// cache-coherent entity index), or list all recorded instances when `topic` is
+/// empty. Symbolic — no LLM.
+pub fn relevant_context(
+    state: &AppState,
+    topic: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<ContextItem>> {
+    let class_iris: Vec<String> = state
+        .arch_vocab
+        .classes
+        .iter()
+        .map(|c| c.iri.clone())
+        .collect();
+    let data_graphs = [PROJECT_KG_GRAPH_IRI.to_string()];
+
+    let subjects: Vec<(String, String)> = match topic.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => state
+            .entity_index
+            .search_classes(
+                t,
+                &class_iris,
+                &state.store,
+                &data_graphs,
+                moose::LABEL_PREDICATES,
+                limit,
+            )
+            .into_iter()
+            .map(|h| (h.iri, h.class_iri))
+            .collect(),
+        None => list_instances(&state.store, &class_iris, limit),
+    };
+
+    Ok(subjects
+        .into_iter()
+        .map(|(iri, class_iri)| build_context_item(&state.store, iri, class_iri))
+        .collect())
+}
+
+/// List up to `limit` instances of the given classes in the project KG graph.
+fn list_instances(store: &Store, class_iris: &[String], limit: usize) -> Vec<(String, String)> {
+    let rdf_type = NamedNodeRef::new_unchecked(moose::RDF_TYPE);
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut out = Vec::new();
+    for class_iri in class_iris {
+        let Ok(class) = NamedNodeRef::new(class_iri) else {
+            continue;
+        };
+        for q in store
+            .quads_for_pattern(
+                None,
+                Some(rdf_type),
+                Some(class.into()),
+                Some(GraphNameRef::NamedNode(graph)),
+            )
+            .flatten()
+        {
+            if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
+                out.push((s.as_str().to_string(), class_iri.clone()));
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fetch an instance's label + literal properties from the project KG graph.
+fn build_context_item(store: &Store, iri: String, class_iri: String) -> ContextItem {
+    let mut label = String::new();
+    let mut properties = Vec::new();
+    if let Ok(subject) = NamedNodeRef::new(&iri) {
+        let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+        for q in store
+            .quads_for_pattern(
+                Some(subject.into()),
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(graph)),
+            )
+            .flatten()
+        {
+            let pred = q.predicate.as_str();
+            if pred == moose::RDF_TYPE {
+                continue;
+            }
+            if let Term::Literal(lit) = &q.object {
+                if pred == moose::RDFS_LABEL {
+                    label = lit.value().to_string();
+                } else {
+                    properties.push((local_name(pred).to_string(), lit.value().to_string()));
+                }
+            }
+        }
+    }
+    ContextItem {
+        iri,
+        kind: local_name(&class_iri).to_string(),
+        label,
+        properties,
+    }
 }
