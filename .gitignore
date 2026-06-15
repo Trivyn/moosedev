@@ -1,0 +1,47 @@
+# ── Rust / Cargo ──────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.profraw
+
+# moosedev is a BINARY application (the MCP server), so Cargo.lock IS committed
+# for reproducible builds — the oxigraph-trivyn fork is pinned by git rev and we
+# build offline against it. (The sibling `moose` *library* ignores Cargo.lock;
+# we intentionally diverge. Do NOT add Cargo.lock to this file.)
+
+# ── Runtime data — generated, never source ────────────────────────────────
+# The durable project KG (persistent oxigraph / rocksdb store) and MOOSE's
+# SQLite session DB are created at runtime. Keep all runtime state under /data/
+# (MOOSE's SessionDb also defaults to sqlite:./data/moose_sessions.db).
+/data/
+
+# Transient SQLite sidecars — safe to ignore even when a .db is intentionally
+# committed (e.g. the precomputed ontology-vector store used by alignment).
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+
+# NOTE: shipped precomputed ontology vectors (the alignment VecStore) are a
+# committed / git-lfs artifact — keep them OUT of /data/ so they aren't ignored.
+
+# ── Local config & secrets ────────────────────────────────────────────────
+# LlmClient is configured via env (base_url / api_key / model). Never commit keys.
+.env
+.env.*
+!.env.example
+
+# Claude Code / MCP local files (matches the `moose` repo convention; a local
+# .mcp.json will often point an MCP client at the moosedev binary).
+.mcp.json
+.claude/settings.local.json
+
+# ── Editor & OS noise ─────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log

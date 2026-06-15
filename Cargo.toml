@@ -1,0 +1,43 @@
+[package]
+name = "moosedev"
+version = "0.1.0"
+edition = "2021"
+description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
+license = "Apache-2.0"
+
+[dependencies]
+# The closed-source MOOSE engine, consumed as a path dependency.
+# candle-cpu + arctic-s: local embedding backbone (Arctic-Embed-S, 384-dim) for alignment.
+moose = { path = "../moose", features = ["candle-cpu", "arctic-s"] }
+
+# Same oxigraph (Trivyn fork, via [patch] below) MOOSE exposes across its public API.
+# `Store` crosses the moose API boundary, so moosedev must resolve the identical crate.
+oxigraph = { version = "0.5.6", features = ["rdf-12"] }
+
+# MCP server over stdio — the official Rust SDK.
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+
+# Async runtime + server plumbing. stdout is the MCP JSON-RPC channel, so logs
+# (tracing) are routed to stderr in main.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[patch.crates-io]
+# Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.
+# Required because oxigraph types (Store, NamedNode, …) cross MOOSE's public API and
+# must be the SAME crate version in both moose and moosedev.
+oxigraph     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxjsonld     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxrdf        = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxrdfio      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxrdfxml     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxsdatatypes = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxttl        = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+sparesults   = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+spareval     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+spargebra    = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+sparopt      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
