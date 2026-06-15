@@ -29,7 +29,10 @@ async fn main() -> anyhow::Result<()> {
     let architecture_ttl =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(moosedev::ontology::DEFAULT_ARCHITECTURE_TTL);
 
-    tracing::info!("MOOSEDev: bootstrapping state (data dir: {})…", data_dir.display());
+    tracing::info!(
+        "MOOSEDev: bootstrapping state (data dir: {})…",
+        data_dir.display()
+    );
     let state = AppState::bootstrap(&data_dir, &architecture_ttl)?;
 
     tracing::info!("MOOSEDev MCP server starting (stdio transport)…");

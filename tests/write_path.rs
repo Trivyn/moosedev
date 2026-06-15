@@ -5,7 +5,9 @@
 
 use std::path::Path;
 
-use moosedev::graph::{self, AppState, RecordInput, ARCH_DESCRIPTION, ARCH_STATUS, PROJECT_KG_GRAPH_IRI};
+use moosedev::graph::{
+    self, AppState, RecordInput, ARCH_DESCRIPTION, ARCH_STATUS, PROJECT_KG_GRAPH_IRI,
+};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, QuadRef};
 
 #[test]
