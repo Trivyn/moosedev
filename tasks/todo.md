@@ -15,13 +15,18 @@
 **M0 complete** ✅ — foundational integration, persistence, and MCP transport all proven.
 
 ## M1 — Capture + Query vertical slice
-- [ ] Minimal `ontologies/architecture.ttl` (ArchitecturalDecision, Lesson, Constraint, AntiPattern)
-- [ ] `graph/` writer: validate → mint IRI → insert typed quads → `invalidate_graph`/`invalidate_all`
-- [ ] `record_important_decision` tool
-- [ ] `LlmClient` (OpenAI-compatible, env-config) + `OntologyResolver` impls
-- [ ] `query` tool → `execute_graph_walk_nlq` (answer + trace)
-- [ ] `get_relevant_context` tool
-- [ ] Verify (key E2E): record a decision → restart → query it back with a trace
+- [x] Ontology generation brief for Trivyn's generator (`spec/architecture-ontology-brief.md`)
+- [x] Crate restructured into lib + bin (`src/lib.rs`) so modules are test-reachable
+- [x] Content-agnostic ontology loader (`src/ontology/mod.rs`) + test (`tests/ontology_loader.rs`)
+- [x] `ontologies/architecture.ttl` — **TEMP stub** (swapped for generator output, no code change)
+- [x] App state wired into the server (persistent `Store` + `EntityIndexCache` + arch vocab) at bootstrap (`src/graph/mod.rs`)
+- [x] `graph/` writer → `moose::kg::assert_instance` (transactional, cache-coherent); IRI minting + ontology-validated `kind`
+- [x] `record_important_decision` tool — MCP E2E verified (records typed instance; rejects unknown kinds); test `tests/write_path.rs`
+- [x] `LlmClient` (OpenAI-compatible, env-config: `src/llm/mod.rs`) + `OntologyResolver` (`src/ontology/mod.rs`)
+- [x] `query` tool → `execute_graph_walk_nlq_with_context` (answer + reasoning trace); pure-symbolic test (`tests/query.rs`) + **live LLM smoke** against `endor`
+- [ ] `get_relevant_context` tool ← **next (finishes M1)**
+- [ ] CategoryMappings (L0 → fixed BFO/CCO IRIs) — deferred to M2 (needs the generated ontology's CCO roots)
+- [x] Key E2E **verified live**: record → NLQ → synthesized answer + 10-stage trace (LLM fired only as the extraction *sensor*; symbolic pipeline did the reasoning). Persistence proven (M0).
 
 ## M2 — Alignment
 - [ ] `scripts/precompute-vectors` → `ontology_vectors` SQLite for shipped ontologies
@@ -43,5 +48,6 @@
 - [ ] Read-only local web UI (focus stack + recorded decisions)
 
 ## Core-MOOSE coordination
-- [ ] File Ask 1 (invalidate `label_sets`) — unblocks complete write coherence
-- [ ] Track Ask 2 (cache-coherent assert/curate primitive) against M1 write-path learnings
+- [x] Ask 1 — **landed in MOOSE**: `invalidate_graph`/`invalidate_all` now clear `label_sets`/`label_order` (+ global/per-graph epoch coherence)
+- [x] Ask 2 (minimal) — **landed** as `moose::kg::assert_instance` (transactional write + epoch-based cache coherence + `AssertionValidator` hook); MOOSEDev wires to it
+- [ ] Ask 2 (scope A, deferred): retract/supersede lifecycle, `ProvenanceWriter` generalization, incremental index maintenance

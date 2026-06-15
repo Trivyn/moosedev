@@ -1,0 +1,56 @@
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix arch:    <https://moosedev.dev/ontologies/architecture#> .
+@prefix se:      <https://moosedev.dev/ontologies/software-engineering#> .
+
+#  ⚠️  TEMPORARY STUB — to be replaced by Trivyn ontology-generator output.
+#  See spec/architecture-ontology-brief.md. This file exists only to exercise
+#  the MOOSEDev ontology loader and the M1 write/query plumbing end-to-end.
+#  It is intentionally minimal, is NOT BFO/CCO-grounded, and should not be
+#  treated as the real ontology. Swapping in the generated .ttl requires no
+#  code changes (the loader is content-agnostic).
+
+<https://moosedev.dev/ontologies/architecture> a owl:Ontology ;
+    rdfs:label "MOOSEDev Architecture Knowledge (STUB)"@en ;
+    rdfs:comment "Temporary stub ontology — replaced by generator output."@en .
+
+# ── Architecture-knowledge classes (would be ⊑ cco:InformationContentEntity) ──
+
+arch:ArchitecturalDecision a owl:Class ;
+    rdfs:label "Architectural Decision"@en ;
+    skos:altLabel "decision"@en , "ADR"@en , "design decision"@en ;
+    skos:definition "A recorded choice about the structure or behavior of the system, together with its rationale."@en .
+
+arch:Constraint a owl:Class ;
+    rdfs:label "Constraint"@en ;
+    skos:altLabel "restriction"@en ;
+    skos:definition "A restriction the system or its design must satisfy."@en .
+
+# ── Software-engineering class (thin; would be ⊑ a CCO artifact/ICE branch) ──
+
+se:Component a owl:Class ;
+    rdfs:label "Component"@en ;
+    skos:altLabel "module"@en , "unit"@en ;
+    skos:definition "A structural unit of the software system."@en .
+
+# ── Relations ────────────────────────────────────────────────────────────────
+
+arch:concerns a owl:ObjectProperty ;
+    rdfs:label "concerns"@en ;
+    rdfs:domain arch:ArchitecturalDecision ;
+    rdfs:range se:Component ;
+    skos:definition "Relates a decision to the system element it is about."@en .
+
+arch:status a owl:DatatypeProperty ;
+    rdfs:label "status"@en ;
+    rdfs:domain arch:ArchitecturalDecision ;
+    rdfs:range rdfs:Literal ;
+    skos:definition "Lifecycle state of a decision (e.g. proposed, accepted, superseded)."@en .
+
+arch:description a owl:DatatypeProperty ;
+    rdfs:label "description"@en ;
+    rdfs:domain arch:ArchitecturalDecision ;
+    rdfs:range rdfs:Literal ;
+    skos:definition "Free-text description of the recorded item."@en .

@@ -19,7 +19,9 @@ clarification accept/review flow (`clarification::accept` → private `write_ove
 exists to *accumulate* structured knowledge at runtime, so each needs a typed write path.
 Re-implementing it per tool invites exactly the drift MOOSE's alignment subsystem exists to prevent.
 
-## Ask 1 — Complete cache invalidation for `label_sets` 🔴
+## Ask 1 — Complete cache invalidation for `label_sets` 🔴 — ✅ DELIVERED
+
+> **Landed in core MOOSE.** `invalidate_graph`/`invalidate_all` now evict `label_sets`/`label_order` too, backed by a global + per-graph **epoch** mechanism so an index build that races a concurrent write cannot cache a stale result. Tests included.
 
 **Problem.** `EntityIndexCache` is build-once and reused; the read path returns the cached index
 without consulting the store (`entity_index.rs:774`), keyed on `class_iri` + graph-set with **no
@@ -41,7 +43,9 @@ low risk.
 unblocks MOOSEDev to ship correct writes via the existing public API in the interim, independent of
 Ask 2.
 
-## Ask 2 — A cache-coherent knowledge-assertion / curation primitive 🟡
+## Ask 2 — A cache-coherent knowledge-assertion / curation primitive 🟡 — ✅ DELIVERED (minimal)
+
+> **Landed in core MOOSE as `moose::kg::assert_instance`** (`src/kg.rs`): a transactional typed-instance write (`rdf:type` + datatype + IRI-valued object properties) into a named graph, an optional `AssertionValidator` that inspects the *uncommitted* transaction before commit, and post-commit cache invalidation — giving correct read-after-write coherence. Caller owns the `Store` + `EntityIndexCache` and mints IRIs; MOOSE stays domain-neutral. **Scope A still deferred:** retract/supersede lifecycle, `ProvenanceWriter` generalization, and incremental (splice) index maintenance.
 
 **Goal.** A public, engine-owned write/curation API — the write-side counterpart to
 `execute_graph_walk_nlq` — so hosts build and curate the knowledge graph at runtime without

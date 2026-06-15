@@ -14,8 +14,9 @@ moose = { path = "../moose", features = ["candle-cpu", "arctic-s"] }
 # `Store` crosses the moose API boundary, so moosedev must resolve the identical crate.
 oxigraph = { version = "0.5.6", features = ["rdf-12"] }
 
-# MCP server over stdio — the official Rust SDK.
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+# MCP server over stdio — the official Rust SDK. `schemars` enables tool input
+# schemas (re-exported as `rmcp::schemars`, so versions always match).
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "schemars"] }
 
 # Async runtime + server plumbing. stdout is the MCP JSON-RPC channel, so logs
 # (tracing) are routed to stderr in main.
@@ -25,6 +26,13 @@ serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Instance IRI minting for recorded knowledge.
+uuid = { version = "1", features = ["v4"] }
+
+# OpenAI-compatible LLM client (the MOOSE "sensor"); local-first via env config.
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
 
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.

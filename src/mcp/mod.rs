@@ -1,46 +1,136 @@
 //! MCP server surface for MOOSEDev (stdio transport via `rmcp`).
 //!
-//! M0b: a minimal server exposing a single `ping` health-check tool, to prove
-//! the MCP transport end-to-end. The durable-KG state (oxigraph `Store` + MOOSE
-//! caches) and the real v1 tool set (`record_important_decision`, `query`,
-//! `align_concepts`, …) are wired in M1+ — see `spec/MOOSEDev_design.md` §7.
+//! Exposes the durable knowledge-graph tools over MCP. Tool handlers stay thin:
+//! validate input, map it to the domain layer, format the result. The typed
+//! write goes through MOOSE's cache-coherent `kg::assert_instance` (via `graph`).
 
-use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
-    },
-    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
+use std::sync::Arc;
+
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
+use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 
-/// The MOOSEDev MCP server. Holds the generated tool router; future fields will
-/// carry the durable knowledge-graph state (Store, MooseOntologyCache, configs).
+use crate::graph::{self, AppState, RecordInput};
+
+/// Tool result helpers — the `vec![Content::text(..)]` wrapping repeats across
+/// every handler, so name it once.
+fn tool_ok(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(message.into())])
+}
+fn tool_error(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(message.into())])
+}
+
+/// Arguments for the `record_important_decision` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RecordDecisionArgs {
+    /// Knowledge class to record — a class in the architecture ontology.
+    /// Defaults to "ArchitecturalDecision".
+    pub kind: Option<String>,
+    /// Short human-readable title for the item.
+    pub title: String,
+    /// Optional longer description / body.
+    pub description: Option<String>,
+    /// Optional lifecycle status (e.g. "proposed", "accepted", "superseded").
+    pub status: Option<String>,
+}
+
+/// Arguments for the `query` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct QueryArgs {
+    /// Natural-language question to answer over the project knowledge graph.
+    pub question: String,
+}
+
+/// The MOOSEDev MCP server: the generated tool router plus shared engine state.
 #[derive(Clone)]
 pub struct MooseDevServer {
     // Read by the `#[tool_handler]`-generated `ServerHandler` impl; the dead-code
     // pass doesn't attribute that macro-generated use, so silence the lint.
     #[allow(dead_code)]
     tool_router: ToolRouter<MooseDevServer>,
-}
-
-impl Default for MooseDevServer {
-    fn default() -> Self {
-        Self::new()
-    }
+    state: Arc<AppState>,
 }
 
 #[tool_router]
 impl MooseDevServer {
-    pub fn new() -> Self {
+    pub fn new(state: Arc<AppState>) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            state,
         }
     }
 
     /// Health check — confirms the MCP transport is live. Returns "pong".
     #[tool(description = "Health check; returns 'pong'.")]
     async fn ping(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text("pong")]))
+        Ok(tool_ok("pong"))
+    }
+
+    /// Record a typed knowledge item into the durable project knowledge graph.
+    #[tool(
+        description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph."
+    )]
+    async fn record_important_decision(
+        &self,
+        Parameters(args): Parameters<RecordDecisionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let kind = args
+            .kind
+            .unwrap_or_else(|| "ArchitecturalDecision".to_string());
+        let title = args.title.trim().to_string();
+        if title.is_empty() {
+            return Ok(tool_error("`title` must not be empty"));
+        }
+        let class_iri = match self.state.resolve_class(&kind) {
+            Ok(iri) => iri,
+            Err(e) => return Ok(tool_error(e.to_string())),
+        };
+
+        // Map the decision's fields to (predicate, value) assertions. Adding a
+        // new knowledge class means a new mapping here — not a change to the
+        // generic `graph::record_instance` writer.
+        let mut properties = vec![(moose::RDFS_LABEL.to_string(), title)];
+        if let Some(desc) = args.description.filter(|s| !s.trim().is_empty()) {
+            properties.push((graph::ARCH_DESCRIPTION.to_string(), desc));
+        }
+        if let Some(status) = args.status.filter(|s| !s.trim().is_empty()) {
+            properties.push((graph::ARCH_STATUS.to_string(), status));
+        }
+
+        let input = RecordInput {
+            class_iri,
+            class_local: kind.clone(),
+            properties,
+        };
+        match graph::record_instance(&self.state, &input) {
+            Ok(iri) => Ok(tool_ok(format!("Recorded {kind} → {iri}"))),
+            Err(e) => Ok(tool_error(format!("failed to record: {e}"))),
+        }
+    }
+
+    /// Ask a natural-language question over the project knowledge graph.
+    #[tool(
+        description = "Ask a natural-language question over the project knowledge graph. Returns an answer plus a symbolic reasoning trace."
+    )]
+    async fn query(
+        &self,
+        Parameters(args): Parameters<QueryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let question = args.question.trim();
+        if question.is_empty() {
+            return Ok(tool_error("`question` must not be empty"));
+        }
+        match graph::query(&self.state, question).await {
+            Ok(r) => Ok(tool_ok(format!(
+                "{}\n\n(confidence: {})\n\n--- reasoning trace ---\n{}",
+                r.answer, r.confidence, r.trace
+            ))),
+            Err(e) => Ok(tool_error(format!("query failed: {e}"))),
+        }
     }
 }
 
@@ -60,8 +150,7 @@ impl ServerHandler for MooseDevServer {
         info.server_info = server_impl;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "MOOSEDev: structured, long-term project memory built on the MOOSE engine."
-                .to_string(),
+            "MOOSEDev: structured, long-term project memory built on the MOOSE engine.".to_string(),
         );
         info
     }

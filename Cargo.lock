@@ -2041,14 +2041,17 @@ name = "moosedev"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "moose",
  "oxigraph",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
