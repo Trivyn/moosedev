@@ -29,7 +29,8 @@
 - [x] Key E2E **verified live**: record → NLQ → synthesized answer + 10-stage trace (LLM fired only as the extraction *sensor*; symbolic pipeline did the reasoning). Persistence proven (M0).
 - [x] **Record → restart → read-back** verified with the real binary across two separate processes sharing a data dir.
 
-**M1 complete** ✅ — tools live: `ping`, `record_important_decision`, `query` (+trace), `get_relevant_context`. 5 tests green, clippy clean.
+**M1 complete** ✅ — tools live: `ping`, `record_important_decision`, `query` (+trace), `get_relevant_context`, `get_provenance`. 6 tests green, clippy clean.
+- [x] **Edit provenance** (bonus): every write emits PROV-O (`prov:Activity` + agent from MCP `clientInfo` + timestamp) into a companion `…/kg/provenance` graph; `get_provenance` reads it back. Realizes auditability (#6); prototypes core Ask-2 scope-A. `src/provenance/mod.rs`, `tests/provenance.rs`.
 - Note: rmcp dispatches tool calls concurrently; cross-call read-after-write relies on the client awaiting each response (true for real MCP clients). Not a concern for v1; revisit if batched/streamed calls are added.
 
 ## M2 — Alignment
@@ -54,4 +55,4 @@
 ## Core-MOOSE coordination
 - [x] Ask 1 — **landed in MOOSE**: `invalidate_graph`/`invalidate_all` now clear `label_sets`/`label_order` (+ global/per-graph epoch coherence)
 - [x] Ask 2 (minimal) — **landed** as `moose::kg::assert_instance` (transactional write + epoch-based cache coherence + `AssertionValidator` hook); MOOSEDev wires to it
-- [ ] Ask 2 (scope A, deferred): retract/supersede lifecycle, `ProvenanceWriter` generalization, incremental index maintenance
+- [~] Ask 2 (scope A): **provenance prototyped in MOOSEDev** (`src/provenance/mod.rs` — PROV-O on write, agent from `clientInfo`) — informs the eventual core `ProvenanceWriter` generalization. Still deferred in core: retract/supersede lifecycle, the generalized hook, incremental index maintenance.

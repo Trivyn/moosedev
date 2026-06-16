@@ -11,9 +11,13 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
-use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::service::RequestContext;
+use rmcp::{
+    schemars, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+};
 
 use crate::graph::{self, AppState, RecordInput};
+use crate::provenance;
 
 /// Tool result helpers — the `vec![Content::text(..)]` wrapping repeats across
 /// every handler, so name it once.
@@ -68,6 +72,13 @@ pub struct GetRelevantContextArgs {
     pub limit: Option<usize>,
 }
 
+/// Arguments for the `get_provenance` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetProvenanceArgs {
+    /// IRI of the recorded item to fetch edit provenance for.
+    pub iri: String,
+}
+
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
 #[derive(Clone)]
 pub struct MooseDevServer {
@@ -100,6 +111,7 @@ impl MooseDevServer {
     async fn record_important_decision(
         &self,
         Parameters(args): Parameters<RecordDecisionArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let kind = args
             .kind
@@ -130,7 +142,24 @@ impl MooseDevServer {
             properties,
         };
         match graph::record_instance(&self.state, &input) {
-            Ok(iri) => Ok(tool_ok(format!("Recorded {kind} → {iri}"))),
+            Ok(iri) => {
+                // Best-effort edit provenance: who (the MCP client) asserted this,
+                // and when. Post-write — a provenance failure must not fail the
+                // record (mirrors MOOSE's `ProvenanceWriter` contract). v1 wires
+                // this per write-tool; once a second write tool (or supersede/
+                // retract) exists, fold it into `graph::record_instance` so every
+                // write is provenanced by construction (the agent identity, from
+                // the MCP `context`, would be threaded down then).
+                let agent = context
+                    .peer
+                    .peer_info()
+                    .map(|ci| ci.client_info.name.clone())
+                    .unwrap_or_else(|| "unknown-mcp-client".to_string());
+                if let Err(e) = provenance::record_provenance(&self.state.store, &iri, &agent) {
+                    tracing::warn!("provenance write failed for {iri}: {e}");
+                }
+                Ok(tool_ok(format!("Recorded {kind} → {iri}")))
+            }
             Err(e) => Ok(tool_error(format!("failed to record: {e}"))),
         }
     }
@@ -169,6 +198,24 @@ impl MooseDevServer {
             Ok(items) if items.is_empty() => Ok(tool_ok("No recorded knowledge found.")),
             Ok(items) => Ok(tool_ok(format_context(&items))),
             Err(e) => Ok(tool_error(format!("failed to retrieve context: {e}"))),
+        }
+    }
+
+    /// Edit provenance for a recorded knowledge item: who recorded it, and when.
+    #[tool(
+        description = "Get the edit provenance (which agent recorded it, and when) for a knowledge item, by IRI."
+    )]
+    async fn get_provenance(
+        &self,
+        Parameters(args): Parameters<GetProvenanceArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match provenance::read_provenance(&self.state.store, args.iri.trim()) {
+            Ok(Some(p)) => Ok(tool_ok(format!(
+                "Recorded by {} at {} (activity {})",
+                p.agent, p.time, p.activity
+            ))),
+            Ok(None) => Ok(tool_ok("No provenance recorded for that IRI.")),
+            Err(e) => Ok(tool_error(format!("failed to read provenance: {e}"))),
         }
     }
 }

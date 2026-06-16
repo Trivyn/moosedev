@@ -34,6 +34,9 @@ uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
 
+# Timestamps for PROV-O edit provenance.
+chrono = "0.4"
+
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.
 # Required because oxigraph types (Store, NamedNode, …) cross MOOSE's public API and
