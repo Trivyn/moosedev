@@ -31,7 +31,10 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
 /// Render structured context items into a readable block for the agent.
 fn format_context(items: &[graph::ContextItem]) -> String {
     let plural = if items.len() == 1 { "" } else { "s" };
-    let mut out = format!("Relevant recorded knowledge ({} item{plural}):\n", items.len());
+    let mut out = format!(
+        "Relevant recorded knowledge ({} item{plural}):\n",
+        items.len()
+    );
     for item in items {
         out.push_str(&format!("\n• {} — \"{}\"\n", item.kind, item.label));
         for (key, value) in &item.properties {

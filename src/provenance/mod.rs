@@ -70,16 +70,56 @@ fn write_provenance(
 
     let quads = [
         // The assertion activity.
-        Quad::new(activity.clone(), rdf_type.clone(), NamedNode::new_unchecked(PROV_ACTIVITY), graph.clone()),
-        Quad::new(activity.clone(), NamedNode::new_unchecked(PROV_WAS_ASSOCIATED_WITH), agent.clone(), graph.clone()),
-        Quad::new(activity.clone(), NamedNode::new_unchecked(PROV_ENDED_AT_TIME), ts.clone(), graph.clone()),
+        Quad::new(
+            activity.clone(),
+            rdf_type.clone(),
+            NamedNode::new_unchecked(PROV_ACTIVITY),
+            graph.clone(),
+        ),
+        Quad::new(
+            activity.clone(),
+            NamedNode::new_unchecked(PROV_WAS_ASSOCIATED_WITH),
+            agent.clone(),
+            graph.clone(),
+        ),
+        Quad::new(
+            activity.clone(),
+            NamedNode::new_unchecked(PROV_ENDED_AT_TIME),
+            ts.clone(),
+            graph.clone(),
+        ),
         // The agent.
-        Quad::new(agent.clone(), rdf_type, NamedNode::new_unchecked(PROV_SOFTWARE_AGENT), graph.clone()),
-        Quad::new(agent.clone(), NamedNode::new_unchecked(RDFS_LABEL), Literal::new_simple_literal(agent_name), graph.clone()),
+        Quad::new(
+            agent.clone(),
+            rdf_type,
+            NamedNode::new_unchecked(PROV_SOFTWARE_AGENT),
+            graph.clone(),
+        ),
+        Quad::new(
+            agent.clone(),
+            NamedNode::new_unchecked(RDFS_LABEL),
+            Literal::new_simple_literal(agent_name),
+            graph.clone(),
+        ),
         // The entity's links back to the activity + agent.
-        Quad::new(entity.clone(), NamedNode::new_unchecked(PROV_WAS_GENERATED_BY), activity, graph.clone()),
-        Quad::new(entity.clone(), NamedNode::new_unchecked(PROV_WAS_ATTRIBUTED_TO), agent, graph.clone()),
-        Quad::new(entity, NamedNode::new_unchecked(PROV_GENERATED_AT_TIME), ts, graph),
+        Quad::new(
+            entity.clone(),
+            NamedNode::new_unchecked(PROV_WAS_GENERATED_BY),
+            activity,
+            graph.clone(),
+        ),
+        Quad::new(
+            entity.clone(),
+            NamedNode::new_unchecked(PROV_WAS_ATTRIBUTED_TO),
+            agent,
+            graph.clone(),
+        ),
+        Quad::new(
+            entity,
+            NamedNode::new_unchecked(PROV_GENERATED_AT_TIME),
+            ts,
+            graph,
+        ),
     ];
 
     let mut txn = store
