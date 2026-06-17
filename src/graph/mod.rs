@@ -6,9 +6,10 @@
 //! the durable store); MOOSE owns the *mechanics* (transactional write + index
 //! coherence; symbolic-first graph-walk query).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use moose::embeddings::vec_store::VecStore;
 use moose::entity_index::EntityIndexCache;
 use moose::kg::{assert_instance, AssertionLiteral, DatatypeAssertion, InstanceAssertion};
 use moose::moose_ontology::MooseOntologyCache;
@@ -87,10 +88,15 @@ pub struct AppState {
     pub moose_cache: Arc<MooseOntologyCache>,
     pub arch_vocab: CompactVocabulary,
     pub capture: CapturePredicates,
+    /// Ontology embedding vectors (L2 alignment tier); `None` until
+    /// `build_alignment_index` runs. Also mirrored into `engine_config`.
+    pub vector_store: Option<Arc<VecStore>>,
     pub engine_config: EngineConfig,
     pub llm: OpenAiCompatClient,
     pub ontology_resolver: MooseDevOntologyResolver,
     pub model: String,
+    /// Data dir (the persistent KG store and the built vector DB live here).
+    pub data_dir: PathBuf,
 }
 
 impl AppState {
@@ -139,7 +145,30 @@ impl AppState {
             llm,
             ontology_resolver,
             model: llm_cfg.model,
+            vector_store: None,
+            data_dir: data_dir.to_path_buf(),
         })
+    }
+
+    /// Build the ontology embedding vector store (MOOSE's L2 alignment tier) from
+    /// the loaded domain graphs, hold it on `self`, and wire it into the query
+    /// engine config. Kept separate from `bootstrap` so non-aligning paths (e.g.
+    /// the M1 capture/query tests) don't pay the embedding-backbone load.
+    pub async fn build_alignment_index(&mut self) -> anyhow::Result<()> {
+        let db_path = self.data_dir.join("ontology-vectors.db");
+        let vec_store = crate::vectors::build_and_open(
+            &self.store,
+            &[
+                ontology::SE_DOMAIN_GRAPH_IRI,
+                ontology::ARCH_DOMAIN_GRAPH_IRI,
+            ],
+            &db_path,
+        )
+        .await?;
+        let vec_store = Arc::new(vec_store);
+        self.engine_config.embedding_store = Some(vec_store.clone());
+        self.vector_store = Some(vec_store);
+        Ok(())
     }
 
     /// Resolve a knowledge `kind` (e.g. "ArchitecturalDecision") to its class IRI

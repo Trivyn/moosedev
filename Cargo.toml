@@ -37,6 +37,11 @@ async-trait = "0.1"
 # Timestamps for PROV-O edit provenance.
 chrono = "0.4"
 
+# Writes the `ontology_vectors` SQLite store that MOOSE's `VecStore::open` reads
+# (MOOSE exposes no public vector-write path). Same sqlite crate + version MOOSE
+# uses, so it resolves to a single build.
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.
 # Required because oxigraph types (Store, NamedNode, …) cross MOOSE's public API and

@@ -38,7 +38,17 @@ async fn main() -> anyhow::Result<()> {
         "MOOSEDev: bootstrapping state (data dir: {})…",
         data_dir.display()
     );
-    let state = AppState::bootstrap(&data_dir, &ontology_dir)?;
+    let mut state = AppState::bootstrap(&data_dir, &ontology_dir)?;
+    // Build the alignment index (loads the embedding model). Non-fatal by design:
+    // if the model can't load (e.g. offline with no bundled weights), the
+    // alignment tools report it per call, but the rest of the server (capture,
+    // query, context, provenance) must still start.
+    tracing::info!("MOOSEDev: building ontology alignment index (embedding vectors)…");
+    if let Err(e) = state.build_alignment_index().await {
+        tracing::warn!(
+            "alignment index unavailable — align_concepts/suggest_mappings disabled: {e}"
+        );
+    }
 
     tracing::info!("MOOSEDev MCP server starting (stdio transport)…");
     let service = MooseDevServer::new(Arc::new(state)).serve(stdio()).await?;

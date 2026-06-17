@@ -33,15 +33,17 @@
 - [x] **Edit provenance** (bonus): every write emits PROV-O (`prov:Activity` + agent from MCP `clientInfo` + timestamp) into a companion `…/kg/provenance` graph; `get_provenance` reads it back. Realizes auditability (#6); prototypes core Ask-2 scope-A. `src/provenance/mod.rs`, `tests/provenance.rs`.
 - Note: rmcp dispatches tool calls concurrently; cross-call read-after-write relies on the client awaiting each response (true for real MCP clients). Not a concern for v1; revisit if batched/streamed calls are added.
 
-## M2 — Alignment
-- [ ] `scripts/precompute-vectors` → `ontology_vectors` SQLite for shipped ontologies
-- [ ] Load `VecStore::open`; build `CompactVocabulary` + `CategoryMappings`
-- [ ] `align_concepts` + `suggest_mappings` via `suggest_parent`/`align_batch`
-- [ ] Verify: new concept aligns under existing class w/ rationale; ambiguous → ranked candidates
+## M2 — Alignment ✅
+- [x] Ontology vector store (`ontology_vectors` SQLite) — **built at startup** from the shipped ontologies (`src/vectors/mod.rs` + `AppState::build_alignment_index`), not a precompute script; embeds classes + datatype props via `default_backbone().embed_document()`, opened with `VecStore::open(None, Some(db))`
+- [x] `embedding_store` wired into `EngineConfig` (also sharpens query-time class disambiguation); startup build is **non-fatal** (model-load failure disables only the alignment tools)
+- [x] `align_concepts` + `suggest_mappings` (MCP tools) via `suggest_parent` — L1 keyword + L2 embedding (LLM tier off; symbolic-first)
+- [x] Verify: live — "Design Decision" → ArchitecturalDecision (L1 exact); ambiguous concepts → ranked candidates with cosine scores. Tests: `tests/vectors.rs`, `tests/alignment.rs`
+- [ ] CategoryMappings (L0 → CCO roots from `trivyn:l0Category`) — **deferred refinement** that narrows L0; alignment works without it (also the M1-deferred item)
 
 ## M3 — SPARQL + Validation
 - [ ] `sparql` tool wrapping `oxigraph::sparql::SparqlEvaluator`
 - [ ] `validate_against_architecture` (SHACL over the durable KG)
+- [ ] **Populate shape-required fields on capture** (P2): `hasAuthor` + `hasTimestamp` (typed `xsd:dateTime` — needs a `PropertyLiteral::Typed` on `RecordInput`) + default `hasLifecycleStatus`; reconcile with the PROV-O who/when (provenance-only vs. also domain-typed). Belongs here because nothing validates instances until this tool exists (`assert_instance` runs with `validator: None`, so shapes are schema-info today, not a write gate)
 - [ ] Verify: SPARQL returns recorded instances; malformed decision fails validation
 
 ## M4 — Bootstrap + Focus
@@ -51,6 +53,10 @@
 
 ## Stretch
 - [ ] Read-only local web UI (focus stack + recorded decisions)
+
+## Known limitations / deferred
+- **Ontology-regeneration orphans existing records** (P1): instances carry the full class IRI as `rdf:type`; if a regenerated ontology changes class IRIs/namespace, prior durable records stop being listed/searched (`relevant_context`/`query` candidate sets come from the current `arch_vocab`). **Zero impact today** (no persistent data), but needs a deliberate **migration story** (re-type on ontology change via a mapping — *not* hardcoded old namespaces) before real data accrues. Lighter partial step: make list-all enumerate by actual `rdf:type` in the project graph rather than the current vocab.
+- **Per-class title predicate**: capture binds the title to `hasTitle` (the `InformationRecord` label property every capture class inherits). The class-generic form (read each class's `trivyn:labelProperty`) is blocked until MOOSE surfaces that annotation (`VocabularyEntry.label_property`).
 
 ## Core-MOOSE coordination
 - [x] Ask 1 — **landed in MOOSE**: `invalidate_graph`/`invalidate_all` now clear `label_sets`/`label_order` (+ global/per-graph epoch coherence)

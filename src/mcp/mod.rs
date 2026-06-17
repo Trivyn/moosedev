@@ -16,6 +16,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 
+use crate::alignment;
 use crate::graph::{self, AppState, RecordInput};
 use crate::provenance;
 
@@ -80,6 +81,26 @@ pub struct GetRelevantContextArgs {
 pub struct GetProvenanceArgs {
     /// IRI of the recorded item to fetch edit provenance for.
     pub iri: String,
+}
+
+/// Arguments for the `align_concepts` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AlignConceptsArgs {
+    /// Label of the new concept to align (e.g. "Design Decision").
+    pub label: String,
+    /// Optional definition / description to sharpen the match.
+    pub definition: Option<String>,
+    /// Optional additional surface forms (synonyms) for the concept.
+    pub surface_labels: Option<Vec<String>>,
+}
+
+/// Arguments for the `suggest_mappings` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SuggestMappingsArgs {
+    /// Label of the concept to find candidate class mappings for.
+    pub label: String,
+    /// Optional definition / description to sharpen the candidates.
+    pub definition: Option<String>,
 }
 
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
@@ -226,6 +247,60 @@ impl MooseDevServer {
             ))),
             Ok(None) => Ok(tool_ok("No provenance recorded for that IRI.")),
             Err(e) => Ok(tool_error(format!("failed to read provenance: {e}"))),
+        }
+    }
+
+    /// Align a new concept to the best-matching class in the architecture ontology.
+    #[tool(
+        description = "Align a new concept (by label, with optional definition) to the best-matching class in the project's architecture ontology, using symbolic keyword + embedding matching. Returns the resolved parent class with the sensor that decided it and a rationale, or ranked candidate classes if ambiguous."
+    )]
+    async fn align_concepts(
+        &self,
+        Parameters(args): Parameters<AlignConceptsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let label = args.label.trim();
+        if label.is_empty() {
+            return Ok(tool_error("`label` must not be empty"));
+        }
+        let surface_labels = args.surface_labels.unwrap_or_default();
+        match alignment::align_concept(
+            &self.state,
+            label,
+            args.definition.as_deref(),
+            surface_labels,
+        )
+        .await
+        {
+            Ok(outcome) => Ok(tool_ok(alignment::format_outcome(
+                &self.state,
+                label,
+                &outcome,
+            ))),
+            Err(e) => Ok(tool_error(format!("alignment failed: {e}"))),
+        }
+    }
+
+    /// Suggest candidate ontology classes a concept could map to (for review).
+    #[tool(
+        description = "Suggest which existing architecture-ontology classes a new concept could map to, for human review. Same alignment engine as align_concepts; surfaces the ranked candidate classes when the match is ambiguous."
+    )]
+    async fn suggest_mappings(
+        &self,
+        Parameters(args): Parameters<SuggestMappingsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let label = args.label.trim();
+        if label.is_empty() {
+            return Ok(tool_error("`label` must not be empty"));
+        }
+        match alignment::align_concept(&self.state, label, args.definition.as_deref(), Vec::new())
+            .await
+        {
+            Ok(outcome) => Ok(tool_ok(alignment::format_outcome(
+                &self.state,
+                label,
+                &outcome,
+            ))),
+            Err(e) => Ok(tool_error(format!("suggest_mappings failed: {e}"))),
         }
     }
 }

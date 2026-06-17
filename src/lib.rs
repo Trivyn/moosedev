@@ -5,8 +5,10 @@
 //! that serves [`mcp::MooseDevServer`] over stdio. Keeping the logic in a lib
 //! makes every module reachable from integration tests in `tests/`.
 
+pub mod alignment;
 pub mod graph;
 pub mod llm;
 pub mod mcp;
 pub mod ontology;
 pub mod provenance;
+pub mod vectors;
