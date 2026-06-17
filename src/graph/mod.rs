@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use moose::embeddings::vec_store::VecStore;
 use moose::entity_index::EntityIndexCache;
 use moose::kg::{assert_instance, AssertionLiteral, DatatypeAssertion, InstanceAssertion};
@@ -41,6 +42,10 @@ pub const PROJECT_KG_GRAPH_IRI: &str = "https://moosedev.dev/kg/project";
 const CAPTURE_TITLE_LOCAL: &str = "hasTitle";
 const CAPTURE_DESCRIPTION_LOCAL: &str = "hasDescription";
 const CAPTURE_STATUS_LOCAL: &str = "hasLifecycleStatus";
+const CAPTURE_AUTHOR_LOCAL: &str = "hasAuthor";
+const CAPTURE_TIMESTAMP_LOCAL: &str = "hasTimestamp";
+const DEFAULT_LIFECYCLE_STATUS: &str = "proposed";
+const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
 /// Architecture-ontology predicate IRIs the capture tool writes, resolved from
 /// the loaded vocabulary at bootstrap by local name (see the `CAPTURE_*_LOCAL`
@@ -51,6 +56,8 @@ pub struct CapturePredicates {
     pub title: String,
     pub description: String,
     pub status: String,
+    pub author: String,
+    pub timestamp: String,
 }
 
 impl CapturePredicates {
@@ -59,6 +66,8 @@ impl CapturePredicates {
             title: datatype_property_iri(vocab, CAPTURE_TITLE_LOCAL)?,
             description: datatype_property_iri(vocab, CAPTURE_DESCRIPTION_LOCAL)?,
             status: datatype_property_iri(vocab, CAPTURE_STATUS_LOCAL)?,
+            author: datatype_property_iri(vocab, CAPTURE_AUTHOR_LOCAL)?,
+            timestamp: datatype_property_iri(vocab, CAPTURE_TIMESTAMP_LOCAL)?,
         })
     }
 }
@@ -218,9 +227,15 @@ pub struct RecordInput {
 
 /// Record a typed knowledge instance into the durable project KG via MOOSE's
 /// cache-coherent assertion primitive. Returns the minted subject IRI.
-pub fn record_instance(state: &AppState, input: &RecordInput) -> anyhow::Result<String> {
+pub fn record_instance(
+    state: &AppState,
+    input: &RecordInput,
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<String> {
     let subject = mint_instance_iri(&input.class_local);
-    let datatype_props: Vec<DatatypeAssertion> = input
+    let timestamp = when.to_rfc3339();
+    let mut datatype_props: Vec<DatatypeAssertion> = input
         .properties
         .iter()
         .map(|(predicate, value)| DatatypeAssertion {
@@ -228,6 +243,27 @@ pub fn record_instance(state: &AppState, input: &RecordInput) -> anyhow::Result<
             literal: AssertionLiteral::Simple(value.as_str()),
         })
         .collect();
+    if !has_property(input, &state.capture.author) {
+        datatype_props.push(DatatypeAssertion {
+            predicate_iri: state.capture.author.as_str(),
+            literal: AssertionLiteral::Simple(author),
+        });
+    }
+    if !has_property(input, &state.capture.timestamp) {
+        datatype_props.push(DatatypeAssertion {
+            predicate_iri: state.capture.timestamp.as_str(),
+            literal: AssertionLiteral::Typed {
+                value: timestamp.as_str(),
+                datatype_iri: XSD_DATETIME,
+            },
+        });
+    }
+    if !has_property(input, &state.capture.status) {
+        datatype_props.push(DatatypeAssertion {
+            predicate_iri: state.capture.status.as_str(),
+            literal: AssertionLiteral::Simple(DEFAULT_LIFECYCLE_STATUS),
+        });
+    }
 
     let assertion = InstanceAssertion {
         graph_iri: PROJECT_KG_GRAPH_IRI,
@@ -240,6 +276,15 @@ pub fn record_instance(state: &AppState, input: &RecordInput) -> anyhow::Result<
     assert_instance(&state.store, &state.entity_index, &assertion, None)
         .map_err(|e| anyhow::anyhow!("assert_instance: {e:?}"))?;
     Ok(subject)
+}
+
+/// Check whether the caller already supplied a property so write-path defaults
+/// do not duplicate explicit values.
+fn has_property(input: &RecordInput, predicate_iri: &str) -> bool {
+    input
+        .properties
+        .iter()
+        .any(|(predicate, _)| predicate == predicate_iri)
 }
 
 /// Result of an NLQ query: the synthesized answer, a confidence label, and a

@@ -5,8 +5,9 @@
 
 use std::path::Path;
 
+use chrono::Utc;
 use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
-use oxigraph::model::{GraphNameRef, NamedNodeRef, QuadRef};
+use oxigraph::model::{GraphNameRef, NamedNodeRef, QuadRef, Term};
 
 #[test]
 fn records_decision_into_durable_kg_and_is_findable() {
@@ -33,7 +34,8 @@ fn records_decision_into_durable_kg_and_is_findable() {
         ],
     };
 
-    let subject = graph::record_instance(&state, &input).expect("record decision");
+    let subject =
+        graph::record_instance(&state, &input, "test-agent", Utc::now()).expect("record decision");
 
     // 1) The rdf:type quad is in the durable project KG named graph.
     let type_quad = QuadRef::new(
@@ -61,6 +63,27 @@ fn records_decision_into_durable_kg_and_is_findable() {
         "the recorded decision should be findable immediately after the write; got {:?}",
         hits.iter().map(|h| &h.iri).collect::<Vec<_>>()
     );
+
+    let subject_node = NamedNodeRef::new(&subject).unwrap();
+    let graph = GraphNameRef::NamedNode(NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap());
+    let expected = [
+        state.capture.author.as_str(),
+        state.capture.timestamp.as_str(),
+        state.capture.status.as_str(),
+    ];
+    for predicate in expected {
+        let has_value = state
+            .store
+            .quads_for_pattern(
+                Some(subject_node.into()),
+                Some(NamedNodeRef::new(predicate).unwrap()),
+                None,
+                Some(graph),
+            )
+            .flatten()
+            .any(|q| matches!(q.object, Term::Literal(_)));
+        assert!(has_value, "expected required field {predicate}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

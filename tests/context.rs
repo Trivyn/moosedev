@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use chrono::Utc;
 use moosedev::graph::{self, AppState, RecordInput};
 
 fn record(state: &AppState, class_iri: &str, title: &str) {
@@ -17,6 +18,8 @@ fn record(state: &AppState, class_iri: &str, title: &str) {
                 (state.capture.status.clone(), "accepted".to_string()),
             ],
         },
+        "test-agent",
+        Utc::now(),
     )
     .expect("record decision");
 }

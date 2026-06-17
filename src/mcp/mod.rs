@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -19,6 +20,7 @@ use rmcp::{
 use crate::alignment;
 use crate::graph::{self, AppState, RecordInput};
 use crate::provenance;
+use crate::{sparql, validation};
 
 /// Tool result helpers — the `vec![Content::text(..)]` wrapping repeats across
 /// every handler, so name it once.
@@ -103,6 +105,13 @@ pub struct SuggestMappingsArgs {
     pub definition: Option<String>,
 }
 
+/// Arguments for the `sparql` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SparqlArgs {
+    /// Read-only SPARQL query to run against the local project store.
+    pub query: String,
+}
+
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
 #[derive(Clone)]
 pub struct MooseDevServer {
@@ -167,12 +176,18 @@ impl MooseDevServer {
             properties.push((cap.status.clone(), status));
         }
 
+        let agent = context
+            .peer
+            .peer_info()
+            .map(|ci| ci.client_info.name.clone())
+            .unwrap_or_else(|| "unknown-mcp-client".to_string());
+        let now = Utc::now();
         let input = RecordInput {
             class_iri,
             class_local: kind.clone(),
             properties,
         };
-        match graph::record_instance(&self.state, &input) {
+        match graph::record_instance(&self.state, &input, &agent, now) {
             Ok(iri) => {
                 // Best-effort edit provenance: who (the MCP client) asserted this,
                 // and when. Post-write — a provenance failure must not fail the
@@ -181,12 +196,9 @@ impl MooseDevServer {
                 // retract) exists, fold it into `graph::record_instance` so every
                 // write is provenanced by construction (the agent identity, from
                 // the MCP `context`, would be threaded down then).
-                let agent = context
-                    .peer
-                    .peer_info()
-                    .map(|ci| ci.client_info.name.clone())
-                    .unwrap_or_else(|| "unknown-mcp-client".to_string());
-                if let Err(e) = provenance::record_provenance(&self.state.store, &iri, &agent) {
+                if let Err(e) =
+                    provenance::record_provenance_at(&self.state.store, &iri, &agent, now)
+                {
                     tracing::warn!("provenance write failed for {iri}: {e}");
                 }
                 Ok(tool_ok(format!("Recorded {kind} → {iri}")))
@@ -303,6 +315,35 @@ impl MooseDevServer {
             Err(e) => Ok(tool_error(format!("suggest_mappings failed: {e}"))),
         }
     }
+
+    /// Run a read-only SPARQL query over the local store.
+    #[tool(
+        description = "Run a read-only SPARQL query over the local store. Default graph is the union of named graphs unless the query specifies FROM. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. Key graph IRIs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, architecture shapes https://moosedev.dev/kg/ontology/software-architecture/shapes."
+    )]
+    async fn sparql(
+        &self,
+        Parameters(args): Parameters<SparqlArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let query = args.query.trim();
+        if query.is_empty() {
+            return Ok(tool_error("`query` must not be empty"));
+        }
+        match sparql::run_query(&self.state.store, query) {
+            Ok(output) => Ok(tool_ok(output)),
+            Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),
+        }
+    }
+
+    /// Validate recorded knowledge against the loaded architecture shapes.
+    #[tool(
+        description = "Validate the durable project knowledge graph against the loaded architecture SHACL shapes. Symbolic and on-demand; validates recorded knowledge, not source code."
+    )]
+    async fn validate_against_architecture(&self) -> Result<CallToolResult, McpError> {
+        match validation::validate_project(&self.state) {
+            Ok(report) => Ok(tool_ok(validation::format_report(&report))),
+            Err(e) => Ok(tool_error(format!("validation failed: {e}"))),
+        }
+    }
 }
 
 #[tool_handler]
@@ -321,7 +362,7 @@ impl ServerHandler for MooseDevServer {
         info.server_info = server_impl;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "MOOSEDev: structured, long-term project memory built on the MOOSE engine.".to_string(),
+            "MOOSEDev: structured, long-term project memory built on the MOOSE engine. Use sparql for deterministic read-only graph queries and validate_against_architecture to check recorded knowledge against loaded shapes.".to_string(),
         );
         info
     }

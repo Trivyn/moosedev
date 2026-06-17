@@ -49,7 +49,13 @@ fn loads_ontologies_and_extracts_architecture_vocabulary() {
         .iter()
         .map(|e| e.local_name.as_str())
         .collect();
-    for expected in ["hasTitle", "hasDescription", "hasLifecycleStatus"] {
+    for expected in [
+        "hasTitle",
+        "hasDescription",
+        "hasLifecycleStatus",
+        "hasAuthor",
+        "hasTimestamp",
+    ] {
         assert!(
             dt_locals.contains(&expected),
             "expected datatype property {expected}; got {dt_locals:?}"

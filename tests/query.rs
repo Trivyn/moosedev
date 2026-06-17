@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use chrono::Utc;
 use moose::types::LlmAssistLevel;
 use moosedev::graph::{self, AppState, RecordInput};
 
@@ -33,6 +34,8 @@ async fn query_runs_pure_symbolic_over_recorded_decisions() {
                     (state.capture.status.clone(), "accepted".to_string()),
                 ],
             },
+            "test-agent",
+            Utc::now(),
         )
         .expect("record decision");
     }

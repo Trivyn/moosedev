@@ -46,10 +46,11 @@ fn agent_iri(name: &str) -> String {
 
 /// Record edit provenance for `entity_iri`, asserted by `agent_name`, now.
 pub fn record_provenance(store: &Store, entity_iri: &str, agent_name: &str) -> anyhow::Result<()> {
-    write_provenance(store, entity_iri, agent_name, Utc::now())
+    record_provenance_at(store, entity_iri, agent_name, Utc::now())
 }
 
-fn write_provenance(
+/// Record edit provenance for `entity_iri`, asserted by `agent_name`, at `when`.
+pub fn record_provenance_at(
     store: &Store,
     entity_iri: &str,
     agent_name: &str,

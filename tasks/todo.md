@@ -41,10 +41,12 @@
 - [ ] CategoryMappings (L0 → CCO roots from `trivyn:l0Category`) — **deferred refinement** that narrows L0; alignment works without it (also the M1-deferred item)
 
 ## M3 — SPARQL + Validation
-- [ ] `sparql` tool wrapping `oxigraph::sparql::SparqlEvaluator`
-- [ ] `validate_against_architecture` (SHACL over the durable KG)
-- [ ] **Populate shape-required fields on capture** (P2): `hasAuthor` + `hasTimestamp` (typed `xsd:dateTime` — needs a `PropertyLiteral::Typed` on `RecordInput`) + default `hasLifecycleStatus`; reconcile with the PROV-O who/when (provenance-only vs. also domain-typed). Belongs here because nothing validates instances until this tool exists (`assert_instance` runs with `validator: None`, so shapes are schema-info today, not a write gate)
-- [ ] Verify: SPARQL returns recorded instances; malformed decision fails validation
+- [x] `sparql` tool wrapping `oxigraph::sparql::SparqlEvaluator`
+- [x] `validate_against_architecture` (focused shape-driven validation over the durable KG: `sh:minCount 1` + `sh:datatype`; unsupported constraints counted)
+- [x] **Populate shape-required fields on capture** (P2): `record_instance` stamps `hasAuthor`, typed `hasTimestamp`, and default `hasLifecycleStatus = "proposed"` when absent; MCP write path threads one timestamp to both domain field and PROV-O.
+- [x] Verify: SPARQL returns recorded instances; normal captures validate; malformed raw decisions fail validation (`tests/sparql.rs`, `tests/validation.rs`)
+
+**M3 complete** ✅ — tools live: `sparql`, `validate_against_architecture`; recorded instances conform to required `InformationRecord` fields by construction. Verification: `cargo check`, `cargo test`.
 
 ## M4 — Bootstrap + Focus
 - [ ] `skills/bootstrap-existing-codebase.md`
