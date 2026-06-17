@@ -106,4 +106,23 @@ MOOSEDev is the first step toward domain-specific, trustworthy AI applications t
 - **simplicity first**: Make every change as simple as possible.  Impact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes.  Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+## Dogfooding MOOSEDev (self-hosted memory)
+
+This repo uses **itself** for long-term memory: a local `moosedev` MCP server exposes the durable
+project knowledge graph. When its tools are available, prefer them over re-deriving context (invariant #5).
+
+- **Recall first** — before non-trivial work, use `get_relevant_context` or `query` to surface prior
+  decisions, lessons, and constraints.
+- **Keep questions to MOOSEDev short** — the `query` (NLQ) tool wants one focused question per call, a
+  single sentence ideally, not a paragraph.
+- **Capture as you go** — record durable knowledge with `record_important_decision` (`kind`:
+  `ArchitecturalDecision`, `Lesson`, `Constraint`, `Pattern`, `AntiPattern`, `Requirement`); capture the
+  decision and its rationale, not transient chatter.
+- **Align new concepts** with `align_concepts` before introducing a new term, so the model graph does
+  not drift (invariant #4).
+- **Verify** with `validate_against_architecture` after capturing; use `sparql` for precise,
+  deterministic reads of the graph.
+
+The graph persists in a local, gitignored store and grows more valuable over time (invariant #10).
 ~

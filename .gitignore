@@ -14,6 +14,9 @@
 # (MOOSE's SessionDb also defaults to sqlite:./data/moose_sessions.db).
 /data/
 
+# Live dogfood store — MOOSEDEV_DATA_DIR for the self-hosted MCP server.
+/.moosedev/
+
 # Transient SQLite sidecars — safe to ignore even when a .db is intentionally
 # committed (e.g. the precomputed ontology-vector store used by alignment).
 *.db-shm
