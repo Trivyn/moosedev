@@ -26,14 +26,19 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = std::path::PathBuf::from(
         std::env::var("MOOSEDEV_DATA_DIR").unwrap_or_else(|_| "data".to_string()),
     );
-    let architecture_ttl =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(moosedev::ontology::DEFAULT_ARCHITECTURE_TTL);
+    // Where the shipped ontologies live. Defaults to the crate's `ontologies/`
+    // dir (dev/`cargo run`); override with `MOOSEDEV_ONTOLOGY_DIR` for a deployed
+    // binary that ships them elsewhere.
+    let ontology_dir = match std::env::var("MOOSEDEV_ONTOLOGY_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies"),
+    };
 
     tracing::info!(
         "MOOSEDev: bootstrapping state (data dir: {})…",
         data_dir.display()
     );
-    let state = AppState::bootstrap(&data_dir, &architecture_ttl)?;
+    let state = AppState::bootstrap(&data_dir, &ontology_dir)?;
 
     tracing::info!("MOOSEDev MCP server starting (stdio transport)…");
     let service = MooseDevServer::new(Arc::new(state)).serve(stdio()).await?;

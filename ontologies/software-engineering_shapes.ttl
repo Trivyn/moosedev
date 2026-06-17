@@ -1,0 +1,114 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix shape: <https://trivyn.io/ontologies/software/engineering/SoftwareEngineering/shapes#> .
+@prefix domain: <https://trivyn.io/ontologies/software/engineering/domain/> .
+
+<https://trivyn.io/ontologies/software/engineering/SoftwareEngineering/shapes> a owl:Ontology ;
+    rdfs:label "SHACL Shapes" ;
+    owl:imports <https://trivyn.io/ontologies/software/engineering/SoftwareEngineering> .
+
+# =============================================================================
+# Mechanically generated SHACL shapes
+# =============================================================================
+
+shape:ComponentShape a sh:NodeShape ;
+    sh:targetClass domain:Component ;
+    sh:property [
+        sh:path domain:accesses ;
+        sh:class domain:DataStore
+    ] ;
+    sh:property [
+        sh:path domain:dependsOn ;
+        sh:class domain:Component
+    ] ;
+    sh:property [
+        sh:path domain:hasComponentName ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:implements ;
+        sh:class domain:Interface
+    ] ;
+    sh:property [
+        sh:path domain:uses ;
+        sh:class domain:Interface
+    ] .
+
+shape:DataStoreShape a sh:NodeShape ;
+    sh:targetClass domain:DataStore ;
+    sh:property [
+        sh:path domain:hasStorageType ;
+        sh:datatype xsd:string
+    ] .
+
+shape:ExternalDependencyShape a sh:NodeShape ;
+    sh:targetClass domain:ExternalDependency ;
+    sh:property [
+        sh:path domain:hasDependencyName ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:hasDependencyVersion ;
+        sh:datatype xsd:string
+    ] .
+
+shape:InterfaceShape a sh:NodeShape ;
+    sh:targetClass domain:Interface ;
+    sh:property [
+        sh:path domain:hasInterfaceName ;
+        sh:datatype xsd:string
+    ] .
+
+shape:InterfaceDefinitionShape a sh:NodeShape ;
+    sh:targetClass domain:InterfaceDefinition ;
+    sh:property [
+        sh:path domain:hasSpecificationVersion ;
+        sh:datatype xsd:string
+    ] .
+
+shape:ModuleShape a sh:NodeShape ;
+    sh:targetClass domain:Module ;
+    sh:property [
+        sh:path domain:hasModuleName ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:moduleContains ;
+        sh:class domain:Module
+    ] .
+
+shape:ServiceShape a sh:NodeShape ;
+    sh:targetClass domain:Service ;
+    sh:property [
+        sh:path domain:exposes ;
+        sh:class domain:Interface
+    ] ;
+    sh:property [
+        sh:path domain:hasServiceType ;
+        sh:datatype xsd:string
+    ] .
+
+shape:SoftwareSystemShape a sh:NodeShape ;
+    sh:targetClass domain:SoftwareSystem ;
+    sh:property [
+        sh:path domain:hasSystemName ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:softwareSystemContains ;
+        sh:class domain:Subsystem
+    ] .
+
+shape:SubsystemShape a sh:NodeShape ;
+    sh:targetClass domain:Subsystem ;
+    sh:property [
+        sh:path domain:hasSubsystemName ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:subsystemContains ;
+        sh:class domain:Component
+    ] .
+

@@ -10,8 +10,8 @@ use moosedev::provenance;
 fn records_and_reads_edit_provenance() {
     let dir = std::env::temp_dir().join(format!("moosedev-prov-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let ttl = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies/architecture.ttl");
-    let state = AppState::bootstrap(&dir, &ttl).expect("bootstrap app state");
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
 
     let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
     let iri = graph::record_instance(

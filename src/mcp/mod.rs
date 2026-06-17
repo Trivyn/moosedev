@@ -128,15 +128,22 @@ impl MooseDevServer {
             Err(e) => return Ok(tool_error(e.to_string())),
         };
 
-        // Map the decision's fields to (predicate, value) assertions. Adding a
-        // new knowledge class means a new mapping here — not a change to the
-        // generic `graph::record_instance` writer.
-        let mut properties = vec![(moose::RDFS_LABEL.to_string(), title)];
+        // Map the decision's fields to (predicate, value) assertions, using the
+        // capture predicates resolved from the ontology at bootstrap. Adding a new
+        // knowledge class means a new mapping here — not a change to the generic
+        // `graph::record_instance` writer. The title is written both as
+        // `rdfs:label` (so MOOSE's entity index can find the instance) and as the
+        // typed `hasTitle` domain property (structured knowledge — invariant #2).
+        let cap = &self.state.capture;
+        let mut properties = vec![
+            (moose::RDFS_LABEL.to_string(), title.clone()),
+            (cap.title.clone(), title),
+        ];
         if let Some(desc) = args.description.filter(|s| !s.trim().is_empty()) {
-            properties.push((graph::ARCH_DESCRIPTION.to_string(), desc));
+            properties.push((cap.description.clone(), desc));
         }
         if let Some(status) = args.status.filter(|s| !s.trim().is_empty()) {
-            properties.push((graph::ARCH_STATUS.to_string(), status));
+            properties.push((cap.status.clone(), status));
         }
 
         let input = RecordInput {

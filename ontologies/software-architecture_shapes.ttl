@@ -1,0 +1,119 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix moose: <https://trivyn.io/ontologies/moose#> .
+@prefix shape: <https://trivyn.io/ontologies/software/architecture/SoftwareArchitectureOntology/shapes#> .
+@prefix dcam: <http://purl.org/dc/dcam/> .
+@prefix domain: <https://trivyn.io/ontologies/software/architecture/domain/> .
+
+<https://trivyn.io/ontologies/software/architecture/SoftwareArchitectureOntology/shapes> a owl:Ontology ;
+    rdfs:label "SHACL Shapes" ;
+    owl:imports <https://trivyn.io/ontologies/software/architecture/SoftwareArchitectureOntology> .
+
+# =============================================================================
+# Mechanically generated SHACL shapes
+# =============================================================================
+
+shape:AlternativeShape a sh:NodeShape ;
+    sh:targetClass domain:Alternative ;
+    sh:closed false .
+
+shape:AntiPatternShape a sh:NodeShape ;
+    sh:targetClass domain:AntiPattern ;
+    sh:property [
+        sh:path domain:violates ;
+        sh:class domain:Constraint
+    ] .
+
+shape:ArchitecturalDecisionShape a sh:NodeShape ;
+    sh:targetClass domain:ArchitecturalDecision ;
+    sh:or (
+        [ sh:path domain:isMotivatedBy ; sh:class domain:Constraint ]
+        [ sh:path domain:isMotivatedBy ; sh:class domain:Requirement ]
+    ) ;
+    sh:property [
+        sh:path domain:concerns ;
+        sh:class domain:SystemComponent
+    ] ;
+    sh:property [
+        sh:path domain:hasRationale ;
+        sh:class domain:Rationale
+    ] ;
+    sh:property [
+        sh:path domain:resultsIn ;
+        sh:class domain:Consequence
+    ] ;
+    sh:property [
+        sh:path domain:supersedes ;
+        sh:class domain:ArchitecturalDecision
+    ] ;
+    sh:property [
+        sh:path domain:weighs ;
+        sh:class domain:Alternative
+    ] .
+
+shape:ConsequenceShape a sh:NodeShape ;
+    sh:targetClass domain:Consequence ;
+    sh:closed false .
+
+shape:ConstraintShape a sh:NodeShape ;
+    sh:targetClass domain:Constraint ;
+    sh:or (
+        [ sh:path domain:constrains ; sh:class domain:ArchitecturalDecision ]
+        [ sh:path domain:constrains ; sh:class domain:SystemComponent ]
+    ) .
+
+shape:InformationRecordShape a sh:NodeShape ;
+    sh:targetClass domain:InformationRecord ;
+    sh:property [
+        sh:path domain:hasAuthor ;
+        sh:datatype xsd:string ;
+        sh:minCount 1
+    ] ;
+    sh:property [
+        sh:path domain:hasDescription ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:hasLifecycleStatus ;
+        sh:datatype xsd:string ;
+        sh:minCount 1
+    ] ;
+    sh:property [
+        sh:path domain:hasTimestamp ;
+        sh:datatype xsd:dateTime ;
+        sh:minCount 1
+    ] ;
+    sh:property [
+        sh:path domain:hasTitle ;
+        sh:datatype xsd:string
+    ] .
+
+shape:LessonShape a sh:NodeShape ;
+    sh:targetClass domain:Lesson ;
+    sh:or (
+        [ sh:path domain:learnedFrom ; sh:class domain:AntiPattern ]
+        [ sh:path domain:learnedFrom ; sh:class domain:ArchitecturalDecision ]
+    ) .
+
+shape:PatternShape a sh:NodeShape ;
+    sh:targetClass domain:Pattern ;
+    sh:closed false .
+
+shape:RationaleShape a sh:NodeShape ;
+    sh:targetClass domain:Rationale ;
+    sh:closed false .
+
+shape:RequirementShape a sh:NodeShape ;
+    sh:targetClass domain:Requirement ;
+    sh:closed false .
+
+shape:SystemComponentShape a sh:NodeShape ;
+    sh:targetClass domain:SystemComponent ;
+    sh:property [
+        sh:path domain:hasComponentName ;
+        sh:datatype xsd:string ;
+        sh:minCount 1
+    ] .
+

@@ -14,7 +14,9 @@ use moose::kg::{assert_instance, AssertionLiteral, DatatypeAssertion, InstanceAs
 use moose::moose_ontology::MooseOntologyCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
 use moose::traits::EngineConfig;
-use moose::types::{CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, WalkBudgets};
+use moose::types::{
+    CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, VocabularyEntry, WalkBudgets,
+};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
@@ -23,12 +25,58 @@ use crate::ontology::{self, MooseDevOntologyResolver};
 
 /// Named graph holding recorded knowledge instances (the durable project KG).
 pub const PROJECT_KG_GRAPH_IRI: &str = "https://moosedev.dev/kg/project";
-/// Namespace of the architecture ontology's terms.
-pub const ARCHITECTURE_NS: &str = "https://moosedev.dev/ontologies/architecture#";
-/// Architecture-ontology predicate IRIs the capture tools map their fields onto.
-/// (Stub-ontology predicates; revisited when the generated ontology lands.)
-pub const ARCH_DESCRIPTION: &str = "https://moosedev.dev/ontologies/architecture#description";
-pub const ARCH_STATUS: &str = "https://moosedev.dev/ontologies/architecture#status";
+/// Local names (in the architecture ontology) of the datatype properties the
+/// capture tool populates. The code couples to the ontology only by these stable
+/// local names — the full IRIs (namespace included) are resolved from the loaded
+/// vocabulary at bootstrap, so the ontology can be regenerated under a different
+/// namespace with no code change.
+///
+/// `hasTitle` is the label property of `InformationRecord`, the root every capture
+/// class inherits. A fully class-generic title would read each class's
+/// `trivyn:labelProperty` from the ontology, but MOOSE doesn't yet surface that
+/// annotation (`VocabularyEntry.label_property` stays unpopulated for these), so
+/// binding to the shared root property is the pragmatic choice for v1's capture
+/// classes (all `InformationRecord` subclasses).
+const CAPTURE_TITLE_LOCAL: &str = "hasTitle";
+const CAPTURE_DESCRIPTION_LOCAL: &str = "hasDescription";
+const CAPTURE_STATUS_LOCAL: &str = "hasLifecycleStatus";
+
+/// Architecture-ontology predicate IRIs the capture tool writes, resolved from
+/// the loaded vocabulary at bootstrap by local name (see the `CAPTURE_*_LOCAL`
+/// constants). Resolving up front fails fast if the ontology lacks an expected
+/// property and keeps the volatile namespace out of the code.
+#[derive(Debug, Clone)]
+pub struct CapturePredicates {
+    pub title: String,
+    pub description: String,
+    pub status: String,
+}
+
+impl CapturePredicates {
+    fn resolve(vocab: &CompactVocabulary) -> anyhow::Result<Self> {
+        Ok(Self {
+            title: datatype_property_iri(vocab, CAPTURE_TITLE_LOCAL)?,
+            description: datatype_property_iri(vocab, CAPTURE_DESCRIPTION_LOCAL)?,
+            status: datatype_property_iri(vocab, CAPTURE_STATUS_LOCAL)?,
+        })
+    }
+}
+
+/// Find a vocabulary entry's full IRI by its local name — the one place the code
+/// looks a term up in the loaded ontology, keeping the volatile namespace out.
+fn iri_by_local_name(entries: &[VocabularyEntry], local: &str) -> Option<String> {
+    entries
+        .iter()
+        .find(|e| e.local_name == local)
+        .map(|e| e.iri.clone())
+}
+
+/// Resolve a datatype property's full IRI from the loaded vocabulary by local name.
+fn datatype_property_iri(vocab: &CompactVocabulary, local: &str) -> anyhow::Result<String> {
+    iri_by_local_name(&vocab.datatype_properties, local).ok_or_else(|| {
+        anyhow::anyhow!("architecture ontology is missing datatype property {local:?}")
+    })
+}
 
 /// Long-lived server state: the durable store, the entity-index cache MOOSE keeps
 /// coherent on write, loaded vocabularies, the query `EngineConfig`, and the LLM
@@ -38,6 +86,7 @@ pub struct AppState {
     pub entity_index: Arc<EntityIndexCache>,
     pub moose_cache: Arc<MooseOntologyCache>,
     pub arch_vocab: CompactVocabulary,
+    pub capture: CapturePredicates,
     pub engine_config: EngineConfig,
     pub llm: OpenAiCompatClient,
     pub ontology_resolver: MooseDevOntologyResolver,
@@ -45,17 +94,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Open the persistent store, initialize MOOSE, load the architecture
-    /// ontology, build the entity-index cache, and assemble the query engine
-    /// configuration (LLM endpoint + assist level read from the environment).
-    pub fn bootstrap(data_dir: &Path, architecture_ttl: &Path) -> anyhow::Result<Self> {
+    /// Open the persistent store, initialize MOOSE, load the shipped domain
+    /// ontologies + SHACL shape graphs from `ontology_dir`, resolve the capture
+    /// predicates from the loaded vocabulary, build the entity-index cache, and
+    /// assemble the query engine configuration (LLM endpoint + assist level read
+    /// from the environment).
+    pub fn bootstrap(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
         let store = Store::open(data_dir.join("kg"))
             .map_err(|e| anyhow::anyhow!("open persistent store: {e}"))?;
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
-        let arch_vocab = ontology::load_architecture(&store, architecture_ttl)?;
+        let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
+        let capture = CapturePredicates::resolve(&arch_vocab)?;
         let entity_index = Arc::new(EntityIndexCache::new(64));
 
         let llm_cfg = LlmConfig::from_env();
@@ -82,6 +134,7 @@ impl AppState {
             entity_index,
             moose_cache,
             arch_vocab,
+            capture,
             engine_config,
             llm,
             ontology_resolver,
@@ -89,15 +142,13 @@ impl AppState {
         })
     }
 
-    /// Resolve a knowledge `kind` (e.g. "ArchitecturalDecision") to its class IRI,
-    /// validating it against the loaded architecture ontology.
+    /// Resolve a knowledge `kind` (e.g. "ArchitecturalDecision") to its class IRI
+    /// by local-name lookup in the loaded architecture vocabulary — so the class's
+    /// full IRI (and namespace) comes from the ontology, not from code.
     pub fn resolve_class(&self, kind: &str) -> anyhow::Result<String> {
-        let class_iri = format!("{ARCHITECTURE_NS}{kind}");
-        if self.arch_vocab.classes.iter().any(|c| c.iri == class_iri) {
-            Ok(class_iri)
-        } else {
-            anyhow::bail!("unknown kind {kind:?}: not a class in the architecture ontology")
-        }
+        iri_by_local_name(&self.arch_vocab.classes, kind).ok_or_else(|| {
+            anyhow::anyhow!("unknown kind {kind:?}: not a class in the architecture ontology")
+        })
     }
 }
 

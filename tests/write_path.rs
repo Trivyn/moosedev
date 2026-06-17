@@ -5,18 +5,16 @@
 
 use std::path::Path;
 
-use moosedev::graph::{
-    self, AppState, RecordInput, ARCH_DESCRIPTION, ARCH_STATUS, PROJECT_KG_GRAPH_IRI,
-};
+use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, QuadRef};
 
 #[test]
 fn records_decision_into_durable_kg_and_is_findable() {
     let dir = std::env::temp_dir().join(format!("moosedev-write-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let ttl = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies/architecture.ttl");
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
 
-    let state = AppState::bootstrap(&dir, &ttl).expect("bootstrap app state");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
 
     let class_iri = state
         .resolve_class("ArchitecturalDecision")
@@ -28,10 +26,10 @@ fn records_decision_into_durable_kg_and_is_findable() {
         properties: vec![
             (moose::RDFS_LABEL.to_string(), title.to_string()),
             (
-                ARCH_DESCRIPTION.to_string(),
+                state.capture.description.clone(),
                 "Chose the official Rust SDK over a hand-rolled JSON-RPC loop.".to_string(),
             ),
-            (ARCH_STATUS.to_string(), "accepted".to_string()),
+            (state.capture.status.clone(), "accepted".to_string()),
         ],
     };
 

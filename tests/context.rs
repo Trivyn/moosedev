@@ -14,7 +14,7 @@ fn record(state: &AppState, class_iri: &str, title: &str) {
             class_local: "ArchitecturalDecision".to_string(),
             properties: vec![
                 (moose::RDFS_LABEL.to_string(), title.to_string()),
-                (graph::ARCH_STATUS.to_string(), "accepted".to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
             ],
         },
     )
@@ -25,8 +25,8 @@ fn record(state: &AppState, class_iri: &str, title: &str) {
 fn relevant_context_lists_all_and_filters_by_topic() {
     let dir = std::env::temp_dir().join(format!("moosedev-context-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let ttl = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies/architecture.ttl");
-    let state = AppState::bootstrap(&dir, &ttl).expect("bootstrap app state");
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
 
     let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
     record(&state, &class_iri, "Adopt rmcp for the MCP transport");
@@ -43,7 +43,7 @@ fn relevant_context_lists_all_and_filters_by_topic() {
     assert!(all.iter().any(|i| i
         .properties
         .iter()
-        .any(|(k, v)| k == "status" && v == "accepted")));
+        .any(|(k, v)| k == "hasLifecycleStatus" && v == "accepted")));
 
     // Topic → label-matched retrieval via the coherent entity index.
     let hits = graph::relevant_context(&state, Some("rmcp"), 10).expect("topic search");

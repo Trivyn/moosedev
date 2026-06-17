@@ -1,7 +1,8 @@
-//! Verifies the ontology-agnostic loader: the stub architecture ontology loads
-//! into an oxigraph store and yields a MOOSE `CompactVocabulary` containing the
-//! v1 typed classes and relations. When the generated ontology replaces the
-//! stub, this test continues to pass unchanged (content-agnostic plumbing).
+//! Verifies the ontology-agnostic loader: the shipped domain ontologies + SHACL
+//! shape graphs load into an oxigraph store and yield a MOOSE `CompactVocabulary`
+//! for the architecture domain containing the v1 typed classes and the relations
+//! the NLQ query walks. Loading by MOOSEDev-owned graph IRI (not the TTL
+//! namespace) is what keeps the code decoupled from the regenerated ontology.
 
 use std::path::Path;
 
@@ -9,28 +10,49 @@ use moosedev::ontology;
 use oxigraph::store::Store;
 
 #[test]
-fn loads_architecture_ontology_and_extracts_vocabulary() {
+fn loads_ontologies_and_extracts_architecture_vocabulary() {
     let store = Store::new().expect("in-memory store");
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(ontology::DEFAULT_ARCHITECTURE_TTL);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
 
-    let vocab = ontology::load_architecture(&store, &path).expect("load architecture ontology");
+    let vocab = ontology::load_ontologies(&store, &dir).expect("load shipped ontologies");
 
-    // The central typed class must surface in the extracted vocabulary —
-    // this is what `record_important_decision` will type instances against.
-    let has_decision = vocab
+    // The architecture domain's typed classes must surface — these are what
+    // `record_important_decision` types instances against (resolved by local name).
+    let locals: Vec<&str> = vocab
         .classes
         .iter()
-        .any(|c| c.iri.ends_with("ArchitecturalDecision"));
+        .map(|c| c.local_name.as_str())
+        .collect();
+    for expected in [
+        "ArchitecturalDecision",
+        "Lesson",
+        "Constraint",
+        "AntiPattern",
+    ] {
+        assert!(
+            locals.contains(&expected),
+            "expected architecture class {expected} in extracted vocab; got {locals:?}"
+        );
+    }
+
+    // The relations the NLQ query traverses (concerns, isMotivatedBy, hasRationale, …).
     assert!(
-        has_decision,
-        "ArchitecturalDecision should appear in the extracted vocabulary; got classes: {:?}",
-        vocab.classes.iter().map(|c| &c.iri).collect::<Vec<_>>()
+        vocab.object_properties.len() >= 3,
+        "expected several architecture relations; got {}",
+        vocab.object_properties.len()
     );
 
-    // At least one walkable relation (object property) must be extracted —
-    // these are the edges the NLQ query traverses.
-    assert!(
-        !vocab.object_properties.is_empty(),
-        "expected at least one object property (e.g. arch:concerns)"
-    );
+    // The capture predicates are resolved by local name at bootstrap, so they
+    // must be present as datatype properties in the extracted vocabulary.
+    let dt_locals: Vec<&str> = vocab
+        .datatype_properties
+        .iter()
+        .map(|e| e.local_name.as_str())
+        .collect();
+    for expected in ["hasTitle", "hasDescription", "hasLifecycleStatus"] {
+        assert!(
+            dt_locals.contains(&expected),
+            "expected datatype property {expected}; got {dt_locals:?}"
+        );
+    }
 }
