@@ -703,9 +703,24 @@ impl ContextItem {
     }
 }
 
+/// Minimum entity-index match score for a topic hit to be reported as relevant.
+///
+/// The index scores an exact primary-label match at 1.0, a single exact-token
+/// match at 0.75–0.8, and a strong multi-token-coverage match at 0.8. A
+/// multi-word topic that overlaps a record on only one *incidental* token is
+/// scaled by the overlap fraction down to ≤0.4 (see moose `entity_index::search`
+/// Level 3). Surfacing those lone-token coincidences under a "relevant recorded
+/// knowledge" header asserts a relevance the symbolic layer cannot back — the
+/// exact failure mode that returned sockets/lifecycle records for an "alignment"
+/// query. We therefore drop everything at or below the single-token-overlap
+/// ceiling (0.4) so an empty result is reported honestly as "nothing relevant"
+/// rather than padded with noise (invariant #6: be correct, don't sound correct).
+const TOPIC_RELEVANCE_FLOOR: f32 = 0.45;
+
 /// Retrieve recorded knowledge relevant to `topic` (label-matched via the
 /// cache-coherent entity index), or list all recorded instances when `topic` is
-/// empty. Symbolic — no LLM.
+/// empty. Topic hits below [`TOPIC_RELEVANCE_FLOOR`] are dropped as noise.
+/// Symbolic — no LLM.
 pub fn relevant_context(
     state: &AppState,
     topic: Option<&str>,
@@ -732,6 +747,7 @@ pub fn relevant_context(
                 limit,
             )
             .into_iter()
+            .filter(|h| h.score >= TOPIC_RELEVANCE_FLOOR)
             .map(|h| (h.iri, h.class_iri))
             .collect(),
         None => list_instances(&state.store, &class_iris, limit),

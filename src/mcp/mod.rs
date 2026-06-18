@@ -328,7 +328,17 @@ impl MooseDevServer {
         let limit = args.limit.unwrap_or(10).clamp(1, 100);
         let include_history = args.include_history.unwrap_or(false);
         match graph::relevant_context(&self.state, args.topic.as_deref(), limit, include_history) {
-            Ok(items) if items.is_empty() => Ok(tool_ok("No recorded knowledge found.")),
+            // Distinguish "nothing relevant to this topic" from "nothing recorded
+            // at all": after the relevance floor, an empty topic result means no
+            // record cleared the bar, not that the graph is empty. Saying so
+            // honestly keeps the agent from reading silence as a settled topic.
+            Ok(items) if items.is_empty() => {
+                let msg = match args.topic.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                    Some(t) => format!("No recorded knowledge relevant to \"{t}\"."),
+                    None => "No recorded knowledge found.".to_string(),
+                };
+                Ok(tool_ok(msg))
+            }
             Ok(items) => Ok(tool_ok(format_context(&items))),
             Err(e) => Ok(tool_error(format!("failed to retrieve context: {e}"))),
         }

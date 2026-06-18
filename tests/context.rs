@@ -48,12 +48,25 @@ fn relevant_context_lists_all_and_filters_by_topic() {
         .iter()
         .any(|(k, v)| k == "hasLifecycleStatus" && v == "accepted")));
 
-    // Topic → label-matched retrieval via the coherent entity index.
+    // Topic → label-matched retrieval via the coherent entity index. A single
+    // exact-token match scores ~0.75, well above the relevance floor.
     let hits = graph::relevant_context(&state, Some("rmcp"), 10, false).expect("topic search");
     assert!(
         hits.iter().any(|i| i.label.contains("rmcp")),
         "topic 'rmcp' should match the rmcp decision; got {:?}",
         hits.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+
+    // Honesty floor: a multi-word topic that overlaps a record on a single
+    // incidental token ("transport") is noise, not relevance — its score is
+    // scaled below the floor, so it must be filtered out rather than padded
+    // under a "relevant recorded knowledge" header.
+    let noise = graph::relevant_context(&state, Some("transport tuning methodology"), 10, false)
+        .expect("noise topic");
+    assert!(
+        noise.is_empty(),
+        "single-token-overlap topic should be filtered as noise; got {:?}",
+        noise.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
 
     let _ = std::fs::remove_dir_all(&dir);
