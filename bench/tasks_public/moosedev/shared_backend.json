@@ -1,0 +1,20 @@
+{
+  "id": "shared_backend",
+  "type": "context_recovery",
+  "hop_count": 1,
+  "info_availability": "memory_only",
+  "prompt": "Why does MOOSEDev run a single shared backend over a Unix socket instead of letting each MCP client spawn its own server? Answer in 2-3 sentences, and cite the recorded decision's title if you can.",
+  "ground_truth": {
+    "must_include_any": [
+      ["single-writer", "single writer"],
+      ["rocksdb"],
+      ["lock", "exclusive"]
+    ],
+    "decision_title": "Shared backend over Unix-socket MCP for concurrent multi-client access",
+    "key_points": [
+      "RocksDB store is single-writer / takes an exclusive directory lock",
+      "per-client stdio servers cannot share one project's store",
+      "one shared backend owns the store and serves multiple clients over a Unix socket"
+    ]
+  }
+}

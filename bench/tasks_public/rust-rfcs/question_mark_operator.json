@@ -1,0 +1,21 @@
+{
+  "id": "question_mark_operator",
+  "type": "context_recovery",
+  "hop_count": 1,
+  "info_availability": "memory_only",
+  "prompt": "What does Rust's `?` operator do for a Result value, and why was explicit `?`-based propagation chosen over fully-automatic exception propagation like most languages have? Answer in 2-3 sentences, and cite the recorded decision's title if you can.",
+  "ground_truth": {
+    "must_include_any": [
+      ["propagat", "early exit", "early return", "returns the err", "unwrap the ok"],
+      ["try!", "try macro", "try ("],
+      ["explicit", "balance", "automatic", "manual"],
+      ["at a glance", "visible", "type error", "silent", "exception safety"]
+    ],
+    "decision_title": "RFC 243: trait based exception handling",
+    "key_points": [
+      "? returns the Ok value or early-exits propagating the Err to the caller; equivalent to the try! macro",
+      "explicit propagation strikes a balance between fully-automatic (most languages) and fully-manual propagation",
+      "it keeps where-an-exception-may-be-thrown visible at a glance and turns signature changes into type errors, not silent behavior changes"
+    ]
+  }
+}

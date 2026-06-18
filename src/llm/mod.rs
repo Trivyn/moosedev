@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use moose::traits::LlmClient;
 use moose::types::{EngineError, LlmParams};
 use serde_json::json;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Endpoint + model selection, read from the environment with local-first defaults.
 #[derive(Debug, Clone)]
@@ -34,12 +36,24 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Cumulative token usage observed on a client's chat-completions responses.
+#[derive(Debug, Default)]
+struct UsageCounters {
+    prompt: AtomicU64,
+    completion: AtomicU64,
+}
+
 /// An OpenAI-compatible chat-completions client.
+///
+/// Token usage is accumulated (interior mutability) because MOOSE's `LlmClient`
+/// trait returns only the completion text; [`with_fresh_usage`](Self::with_fresh_usage)
+/// + [`take_usage`](Self::take_usage) let a caller attribute usage to one query.
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatClient {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+    usage: Arc<UsageCounters>,
 }
 
 impl OpenAiCompatClient {
@@ -52,6 +66,41 @@ impl OpenAiCompatClient {
             base_url: base_url.into(),
             api_key: api_key.into(),
             http,
+            usage: Arc::new(UsageCounters::default()),
+        }
+    }
+
+    /// A clone that shares the HTTP pool and endpoint config but accumulates
+    /// token usage into its own **fresh** counters — so usage can be attributed
+    /// to a single query even under concurrent backend use.
+    pub fn with_fresh_usage(&self) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            http: self.http.clone(),
+            usage: Arc::new(UsageCounters::default()),
+        }
+    }
+
+    /// `(prompt_tokens, completion_tokens)` accumulated since construction/fork,
+    /// resetting the counters to zero.
+    pub fn take_usage(&self) -> (u64, u64) {
+        (
+            self.usage.prompt.swap(0, Ordering::Relaxed),
+            self.usage.completion.swap(0, Ordering::Relaxed),
+        )
+    }
+
+    /// Accumulate `usage.prompt_tokens` / `usage.completion_tokens` from a
+    /// chat-completions response body; absent fields count as 0.
+    fn record_usage(&self, body: &serde_json::Value) {
+        let prompt = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+        let completion = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+        if prompt > 0 {
+            self.usage.prompt.fetch_add(prompt, Ordering::Relaxed);
+        }
+        if completion > 0 {
+            self.usage.completion.fetch_add(completion, Ordering::Relaxed);
         }
     }
 }
@@ -95,9 +144,51 @@ impl LlmClient for OpenAiCompatClient {
             .await
             .map_err(|e| EngineError::InternalError(format!("LLM response decode: {e}")))?;
 
+        self.record_usage(&v);
+
         v["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
             .ok_or_else(|| EngineError::InternalError(format!("LLM response missing content: {v}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn client() -> OpenAiCompatClient {
+        OpenAiCompatClient::new("http://localhost:1234/v1", "test")
+    }
+
+    #[test]
+    fn record_usage_accumulates_and_take_resets() {
+        let c = client();
+        c.record_usage(&json!({"usage": {"prompt_tokens": 12, "completion_tokens": 7}}));
+        c.record_usage(&json!({"usage": {"prompt_tokens": 3, "completion_tokens": 1}}));
+        assert_eq!(c.take_usage(), (15, 8));
+        // take_usage resets the counters.
+        assert_eq!(c.take_usage(), (0, 0));
+    }
+
+    #[test]
+    fn record_usage_treats_missing_fields_as_zero() {
+        let c = client();
+        c.record_usage(&json!({ "choices": [] })); // no usage block at all
+        c.record_usage(&json!({"usage": {"prompt_tokens": 5}})); // completion missing
+        assert_eq!(c.take_usage(), (5, 0));
+    }
+
+    #[test]
+    fn with_fresh_usage_isolates_counters() {
+        let base = client();
+        base.record_usage(&json!({"usage": {"prompt_tokens": 100, "completion_tokens": 100}}));
+        let forked = base.with_fresh_usage();
+        forked.record_usage(&json!({"usage": {"prompt_tokens": 2, "completion_tokens": 3}}));
+        // The fork sees only its own usage…
+        assert_eq!(forked.take_usage(), (2, 3));
+        // …and the base is unaffected by the fork's calls.
+        assert_eq!(base.take_usage(), (100, 100));
     }
 }

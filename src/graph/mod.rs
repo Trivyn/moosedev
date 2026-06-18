@@ -744,7 +744,17 @@ const SCHEMA_QUERY_SPEC_INTERNAL_ERROR: &str =
 /// symbolic-first graph-walk pipeline. Returns the answer plus an execution
 /// trace; the LLM sensor fires only at assist levels ≥ Standard.
 pub async fn query(state: &AppState, nlq: &str) -> anyhow::Result<QueryResult> {
-    query_with_llm_client(state, &state.llm, &state.model, nlq).await
+    // Fork the client so token usage is attributed to *this* query only (safe
+    // under concurrent backend use), then surface the NLQ model's token cost in
+    // the trace — the benchmark harness parses this to account B2's internal
+    // LLM cost.
+    let llm = state.llm.with_fresh_usage();
+    let mut result = query_with_llm_client(state, &llm, &state.model, nlq).await?;
+    let (prompt, completion) = llm.take_usage();
+    result
+        .trace
+        .push_str(&format!("\ntokens: prompt={prompt} completion={completion}"));
+    Ok(result)
 }
 
 /// Variant of [`query`] that lets integration tests inject a deterministic LLM

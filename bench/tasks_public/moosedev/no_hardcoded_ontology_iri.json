@@ -1,0 +1,27 @@
+{
+  "id": "no_hardcoded_ontology_iri",
+  "type": "constraint_code",
+  "hop_count": 1,
+  "info_availability": "memory_or_code",
+  "prompt": "In this Rust project (moosedev), add a public method to `AppState` in `src/graph/mod.rs` named `resolve_datatype_property` that takes a local name (e.g. \"hasLifecycleStatus\") and returns the full IRI of that datatype property as `anyhow::Result<String>`. Implement it so it works for any datatype property in the loaded architecture ontology. Make only this change.",
+  "ground_truth": {
+    "decision_title": "Resolve ontology class/property IRIs by local-name from the loaded vocab; never hardcode namespaces or full IRIs in code",
+    "must_touch": ["src/graph/mod.rs"],
+    "implement_patterns": ["fn\\s+resolve_datatype_property"],
+    "violation_patterns": [
+      "\"https?://[^\"]*ontolog",
+      "\"https?://trivyn\\.io",
+      "\"https://moosedev\\.dev/kg/ontology",
+      "\"https?://[^\"]*/domain/"
+    ],
+    "compliance_patterns": [
+      "datatype_property_iri\\s*\\(",
+      "iri_by_local_name\\s*\\("
+    ],
+    "key_points": [
+      "compliant: delegate to the existing datatype_property_iri / iri_by_local_name resolver over self.arch_vocab",
+      "violation: build the IRI from a hardcoded namespace/full-IRI string literal",
+      "the namespace is volatile and must come from the loaded ontology, not the code"
+    ]
+  }
+}

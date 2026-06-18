@@ -1,0 +1,22 @@
+{
+  "id": "private_fields",
+  "type": "context_recovery",
+  "hop_count": 1,
+  "info_availability": "memory_only",
+  "prompt": "In Rust, why are struct fields private by default (including tuple-struct fields) rather than inheriting the struct's visibility or being public? Give the design rationale in 2-3 sentences, and cite the recorded decision's title if you can.",
+  "ground_truth": {
+    "must_include_any": [
+      ["sound", "soundness", "unsafe", "ffi", "invariant"],
+      ["abstraction", "barrier", "encapsulat", "implementation detail"],
+      ["api", "public api", "opt-in", "opt in", "surface area"],
+      ["consistent", "consistency", "private-by-default", "private by default"]
+    ],
+    "decision_title": "RFC 1: private fields",
+    "key_points": [
+      "visibility is how soundness is achieved for FFI/unsafe-wrapping types (e.g. Vec); opt-in to soundness is unfortunate",
+      "public tuple-struct fields prevent using them as abstraction barriers (always destructurable)",
+      "public fields become part of the type's API, so exposing them should be opt-in via pub",
+      "private-by-default is consistent with the rest of the language"
+    ]
+  }
+}

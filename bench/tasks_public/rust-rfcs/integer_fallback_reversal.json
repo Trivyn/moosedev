@@ -1,0 +1,20 @@
+{
+  "id": "integer_fallback_reversal",
+  "type": "multi_hop",
+  "hop_count": 2,
+  "info_availability": "memory_only",
+  "prompt": "Rust first REMOVED the integer-literal inference fallback and then later RESTORED it. Explain (a) why the fallback was removed, (b) why it was restored, and (c) what unconstrained integer literals default to NOW. Answer in 3-4 sentences, and cite the recorded decision title(s) you relied on.",
+  "ground_truth": {
+    "must_include_any": [
+      ["error-prone", "error prone", "unexpected", "small changes", "stricter", "strict typing"],
+      ["small program", "in the small", "tests", "annoying", "accumulator", "first exposure"],
+      ["i32"]
+    ],
+    "decision_title": "RFC 212: restore int fallback",
+    "key_points": [
+      "RFC 115 removed the fallback: integer inference defaulting to int was felt error-prone; small code changes could change inferred types, and measurements showed small impact",
+      "RFC 212 restored it: lacking a fallback was annoying for small programs/tests (a common first exposure), where literals are only printed or compared",
+      "the current default is i32 (not the old int), chosen for C-familiarity, performance/memory, and platform-independence"
+    ]
+  }
+}
