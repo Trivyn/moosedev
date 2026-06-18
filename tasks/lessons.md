@@ -24,6 +24,12 @@ Pattern: The initial `--connect` auto-spawn test killed only the proxy PID and a
 
 Rule: When process-group/session isolation is the design requirement, the test must send a signal to the parent/proxy process group and assert the detached child still serves. Killing one PID is insufficient because it passes even when the isolation call is removed.
 
+## Don't Index Instance Data — MOOSE Uses Walk Planning for Precision
+
+Pattern: Proposed embedding-ranked A-box recall and embedding-based instance dedup — building a vector index over instance content. This contradicts a deliberate MOOSE design choice: MOOSE does not index instance data; walk planning was devised to avoid the vector-index/RAG trap and deliver more precise, auditable retrieval.
+
+Rule: When recall/dedup/contradiction seems to need "semantic search" over recorded instances, reach for the symbolic path first — `query` (walk planning) and `sparql` for retrieval precision; LLM-as-sensor + typed conflict for contradiction — not a nearest-neighbor index over instances. Embeddings in MOOSEDev stay confined to T-box term alignment (`suggest_parent`) over the static ontology (class placement, not instance retrieval). `get_relevant_context` is a shallow lexical anchor/browse tool by construction; fix its imprecision with an honesty floor + tool-selection guidance, not vector search.
+
 ## Canonicalized Path Derivation Needs Precreated Directories
 
 Pattern: `socket_path_for` canonicalizes the data dir when it exists, then applies the Unix-socket length guard. `--serve` created the data dir before deriving the socket, but `--connect` did not, so first-run and later-run derivation could diverge for paths near the macOS socket length limit.
