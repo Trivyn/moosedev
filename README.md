@@ -146,12 +146,15 @@ The backend listens on a Unix socket derived **per data dir**
 (`<MOOSEDEV_DATA_DIR>/moosedev.sock` by default, or `MOOSEDEV_SOCKET`), so
 separate projects each get their own backend with no cross-talk. `--connect`
 clients are lightweight proxies — they never open the store or load the model.
-Lifecycle is manual for now (you start `--serve` yourself); transparent
-auto-spawn is planned (see `tasks/todo.md`, M5).
+When no backend is listening, `--connect` auto-spawns a detached `--serve`
+backend for the same resolved socket unless `MOOSEDEV_NO_AUTOSPAWN=1` is set.
 
 ### Configuration
 
-MOOSEDev is configured via environment variables (this surface is filling in as features land):
+MOOSEDev is configured via environment variables (this surface is filling in as features land).
+At startup, `moosedev` also reads a repo-root `.env` when present; explicit environment variables
+from the shell or MCP client config take precedence. This applies to `--connect` too, so an
+auto-spawned backend inherits the resolved configuration.
 
 - **LLM endpoint** (for natural-language `query`): an OpenAI-compatible `base_url` / `api_key` / `model` — point it at a local runtime (e.g. Ollama, LM Studio) or a hosted provider. *Local-first by default; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).

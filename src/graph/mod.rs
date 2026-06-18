@@ -17,7 +17,7 @@ use moose::kg::{
 };
 use moose::moose_ontology::MooseOntologyCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
-use moose::traits::EngineConfig;
+use moose::traits::{EngineConfig, LlmClient};
 use moose::types::{
     CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, VocabularyEntry, WalkBudgets,
 };
@@ -737,19 +737,53 @@ pub struct QueryResult {
     pub trace: String,
 }
 
+const SCHEMA_QUERY_SPEC_INTERNAL_ERROR: &str =
+    "Schema query intent set but no SchemaQuerySpec was attached";
+
 /// Answer a natural-language question over the project KG using MOOSE's
 /// symbolic-first graph-walk pipeline. Returns the answer plus an execution
 /// trace; the LLM sensor fires only at assist levels ≥ Standard.
 pub async fn query(state: &AppState, nlq: &str) -> anyhow::Result<QueryResult> {
+    query_with_llm_client(state, &state.llm, &state.model, nlq).await
+}
+
+/// Variant of [`query`] that lets integration tests inject a deterministic LLM
+/// sensor while still exercising MOOSEDev's wrapper behavior.
+#[doc(hidden)]
+pub async fn query_with_llm_client(
+    state: &AppState,
+    llm: &dyn LlmClient,
+    model: &str,
+    nlq: &str,
+) -> anyhow::Result<QueryResult> {
+    let first = execute_query(state, llm, &state.engine_config, model, nlq).await?;
+    if state.engine_config.llm_assist_level != LlmAssistLevel::PureSymbolic
+        && first.answer.contains(SCHEMA_QUERY_SPEC_INTERNAL_ERROR)
+    {
+        let mut fallback_config = state.engine_config.clone();
+        fallback_config.llm_assist_level = LlmAssistLevel::PureSymbolic;
+        return execute_query(state, llm, &fallback_config, model, nlq).await;
+    }
+
+    Ok(first)
+}
+
+async fn execute_query(
+    state: &AppState,
+    llm: &dyn LlmClient,
+    engine_config: &EngineConfig,
+    model: &str,
+    nlq: &str,
+) -> anyhow::Result<QueryResult> {
     let data_graphs = [PROJECT_KG_GRAPH_IRI.to_string()];
     let output = execute_graph_walk_nlq_with_context(
         &state.store,
-        &state.llm,
+        llm,
         &state.ontology_resolver,
-        &state.engine_config,
+        engine_config,
         nlq,
         &data_graphs,
-        &state.model,
+        model,
         state.entity_index.clone(),
         None,
         None,

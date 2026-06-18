@@ -5,9 +5,35 @@
 
 use std::path::Path;
 
+use async_trait::async_trait;
 use chrono::Utc;
-use moose::types::LlmAssistLevel;
+use moose::traits::LlmClient;
+use moose::types::{EngineError, LlmAssistLevel, LlmParams};
 use moosedev::graph::{self, AppState, RecordInput};
+
+struct MetaIntentLlm;
+
+#[async_trait]
+impl LlmClient for MetaIntentLlm {
+    async fn chat_completion(
+        &self,
+        _model: &str,
+        prompt: &str,
+        _params: Option<&LlmParams>,
+    ) -> Result<String, EngineError> {
+        if prompt.contains("Respond with ONLY a JSON object")
+            && prompt.contains("\"intent\"")
+            && prompt.contains("\"object\"")
+        {
+            return Ok(
+                r#"{"intent":"meta","object":"architectural decisions","modifiers":[]}"#
+                    .to_string(),
+            );
+        }
+
+        Ok(r#"{"summary":"synthetic answer","relevant_iris":[],"confidence":"high","unanswered_aspects":[]}"#.to_string())
+    }
+}
 
 #[tokio::test]
 async fn query_runs_pure_symbolic_over_recorded_decisions() {
@@ -48,6 +74,62 @@ async fn query_runs_pure_symbolic_over_recorded_decisions() {
     assert!(
         result.trace.contains("pure symbolic"),
         "trace should show no LLM sensors fired; got:\n{}",
+        result.trace
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn query_does_not_surface_schema_spec_internal_error_for_project_records() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-query-schema-regression-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+
+    let mut state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+    state.engine_config.llm_assist_level = LlmAssistLevel::Standard;
+
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    graph::record_instance(
+        &state,
+        &RecordInput {
+            class_iri,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (
+                    moose::RDFS_LABEL.to_string(),
+                    "Keep project knowledge in the durable graph".to_string(),
+                ),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record decision");
+
+    let result = graph::query_with_llm_client(
+        &state,
+        &MetaIntentLlm,
+        "fake-model",
+        "What are the current architectural decisions for this project?",
+    )
+    .await
+    .expect("query should run");
+
+    assert!(
+        !result
+            .answer
+            .contains("Schema query intent set but no SchemaQuerySpec"),
+        "internal schema contract violation leaked to query answer:\n{}",
+        result.answer
+    );
+    assert!(
+        result.trace.contains("assist level: PureSymbolic"),
+        "schema-contract fallback should retry symbolically; trace:\n{}",
         result.trace
     );
 

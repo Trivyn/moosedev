@@ -16,8 +16,9 @@
 //!   This is what each MCP client spawns.
 //!
 //! `SOCKET` is optional; it otherwise comes from `MOOSEDEV_SOCKET`, else is
-//! derived per data dir. Configure with `MOOSEDEV_DATA_DIR` / `MOOSEDEV_ONTOLOGY_DIR`.
-//! Set `MOOSEDEV_NO_AUTOSPAWN=1` to make `--connect` require a pre-running backend.
+//! derived per data dir. Configure with `.env` in the repo root, or environment
+//! variables such as `MOOSEDEV_DATA_DIR` / `MOOSEDEV_ONTOLOGY_DIR`. Set
+//! `MOOSEDEV_NO_AUTOSPAWN=1` to make `--connect` require a pre-running backend.
 
 use std::path::{Path, PathBuf};
 
@@ -40,7 +41,8 @@ USAGE:
     moosedev --help          Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
-Environment: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
+Configuration: repo-root .env plus environment variables. Explicit environment
+values win. Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
 MOOSEDEV_NO_AUTOSPAWN.";
 
 /// Parse argv (excluding argv[0]) into a [`Mode`]. Modes are mutually exclusive;
@@ -69,8 +71,49 @@ fn resolve_socket(explicit: Option<PathBuf>, data_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| runtime::socket_path_for(data_dir))
 }
 
+fn load_dotenv_file(path: &Path) -> anyhow::Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    dotenvy::from_path(path)
+        .map(|_| true)
+        .map_err(|e| anyhow::anyhow!("load dotenv {}: {e}", path.display()))
+}
+
+fn repo_dotenv_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join(".env")];
+
+    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()]
+        .into_iter()
+        .flatten()
+    {
+        for ancestor in start.ancestors() {
+            if ancestor.join("Cargo.toml").is_file() {
+                let candidate = ancestor.join(".env");
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+                break;
+            }
+        }
+    }
+
+    candidates
+}
+
+fn load_repo_dotenv() -> anyhow::Result<()> {
+    for candidate in repo_dotenv_candidates() {
+        if load_dotenv_file(&candidate)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    load_repo_dotenv()?;
+
     // Logs MUST go to stderr — stdout carries the MCP JSON-RPC framing.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -138,5 +181,42 @@ fn ontology_dir() -> PathBuf {
     match std::env::var("MOOSEDEV_ONTOLOGY_DIR") {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn dotenv_loads_missing_values_without_overriding_existing_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let dir = std::env::temp_dir().join(format!("moosedev-dotenv-test-{}", std::process::id()));
+        let dotenv = dir.join(".env");
+        let missing_key = "MOOSEDEV_DOTENV_TEST_MISSING";
+        let existing_key = "MOOSEDEV_DOTENV_TEST_EXISTING";
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dotenv dir");
+        std::fs::write(
+            &dotenv,
+            format!("{missing_key}=from-file\n{existing_key}=from-file\n"),
+        )
+        .expect("write temp dotenv");
+
+        std::env::remove_var(missing_key);
+        std::env::set_var(existing_key, "from-env");
+
+        assert!(load_dotenv_file(&dotenv).expect("load dotenv"));
+        assert_eq!(std::env::var(missing_key).as_deref(), Ok("from-file"));
+        assert_eq!(std::env::var(existing_key).as_deref(), Ok("from-env"));
+
+        std::env::remove_var(missing_key);
+        std::env::remove_var(existing_key);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
