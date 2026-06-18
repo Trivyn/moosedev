@@ -48,8 +48,8 @@ fn relevant_context_lists_all_and_filters_by_topic() {
         .iter()
         .any(|(k, v)| k == "hasLifecycleStatus" && v == "accepted")));
 
-    // Topic → label-matched retrieval via the coherent entity index. A single
-    // exact-token match scores ~0.75, well above the relevance floor.
+    // Topic → BM25 lexical relevance over each record's label + description
+    // (moose `search_records`). "rmcp" appears in the rmcp decision's label.
     let hits = graph::relevant_context(&state, Some("rmcp"), 10, false).expect("topic search");
     assert!(
         hits.iter().any(|i| i.label.contains("rmcp")),
@@ -57,16 +57,15 @@ fn relevant_context_lists_all_and_filters_by_topic() {
         hits.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
 
-    // Honesty floor: a multi-word topic that overlaps a record on a single
-    // incidental token ("transport") is noise, not relevance — its score is
-    // scaled below the floor, so it must be filtered out rather than padded
-    // under a "relevant recorded knowledge" header.
-    let noise = graph::relevant_context(&state, Some("transport tuning methodology"), 10, false)
-        .expect("noise topic");
+    // Honest empty-state (invariant #6): a topic that shares no term with any
+    // record returns nothing rather than padded noise — `search_records` excludes
+    // zero-match records, so relevance is never asserted where none exists.
+    let none = graph::relevant_context(&state, Some("kubernetes helm rollout"), 10, false)
+        .expect("no-match topic");
     assert!(
-        noise.is_empty(),
-        "single-token-overlap topic should be filtered as noise; got {:?}",
-        noise.iter().map(|i| &i.label).collect::<Vec<_>>()
+        none.is_empty(),
+        "topic sharing no term with any record should return nothing; got {:?}",
+        none.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
 
     let _ = std::fs::remove_dir_all(&dir);
