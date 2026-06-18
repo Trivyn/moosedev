@@ -1,0 +1,5 @@
+[mcp_servers.moosedev]
+type = "stdio"
+command = "./target/release/moosedev"
+args = ["--connect"]
+env = { MOOSEDEV_DATA_DIR = "./.moosedev" }

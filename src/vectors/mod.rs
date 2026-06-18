@@ -7,7 +7,9 @@
 //! recipe (label + definition + altLabels, no query prefix), matching what
 //! MOOSE's query side compares against (template: MOOSE `…/chinook.rs`).
 
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use moose::embeddings::vec_store::{ElementType, StoreStamp, VecStore};
@@ -22,21 +24,57 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 /// `SKOS_ALT_LABEL`/`SKOS_PREF_LABEL` constants but not this one).
 const SKOS_DEFINITION: &str = "http://www.w3.org/2004/02/skos/core#definition";
 
+/// One ontology element's embed inputs: the identity we store and the exact text
+/// we embed. Collected once and used for **both** the freshness fingerprint and
+/// the build, so the cache key can never drift from what actually goes into the
+/// vectors. `label` is stored verbatim in row metadata (also embedded in `content`).
+struct EmbedInput {
+    iri: String,
+    element_type: ElementType,
+    label: String,
+    content: String,
+}
+
 /// Build the ontology vector store at `db_path` from the given domain graphs and
-/// open it. Rebuilt fresh each call (regen-safe). Embeds every `owl:Class` and
-/// `owl:DatatypeProperty`; object properties aren't ranked on, so they're skipped.
+/// open it. Embeds every `owl:Class` and `owl:DatatypeProperty` (object properties
+/// aren't ranked on, so they're skipped).
+///
+/// **Cached:** a previously built store is reused when its ontology fingerprint
+/// still matches *and* it opens cleanly. The shipped ontology only changes on a
+/// version bump, so the common startup is a cache hit — no embedding-backbone load
+/// and no re-embedding. A rebuild is forced when the ontology content changes (the
+/// fingerprint flips) or the embedding model changes (`VecStore::open` validates
+/// the stamp against the compiled-in active model and errors on drift).
 pub async fn build_and_open(
     store: &Store,
     domain_graph_iris: &[&str],
     db_path: &Path,
 ) -> anyhow::Result<VecStore> {
+    let inputs = collect_embed_inputs(store, domain_graph_iris)?;
+    let fingerprint = ontology_fingerprint(&inputs);
+    let fp_path = fingerprint_path(db_path);
+
+    // Fast path: reuse the persisted store when nothing that affects the vectors
+    // has changed. `open` is cheap (no backbone load) and rejects model drift.
+    if let Some(vec_store) = try_reuse(db_path, &fp_path, &fingerprint).await {
+        tracing::info!(
+            "[vectors] reusing cached ontology vector store ({} vectors, ontology + model unchanged): {}",
+            inputs.len(),
+            db_path.display()
+        );
+        return Ok(vec_store);
+    }
+
     let backbone =
         default_backbone().map_err(|e| anyhow::anyhow!("load embedding backbone: {e}"))?;
 
-    // Fresh build: drop any prior DB (and WAL/SHM) so rows don't accumulate.
+    // Fresh build: drop any prior DB (and WAL/SHM) plus the stale fingerprint so
+    // rows don't accumulate and a crash mid-build can't leave a "fresh"-looking
+    // store (the fingerprint is rewritten only after a successful stamp, below).
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
     }
+    let _ = std::fs::remove_file(&fp_path);
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("create vector store dir {}: {e}", parent.display()))?;
@@ -57,37 +95,22 @@ pub async fn build_and_open(
     .await
     .map_err(|e| anyhow::anyhow!("create ontology_vectors table: {e}"))?;
 
-    let mut count = 0usize;
-    for graph_iri in domain_graph_iris {
-        let vocab = extract_compact_vocabulary(store, graph_iri, None)
-            .map_err(|e| anyhow::anyhow!("extract_compact_vocabulary({graph_iri}): {e:?}"))?;
-        for (entries, kind) in [
-            (&vocab.classes, ElementType::Class),
-            (&vocab.datatype_properties, ElementType::DatatypeProperty),
-        ] {
-            for entry in entries {
-                let content = embed_text(store, graph_iri, entry)?;
-                let vector = backbone
-                    .embed_document(&content)
-                    .map_err(|e| anyhow::anyhow!("embed {}: {e}", entry.iri))?;
-                let metadata = serde_json::json!({
-                    "label": entry.label.clone().unwrap_or_else(|| entry.local_name.clone()),
-                })
-                .to_string();
-                sqlx::query(
-                    "INSERT INTO ontology_vectors (id, element_type, metadata, embedding) \
-                     VALUES (?, ?, ?, ?)",
-                )
-                .bind(&entry.iri)
-                .bind(kind.as_db_value())
-                .bind(metadata)
-                .bind(embedding_to_blob(&vector))
-                .execute(&pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("insert vector {}: {e}", entry.iri))?;
-                count += 1;
-            }
-        }
+    for input in &inputs {
+        let vector = backbone
+            .embed_document(&input.content)
+            .map_err(|e| anyhow::anyhow!("embed {}: {e}", input.iri))?;
+        let metadata = serde_json::json!({ "label": input.label }).to_string();
+        sqlx::query(
+            "INSERT INTO ontology_vectors (id, element_type, metadata, embedding) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&input.iri)
+        .bind(input.element_type.as_db_value())
+        .bind(metadata)
+        .bind(embedding_to_blob(&vector))
+        .execute(&pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("insert vector {}: {e}", input.iri))?;
     }
     pool.close().await;
 
@@ -102,14 +125,95 @@ pub async fn build_and_open(
     .await
     .map_err(|e| anyhow::anyhow!("stamp vector store: {e}"))?;
 
+    // Record the fingerprint last: a store is only advertised as fresh once its
+    // rows and model stamp are fully written.
+    std::fs::write(&fp_path, &fingerprint)
+        .map_err(|e| anyhow::anyhow!("write fingerprint {}: {e}", fp_path.display()))?;
+
     tracing::info!(
-        "[vectors] built ontology vector store: {count} vectors at {}",
+        "[vectors] built ontology vector store: {} vectors at {}",
+        inputs.len(),
         db_path.display()
     );
 
     VecStore::open(None, Some(db_path))
         .await
         .map_err(|e| anyhow::anyhow!("open vector store: {e}"))
+}
+
+/// Try to reuse a persisted store: returns the opened store iff the fingerprint
+/// sidecar matches `fingerprint` and it opens cleanly with vectors. `open`
+/// validates the embedding-model stamp against the compiled-in active model, so a
+/// model change (or a corrupt/empty store) returns `None` and the caller rebuilds.
+async fn try_reuse(db_path: &Path, fp_path: &Path, fingerprint: &str) -> Option<VecStore> {
+    if !db_path.exists() || std::fs::read_to_string(fp_path).ok().as_deref() != Some(fingerprint) {
+        return None;
+    }
+    match VecStore::open(None, Some(db_path)).await {
+        Ok(vec_store) if vec_store.is_enabled() => Some(vec_store),
+        Ok(_) => {
+            tracing::info!("[vectors] cached store has no vectors; rebuilding");
+            None
+        }
+        Err(e) => {
+            tracing::info!("[vectors] cached store unusable ({e}); rebuilding");
+            None
+        }
+    }
+}
+
+/// Collect the embed inputs for every `owl:Class` and `owl:DatatypeProperty` in
+/// `domain_graph_iris`, in a deterministic order. Pure graph reads — no model load
+/// — so it's cheap enough to run on every startup to compute the fingerprint.
+fn collect_embed_inputs(
+    store: &Store,
+    domain_graph_iris: &[&str],
+) -> anyhow::Result<Vec<EmbedInput>> {
+    let mut inputs = Vec::new();
+    for graph_iri in domain_graph_iris {
+        let vocab = extract_compact_vocabulary(store, graph_iri, None)
+            .map_err(|e| anyhow::anyhow!("extract_compact_vocabulary({graph_iri}): {e:?}"))?;
+        for (entries, kind) in [
+            (&vocab.classes, ElementType::Class),
+            (&vocab.datatype_properties, ElementType::DatatypeProperty),
+        ] {
+            for entry in entries {
+                inputs.push(EmbedInput {
+                    iri: entry.iri.clone(),
+                    element_type: kind,
+                    label: entry
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| entry.local_name.clone()),
+                    content: embed_text(store, graph_iri, entry)?,
+                });
+            }
+        }
+    }
+    Ok(inputs)
+}
+
+/// A content fingerprint over the exact `(iri, element_type, embed-text)` tuples
+/// that determine the stored vectors — the cache key for deciding whether a
+/// persisted store is still fresh. Deterministic across runs of the same binary
+/// (fixed-seed `DefaultHasher`); a compiler/std change can only perturb it, which
+/// merely forces a (safe) rebuild. `label` is omitted because it's already part of
+/// `content`.
+fn ontology_fingerprint(inputs: &[EmbedInput]) -> String {
+    let mut hasher = DefaultHasher::new();
+    inputs.len().hash(&mut hasher);
+    for input in inputs {
+        input.iri.hash(&mut hasher);
+        input.element_type.as_db_value().hash(&mut hasher);
+        input.content.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Sidecar path recording the ontology fingerprint a built store was made from
+/// (co-located with the DB so it's cleaned up with the data dir).
+fn fingerprint_path(db_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.fingerprint", db_path.display()))
 }
 
 /// Document-side embed text for one ontology element: `Term: <label>. Definition:

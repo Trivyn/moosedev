@@ -33,9 +33,8 @@
 .env.*
 !.env.example
 
-# Claude Code / MCP local files (matches the `moose` repo convention; a local
-# .mcp.json will often point an MCP client at the moosedev binary).
-.mcp.json
+# Agent client local state. Repo-scoped MCP config is intentionally checked in
+# via `.mcp.json` (Claude) and `.codex/config.toml` (Codex).
 .claude/settings.local.json
 
 # ── Editor & OS noise ─────────────────────────────────────────────────────

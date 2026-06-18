@@ -12,14 +12,16 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use moose::embeddings::vec_store::VecStore;
 use moose::entity_index::EntityIndexCache;
-use moose::kg::{assert_instance, AssertionLiteral, DatatypeAssertion, InstanceAssertion};
+use moose::kg::{
+    assert_instance, AssertionLiteral, DatatypeAssertion, InstanceAssertion, ObjectAssertion,
+};
 use moose::moose_ontology::MooseOntologyCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
 use moose::traits::EngineConfig;
 use moose::types::{
     CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, VocabularyEntry, WalkBudgets,
 };
-use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 use oxigraph::store::Store;
 
 use crate::llm::{LlmConfig, OpenAiCompatClient};
@@ -85,6 +87,15 @@ fn iri_by_local_name(entries: &[VocabularyEntry], local: &str) -> Option<String>
 fn datatype_property_iri(vocab: &CompactVocabulary, local: &str) -> anyhow::Result<String> {
     iri_by_local_name(&vocab.datatype_properties, local).ok_or_else(|| {
         anyhow::anyhow!("architecture ontology is missing datatype property {local:?}")
+    })
+}
+
+/// Resolve an object property's (relation's) full IRI from the loaded vocabulary
+/// by local name — the relation analogue of [`datatype_property_iri`], keeping the
+/// volatile namespace out of the code.
+fn object_property_iri(vocab: &CompactVocabulary, local: &str) -> anyhow::Result<String> {
+    iri_by_local_name(&vocab.object_properties, local).ok_or_else(|| {
+        anyhow::anyhow!("architecture ontology is missing object property {local:?}")
     })
 }
 
@@ -188,6 +199,12 @@ impl AppState {
             anyhow::anyhow!("unknown kind {kind:?}: not a class in the architecture ontology")
         })
     }
+
+    /// Resolve a relation local name (e.g. "supersedes", "hasRationale") to its
+    /// full IRI from the loaded architecture vocabulary.
+    pub fn resolve_object_property(&self, local: &str) -> anyhow::Result<String> {
+        object_property_iri(&self.arch_vocab, local)
+    }
 }
 
 /// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–5); defaults to Standard.
@@ -233,6 +250,22 @@ pub fn record_instance(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<String> {
+    record_instance_with_relations(state, input, &[], author, when)
+}
+
+/// Like [`record_instance`], but also writes IRI-valued relations
+/// `(predicate_iri, object_iri)` — e.g. `isMotivatedBy`, `supersedes`. This is the
+/// enabling layer for typed links between records (invariant #2): the writer
+/// previously always passed an empty `object_props` slice, so no relation could be
+/// captured. Resolve `predicate_iri` from the ontology via
+/// [`AppState::resolve_object_property`].
+pub fn record_instance_with_relations(
+    state: &AppState,
+    input: &RecordInput,
+    object_props: &[(String, String)],
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<String> {
     let subject = mint_instance_iri(&input.class_local);
     let timestamp = when.to_rfc3339();
     let mut datatype_props: Vec<DatatypeAssertion> = input
@@ -265,12 +298,20 @@ pub fn record_instance(
         });
     }
 
+    let object_assertions: Vec<ObjectAssertion> = object_props
+        .iter()
+        .map(|(predicate, object)| ObjectAssertion {
+            predicate_iri: predicate.as_str(),
+            object_iri: object.as_str(),
+        })
+        .collect();
+
     let assertion = InstanceAssertion {
         graph_iri: PROJECT_KG_GRAPH_IRI,
         subject_iri: &subject,
         class_iri: &input.class_iri,
         datatype_props: &datatype_props,
-        object_props: &[],
+        object_props: &object_assertions,
     };
 
     assert_instance(&state.store, &state.entity_index, &assertion, None)
@@ -285,6 +326,242 @@ fn has_property(input: &RecordInput, predicate_iri: &str) -> bool {
         .properties
         .iter()
         .any(|(predicate, _)| predicate == predicate_iri)
+}
+
+/// A decision change: the replacement to record, the decision it supersedes, and
+/// the rationale (the *why*) for the change.
+pub struct SupersedeInput {
+    pub superseded_iri: String,
+    pub new: RecordInput,
+    pub rationale: String,
+}
+
+/// IRIs minted/affected by a supersede.
+pub struct SupersedeOutcome {
+    pub new_iri: String,
+    pub rationale_iri: String,
+    pub superseded_iri: String,
+}
+
+/// The write-path "stamp" applied to a captured instance: the capture predicate
+/// IRIs plus the author, timestamp, and lifecycle status defaults to add when the
+/// caller didn't supply them.
+struct CaptureStamp<'a> {
+    capture: &'a CapturePredicates,
+    author: &'a str,
+    timestamp: &'a str,
+    status: &'a str,
+}
+
+/// Build the owned quads for one capture instance in the project graph: its type,
+/// the caller's literal props, its IRI-valued relations, and the write-path
+/// defaults (author, typed timestamp, lifecycle status) when the caller didn't
+/// supply them. Returns quads rather than asserting so a supersede can commit
+/// several instances *plus* a status change in one transaction. The default set
+/// mirrors `record_instance_with_relations` — keep the two in sync.
+fn capture_instance_quads(
+    subject_iri: &str,
+    class_iri: &str,
+    literal_props: &[(String, String)],
+    object_props: &[(String, String)],
+    stamp: &CaptureStamp<'_>,
+) -> anyhow::Result<Vec<Quad>> {
+    let capture = stamp.capture;
+    let author = stamp.author;
+    let timestamp_rfc3339 = stamp.timestamp;
+    let status = stamp.status;
+    let graph = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
+    let subject = NamedNode::new(subject_iri)
+        .map_err(|e| anyhow::anyhow!("invalid subject IRI {subject_iri}: {e}"))?;
+
+    let mut quads = vec![Quad::new(
+        subject.clone(),
+        NamedNode::new(moose::RDF_TYPE)?,
+        NamedNode::new(class_iri)
+            .map_err(|e| anyhow::anyhow!("invalid class IRI {class_iri}: {e}"))?,
+        graph.clone(),
+    )];
+    for (predicate, value) in literal_props {
+        quads.push(Quad::new(
+            subject.clone(),
+            NamedNode::new(predicate)?,
+            Literal::new_simple_literal(value.as_str()),
+            graph.clone(),
+        ));
+    }
+    for (predicate, object) in object_props {
+        quads.push(Quad::new(
+            subject.clone(),
+            NamedNode::new(predicate)?,
+            NamedNode::new(object)?,
+            graph.clone(),
+        ));
+    }
+
+    // Write-path defaults, only when the caller didn't supply them (mirrors
+    // `record_instance_with_relations`). Timestamp is typed xsd:dateTime to satisfy
+    // the InformationRecord shape; author/status are plain strings.
+    let supplied = |p: &str| literal_props.iter().any(|(k, _)| k == p);
+    if !supplied(&capture.author) {
+        quads.push(Quad::new(
+            subject.clone(),
+            NamedNode::new(&capture.author)?,
+            Literal::new_simple_literal(author),
+            graph.clone(),
+        ));
+    }
+    if !supplied(&capture.timestamp) {
+        quads.push(Quad::new(
+            subject.clone(),
+            NamedNode::new(&capture.timestamp)?,
+            Literal::new_typed_literal(timestamp_rfc3339, NamedNode::new(XSD_DATETIME)?),
+            graph.clone(),
+        ));
+    }
+    if !supplied(&capture.status) {
+        quads.push(Quad::new(
+            subject.clone(),
+            NamedNode::new(&capture.status)?,
+            Literal::new_simple_literal(status),
+            graph,
+        ));
+    }
+    Ok(quads)
+}
+
+/// Record a new decision that supersedes an existing one, capture *why* it changed
+/// as a linked `Rationale`, and mark the old decision `superseded` — preserving it
+/// as history (it is never deleted). Atomic: the new decision, the `Rationale`
+/// node, the `supersedes`/`hasRationale` edges, and the old decision's status
+/// change all commit in one transaction; the entity index is invalidated once on
+/// success. The superseded subject must already be an `ArchitecturalDecision` in
+/// the project graph (`supersedes`' range) — else this errors and writes nothing.
+pub fn supersede_decision(
+    state: &AppState,
+    input: &SupersedeInput,
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<SupersedeOutcome> {
+    let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+
+    // Precondition: the superseded subject exists and is an ArchitecturalDecision.
+    let decision_class = state.resolve_class("ArchitecturalDecision")?;
+    let decision_class_ref = NamedNodeRef::new(&decision_class)?;
+    let old_subject = NamedNode::new(&input.superseded_iri)
+        .map_err(|e| anyhow::anyhow!("invalid superseded IRI {}: {e}", input.superseded_iri))?;
+    let is_decision = state
+        .store
+        .quads_for_pattern(
+            Some(old_subject.as_ref().into()),
+            Some(NamedNodeRef::new_unchecked(moose::RDF_TYPE)),
+            Some(decision_class_ref.into()),
+            Some(GraphNameRef::NamedNode(project_graph)),
+        )
+        .flatten()
+        .next()
+        .is_some();
+    if !is_decision {
+        anyhow::bail!(
+            "cannot supersede {}: not an ArchitecturalDecision in the project graph",
+            input.superseded_iri
+        );
+    }
+
+    // Resolve relation + class IRIs from the loaded ontology (by local name).
+    let supersedes_pred = state.resolve_object_property("supersedes")?;
+    let has_rationale_pred = state.resolve_object_property("hasRationale")?;
+    let rationale_class = state.resolve_class("Rationale")?;
+
+    let new_iri = mint_instance_iri(&input.new.class_local);
+    let rationale_iri = mint_instance_iri("Rationale");
+    let timestamp = when.to_rfc3339();
+
+    // The Rationale node (the why): its description carries the reason; its title
+    // is derived from the new decision's title so it reads well in listings.
+    let new_title = input
+        .new
+        .properties
+        .iter()
+        .find(|(p, _)| p == &state.capture.title)
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("decision");
+    let rationale_title = format!("Rationale: {new_title}");
+    let rationale_literals = vec![
+        (moose::RDFS_LABEL.to_string(), rationale_title.clone()),
+        (state.capture.title.clone(), rationale_title),
+        (state.capture.description.clone(), input.rationale.clone()),
+    ];
+    // A superseding decision (and its rationale) is the now-current record, so
+    // default the lifecycle status to "accepted".
+    let stamp = CaptureStamp {
+        capture: &state.capture,
+        author,
+        timestamp: &timestamp,
+        status: "accepted",
+    };
+    let rationale_quads = capture_instance_quads(
+        &rationale_iri,
+        &rationale_class,
+        &rationale_literals,
+        &[],
+        &stamp,
+    )?;
+
+    // The new decision: caller literals + edges to the rationale and the old one.
+    // (The caller may still override status via `new.properties`.)
+    let new_edges = vec![
+        (has_rationale_pred, rationale_iri.clone()),
+        (supersedes_pred, input.superseded_iri.clone()),
+    ];
+    let new_quads = capture_instance_quads(
+        &new_iri,
+        &input.new.class_iri,
+        &input.new.properties,
+        &new_edges,
+        &stamp,
+    )?;
+
+    // Flip the OLD decision's lifecycle status to "superseded": remove all its
+    // existing status quads and assert the new one. Nothing else on the old
+    // instance is touched — it remains as the historical record.
+    let old_status_quads: Vec<Quad> = state
+        .store
+        .quads_for_pattern(
+            Some(old_subject.as_ref().into()),
+            Some(NamedNodeRef::new(&state.capture.status)?),
+            None,
+            Some(GraphNameRef::NamedNode(project_graph)),
+        )
+        .flatten()
+        .collect();
+    let superseded_status = Quad::new(
+        old_subject.clone(),
+        NamedNode::new(&state.capture.status)?,
+        Literal::new_simple_literal("superseded"),
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+    );
+
+    // One atomic transaction: insert the new decision + rationale + the old's new
+    // status, and remove the old's prior status quads.
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("supersede transaction: {e}"))?;
+    txn.extend(rationale_quads.iter().map(Quad::as_ref));
+    txn.extend(new_quads.iter().map(Quad::as_ref));
+    for quad in &old_status_quads {
+        txn.remove(quad.as_ref());
+    }
+    txn.insert(superseded_status.as_ref());
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("supersede commit: {e}"))?;
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+
+    Ok(SupersedeOutcome {
+        new_iri,
+        rationale_iri,
+        superseded_iri: input.superseded_iri.clone(),
+    })
 }
 
 /// Result of an NLQ query: the synthesized answer, a confidence label, and a
@@ -373,6 +650,16 @@ pub struct ContextItem {
     pub properties: Vec<(String, String)>,
 }
 
+impl ContextItem {
+    /// True when this record has been retired from the current working set
+    /// (lifecycle status `superseded` or `deprecated`).
+    pub fn is_historical(&self) -> bool {
+        self.properties.iter().any(|(k, v)| {
+            k == "hasLifecycleStatus" && matches!(v.as_str(), "superseded" | "deprecated")
+        })
+    }
+}
+
 /// Retrieve recorded knowledge relevant to `topic` (label-matched via the
 /// cache-coherent entity index), or list all recorded instances when `topic` is
 /// empty. Symbolic — no LLM.
@@ -380,6 +667,7 @@ pub fn relevant_context(
     state: &AppState,
     topic: Option<&str>,
     limit: usize,
+    include_history: bool,
 ) -> anyhow::Result<Vec<ContextItem>> {
     let class_iris: Vec<String> = state
         .arch_vocab
@@ -406,10 +694,20 @@ pub fn relevant_context(
         None => list_instances(&state.store, &class_iris, limit),
     };
 
-    Ok(subjects
+    let mut items: Vec<ContextItem> = subjects
         .into_iter()
-        .map(|(iri, class_iri)| build_context_item(&state.store, iri, class_iri))
-        .collect())
+        .map(|(iri, class_iri)| build_context_item(state, iri, class_iri))
+        .collect();
+
+    // Default to the *current* working set: hide superseded/deprecated records
+    // (history is one hop away — `include_history` lists them, and each current
+    // item still surfaces its `supersedes` link + rationale). Filtering after the
+    // fetch means a page can return fewer than `limit` items when history exists;
+    // acceptable for v1's data volumes.
+    if !include_history {
+        items.retain(|item| !item.is_historical());
+    }
+    Ok(items)
 }
 
 /// List up to `limit` instances of the given classes in the project KG graph.
@@ -441,12 +739,19 @@ fn list_instances(store: &Store, class_iris: &[String], limit: usize) -> Vec<(St
     out
 }
 
-/// Fetch an instance's label + literal properties from the project KG graph.
-fn build_context_item(store: &Store, iri: String, class_iri: String) -> ContextItem {
+/// Fetch an instance's label, literal properties, and relations from the project
+/// KG graph. Object-valued edges (e.g. `supersedes`, `hasRationale`) are surfaced
+/// as `(local-name, target-IRI)` so the lifecycle chain is visible and walkable;
+/// the linked `Rationale`'s text (the *why*) is dereferenced inline, and a
+/// retired record also gets a `supersededBy` back-link to what replaced it.
+fn build_context_item(state: &AppState, iri: String, class_iri: String) -> ContextItem {
+    let store = &state.store;
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let mut label = String::new();
-    let mut properties = Vec::new();
+    let mut properties: Vec<(String, String)> = Vec::new();
+    let mut rationale_iri: Option<String> = None;
+
     if let Ok(subject) = NamedNodeRef::new(&iri) {
-        let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
         for q in store
             .quads_for_pattern(
                 Some(subject.into()),
@@ -460,19 +765,82 @@ fn build_context_item(store: &Store, iri: String, class_iri: String) -> ContextI
             if pred == moose::RDF_TYPE {
                 continue;
             }
-            if let Term::Literal(lit) = &q.object {
-                if pred == moose::RDFS_LABEL {
+            match &q.object {
+                Term::Literal(lit) if pred == moose::RDFS_LABEL => {
                     label = lit.value().to_string();
-                } else {
+                }
+                Term::Literal(lit) => {
                     properties.push((local_name(pred).to_string(), lit.value().to_string()));
+                }
+                Term::NamedNode(obj) => {
+                    let pname = local_name(pred);
+                    if pname == "hasRationale" {
+                        rationale_iri = Some(obj.as_str().to_string());
+                    }
+                    properties.push((pname.to_string(), obj.as_str().to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Surface the rationale *text* (the why), not just the link to its node.
+    if let Some(rat) = &rationale_iri {
+        if let Some(text) = first_literal(store, rat, &state.capture.description) {
+            properties.push(("rationale".to_string(), text));
+        }
+    }
+
+    // For a retired record, surface what replaced it (inverse `supersedes`).
+    let is_historical = properties.iter().any(|(k, v)| {
+        k == "hasLifecycleStatus" && matches!(v.as_str(), "superseded" | "deprecated")
+    });
+    if is_historical {
+        if let (Ok(subject), Ok(pred)) = (
+            NamedNodeRef::new(&iri),
+            state.resolve_object_property("supersedes"),
+        ) {
+            if let Ok(pred_ref) = NamedNodeRef::new(&pred) {
+                for q in store
+                    .quads_for_pattern(
+                        None,
+                        Some(pred_ref),
+                        Some(subject.into()),
+                        Some(GraphNameRef::NamedNode(graph)),
+                    )
+                    .flatten()
+                {
+                    if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
+                        properties.push(("supersededBy".to_string(), s.as_str().to_string()));
+                    }
                 }
             }
         }
     }
+
     ContextItem {
         iri,
         kind: local_name(&class_iri).to_string(),
         label,
         properties,
     }
+}
+
+/// First literal object of `(subject, predicate, *)` in the project graph, if any.
+fn first_literal(store: &Store, subject_iri: &str, predicate_iri: &str) -> Option<String> {
+    let subject = NamedNodeRef::new(subject_iri).ok()?;
+    let predicate = NamedNodeRef::new(predicate_iri).ok()?;
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    store
+        .quads_for_pattern(
+            Some(subject.into()),
+            Some(predicate),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .find_map(|q| match q.object {
+            Term::Literal(l) => Some(l.value().to_string()),
+            _ => None,
+        })
 }

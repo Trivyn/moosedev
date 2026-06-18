@@ -53,12 +53,136 @@
 - [ ] `get_focus_stack` via `SessionDb`
 - [ ] Verify: bootstrap a sample repo → typed knowledge populated + queryable
 
+## M5 — Concurrent multi-client access (shared backend) — CORE
+> Goal: multiple MCP clients (Claude Code, Codex) share one live KG **concurrently** by
+> talking to a single backend process that owns the RocksDB store. Build the core first
+> (manual lifecycle, explicit `--serve`/`--connect`); auto-spawn daemon polish is deferred.
+> Replaces the per-client stdio-subprocess model for shared use (see line-62 limitation).
+
+- [x] CLI dispatch in `main.rs` (hand-rolled, no new dep): default = **stdio** (unchanged — backward compatible); `--serve [SOCKET]` = backend; `--connect [SOCKET]` = stdio↔socket proxy; `--help`.
+- [x] Socket path derivation (`runtime::socket_path_for`): default `<MOOSEDEV_DATA_DIR>/moosedev.sock`; length-guard fallback to a hashed path under the temp dir (macOS `sun_path` ~104-char cap). **One socket per data dir → multi-project isolation by construction** (verified by the isolation test).
+- [x] Refactor: extracted `runtime::build_server(data_dir, ontology_dir) -> MooseDevServer` (bootstrap + alignment index) shared by stdio + serve modes.
+- [x] Serve mode (`runtime::serve_unix`): remove stale socket → `UnixListener::bind` → `select!`(accept → per-conn `server.clone().serve(stream)` task | `ctrl_c` → remove socket + exit). Shared `Arc<AppState>`; writes serialized by RocksDB txn (`EntityIndexCache` is `Send+Sync`). **Probe moved to `main`** (`ensure_no_live_backend`) — it must run *before* `build_server`, else a same-data-dir conflict dies on the RocksDB lock (after a wasted model load) instead of giving the friendly "already listening" message.
+- [x] Connect mode (`runtime::connect_unix`): `UnixStream::connect` → transparent **bidirectional byte relay** via `tokio::io::copy_bidirectional(join(stdin,stdout), socket)` (no MCP parsing); half-closes on EOF. Diagnostics to stderr only. Never opens the store / loads the model.
+- [x] Tests (`tests/concurrent_clients.rs`, rmcp `client` dev-dep): in-process serve on a temp socket + **two concurrent rmcp clients** → both handshake, both `record` concurrently, each cross-reads the other's write. Multi-project isolation (two data dirs → two distinct sockets, no cross-talk). Full suite green, clippy clean.
+- [x] Verify (real binary smoke, 7/7): stdio regression (initialize→ping); two concurrent `--connect` clients; second `--serve` refuses with the friendly message; cross-process read-back via a fresh `--connect`. **Remaining for the user:** wire Claude + Codex configs to `--connect` against one manual `--serve` (see README "Shared mode").
+- [x] Docs: README "Shared mode (multiple clients / agents)" + config env vars; line-62 limitation note updated.
+
+Deferred to a later infra pass (auto-spawn daemon): detached spawn, idle-shutdown refcount, version handshake to restart a stale/outdated daemon, `--status`/`--stop`, daemon log file, and socket cleanup on `SIGTERM` (today only `SIGINT`/ctrl_c removes the socket; a stale file is cleared on next `--serve`).
+
+**M5 core complete** ✅ — multiple MCP clients share one live KG concurrently via a single Unix-socket backend (`moosedev --serve`) + thin `--connect` proxies. Decision recorded in the graph (`ArchitecturalDecision/0d81e237…`).
+
+## Vector store startup caching
+> Problem: `build_alignment_index` → `vectors::build_and_open` **unconditionally** drops and
+> re-embeds the whole ontology vector store on every backend startup (loads the embedding backbone
+> + N inferences), even though the shipped ontology only changes on a version bump.
+
+- [x] Make the rebuild conditional on a freshness key, reusing a persisted store when nothing changed:
+  - [x] Collect the embed inputs once (`(iri, element_type, label, embed-text)`) and use them for both the build and the fingerprint, so the cache key can't drift from what's embedded.
+  - [x] Persist an ontology **content fingerprint** sidecar next to the DB; fast-path reuse when it matches AND `VecStore::open` succeeds (`open` validates the model stamp against the compiled-in `model_id::ACTIVE` — model drift falls through to a rebuild). No backbone load on a cache hit.
+  - [x] Clear the sidecar on rebuild; write it only after a successful stamp (crash-safe).
+- [x] Tests (`tests/vectors.rs`): unchanged ontology ⇒ DB file untouched (cache hit); changed ontology ⇒ class re-embedded (rebuild).
+- [x] Verify: `cargo test` (full suite green), `cargo clippy` (clean), and **real-binary smoke**: two startups on one data dir → cold "built … 36 vectors" (~10s) then warm "reusing cached … (ontology + model unchanged)" (~16ms).
+
+> Future need (your point b): a **cache hit only proves the T-box index is fresh** — it does nothing
+> for existing A-box instances. A breaking ontology change (renamed/removed class, namespace shift)
+> still orphans recorded data. That migration story is tracked under "Known limitations" P1 below; this
+> caching is forward-compatible with it (an ontology change flips the fingerprint ⇒ rebuild).
+
+**Vector store caching complete** ✅ — startup reuses `ontology-vectors.db` unless the ontology content
+fingerprint or embedding model changes. Decisions recorded in the graph (`ArchitecturalDecision/43446e69…`,
+future-need `Requirement/74423463…`); graph validates (0 violations).
+
+## Supersede-with-rationale lifecycle + object-property capture
+> Spec: `spec/supersede-and-relations.md`. Plan: `~/.claude/plans/cryptic-forging-finch.md`.
+> When a decision changes, keep the old one as history, link the new one, and capture WHY — using
+> ontology terms that already exist (`supersedes`, `hasRationale`→`Rationale`, lifecycle statuses).
+> **No ontology changes** (confirmed with the user's "pause if ontology changes" condition).
+
+- [x] **Phase 1 — object-property plumbing:** non-breaking `graph::record_instance_with_relations`
+  writes IRI-valued relations via `moose::kg::ObjectAssertion` (was always `&[]`); `record_instance`
+  delegates with no relations. `object_property_iri` + `AppState::resolve_object_property` resolve
+  relations by local name. (RecordInput left unchanged → zero churn to the 8 literal call sites.)
+- [x] **Phase 2 — supersede:** `graph::supersede_decision` (atomic — one oxigraph transaction inserts
+  the new decision + a `Rationale` node + `supersedes`/`hasRationale` edges, removes the old status
+  quads, inserts `superseded`, then `invalidate_graph`). Precondition: target must be an
+  `ArchitecturalDecision` (else errors, writes nothing). New MCP tool `supersede_decision`. Old record
+  preserved; only its lifecycle status flips.
+- [x] **Phase 3 — read path:** `relevant_context` gains `include_history` (default false → hides
+  superseded/deprecated); items surface the `supersedes` link, the dereferenced rationale **text**, and
+  a `supersededBy` back-link. `get_relevant_context` MCP arg `include_history`.
+- [x] Tests `tests/supersede.rs` (4): links+preserve+conforms; precondition rejects + no partial write;
+  read-path filtering + chain rendering; `record_instance_with_relations` writes edges. Clippy clean.
+- [x] Real-binary MCP smoke (record → supersede → context default/​history): all checks pass —
+  tool registered; default view hides the superseded decision and surfaces the new one with its
+  rationale text + supersedes link; history view includes the old with a `supersededBy` back-link.
+  (Drive sequential **process** invocations, not piped concurrent calls — rmcp dispatches tool calls
+  concurrently, so a single piped batch races the write; see lessons.md.)
+
+**Supersede feature complete** ✅ — full suite green (incl. `tests/supersede.rs` 4/4), clippy clean,
+real-binary MCP smoke passes. Decisions recorded: `Requirement/b2f8240c` (need),
+`ArchitecturalDecision/f6ac8e23` (implementation). No ontology changes.
+
 ## Stretch
 - [ ] Read-only local web UI (focus stack + recorded decisions)
+
+## Repo-local agent MCP config
+> Move the MOOSEDev dogfood MCP wiring out of global client config and into this
+> repository so Codex and Claude attach to this repo's shared backend only here.
+
+- [x] Add project-scoped Codex MCP config at `.codex/config.toml`.
+- [x] Add project-scoped Claude MCP config at `.mcp.json`.
+- [x] Remove the global Codex `mcp_servers.moosedev` block after local config is in place.
+- [x] Remove Claude's user-level project `mcpServers.moosedev` entry from `~/.claude.json`.
+- [x] Verify config files parse and the user-level Codex/Claude configs no longer contain MOOSEDev MCP wiring.
+
+Review: repo-local config now owns the MOOSEDev MCP wiring for both clients. `claude mcp list`
+shows `moosedev` from `./target/release/moosedev --connect` as pending repo approval, and
+`codex mcp list` shows `moosedev` from the same relative command. The shared backend remains
+manual lifecycle: start `MOOSEDEV_DATA_DIR=./.moosedev ./target/release/moosedev --serve`.
+
+## Root backend start script
+> Provide a repo-root helper that starts the shared backend with the repository-local
+> data/ontology paths and explicit LLM configuration.
+
+- [x] Add `start-moosedev.sh`.
+- [x] Default `MOOSEDEV_LLM_BASE_URL` to `http://localhost:1234/v1` and `MOOSEDEV_LLM_API_KEY` to `lm-studio`.
+- [x] Require `MOOSEDEV_LLM_MODEL` so the script cannot silently use the stale built-in default.
+
+Review: run with `MOOSEDEV_LLM_MODEL=<loaded-model-id> ./start-moosedev.sh`. The script resolves paths
+from its own location, exports the environment expected by MOOSEDev, validates the release binary,
+and execs `target/release/moosedev --serve`.
+
+## --connect auto-spawn backend
+> Make per-client `--connect` proxies auto-start the matching detached `--serve`
+> backend when no daemon is listening on the resolved per-data-dir socket.
+
+- [x] Add runtime helpers for serve log path, pidfile path, detached backend spawn,
+  connect retry, and `MOOSEDEV_NO_AUTOSPAWN`.
+- [x] Make `connect_unix` use auto-spawn with the resolved data dir while preserving
+  the byte relay and stdout cleanliness.
+- [x] Add SIGTERM handling to `serve_unix` so detached backends remove their socket on
+  clean shutdown.
+- [x] Wire `main.rs` for connect data-dir passing, serve pidfile lifecycle, startup
+  logging, and updated usage text.
+- [x] Add integration tests for default-on auto-spawn and opt-out behavior.
+- [x] Verify with formatting, targeted autospawn tests, full tests/checks as feasible.
+
+Review: `--connect` creates the data dir before deriving the socket, then first tries the
+resolved socket, auto-spawns the same binary as `--serve <resolved-socket>` when the socket is
+absent/stale, redirects daemon stdio to `<data_dir>/moosedev-serve.log`, and retries for up to
+30s. `--serve` writes `<data_dir>/moosedev-serve.pid`, logs resolved paths at startup, removes
+the pidfile after clean shutdown, and handles SIGTERM through the same socket cleanup path as
+ctrl-c. `MOOSEDEV_NO_AUTOSPAWN=1` preserves the old fail-fast behavior. The autospawn test now
+signals the proxy process group and verifies the detached backend survives, so it covers the
+load-bearing `.process_group(0)` isolation. Verification passed: `cargo fmt`,
+`cargo test --test autospawn`, `cargo check`, `cargo clippy --all-targets --all-features`, and
+full `cargo test`.
 
 ## Known limitations / deferred
 - **Ontology-regeneration orphans existing records** (P1): instances carry the full class IRI as `rdf:type`; if a regenerated ontology changes class IRIs/namespace, prior durable records stop being listed/searched (`relevant_context`/`query` candidate sets come from the current `arch_vocab`). **Zero impact today** (no persistent data), but needs a deliberate **migration story** (re-type on ontology change via a mapping — *not* hardcoded old namespaces) before real data accrues. Lighter partial step: make list-all enumerate by actual `rdf:type` in the project graph rather than the current vocab.
 - **Per-class title predicate**: capture binds the title to `hasTitle` (the `InformationRecord` label property every capture class inherits). The class-generic form (read each class's `trivyn:labelProperty`) is blocked until MOOSE surfaces that annotation (`VocabularyEntry.label_property`).
+- **Concurrent multi-agent access** — ✅ **addressed by M5 core** (was: a future goal). The durable KG is RocksDB-backed (single-writer exclusive lock); in the default per-client stdio model each MCP client spawned its own server, so the second (e.g. codex beside Claude Code) failed to open the locked store on startup ("handshake fail"). Resolved by a single shared backend (`moosedev --serve`, Unix-socket MCP) that owns the store, with clients as thin `--connect` proxies — multiple agents now read+write one live graph **concurrently** (per-data-dir socket keeps projects isolated). **Remaining (deferred infra):** transparent auto-spawn daemon so users don't run `--serve` manually (detached spawn, idle shutdown, version handshake, `--status`/`--stop`). Originally surfaced while wiring the Claude Code + codex dogfood against a shared `.moosedev/`.
 
 ## Core-MOOSE coordination
 - [x] Ask 1 — **landed in MOOSE**: `invalidate_graph`/`invalidate_all` now clear `label_sets`/`label_order` (+ global/per-graph epoch coherence)

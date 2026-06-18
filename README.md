@@ -110,12 +110,48 @@ MOOSEDev speaks MCP over **stdio**. Point an MCP client at the binary. For examp
 
 Today the server exposes `ping`; the knowledge tools above come online as M1+ land.
 
+### Shared mode (multiple clients / agents)
+
+The durable graph is RocksDB-backed, which is **single-writer**: only one process
+can hold a project's store open at a time. With the default stdio mode each MCP
+client spawns its own server, so a **second** client (e.g. Codex alongside Claude
+Code) on the same project fails to start. To let several clients share one live
+graph **concurrently**, run a single shared backend and point the clients at it:
+
+```bash
+# 1) Start one backend per project (it owns the store; keep it running).
+MOOSEDEV_DATA_DIR=/path/to/project/.moosedev moosedev --serve
+```
+
+```jsonc
+// 2) Configure every client to connect through a thin proxy instead of
+//    spawning their own server. Same MOOSEDEV_DATA_DIR as the backend.
+{
+  "mcpServers": {
+    "moosedev": {
+      "command": "/absolute/path/to/moosedev",
+      "args": ["--connect"],
+      "env": { "MOOSEDEV_DATA_DIR": "/path/to/project/.moosedev" }
+    }
+  }
+}
+```
+
+The backend listens on a Unix socket derived **per data dir**
+(`<MOOSEDEV_DATA_DIR>/moosedev.sock` by default, or `MOOSEDEV_SOCKET`), so
+separate projects each get their own backend with no cross-talk. `--connect`
+clients are lightweight proxies — they never open the store or load the model.
+Lifecycle is manual for now (you start `--serve` yourself); transparent
+auto-spawn is planned (see `tasks/todo.md`, M5).
+
 ### Configuration
 
 MOOSEDev is configured via environment variables (this surface is filling in as features land):
 
 - **LLM endpoint** (for natural-language `query`): an OpenAI-compatible `base_url` / `api_key` / `model` — point it at a local runtime (e.g. Ollama, LM Studio) or a hosted provider. *Local-first by default; cloud is opt-in.*
-- **Data directory**: where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
+- **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
+- **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
+- **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live (defaults to the crate's `ontologies/`).
 
 ## Project layout
 

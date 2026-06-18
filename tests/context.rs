@@ -40,7 +40,7 @@ fn relevant_context_lists_all_and_filters_by_topic() {
     );
 
     // No topic → both items, with their type, label, and status property.
-    let all = graph::relevant_context(&state, None, 10).expect("list all");
+    let all = graph::relevant_context(&state, None, 10, false).expect("list all");
     assert_eq!(all.len(), 2, "should list both recorded decisions");
     assert!(all.iter().all(|i| i.kind == "ArchitecturalDecision"));
     assert!(all.iter().any(|i| i
@@ -49,7 +49,7 @@ fn relevant_context_lists_all_and_filters_by_topic() {
         .any(|(k, v)| k == "hasLifecycleStatus" && v == "accepted")));
 
     // Topic → label-matched retrieval via the coherent entity index.
-    let hits = graph::relevant_context(&state, Some("rmcp"), 10).expect("topic search");
+    let hits = graph::relevant_context(&state, Some("rmcp"), 10, false).expect("topic search");
     assert!(
         hits.iter().any(|i| i.label.contains("rmcp")),
         "topic 'rmcp' should match the rmcp decision; got {:?}",

@@ -20,7 +20,7 @@ rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "schem
 
 # Async runtime + server plumbing. stdout is the MCP JSON-RPC channel, so logs
 # (tracing) are routed to stderr in main.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "signal", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -41,6 +41,14 @@ chrono = "0.4"
 # (MOOSE exposes no public vector-write path). Same sqlite crate + version MOOSE
 # uses, so it resolves to a single build.
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+[dev-dependencies]
+# Drive the server as an MCP *client* in integration tests (real handshake +
+# tools/call over the same async-rw transport the backend serves). Same rmcp
+# version as the normal dep; features unify across the two.
+rmcp = { version = "1.7", features = ["client", "transport-async-rw"] }
+# Integration tests drive real child processes over piped stdio.
+tokio = { version = "1", features = ["process"] }
 
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.

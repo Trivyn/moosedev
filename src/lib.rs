@@ -11,6 +11,7 @@ pub mod llm;
 pub mod mcp;
 pub mod ontology;
 pub mod provenance;
+pub mod runtime;
 pub mod sparql;
 pub mod validation;
 pub mod vectors;

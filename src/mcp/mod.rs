@@ -18,7 +18,7 @@ use rmcp::{
 };
 
 use crate::alignment;
-use crate::graph::{self, AppState, RecordInput};
+use crate::graph::{self, AppState, RecordInput, SupersedeInput};
 use crate::provenance;
 use crate::{sparql, validation};
 
@@ -76,6 +76,24 @@ pub struct GetRelevantContextArgs {
     pub topic: Option<String>,
     /// Maximum number of items to return (default 10).
     pub limit: Option<usize>,
+    /// Include superseded/deprecated records too. Defaults to false — only the
+    /// current working set is returned, with each item's supersedes link shown.
+    pub include_history: Option<bool>,
+}
+
+/// Arguments for the `supersede_decision` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SupersedeArgs {
+    /// IRI of the existing decision being replaced (it will be marked "superseded").
+    pub superseded_iri: String,
+    /// Short human-readable title for the new (replacement) decision.
+    pub title: String,
+    /// Why the decision changed — captured as a linked Rationale node. Required.
+    pub rationale: String,
+    /// Optional longer description / body for the new decision.
+    pub description: Option<String>,
+    /// Knowledge class for the new decision. Defaults to "ArchitecturalDecision".
+    pub kind: Option<String>,
 }
 
 /// Arguments for the `get_provenance` tool.
@@ -207,6 +225,80 @@ impl MooseDevServer {
         }
     }
 
+    /// Record a new decision that supersedes an existing one, preserving history.
+    #[tool(
+        description = "Record a NEW architectural decision that supersedes an existing one when a prior decision changes. Links new -supersedes-> old, captures WHY it changed as a linked Rationale, and marks the old decision 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the decision being replaced as `superseded_iri`."
+    )]
+    async fn supersede_decision(
+        &self,
+        Parameters(args): Parameters<SupersedeArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let kind = args
+            .kind
+            .unwrap_or_else(|| "ArchitecturalDecision".to_string());
+        let title = args.title.trim().to_string();
+        let rationale = args.rationale.trim().to_string();
+        let superseded_iri = args.superseded_iri.trim().to_string();
+        if title.is_empty() {
+            return Ok(tool_error("`title` must not be empty"));
+        }
+        if rationale.is_empty() {
+            return Ok(tool_error(
+                "`rationale` must not be empty — capture WHY the decision changed",
+            ));
+        }
+        if superseded_iri.is_empty() {
+            return Ok(tool_error("`superseded_iri` must not be empty"));
+        }
+        let class_iri = match self.state.resolve_class(&kind) {
+            Ok(iri) => iri,
+            Err(e) => return Ok(tool_error(e.to_string())),
+        };
+
+        let cap = &self.state.capture;
+        let mut properties = vec![
+            (moose::RDFS_LABEL.to_string(), title.clone()),
+            (cap.title.clone(), title),
+        ];
+        if let Some(desc) = args.description.filter(|s| !s.trim().is_empty()) {
+            properties.push((cap.description.clone(), desc));
+        }
+
+        let agent = context
+            .peer
+            .peer_info()
+            .map(|ci| ci.client_info.name.clone())
+            .unwrap_or_else(|| "unknown-mcp-client".to_string());
+        let now = Utc::now();
+        let input = SupersedeInput {
+            superseded_iri,
+            new: RecordInput {
+                class_iri,
+                class_local: kind.clone(),
+                properties,
+            },
+            rationale,
+        };
+        match graph::supersede_decision(&self.state, &input, &agent, now) {
+            Ok(out) => {
+                // Provenance both minted records (best-effort, never fails the write).
+                for iri in [&out.new_iri, &out.rationale_iri] {
+                    if let Err(e) =
+                        provenance::record_provenance_at(&self.state.store, iri, &agent, now)
+                    {
+                        tracing::warn!("provenance write failed for {iri}: {e}");
+                    }
+                }
+                Ok(tool_ok(format!(
+                    "Superseded {} → {} (rationale {})",
+                    out.superseded_iri, out.new_iri, out.rationale_iri
+                )))
+            }
+            Err(e) => Ok(tool_error(format!("failed to supersede: {e}"))),
+        }
+    }
+
     /// Ask a natural-language question over the project knowledge graph.
     #[tool(
         description = "Ask a natural-language question over the project knowledge graph. Returns an answer plus a symbolic reasoning trace."
@@ -237,7 +329,8 @@ impl MooseDevServer {
         Parameters(args): Parameters<GetRelevantContextArgs>,
     ) -> Result<CallToolResult, McpError> {
         let limit = args.limit.unwrap_or(10).clamp(1, 100);
-        match graph::relevant_context(&self.state, args.topic.as_deref(), limit) {
+        let include_history = args.include_history.unwrap_or(false);
+        match graph::relevant_context(&self.state, args.topic.as_deref(), limit, include_history) {
             Ok(items) if items.is_empty() => Ok(tool_ok("No recorded knowledge found.")),
             Ok(items) => Ok(tool_ok(format_context(&items))),
             Err(e) => Ok(tool_error(format!("failed to retrieve context: {e}"))),
