@@ -429,13 +429,47 @@ fn capture_instance_quads(
     Ok(quads)
 }
 
-/// Record a new decision that supersedes an existing one, capture *why* it changed
-/// as a linked `Rationale`, and mark the old decision `superseded` — preserving it
-/// as history (it is never deleted). Atomic: the new decision, the `Rationale`
-/// node, the `supersedes`/`hasRationale` edges, and the old decision's status
-/// change all commit in one transaction; the entity index is invalidated once on
-/// success. The superseded subject must already be an `ArchitecturalDecision` in
-/// the project graph (`supersedes`' range) — else this errors and writes nothing.
+/// `rdfs:subClassOf` — class-subsumption predicate (moose's const set omits it).
+const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+
+/// True if `class_iri` equals `ancestor_iri` or is a transitive `rdfs:subClassOf`
+/// of it, per the loaded ontology. Bounded, cycle-safe walk over subClassOf edges
+/// in any graph — class axioms live in the ontology graphs, not the project graph.
+fn is_subclass_of(store: &Store, class_iri: &str, ancestor_iri: &str) -> bool {
+    let sub_class_of = NamedNodeRef::new_unchecked(RDFS_SUBCLASS_OF);
+    let mut stack = vec![class_iri.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if cur == ancestor_iri {
+            return true;
+        }
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        let Ok(node) = NamedNode::new(&cur) else {
+            continue;
+        };
+        for q in store
+            .quads_for_pattern(Some(node.as_ref().into()), Some(sub_class_of), None, None)
+            .flatten()
+        {
+            if let Term::NamedNode(parent) = q.object {
+                stack.push(parent.as_str().to_string());
+            }
+        }
+    }
+    false
+}
+
+/// Record a new knowledge item that supersedes an existing one, capture *why* it
+/// changed as a linked `Rationale`, and mark the old item `superseded` — preserving
+/// it as history (it is never deleted). The replacement is recorded with the SAME
+/// class as the superseded item (type-preserving), so the caller's `new.class_*`
+/// fields are ignored. Atomic: the new item, the `Rationale` node, the
+/// `supersedes`/`hasRationale` edges, and the old item's status change all commit
+/// in one transaction; the entity index is invalidated once on success. The
+/// superseded subject must already be an `InformationRecord` (or subclass) in the
+/// project graph — else this errors and writes nothing.
 pub fn supersede_decision(
     state: &AppState,
     input: &SupersedeInput,
@@ -444,35 +478,44 @@ pub fn supersede_decision(
 ) -> anyhow::Result<SupersedeOutcome> {
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
 
-    // Precondition: the superseded subject exists and is an ArchitecturalDecision.
-    let decision_class = state.resolve_class("ArchitecturalDecision")?;
-    let decision_class_ref = NamedNodeRef::new(&decision_class)?;
+    // Precondition: the superseded subject must be a recorded knowledge item — an
+    // instance of :InformationRecord (or a subclass). We then mint the replacement
+    // with that SAME class (type-preserving): a Requirement is superseded by a
+    // Requirement, a Constraint by a Constraint, and so on. This prevents nonsense
+    // cross-kind supersedes and keeps the supersedes/hasRationale edges on a class
+    // whose ontology domain is :InformationRecord. (Previously hardcoded to
+    // ArchitecturalDecision, which blocked superseding any other knowledge class.)
     let old_subject = NamedNode::new(&input.superseded_iri)
         .map_err(|e| anyhow::anyhow!("invalid superseded IRI {}: {e}", input.superseded_iri))?;
-    let is_decision = state
+    let info_record_class = state.resolve_class("InformationRecord")?;
+    let superseded_class = state
         .store
         .quads_for_pattern(
             Some(old_subject.as_ref().into()),
             Some(NamedNodeRef::new_unchecked(moose::RDF_TYPE)),
-            Some(decision_class_ref.into()),
+            None,
             Some(GraphNameRef::NamedNode(project_graph)),
         )
         .flatten()
-        .next()
-        .is_some();
-    if !is_decision {
-        anyhow::bail!(
-            "cannot supersede {}: not an ArchitecturalDecision in the project graph",
-            input.superseded_iri
-        );
-    }
+        .filter_map(|q| match q.object {
+            Term::NamedNode(t) => Some(t.as_str().to_string()),
+            _ => None,
+        })
+        .find(|t| is_subclass_of(&state.store, t, &info_record_class))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot supersede {}: not a recorded knowledge item (InformationRecord) in the project graph",
+                input.superseded_iri
+            )
+        })?;
+    let superseded_local = local_name(&superseded_class).to_string();
 
     // Resolve relation + class IRIs from the loaded ontology (by local name).
     let supersedes_pred = state.resolve_object_property("supersedes")?;
     let has_rationale_pred = state.resolve_object_property("hasRationale")?;
     let rationale_class = state.resolve_class("Rationale")?;
 
-    let new_iri = mint_instance_iri(&input.new.class_local);
+    let new_iri = mint_instance_iri(&superseded_local);
     let rationale_iri = mint_instance_iri("Rationale");
     let timestamp = when.to_rfc3339();
 
@@ -515,7 +558,7 @@ pub fn supersede_decision(
     ];
     let new_quads = capture_instance_quads(
         &new_iri,
-        &input.new.class_iri,
+        &superseded_class,
         &input.new.properties,
         &new_edges,
         &stamp,
