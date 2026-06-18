@@ -164,6 +164,7 @@ MOOSEDev is configured via environment variables (this surface is filling in as 
 src/            # the MCP server (Rust): mcp/, graph/, ontology/, llm/
 ontologies/     # software-engineering + architecture ontologies (.ttl) [forthcoming]
 skills/         # bootstrap-existing-codebase workflow
+templates/      # CLAUDE.md template for projects adopting MOOSEDev as memory
 spec/           # specification + design of record + upstream engine asks
 tasks/          # build checklist / roadmap
 tests/          # integration tests

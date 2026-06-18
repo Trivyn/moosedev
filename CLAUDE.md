@@ -70,10 +70,13 @@ MOOSEDev is the first step toward domain-specific, trustworthy AI applications t
 - One task per subagent for focused execution
 
 ### 3. Self improvement Loop
-- After ANY correction from the user: update `tasks/lessons.md` with the Pattern
-- Write rules for yourself that prevent the same mistake
-- Ruthlessly iterate on these lessons until mistake rate drops
-- Review lessons at session start for relevant project
+- After ANY correction from the user: record a typed `Lesson` in the graph
+  (`record_important_decision`, `kind: Lesson`) — the graph is the source of truth (invariant
+  #2). Optionally mirror it to `tasks/lessons.md` as a human-readable view.
+- Capture the Pattern and a rule that prevents the same mistake; recall-first (a **list-all**
+  `get_relevant_context`) before recording so you don't duplicate an existing Lesson.
+- Ruthlessly iterate until the mistake rate drops.
+- Review prior Lessons at session start via `get_relevant_context` / `query`.
 
 ### 4. Verification before Done
 - Never mark a task complete without proving it works
@@ -95,12 +98,21 @@ MOOSEDev is the first step toward domain-specific, trustworthy AI applications t
 
 ## Task management
 
-1. **Plan First**: Write plan to 'tasks/todo.md' with checkable items
-2. **Verify Plan**: Check in before starting implementation
-3. **Track Progress**: Mark items complete as you go
-4. **Explain Changes**: High level summary at each step
-5. **Document Results**: Add review section to `tasks/todo.md`
-6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+The durable **project knowledge graph is the source of truth**; markdown files
+(`tasks/todo.md`, `tasks/lessons.md`) are optional human-readable mirrors, never the canonical
+record (invariant #2). See "Dogfooding MOOSEDev" for the tool loop.
+
+1. **Recall First**: surface prior decisions/lessons/constraints from the graph
+   (`get_relevant_context` / `query` / `sparql`) before non-trivial work — and show the queries.
+2. **Plan First**: write the plan (the plan file, or `tasks/todo.md`) with checkable items.
+3. **Verify Plan**: check in before starting implementation.
+4. **Capture as Typed Records**: record durable decisions/requirements/constraints/patterns as
+   you go (`record_important_decision`); `align_concepts` before coining a new term; always
+   report what was written (kind/title/IRI). Correct with `supersede_decision` (replacement) or
+   `retract_decision` (deprecate) — never a silent duplicate.
+5. **Track Progress & Explain Changes**: mark items complete; give a high-level summary at each step.
+6. **Validate**: run `validate_against_architecture` after capturing.
+7. **Capture Lessons**: after corrections, record a typed `Lesson` (see Self improvement Loop).
 
 ## Core Principles
 - **simplicity first**: Make every change as simple as possible.  Impact minimal code.
