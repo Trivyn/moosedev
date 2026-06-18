@@ -92,7 +92,8 @@ pub struct SupersedeArgs {
     pub rationale: String,
     /// Optional longer description / body for the new decision.
     pub description: Option<String>,
-    /// Knowledge class for the new decision. Defaults to "ArchitecturalDecision".
+    /// Ignored: the replacement always inherits the superseded item's class
+    /// (type-preserving). Kept for backward compatibility.
     pub kind: Option<String>,
 }
 
@@ -227,16 +228,13 @@ impl MooseDevServer {
 
     /// Record a new decision that supersedes an existing one, preserving history.
     #[tool(
-        description = "Record a NEW architectural decision that supersedes an existing one when a prior decision changes. Links new -supersedes-> old, captures WHY it changed as a linked Rationale, and marks the old decision 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the decision being replaced as `superseded_iri`."
+        description = "Record a NEW knowledge item that supersedes an existing one when a prior decision/requirement/constraint/lesson changes. The replacement is recorded with the SAME knowledge class as the superseded item (type-preserving). Links new -supersedes-> old, captures WHY it changed as a linked Rationale, and marks the old item 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the item being replaced as `superseded_iri`."
     )]
     async fn supersede_decision(
         &self,
         Parameters(args): Parameters<SupersedeArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let kind = args
-            .kind
-            .unwrap_or_else(|| "ArchitecturalDecision".to_string());
         let title = args.title.trim().to_string();
         let rationale = args.rationale.trim().to_string();
         let superseded_iri = args.superseded_iri.trim().to_string();
@@ -251,10 +249,6 @@ impl MooseDevServer {
         if superseded_iri.is_empty() {
             return Ok(tool_error("`superseded_iri` must not be empty"));
         }
-        let class_iri = match self.state.resolve_class(&kind) {
-            Ok(iri) => iri,
-            Err(e) => return Ok(tool_error(e.to_string())),
-        };
 
         let cap = &self.state.capture;
         let mut properties = vec![
@@ -273,9 +267,12 @@ impl MooseDevServer {
         let now = Utc::now();
         let input = SupersedeInput {
             superseded_iri,
+            // Class is inferred from the superseded record (type-preserving) inside
+            // graph::supersede_decision; these placeholders are ignored, as is the
+            // `kind` arg — the replacement always matches the superseded item's class.
             new: RecordInput {
-                class_iri,
-                class_local: kind.clone(),
+                class_iri: String::new(),
+                class_local: String::new(),
                 properties,
             },
             rationale,

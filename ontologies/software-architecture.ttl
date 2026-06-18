@@ -248,11 +248,11 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:altLabel "is motivated by".
 :hasRationale a owl:ObjectProperty ;
     rdfs:label "hasRationale" ;
-    rdfs:domain :ArchitecturalDecision ;
     rdfs:range :Rationale ;
     rdfs:subPropertyOf obo:BFO_0000176 {| trivyn:confidence "0.70"^^xsd:decimal ; trivyn:parentLabel "continuant part of" ; trivyn:rrfRank "2"^^xsd:integer ; skos:historyNote "Aligned to continuant part of via embedding similarity" ; dcterms:created "2026-06-17T15:28:08Z"^^xsd:dateTime |};
     skos:definition "Relates an architectural decision to its underlying reasoning.";
-    skos:altLabel "has rationale".
+    skos:altLabel "has rationale";
+    rdfs:domain :InformationRecord.
 :weighs a owl:ObjectProperty ;
     rdfs:label "weighs" ;
     rdfs:domain :ArchitecturalDecision ;
@@ -268,9 +268,9 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:altLabel "results in".
 :supersedes a owl:ObjectProperty ;
     rdfs:label "supersedes" ;
-    rdfs:domain :ArchitecturalDecision ;
-    rdfs:range :ArchitecturalDecision ;
-    skos:definition "Relates an architectural decision to the one it replaces.".
+    skos:definition "Relates an architectural decision to the one it replaces.";
+    rdfs:domain :InformationRecord;
+    rdfs:range :InformationRecord.
 :constrains a owl:ObjectProperty ;
     rdfs:label "constrains" ;
     rdfs:domain :Constraint ;

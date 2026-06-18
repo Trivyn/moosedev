@@ -170,6 +170,74 @@ fn supersede_links_records_captures_why_and_preserves_old() {
 }
 
 #[test]
+fn supersede_preserves_type_for_non_decision_records() {
+    let state = bootstrap("nonad");
+    let req_class = state.resolve_class("Requirement").unwrap();
+    let dc = state.resolve_class("ArchitecturalDecision").unwrap();
+
+    // A Requirement — NOT an ArchitecturalDecision — was unsupersedable before.
+    let old = graph::record_instance(
+        &state,
+        &RecordInput {
+            class_iri: req_class.clone(),
+            class_local: "Requirement".to_string(),
+            properties: vec![
+                (
+                    moose::RDFS_LABEL.to_string(),
+                    "Support remote clients".to_string(),
+                ),
+                (
+                    state.capture.title.clone(),
+                    "Support remote clients".to_string(),
+                ),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("record requirement");
+
+    // Supersede it, deliberately passing a DIFFERENT caller kind (decision_input
+    // builds an ArchitecturalDecision) to prove the replacement is minted as the
+    // superseded record's type, not the caller's.
+    let out = graph::supersede_decision(
+        &state,
+        &SupersedeInput {
+            superseded_iri: old.clone(),
+            new: decision_input(&state, &dc, "Support remote and local clients"),
+            rationale: "Scope widened to also cover local clients.".to_string(),
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("supersede requirement");
+
+    // Type-preserving: the replacement is a Requirement, not the caller's kind.
+    assert!(
+        has_edge(&state, &out.new_iri, moose::RDF_TYPE, &req_class),
+        "replacement must inherit the superseded record's class (Requirement)"
+    );
+    assert!(
+        !has_edge(&state, &out.new_iri, moose::RDF_TYPE, &dc),
+        "replacement must NOT be minted as the caller-supplied kind"
+    );
+
+    // The lifecycle still works for a non-decision: link + flip + conformance.
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+    assert!(has_edge(&state, &out.new_iri, &supersedes, &old));
+    assert_eq!(
+        literals(&state, &old, &state.capture.status),
+        vec!["superseded"],
+        "old requirement flipped to exactly one 'superseded' status"
+    );
+    assert!(
+        validation::validate_project(&state).unwrap().conforms(),
+        "non-decision supersede must conform to the architecture shapes"
+    );
+}
+
+#[test]
 fn supersede_rejects_unknown_target_and_writes_nothing() {
     let state = bootstrap("precond");
     let dc = state.resolve_class("ArchitecturalDecision").unwrap();
