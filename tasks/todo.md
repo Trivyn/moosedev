@@ -49,9 +49,28 @@
 **M3 complete** ✅ — tools live: `sparql`, `validate_against_architecture`; recorded instances conform to required `InformationRecord` fields by construction. Verification: `cargo check`, `cargo test`.
 
 ## M4 — Bootstrap + Focus
-- [ ] `skills/bootstrap-existing-codebase.md`
-- [ ] `get_focus_stack` via `SessionDb`
-- [ ] Verify: bootstrap a sample repo → typed knowledge populated + queryable
+- [x] `skills/bootstrap-existing-codebase.md` — agent-agnostic workflow that composes the
+  live tool surface (recall → survey → extract → align → capture → validate → verify);
+  mirrors CLAUDE.md dogfooding discipline. No new code.
+- [ ] `get_focus_stack` via `SessionDb` — **deferred** (see decision below)
+- [x] Verify: bootstrap → typed knowledge populated + queryable (live dry-run; see review)
+
+> **Decision — defer `get_focus_stack`, ship bootstrap skill.** MOOSE's focus stack is
+> conversational machinery written by `chat_pipeline` (per-turn salience decay for coref).
+> MOOSEDev's `query` is a one-shot symbolic walk (`execute_graph_walk_nlq_with_context` with
+> `session_prior`/`session_memory` = `None`) that maintains no `SessionContext` and never
+> `save_context`s — so `get_focus_stack` would read empty unless `query` is made
+> session-aware. A coding agent issues discrete, fully-specified queries — it **is** its own
+> multi-turn/coref layer — so an ephemeral within-session focus stack is low value and cuts
+> against invariant #5 (memory should be external **and durable**, not within-session).
+> `design.md` already frames focus as "an *optional* within-session continuity layer." Focus
+> is deferred (not built hollow); bootstrap is the high-value piece (it populates the empty
+> graph — invariants #3, #10). Recorded in the graph as an `ArchitecturalDecision`.
+
+**M4 (partial) complete** ✅ — bootstrap workflow shipped (`skills/bootstrap-existing-codebase.md`);
+`get_focus_stack` deferred with rationale. Verification: skill self-consistent with
+`src/mcp/mod.rs`; live dry-run captured typed records that validate (0 violations) and return
+from `query` / `get_relevant_context` / `sparql`. Docs-only — no source changes.
 
 ## M5 — Concurrent multi-client access (shared backend) — CORE
 > Goal: multiple MCP clients (Claude Code, Codex) share one live KG **concurrently** by
@@ -122,6 +141,27 @@ future-need `Requirement/74423463…`); graph validates (0 violations).
 **Supersede feature complete** ✅ — full suite green (incl. `tests/supersede.rs` 4/4), clippy clean,
 real-binary MCP smoke passes. Decisions recorded: `Requirement/b2f8240c` (need),
 `ArchitecturalDecision/f6ac8e23` (implementation). No ontology changes.
+
+## Retract (in-place deprecate) lifecycle
+> The in-place counterpart to supersede: withdraw a recorded item that should no longer
+> apply WITHOUT recording a replacement (e.g. a duplicate, or a decision abandoned with no
+> successor). Satisfies the graph Requirement "Add an in-place status/retract transition for
+> knowledge records" (`Requirement/1ae3b79a`). No ontology changes.
+
+- [x] `graph::retract_decision`: atomic txn — mint a `Rationale` (the why), link the target
+  `hasRationale`→rationale, flip its `hasLifecycleStatus` to `deprecated`, then
+  `invalidate_graph`. Precondition: target must be an `InformationRecord` — extracted a
+  shared `require_information_record` helper (supersede now uses it too). Record preserved;
+  only its status flips. No replacement minted (cf. supersede).
+- [x] New MCP tool `retract_decision(iri, rationale)`; provenance stamped on the rationale node.
+- [x] Read path: `deprecated` is already hidden by default (`is_historical`) and shown with
+  `include_history`, surfacing the retraction rationale inline — **no read-path change**.
+- [x] Tests `tests/retract.rs` (3): deprecate+preserve+conforms; precondition rejects + no
+  write; read-path hides + history surfaces rationale. Full suite green, clippy clean.
+
+**Retract feature complete** ✅ — closes the retract Requirement. Built to clean up two
+duplicate records mistakenly captured during the M4 dry-run (root cause + rule in
+`tasks/lessons.md`, "Recall-First Means List-All").
 
 ## Stretch
 - [ ] Read-only local web UI (focus stack + recorded decisions)

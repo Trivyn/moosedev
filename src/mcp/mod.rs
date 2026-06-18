@@ -97,6 +97,16 @@ pub struct SupersedeArgs {
     pub kind: Option<String>,
 }
 
+/// Arguments for the `retract_decision` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RetractArgs {
+    /// IRI of the recorded item to retract — it is marked "deprecated" (dropped
+    /// from the current working set) but preserved as history (never deleted).
+    pub iri: String,
+    /// Why the item is being withdrawn — captured as a linked Rationale. Required.
+    pub rationale: String,
+}
+
 /// Arguments for the `get_provenance` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetProvenanceArgs {
@@ -296,6 +306,52 @@ impl MooseDevServer {
         }
     }
 
+    /// Retract a recorded knowledge item in place (mark deprecated + capture why).
+    #[tool(
+        description = "Retract a recorded knowledge item that should no longer apply (e.g. a duplicate, or a decision abandoned WITHOUT a replacement). Marks it 'deprecated' so it drops out of the current working set, captures WHY as a linked Rationale, and preserves the record as history (never deleted). Use supersede_decision instead when a replacement record exists. Pass the item's IRI as `iri` and the reason as `rationale`."
+    )]
+    async fn retract_decision(
+        &self,
+        Parameters(args): Parameters<RetractArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let iri = args.iri.trim().to_string();
+        let rationale = args.rationale.trim().to_string();
+        if iri.is_empty() {
+            return Ok(tool_error("`iri` must not be empty"));
+        }
+        if rationale.is_empty() {
+            return Ok(tool_error(
+                "`rationale` must not be empty — capture WHY the item is being retracted",
+            ));
+        }
+
+        let agent = context
+            .peer
+            .peer_info()
+            .map(|ci| ci.client_info.name.clone())
+            .unwrap_or_else(|| "unknown-mcp-client".to_string());
+        let now = Utc::now();
+        match graph::retract_decision(&self.state, &iri, &rationale, &agent, now) {
+            Ok(out) => {
+                // Provenance the minted rationale node (best-effort; never fails the write).
+                if let Err(e) = provenance::record_provenance_at(
+                    &self.state.store,
+                    &out.rationale_iri,
+                    &agent,
+                    now,
+                ) {
+                    tracing::warn!("provenance write failed for {}: {e}", out.rationale_iri);
+                }
+                Ok(tool_ok(format!(
+                    "Retracted {} (deprecated; rationale {})",
+                    out.retracted_iri, out.rationale_iri
+                )))
+            }
+            Err(e) => Ok(tool_error(format!("failed to retract: {e}"))),
+        }
+    }
+
     /// Ask a natural-language question over the project knowledge graph.
     #[tool(
         description = "Ask a natural-language question over the project knowledge graph. Returns an answer plus a symbolic reasoning trace."
@@ -333,7 +389,12 @@ impl MooseDevServer {
             // record cleared the bar, not that the graph is empty. Saying so
             // honestly keeps the agent from reading silence as a settled topic.
             Ok(items) if items.is_empty() => {
-                let msg = match args.topic.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                let msg = match args
+                    .topic
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
                     Some(t) => format!("No recorded knowledge relevant to \"{t}\"."),
                     None => "No recorded knowledge found.".to_string(),
                 };

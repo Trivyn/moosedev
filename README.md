@@ -63,7 +63,12 @@ MOOSE provides the read/reason side — natural-language query, the alignment en
 | `align_concepts` | Align new concepts to the loaded ontologies | ⏳ M2 |
 | `suggest_mappings` | Propose ontology mappings for new concepts | ⏳ M2 |
 | `validate_against_architecture` | Lightweight consistency validation of recorded knowledge | ⏳ M3 |
-| `get_focus_stack` | Return the current symbolic focus stack | ⏳ M4 |
+| `get_focus_stack` | Return the current symbolic focus stack | ⏸ M4 — deferred¹ |
+
+¹ `get_focus_stack` is deferred: MOOSE's focus stack is conversational state populated by the
+chat pipeline, but a coding agent issues discrete, self-contained queries (it is its own
+multi-turn layer), so an ephemeral within-session focus stack is low value. The M4 effort
+went to the bootstrap workflow instead. See `tasks/todo.md` (M4).
 
 ## Status
 
@@ -158,7 +163,7 @@ MOOSEDev is configured via environment variables (this surface is filling in as 
 ```
 src/            # the MCP server (Rust): mcp/, graph/, ontology/, llm/
 ontologies/     # software-engineering + architecture ontologies (.ttl) [forthcoming]
-skills/         # bootstrap-existing-codebase workflow [forthcoming]
+skills/         # bootstrap-existing-codebase workflow
 spec/           # specification + design of record + upstream engine asks
 tasks/          # build checklist / roadmap
 tests/          # integration tests

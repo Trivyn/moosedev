@@ -461,6 +461,36 @@ fn is_subclass_of(store: &Store, class_iri: &str, ancestor_iri: &str) -> bool {
     false
 }
 
+/// Verify `subject` is a recorded knowledge item — an instance of
+/// `:InformationRecord` (or a subclass) in the project graph — and return its
+/// class IRI. The lifecycle tools (`supersede_decision`, `retract_decision`)
+/// share this precondition so they never mutate a non-record subject, and the
+/// returned class lets a supersede mint its replacement type-preservingly.
+fn require_information_record(state: &AppState, subject: &NamedNode) -> anyhow::Result<String> {
+    let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let info_record_class = state.resolve_class("InformationRecord")?;
+    state
+        .store
+        .quads_for_pattern(
+            Some(subject.as_ref().into()),
+            Some(NamedNodeRef::new_unchecked(moose::RDF_TYPE)),
+            None,
+            Some(GraphNameRef::NamedNode(project_graph)),
+        )
+        .flatten()
+        .filter_map(|q| match q.object {
+            Term::NamedNode(t) => Some(t.as_str().to_string()),
+            _ => None,
+        })
+        .find(|t| is_subclass_of(&state.store, t, &info_record_class))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is not a recorded knowledge item (InformationRecord) in the project graph",
+                subject.as_str()
+            )
+        })
+}
+
 /// Record a new knowledge item that supersedes an existing one, capture *why* it
 /// changed as a linked `Rationale`, and mark the old item `superseded` — preserving
 /// it as history (it is never deleted). The replacement is recorded with the SAME
@@ -487,27 +517,8 @@ pub fn supersede_decision(
     // ArchitecturalDecision, which blocked superseding any other knowledge class.)
     let old_subject = NamedNode::new(&input.superseded_iri)
         .map_err(|e| anyhow::anyhow!("invalid superseded IRI {}: {e}", input.superseded_iri))?;
-    let info_record_class = state.resolve_class("InformationRecord")?;
-    let superseded_class = state
-        .store
-        .quads_for_pattern(
-            Some(old_subject.as_ref().into()),
-            Some(NamedNodeRef::new_unchecked(moose::RDF_TYPE)),
-            None,
-            Some(GraphNameRef::NamedNode(project_graph)),
-        )
-        .flatten()
-        .filter_map(|q| match q.object {
-            Term::NamedNode(t) => Some(t.as_str().to_string()),
-            _ => None,
-        })
-        .find(|t| is_subclass_of(&state.store, t, &info_record_class))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot supersede {}: not a recorded knowledge item (InformationRecord) in the project graph",
-                input.superseded_iri
-            )
-        })?;
+    let superseded_class = require_information_record(state, &old_subject)
+        .map_err(|e| anyhow::anyhow!("cannot supersede {}: {e}", input.superseded_iri))?;
     let superseded_local = local_name(&superseded_class).to_string();
 
     // Resolve relation + class IRIs from the loaded ontology (by local name).
@@ -604,6 +615,117 @@ pub fn supersede_decision(
         new_iri,
         rationale_iri,
         superseded_iri: input.superseded_iri.clone(),
+    })
+}
+
+/// IRIs affected by a retract: the record withdrawn and the `Rationale` minted.
+pub struct RetractOutcome {
+    pub retracted_iri: String,
+    pub rationale_iri: String,
+}
+
+/// Retract a recorded knowledge item in place: flip its lifecycle status to
+/// `deprecated` (so it drops out of the current working set, while the record and
+/// all its other triples are preserved as history) and attach a `Rationale`
+/// capturing *why* it was withdrawn. Unlike [`supersede_decision`], no replacement
+/// is minted — this is the "this entry should no longer apply" transition (e.g. a
+/// duplicate, or a decision abandoned without a successor). Atomic: the `Rationale`
+/// node, the `hasRationale` edge, and the status change commit in one transaction;
+/// the entity index is invalidated once on success. The subject must already be an
+/// `InformationRecord` (or subclass) in the project graph — else this errors and
+/// writes nothing.
+pub fn retract_decision(
+    state: &AppState,
+    target_iri: &str,
+    rationale: &str,
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<RetractOutcome> {
+    let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let subject = NamedNode::new(target_iri)
+        .map_err(|e| anyhow::anyhow!("invalid target IRI {target_iri}: {e}"))?;
+
+    // Precondition: only recorded knowledge items can be retracted (writes nothing
+    // on failure, since this returns before the transaction).
+    require_information_record(state, &subject)
+        .map_err(|e| anyhow::anyhow!("cannot retract {target_iri}: {e}"))?;
+
+    let has_rationale_pred = state.resolve_object_property("hasRationale")?;
+    let rationale_class = state.resolve_class("Rationale")?;
+    let rationale_iri = mint_instance_iri("Rationale");
+    let timestamp = when.to_rfc3339();
+
+    // Title the Rationale after the retracted record so it reads well in listings.
+    let target_title = first_literal(&state.store, target_iri, &state.capture.title)
+        .unwrap_or_else(|| "record".to_string());
+    let rationale_title = format!("Rationale: retract {target_title}");
+    let rationale_literals = vec![
+        (moose::RDFS_LABEL.to_string(), rationale_title.clone()),
+        (state.capture.title.clone(), rationale_title),
+        (state.capture.description.clone(), rationale.to_string()),
+    ];
+    // The rationale is itself a current record.
+    let stamp = CaptureStamp {
+        capture: &state.capture,
+        author,
+        timestamp: &timestamp,
+        status: "accepted",
+    };
+    let rationale_quads = capture_instance_quads(
+        &rationale_iri,
+        &rationale_class,
+        &rationale_literals,
+        &[],
+        &stamp,
+    )?;
+
+    // The hasRationale edge hangs off the retracted record itself — unlike a
+    // supersede, there is no successor record to carry it.
+    let rationale_edge = Quad::new(
+        subject.clone(),
+        NamedNode::new(&has_rationale_pred)?,
+        NamedNode::new(&rationale_iri)?,
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+    );
+
+    // Flip the target's lifecycle status to "deprecated": remove its existing
+    // status quads and assert the new one. Nothing else on the record is touched.
+    let old_status_quads: Vec<Quad> = state
+        .store
+        .quads_for_pattern(
+            Some(subject.as_ref().into()),
+            Some(NamedNodeRef::new(&state.capture.status)?),
+            None,
+            Some(GraphNameRef::NamedNode(project_graph)),
+        )
+        .flatten()
+        .collect();
+    let deprecated_status = Quad::new(
+        subject.clone(),
+        NamedNode::new(&state.capture.status)?,
+        Literal::new_simple_literal("deprecated"),
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+    );
+
+    // One atomic transaction: insert the rationale + its edge + the new status, and
+    // remove the prior status quads.
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("retract transaction: {e}"))?;
+    txn.extend(rationale_quads.iter().map(Quad::as_ref));
+    txn.insert(rationale_edge.as_ref());
+    for quad in &old_status_quads {
+        txn.remove(quad.as_ref());
+    }
+    txn.insert(deprecated_status.as_ref());
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("retract commit: {e}"))?;
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+
+    Ok(RetractOutcome {
+        retracted_iri: target_iri.to_string(),
+        rationale_iri,
     })
 }
 
