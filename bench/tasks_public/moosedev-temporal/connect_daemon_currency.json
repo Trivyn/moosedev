@@ -1,0 +1,12 @@
+{
+  "type": "context_qa",
+  "materialize_tree": false,
+  "prompt": "In THIS project (MOOSEDev), when you run the MCP server with `--connect` and no backend is already running, what happens CURRENTLY — must you start `--serve` yourself first, or does it auto-spawn the backend for you? Answer in one sentence.",
+  "memory_topic": "--connect backend daemon current behavior auto-spawn or manual serve",
+  "ground_truth": {
+    "must_include_any": [["auto-spawn", "autospawn", "auto spawn", "automatically", "spawns"]],
+    "stale_answer_markers": ["manual", "manually", "yourself", "planned", "not yet"],
+    "decision_title": ""
+  },
+  "_note": "Currency pair: 'lifecycle is manual; auto-spawn planned (M5)' (superseded, commit e7c7f07d) -> '--connect auto-spawns backend' (accepted, commit 69f8f013). NOTE the stale record itself says 'auto-spawn is planned', so coverage can be contaminated; read the STALE diagnostic (does the arm serve the manual/planned framing) as the currency signal."
+}

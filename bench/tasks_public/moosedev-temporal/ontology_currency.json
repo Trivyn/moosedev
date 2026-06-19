@@ -1,0 +1,12 @@
+{
+  "type": "context_qa",
+  "materialize_tree": false,
+  "prompt": "In THIS project (MOOSEDev), what is the CURRENT state of the architecture ontology — is it a temporary hand-written stub, or a generated production ontology? Answer in one or two sentences.",
+  "memory_topic": "architecture ontology current state stub or production",
+  "ground_truth": {
+    "must_include_any": [["production", "generated", "trivyn-generated"]],
+    "stale_answer_markers": ["temporary", "placeholder", "intentionally temporary"],
+    "decision_title": ""
+  },
+  "_note": "Currency pair: stub architecture.ttl (superseded, commit 64f9fbf1) -> Trivyn-generated production ontology (accepted, commit 7f015a32, M2). B2 serves current (production); currency-blind B1 may serve the stale 'temporary stub'."
+}
