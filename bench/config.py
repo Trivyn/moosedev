@@ -59,6 +59,14 @@ CORPORA = {
         # (comprehension-debt premise). The Go code stays.
         "agent_exclude": ["README.md", "MANIFESTO.md", "CLAUDE.md", "spec", "LICENSE"],
     },
+    "moosedev-temporal": {
+        # The temporally-bootstrapped moosedev graph (real supersession chains + a real timeline).
+        # Currency A/B corpus: B2 reads this graph (get_relevant_context serves CURRENT only); B1 is
+        # a currency-blind free-text export (all records incl. superseded, no status line) — the
+        # faithful append-only baseline. Q&A-only (materialize_tree:false on its tasks).
+        "data_dir": str(Path.home() / ".moosedev-stores" / "moosedev-temporal"),
+        "repo": str(REPO),
+    },
 }
 
 

@@ -1,0 +1,12 @@
+{
+  "type": "context_qa",
+  "materialize_tree": false,
+  "prompt": "In THIS project (MOOSEDev), how does the `get_relevant_context` tool CURRENTLY retrieve relevant records for a given topic? Describe the current retrieval mechanism in one or two sentences.",
+  "memory_topic": "get_relevant_context retrieval how it finds records for a topic",
+  "ground_truth": {
+    "must_include_any": [["BM25", "search_records", "search records"]],
+    "stale_answer_markers": ["pure-symbolic", "pure symbolic"],
+    "decision_title": ""
+  },
+  "_note": "Currency A/B (anti-staleness). The retrieval method was reversed in moosedev's own history: pure-symbolic entity-index (commit bddba142, superseded) -> BM25 search_records (accepted). B2's get_relevant_context serves CURRENT only; the currency-blind B1 export carries BOTH. materialize_tree:false so the live (current) code can't answer it -- memory is the only source, and only structured memory curates to current."
+}

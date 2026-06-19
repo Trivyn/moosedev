@@ -186,8 +186,75 @@ def parse_events(stdout: str) -> dict:
     }
 
 
+def parse_codex_events(stdout: str) -> dict:
+    """Parse `codex exec --json` JSONL into the same shape as parse_events (opencode).
+    Events: turn.completed{usage:{input_tokens,output_tokens,...}}; item.completed{item:{
+    type:mcp_tool_call,tool,result}} and {item:{type:agent_message,text}}. output_tokens already
+    includes reasoning tokens (OpenAI convention), so it is not added separately."""
+    agent_in = agent_out = steps = 0
+    tools, texts = [], []
+    nlq_p = nlq_c = 0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") == "turn.completed":
+            u = e.get("usage") or {}
+            agent_in += u.get("input_tokens", 0)
+            agent_out += u.get("output_tokens", 0)
+            steps += 1
+        elif e.get("type") == "item.completed":
+            it = e.get("item") or {}
+            if it.get("type") == "mcp_tool_call":
+                tools.append(it.get("tool"))
+                res = it.get("result") or {}
+                for part in (res.get("content") or []):
+                    for m in re.finditer(r"tokens: prompt=(\d+) completion=(\d+)", part.get("text", "") or ""):
+                        nlq_p += int(m.group(1))
+                        nlq_c += int(m.group(2))
+            elif it.get("type") == "agent_message":
+                tx = it.get("text") or ""
+                if tx.strip():
+                    texts.append(tx)
+    return {
+        "agent_in": agent_in, "agent_out": agent_out, "steps": steps, "tools": tools,
+        "nlq_prompt": nlq_p, "nlq_completion": nlq_c, "final_text": "\n".join(texts),
+    }
+
+
+def codex_mcp_overrides(arm: str, corpus: str, mode: str) -> list:
+    """codex `-c` MCP-server overrides for the arm (mirrors arm_opencode_config's MCP logic).
+    Oracle mode pushes context in the prompt, so no live MCP; B0/B1-md get none."""
+    if mode == "oracle":
+        return []
+    c = config.CORPORA[corpus]
+
+    def srv(name: str, command: str, cmd_args: list, env: dict) -> list:
+        toml_args = "[" + ", ".join(f'"{a}"' for a in cmd_args) + "]"
+        toml_env = "{ " + ", ".join(f'{k} = "{v}"' for k, v in env.items()) + " }"
+        return ["-c", f'mcp_servers.{name}.command="{command}"',
+                "-c", f"mcp_servers.{name}.args={toml_args}",
+                "-c", f"mcp_servers.{name}.env={toml_env}"]
+
+    if arm == "B1-rag":
+        return srv("freetext", str(config.VENV_PY),
+                   [str(config.BENCH / "freetext_mcp" / "server.py")],
+                   {"FREETEXT_CORPUS": str(config.corpus_chunks_path(corpus))})
+    if arm == "B2":
+        return srv("moosedev", config.MOOSEDEV_BIN, ["--connect"], {
+            "MOOSEDEV_DATA_DIR": c["data_dir"], "MOOSEDEV_NO_AUTOSPAWN": "1",
+            "MOOSEDEV_LLM_BASE_URL": config.LLM_BASE_URL, "MOOSEDEV_LLM_API_KEY": config.LLM_API_KEY,
+            "MOOSEDEV_LLM_MODEL": config.NLQ_MODEL})
+    return []
+
+
 def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "tooluse",
-             agent: str = None, variant: str = None, prompt_prefix: str = "") -> dict:
+             agent: str = None, variant: str = None, prompt_prefix: str = "",
+             backend: str = "opencode") -> dict:
     task = load_task(corpus, task_id)
     is_code = task["type"] in CODE_TASK_TYPES
     run_id = f"{corpus}_{task_id}_{arm}_{mode}_{(agent or 'build')}_{uuid.uuid4().hex[:8]}"
@@ -210,17 +277,29 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
     if prompt_prefix:  # diagnostic: forceful in-prompt guidance (e.g. "call get_relevant_context first")
         prompt = f"{prompt_prefix}\n\n{prompt}"
     wd = prepare_workdir(run_id, arm, corpus, task, mode)
-    # --pure: no external opencode plugins, so runs are insulated from the global setup.
-    cmd = ["opencode", "run", "--pure", "--model", model, "--format", "json", "--dir", str(wd)]
-    if agent:    # opencode agent/mode (build|plan|general|explore|custom); build is the default
-        cmd += ["--agent", agent]
-    if variant:  # provider reasoning effort (e.g. high|max|minimal)
-        cmd += ["--variant", variant]
-    cmd += [prompt]
+    final_file = wd / "_codex_final.txt"  # codex -o canonical final message
+    if backend == "codex":
+        # codex CLI harness (codex subscription; more reliable GPT tool-calling). MCP per arm via
+        # -c overrides; reads the -o final message. Q&A-focused (no patch extraction yet).
+        cmd = ["codex", "exec", "-m", model, "--dangerously-bypass-approvals-and-sandbox",
+               "--skip-git-repo-check", "--json", "-o", str(final_file)]
+        cmd += codex_mcp_overrides(arm, corpus, mode)
+        if variant:  # codex reasoning effort, e.g. minimal|low|medium|high
+            cmd += ["-c", f'model_reasoning_effort="{variant}"']
+        cmd += [prompt]
+    else:
+        # --pure: no external opencode plugins, so runs are insulated from the global setup.
+        cmd = ["opencode", "run", "--pure", "--model", model, "--format", "json", "--dir", str(wd)]
+        if agent:    # opencode agent/mode (build|plan|general|explore|custom); build is the default
+            cmd += ["--agent", agent]
+        if variant:  # provider reasoning effort (e.g. high|max|minimal)
+            cmd += ["--variant", variant]
+        cmd += [prompt]
     t0 = time.time()
     timed_out = False
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.CELL_TIMEOUT)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.CELL_TIMEOUT,
+                              cwd=str(wd) if backend == "codex" else None)
         stdout, returncode = proc.stdout, proc.returncode
     except subprocess.TimeoutExpired as e:
         # A hung/slow cell is a RESULT, not a crash: record it and grade whatever the agent wrote
@@ -230,7 +309,14 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         stdout = out.decode() if isinstance(out, (bytes, bytearray)) else (out or "")
         returncode = 124
     wall_ms = int((time.time() - t0) * 1000)
-    ev = parse_events(stdout)
+    if backend == "codex":
+        ev = parse_codex_events(stdout)
+        if final_file.exists():
+            ft = final_file.read_text().strip()
+            if ft:
+                ev["final_text"] = ft
+    else:
+        ev = parse_events(stdout)
     runs_dir = config.corpus_runs_path(corpus)  # private corpora -> BENCH_HOME, never the open repo
     (runs_dir / f"{run_id}.events.json").write_text(stdout or "")  # raw transcript: tool args + outputs
 
@@ -244,12 +330,13 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         metrics["patch_len"] = len(patch)
     else:
         g = grade(ev["final_text"], task["ground_truth"])
-        metrics = {k: g[k] for k in ("coverage", "cited")}
+        metrics = {k: g[k] for k in ("coverage", "cited", "stale")}
 
     row = {
         "run_id": run_id, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0)),  # UTC cell start
         "corpus": corpus, "task_id": task_id, "task_type": task["type"],
         "hop_count": task.get("hop_count"), "arm": arm, "mode": mode, "agent_model": model,
+        "backend": backend,
         "internal_nlq_model": config.NLQ_MODEL if arm == "B2" else None,
         "score": g["score"], "passed": g["passed"], "metrics": metrics,
         "tokens": {
@@ -274,20 +361,23 @@ def main():
     ap.add_argument("--corpus", default="moosedev")
     ap.add_argument("--task", default="shared_backend")
     ap.add_argument("--arm", choices=config.ARMS, help="single arm; default runs all")
-    ap.add_argument("--model", default=config.AGENT_MODEL)
+    ap.add_argument("--model", default=None, help="agent model; defaults per backend")
+    ap.add_argument("--backend", default="opencode", choices=["opencode", "codex"],
+                    help="agent harness: opencode (default) or the codex CLI")
     ap.add_argument("--mode", default="tooluse", choices=["tooluse", "oracle"])
     ap.add_argument("--agent", default=None, help="opencode agent/mode: build|plan|general|explore")
-    ap.add_argument("--variant", default=None, help="provider reasoning effort, e.g. high|max")
+    ap.add_argument("--variant", default=None, help="reasoning effort, e.g. high|max (opencode) | low|medium (codex)")
     ap.add_argument("--prompt-prefix", default="", help="diagnostic: text prepended to the task prompt")
     args = ap.parse_args()
 
+    model = args.model or ("gpt-5.5" if args.backend == "codex" else config.AGENT_MODEL)
     arms = [args.arm] if args.arm else config.ARMS
     rows = []
     for arm in arms:
-        print(f"\n=== running {arm} ({args.mode}, agent={args.agent or 'build'}) ===", flush=True)
+        print(f"\n=== running {arm} ({args.mode}, backend={args.backend}, model={model}) ===", flush=True)
         try:
-            row = run_cell(args.corpus, args.task, arm, args.model, args.mode, args.agent,
-                           args.variant, args.prompt_prefix)
+            row = run_cell(args.corpus, args.task, arm, model, args.mode, args.agent,
+                           args.variant, args.prompt_prefix, args.backend)
         except Exception as e:  # one arm's failure must not abort the rest of the matrix
             print(f"  ARM FAILED: {type(e).__name__}: {e}", flush=True)
             continue

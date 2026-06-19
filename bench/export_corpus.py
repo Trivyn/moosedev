@@ -35,7 +35,7 @@ def _local(iri: str) -> str:
     return iri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
 
 
-def rows_to_chunks(sparql_json: str) -> list[dict]:
+def rows_to_chunks(sparql_json: str, include_status: bool = True) -> list[dict]:
     data = json.loads(sparql_json)
     chunks, seen = [], set()
     for b in data["results"]["bindings"]:
@@ -46,10 +46,11 @@ def rows_to_chunks(sparql_json: str) -> list[dict]:
         title = b["title"]["value"]
         desc = b.get("desc", {}).get("value", "")
         status = b.get("status", {}).get("value", "")
-        # Bake lifecycle status INTO the searchable text (fair parity): B1 then holds the same
-        # currency info B2 has, so a currency win reflects whether the delivery ACTS on the
-        # lifecycle, not whether the info was hidden from free-text.
-        status_line = f"\n\nLifecycle status: {status}" if status else ""
+        # Status in the searchable text gives B1 the same currency info B2 has (a currency win then
+        # reflects whether the delivery ACTS on the lifecycle). With include_status=False
+        # (--no-status), B1 is CURRENCY-BLIND: the faithful append-only free-text baseline that
+        # accumulates superseded + current entries with no machine-readable lifecycle.
+        status_line = f"\n\nLifecycle status: {status}" if (status and include_status) else ""
         chunks.append({
             "iri": iri,
             "title": title,
@@ -72,14 +73,17 @@ def corpus_env(corpus: str) -> dict:
     }
 
 
-async def main(corpus: str = "moosedev") -> None:
+async def main(corpus: str = "moosedev", include_status: bool = True) -> None:
     out_json = await call_tool(config.MOOSEDEV_BIN, ["--connect"], corpus_env(corpus),
                                "sparql", {"query": QUERY})
-    chunks = rows_to_chunks(out_json)
+    chunks = rows_to_chunks(out_json, include_status)
     out = config.corpus_chunks_path(corpus)
     out.write_text(json.dumps(chunks, indent=2))
-    print(f"exported {len(chunks)} records -> {out}")
+    print(f"exported {len(chunks)} records -> {out}{'' if include_status else ' (currency-blind, no status)'}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main(*(sys.argv[1:] or ["moosedev"])))
+    _argv = sys.argv[1:]
+    _no_status = "--no-status" in _argv
+    _pos = [a for a in _argv if not a.startswith("--")] or ["moosedev"]
+    asyncio.run(main(_pos[0], not _no_status))
