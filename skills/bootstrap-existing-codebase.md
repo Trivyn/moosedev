@@ -2,15 +2,18 @@
 
 **Goal:** recover the *why* of an existing codebase — the architectural decisions,
 constraints, lessons, and patterns that aren't obvious from the source — and record them as
-**typed, queryable knowledge** in MOOSEDev's durable project graph.
+**typed, LINKED, queryable knowledge** in MOOSEDev's durable project graph.
 
-This is how a project that has accumulated **comprehension debt** (CLAUDE.md invariant #3)
-gets an initial knowledge graph. New work then *extends* that graph instead of starting from
-an empty store (invariant #10). It is also MOOSEDev's own end-to-end exercise of the
-capture → align → validate → query loop.
+This is how a project that has accumulated **comprehension debt** (CLAUDE.md invariant #3) gets
+an initial knowledge graph. The point is **not a pile of records** — it is a **traversable
+graph**: a decision links to the requirement that motivated it, the constraint that shaped it,
+the alternatives weighed, the consequences that resulted, and the components it touches. Flat
+keyword retrieval finds a single record; only a *linked* graph lets you follow "why?" from a
+decision to rationale that lives in a lexically-distant record. New work then *extends* that
+graph instead of starting from an empty store (invariant #10).
 
-> **Audience:** a coding agent (Claude Code, Codex, …) with the MOOSEDev MCP server
-> attached. It is a workflow, not code. Follow the phases in order.
+> **Audience:** a coding agent (Claude Code, Codex, …) with the MOOSEDev MCP server attached.
+> It is a workflow, not code. Follow the phases in order.
 
 ---
 
@@ -20,165 +23,269 @@ capture → align → validate → query loop.
 - A codebase whose design rationale lives only in people's heads, scattered docs, or git
   history — and is at risk of being lost.
 
-**When *not* to use:** a brand-new/empty project (there's no accumulated rationale to
-recover yet — just capture decisions as you make them), or to mass-import low-value notes.
+**When *not* to use:** a brand-new/empty project (capture decisions as you make them instead),
+or to mass-import low-value notes.
 
 ## What "done" looks like
 
-A handful to a few dozen **high-signal** typed records exist in the graph, they
-`validate_against_architecture` with **0 violations**, and they come back from `query` /
-`get_relevant_context` / `sparql`. Quality over quantity — a small set of load-bearing
-decisions beats a flood of restated code.
+A handful to a few dozen **high-signal** typed records, **linked into clusters** (not a flat
+bag):
+
+- they `validate_against_architecture` with **0 violations**;
+- the relationship **edge count is ≳ the node count** (the graph is connected, not flat);
+- the **competency questions** (Phase 7) return real multi-hop answers; and
+- `get_relevant_context` returns a seed record **plus its linked neighbors**.
+
+Quality + connectivity over quantity — a small set of load-bearing, *interconnected* decisions
+beats a flood of restated, disconnected code.
 
 ---
 
-## The typed knowledge you capture
+## The typed NODES you capture
 
-Every record is a typed instance written with `record_important_decision`
-(`kind`, `title`, `description`, optional `status`). Pick the `kind` that fits:
+Every node is a typed instance written with `record_important_decision`
+(`kind`, `title`, `description`, optional `status`). It returns the new record's **IRI** — keep
+it (you need it to draw edges in Phase 5).
 
-| `kind`                 | Capture this                                              |
-|------------------------|----------------------------------------------------------|
-| `ArchitecturalDecision`| A choice about structure and **why** it was made (and what was rejected). The default. |
-| `Constraint`           | A hard limit / invariant the system must respect (platform cap, security boundary, perf budget). |
-| `Requirement`          | A goal or need the system exists to satisfy.             |
-| `Pattern`              | A recurring design approach used deliberately across the code. |
-| `AntiPattern`          | Something to avoid here, and why (often a lesson learned the hard way). |
-| `Lesson`               | A non-obvious learning / gotcha worth remembering.       |
+| `kind`                 | Capture this                                                        |
+|------------------------|---------------------------------------------------------------------|
+| `ArchitecturalDecision`| A choice about structure/behavior and **why** (the cluster's hub). Default. |
+| `Requirement`          | A goal/driver the decision exists to satisfy.                        |
+| `Constraint`           | A hard limit/invariant the design must respect (platform cap, security boundary, perf budget). |
+| `Alternative`          | A different option that was considered and rejected.                |
+| `Consequence`          | An outcome / accepted trade-off of a decision.                      |
+| `SystemComponent`      | A code module/element that decisions and constraints act upon.       |
+| `Pattern`              | A recurring design approach used deliberately.                      |
+| `AntiPattern`          | Something to avoid here, and why.                                   |
+| `Lesson`               | A non-obvious learning / gotcha worth remembering.                  |
 
-These are the canonical kinds; the loaded ontology is the source of truth. An unknown
-`kind` is rejected — if a term doesn't obviously map, run `align_concepts` first (Phase 3)
-to find the right class rather than guessing.
+The loaded ontology is the source of truth for kinds. An unknown `kind` is rejected — if a term
+doesn't obviously map, run `align_concepts` first (Phase 3). (`Rationale` nodes are created
+*automatically* by supersede/retract — you don't mint them.)
+
+## The EDGES you build (the heart of the graph)
+
+After recording nodes, connect them with `relate(subject_iri, predicate, object_iri)` — the
+`predicate` is an ontology object-property **local name**. Each edge is **validated against the
+ontology's SHACL shapes**: a backwards or mistyped edge (wrong endpoint kinds, wrong direction)
+is **rejected and nothing is written**. So every edge must match this map:
+
+```
+ArchitecturalDecision --isMotivatedBy--> Requirement | Constraint   (why)
+ArchitecturalDecision --weighs-->        Alternative                (what was rejected)
+ArchitecturalDecision --resultsIn-->     Consequence                (the trade-off)
+ArchitecturalDecision --concerns-->      SystemComponent            (what it touches)
+Constraint            --constrains-->     ArchitecturalDecision | SystemComponent
+AntiPattern           --violates-->       Constraint
+Lesson                --learnedFrom-->    ArchitecturalDecision | AntiPattern
+```
+
+`supersedes` and `hasRationale` are created **automatically** by `supersede_decision` /
+`retract_decision` — never `relate()` those by hand.
+
+> A rejected `relate()` means the kinds/direction don't match the map — fix the cluster, don't
+> force it. Keep `isMotivatedBy` homogeneous per decision: if both a requirement and a
+> constraint apply, use `isMotivatedBy`→Requirement and `constrains`→the decision.
 
 ---
 
 ## What to capture vs. skip
 
-**Capture** durable *why* — the reasoning that the code cannot tell you:
-
-- the decision **and its rationale** (why this, why not the alternative);
-- constraints that explain otherwise-puzzling code;
-- lessons/anti-patterns that prevent repeating a past mistake.
+Think in **clusters**, not isolated facts. **Capture** durable *why* the code can't tell you —
+a decision and the requirement/constraint/alternative/consequence/component around it; lessons
+and anti-patterns that prevent repeating a mistake.
 
 **Skip** what the code or git already record, and what won't matter next month:
-
-- code *structure* (modules, signatures) — that's recoverable by reading the code;
-- line-level mechanics, restating what a function does;
-- transient implementation detail or chatter.
+- code *structure* (modules, signatures) — recoverable by reading the code (the exception:
+  a `SystemComponent` node minted only as an *anchor* for `concerns`/`constrains` edges);
+- line-level mechanics, restating what a function does; transient detail or chatter.
 
 **Discipline (invariant #2 — structured over free text):**
-- **One fact per record.** Don't pack three decisions into one.
-- Title = the claim in a line; description = the *why* + what was rejected + evidence
-  (e.g. the file/commit it came from).
-- Prefer the typed `kind` over a vague decision. Structured beats prose.
+- **One fact per node.** Don't pack three decisions into one.
+- Title = the claim in a line; description = the *why* + **the evidence** (the file/section or
+  commit it came from). `relate()` has no description field, so the edge's justification lives
+  in the endpoint nodes' descriptions + your link plan.
+- Prefer the typed `kind` and an explicit edge over vague prose.
 
 ## Where to mine rationale
 
-Rationale hides in: design docs / ADRs / RFCs, `CHANGELOG`, "why" code comments (not
-"what"), **commit messages and PR descriptions**, issue/discussion threads, naming
-conventions, and contributor docs (`CONTRIBUTING`, `CLAUDE.md`, `README`). Git history is
-often the richest source of *why*.
+Design docs / ADRs / RFCs, `CHANGELOG`, "why" comments (not "what"), **commit messages and PR
+descriptions**, issue/discussion threads, naming conventions, `CONTRIBUTING`/`CLAUDE.md`/
+`README`. Git history is often the richest source of *why* (and of supersessions).
 
 ---
 
 ## Workflow
 
-### Phase 0 — Connect & recall (always first)
+### Phase 0 — Connect, recall, baseline (always first)
 
-1. `ping` → expect `pong`. If it fails, the backend isn't attached — stop and fix wiring
-   (see the README "Shared mode" section) before continuing.
-2. **Recall first.** `get_relevant_context` with **no `topic`** (list-all) to see what's
-   already recorded. You are *extending* the graph — don't duplicate existing records. If a
-   record exists but is now wrong, plan to `supersede_decision` it (Phase 4), not duplicate.
+1. `ping` → `pong`. If it fails, the backend isn't attached — fix wiring before continuing.
+2. **Confirm the store.** For a foreign repo, `get_relevant_context` with **no `topic`** should
+   return "No recorded knowledge found." (proves you're on that project's own store, not
+   another project's). On an existing store, this list-all is your dedup inventory.
+3. **Baseline edge count** (run the Phase 6 histogram once) so you can later show N→M edges.
 
-### Phase 1 — Survey the codebase
+### Phase 1 — Survey for CLUSTERS (not isolated items)
 
-Build a mental map of the project and where rationale lives. **Use subagents** for the
-reading-heavy work so the main context stays clean (CLAUDE.md "Subagent Strategy") — e.g.
-one agent summarizes docs/ADRs, one mines `git log`/PRs for decisions, one notes
-constraints/patterns from the code and build config. Have each return a short list of
-**candidate** items with evidence, not file dumps.
+**Use subagents** for the reading-heavy work (CLAUDE.md "Subagent Strategy"). Have each return
+candidate **clusters** with **per-node AND per-edge evidence** — not file dumps. For every
+candidate decision, answer the edge-surfacing questions:
+
+- **Why was it chosen?** → a `Requirement` (`isMotivatedBy`)
+- **What hard limit forced/shaped it?** → a `Constraint` (`constrains` → the decision)
+- **What else was considered and rejected?** → an `Alternative` (`weighs`)
+- **What did it cost / what trade-off was accepted?** → a `Consequence` (`resultsIn`)
+- **What module does it touch?** → a `SystemComponent` (`concerns`)
+
+And: **what bad pattern would break a constraint?** → `AntiPattern` (`violates`);
+**where did a lesson come from?** → `Lesson` (`learnedFrom`).
+
+Source cue-words (work on docs, comments, commits, PRs): "never / must not / inviolable" →
+**Constraint**; "because / so that / in order to" → **Requirement**; "rejected / instead of /
+we tried X but" → **Alternative**; "trade-off / at the cost of / limitation" → **Consequence**;
+"lesson / gotcha / we learned" → **Lesson**; a commit/PR that **reverts or changes** a prior
+choice → `supersede_decision`.
 
 Good starting reads: `README`, `CLAUDE.md`/`CONTRIBUTING`, `spec/`/`docs/`/`adr/`, build
-manifests (`Cargo.toml`, `package.json`, …), top-level module layout, and
-`git log --oneline` / notable PRs.
+manifests, top-level module layout, `git log --oneline` / notable PRs.
 
-### Phase 2 — Extract candidates
+### Phase 2 — Shape each cluster (node table + link plan)
 
-Consolidate the survey into a deduped list of candidate records. For each: the proposed
-`kind`, a one-line title, the *why*, and the evidence (file/commit). Drop anything that
-fails the "capture vs. skip" bar above.
+Consolidate the survey into, per cluster, two small tables. **Drop any node or edge that lacks
+specific evidence.**
+- **Node table:** `kind | title | description (why + evidence: file/section or commit) | status`
+- **Link plan:** `subject-title | predicate | object-title | evidence-for-the-edge`
 
-### Phase 3 — Align new terms (before recording)
+The link plan applies the predicate map above; the edge's evidence must justify the **direction
+and the specific pair**, not merely that both nodes exist.
 
-For any concept whose `kind` isn't obviously one of the canonical classes, **align it
-first** so the graph doesn't drift (invariant #4):
+### Phase 3 — Align new TERMS to classes (before recording)
 
-- `align_concepts(label, definition?, surface_labels?)` → resolves the best-matching class
-  (with the sensor + rationale), or returns ranked candidates if ambiguous.
-- `suggest_mappings(label, definition?)` → just the ranked candidates, for review.
+For any node whose `kind` isn't obviously a canonical class, `align_concepts(label, definition?)`
+(or `suggest_mappings`) to resolve the class (invariant #4). This is **term → class** resolution
+— distinct from **link-or-mint** (instance dedup, Phase 4). They compose: align picks the class;
+link-or-mint decides reuse-or-create within it.
 
-Record under the resolved class. Don't invent kinds.
+### Phase 4 — Capture nodes (link-or-mint) → node registry
 
-### Phase 4 — Capture as typed instances
-
-For each surviving candidate:
+Walk the node table. For each node apply **link-or-mint grounding** (below); when you mint:
 
 ```
 record_important_decision(
-  kind:        "ArchitecturalDecision",          // or the aligned kind
-  title:       "Single-writer RocksDB store; one shared backend per project",
-  description: "RocksDB holds an exclusive lock, so per-client stdio servers can't share a
-                project. Chose one --serve backend + thin --connect proxies. Rejected: N-Quads
-                file store (loses transactional coherence). Evidence: tasks/todo.md M5.",
-  status:      "accepted"                          // optional; defaults to "proposed"
+  kind:        "Requirement",                       // or the aligned kind
+  title:       "A rebuild on unchanged input must emit a byte-identical KG",
+  description: "Reproducible diffs for the review/audit workflow. Evidence: spec/SPEC.md §Ingestion.",
+  status:      "proposed"                            // default; use "accepted" only when the source states it
 )
 ```
 
-- Capture the **rationale and the rejected alternative**, not just the conclusion.
-- To **correct** an existing record, never silently duplicate — instead:
-  - `supersede_decision(superseded_iri, title, rationale, description?)` when there is a
-    **replacement** — preserves the old as history, links the new, and records *why* it
-    changed (type-preserving).
-  - `retract_decision(iri, rationale)` when the record should simply **no longer apply**
-    (e.g. a duplicate, or a decision abandoned with no successor) — marks it `deprecated`,
-    captures *why*, and preserves it as history.
+Parse the returned IRI and store it in a **node registry** (`title → IRI`). To **correct** an
+existing record, never silently duplicate: `supersede_decision(superseded_iri, title, rationale,
+description?)` when there's a replacement (preserves the old, links new→old, records *why*), or
+`retract_decision(iri, rationale)` when it should simply no longer apply.
 
-### Phase 5 — Validate
+### Phase 5 — LINK (the distinct edge step)
 
-Run `validate_against_architecture`. Resolve any reported violations (usually a missing
-required field — re-record with the missing piece). Aim for **0 violations** before moving
-on.
+Walk the **link plan**; for each row:
 
-### Phase 6 — Verify queryability
+```
+relate(subject_iri, predicate, object_iri)   // IRIs from the registry; predicate from the map
+```
 
-Prove the knowledge is retrievable (this *is* the acceptance criterion):
+`relate()` is idempotent and SHACL-validated. A rejected edge names the offending endpoint and
+the expected class — that's a signal your cluster is mis-shaped, not a reason to force it.
 
-- `query("<a question the records should answer>")` → expect a synthesized answer **plus a
-  reasoning trace**.
-- `get_relevant_context(topic: "<area>")` → expect the relevant records back.
-- `sparql("SELECT ?s ?l WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s
-  <http://www.w3.org/2000/01/rdf-schema#label> ?l } } LIMIT 50")` → deterministic listing of
-  what landed. (Optional: `get_provenance(iri)` to confirm who/when recorded it.)
+### Phase 6 — Validate + lint + connectivity (prove it isn't flat)
+
+1. `validate_against_architecture` → expect **0 violations**. **Necessary, not sufficient:** it
+   checks required fields and edge *types-if-present* but **never requires edges**, so a *flat*
+   graph also passes. Prove linkage with SPARQL.
+2. **Edge histogram** (linkage proof):
+   ```sparql
+   SELECT ?pred (COUNT(*) AS ?n) WHERE {
+     GRAPH <https://moosedev.dev/kg/project> {
+       ?s ?p ?o . FILTER(isIRI(?o))
+       BIND(REPLACE(STR(?p),"^.*[/#]","") AS ?pred)
+       FILTER(?pred IN ("isMotivatedBy","weighs","resultsIn","concerns","constrains","violates","learnedFrom","supersedes"))
+     }
+   } GROUP BY ?pred ORDER BY DESC(?n)
+   ```
+3. **Edge-type matrix** (confabulation/mistype lint — every row must match the predicate map):
+   ```sparql
+   SELECT ?pred ?scl ?ocl (COUNT(*) AS ?n) WHERE {
+     GRAPH <https://moosedev.dev/kg/project> {
+       ?s ?p ?o . FILTER(isIRI(?o)) . ?s a ?sc . ?o a ?oc .
+       BIND(REPLACE(STR(?p),"^.*[/#]","") AS ?pred)
+       BIND(REPLACE(STR(?sc),"^.*[/#]","") AS ?scl)
+       BIND(REPLACE(STR(?oc),"^.*[/#]","") AS ?ocl)
+       FILTER(?pred IN ("isMotivatedBy","weighs","resultsIn","concerns","constrains","violates","learnedFrom"))
+     }
+   } GROUP BY ?pred ?scl ?ocl ORDER BY ?pred
+   ```
+4. **Orphan check** — records with no typed edge in or out should be ≈ 0.
+
+Targets: ≥1 outbound edge for every `ArchitecturalDecision`; **edge:node ratio ≳ 1.0**.
+
+### Phase 7 — Verify traversability (the acceptance criterion)
+
+- Answer the **competency questions** with `sparql`/`query`, each should return bound rows:
+  1. Which decision **supersedes** a previous one? 2. What constraints does an anti-pattern
+  **violate**? 3. Which requirements **motivated** a decision? 4. What **consequences /
+  alternatives** does a decision have? 5. Which components does a constraint/decision
+  **constrain/concern**? 6. What lessons were **learned from** a decision/anti-pattern?
+- **Multi-hop proof:** `get_relevant_context(topic: "<a seed record's words>")` should return
+  the seed **plus** neighbors tagged `linkedVia: <predicate>` — the lexically-distant *why*
+  reached by edge-following, not keyword match.
+- **(Operator A/B):** re-running the same query with `MOOSEDEV_EXPAND_HOPS=0` on the serve
+  returns **only** the seed (no neighbors). That difference is the traversal value the linked
+  graph adds over flat retrieval — the whole point of bootstrapping structure.
 
 ---
 
-## Anti-goals (read before you start capturing)
+## Link-or-mint grounding (instance dedup, invariant #4)
 
-- **Symbolic-first.** This workflow composes deterministic capture/align/validate/query
-  tools (invariant #1). Don't reach for free-text dumps or external "semantic search" over
-  records — `query` (walk planning) and `sparql` are the retrieval path.
-- **No record floods.** A few load-bearing decisions > hundreds of restated facts. Noise
-  buries signal and is itself a form of comprehension debt.
-- **Align before coining.** Introducing inconsistent one-off kinds defeats the graph
-  (invariant #4).
-- **Don't restate the code.** If a fact is recoverable by reading the source or `git log`,
-  it doesn't belong here unless you're capturing the *why* behind it.
+Before creating a node, check whether an equivalent **instance** already exists:
+`get_relevant_context(topic: "<the node's concept in 3-6 words>")` and inspect returns **of the
+same kind**.
+- **Match** (a maintainer would call having both a duplicate): **reuse the existing IRI** — do
+  not mint. Record the reuse in your registry.
+- **No match** (only topically related, or nothing returned): **mint** and capture the new IRI.
+
+Test: *"Would a maintainer say these are the same requirement/constraint, or two different
+ones?"* Bias **toward reuse** for `Requirement`/`Constraint` — they recur across many decisions,
+and reuse is what creates the **hub nodes** that make the graph multi-hop. Bias **toward mint**
+for `Consequence`/`Alternative` — usually specific to one decision.
+
+## Anti-confabulation discipline (invariant #6 — honesty over plausibility)
+
+Edges are not SHACL-*required*, and `get_relevant_context` tells agents to **TRUST** recorded
+knowledge — so a fabricated edge is a durable false claim. Therefore:
+- **Evidence-or-skip, per edge.** Cite the doc line / code fact / commit that states the
+  *relationship* (X drove / violates / resulted-in Y) — not merely that both nodes exist. If you
+  can't point to it, **don't draw the edge.**
+- **Prefer not-linking over guessing.** A missing edge is honest comprehension debt; a wrong one
+  is served as truth forever. **Under-link rather than over-link.**
+- **No transitive invention.** Assert only edges the source states or directly implies.
+- **Lifecycle honesty.** Leave `status:"proposed"` when the source only *implies* a node/edge;
+  reserve `"accepted"` for what the source states outright.
+
+## Anti-goals (read before you start)
+
+- **Symbolic-first.** Compose the capture/align/relate/validate/query tools (invariant #1);
+  don't reach for free-text dumps or external "semantic search" over records.
+- **No record floods, no edge floods.** A few load-bearing, well-linked decisions beat hundreds
+  of restated facts or speculative edges. Noise is itself comprehension debt.
+- **Align before coining; link-or-mint before duplicating.** Inconsistent one-off kinds or
+  parallel duplicate instances defeat the graph (invariant #4).
+- **Don't restate the code.** If a fact is recoverable by reading the source or `git log`, it
+  doesn't belong here unless you're capturing the *why* behind it.
 
 ## Done checklist
 
-- [ ] `ping` healthy; recalled existing context first (no duplicates).
-- [ ] Candidates pass the capture-vs-skip bar; new terms aligned.
-- [ ] Typed records written with rationale (+ rejected alternatives).
+- [ ] `ping` healthy; recalled existing context first (correct store; no duplicates).
+- [ ] Candidates shaped into **clusters** (node table + link plan); new terms aligned.
+- [ ] Nodes recorded with rationale + evidence; IRIs captured in a registry (link-or-mint applied).
+- [ ] Edges drawn with `relate()` per the predicate map; each edge evidence-grounded.
 - [ ] `validate_against_architecture` → 0 violations.
-- [ ] `query` / `get_relevant_context` / `sparql` return the recorded knowledge.
+- [ ] Edge histogram non-empty; edge-type matrix clean; orphans ≈ 0; **edges ≳ nodes**.
+- [ ] Competency questions return rows; `get_relevant_context` shows `linkedVia` neighbors.
