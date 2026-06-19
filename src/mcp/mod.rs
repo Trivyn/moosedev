@@ -48,25 +48,32 @@ fn format_context(items: &[graph::ContextItem]) -> String {
     out
 }
 
-/// Resolve an optional RFC3339 `timestamp` arg to a UTC instant (defaults to now).
-/// Lets the temporal bootstrap replay historical commit dates; errors on a malformed
-/// value so the handler surfaces it rather than silently using now.
+/// Resolve the record timestamp. Precedence: an explicit RFC3339 `timestamp` arg -> a
+/// driver-provided default file (the temporal bootstrap writes each episode's commit date there,
+/// so the timeline is deterministic and not the LLM's responsibility) -> now (normal live capture).
 fn resolve_when(ts: &Option<String>) -> Result<chrono::DateTime<Utc>, String> {
-    match ts.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let raw = ts
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| read_capture_default("MOOSEDEV_CAPTURE_TS_FILE"));
+    match raw {
         None => Ok(Utc::now()),
-        Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+        Some(s) => chrono::DateTime::parse_from_rfc3339(&s)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| format!("invalid `timestamp` (expected RFC3339): {e}")),
+            .map_err(|e| format!("invalid timestamp (expected RFC3339): {e}")),
     }
 }
 
-/// Resolve the author: an explicit `author` arg (e.g. a commit author for the
-/// temporal bootstrap), else the MCP client name.
+/// Resolve the author. Precedence: an explicit `author` arg -> a driver-provided default file
+/// (the temporal bootstrap's per-episode commit author) -> the MCP client name (live capture).
 fn resolve_author(arg: &Option<String>, context: &RequestContext<RoleServer>) -> String {
     arg.as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .or_else(|| read_capture_default("MOOSEDEV_CAPTURE_AUTHOR_FILE"))
         .unwrap_or_else(|| {
             context
                 .peer
@@ -74,6 +81,17 @@ fn resolve_author(arg: &Option<String>, context: &RequestContext<RoleServer>) ->
                 .map(|ci| ci.client_info.name.clone())
                 .unwrap_or_else(|| "unknown-mcp-client".to_string())
         })
+}
+
+/// Read a driver-provided capture default from the file named by `env_var`, if set and non-empty.
+/// Used only by the temporal bootstrap to inject each episode's commit date/author
+/// deterministically; live capture sets neither env var, so the normal now/client defaults apply.
+fn read_capture_default(env_var: &str) -> Option<String> {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Arguments for the `record_important_decision` tool.

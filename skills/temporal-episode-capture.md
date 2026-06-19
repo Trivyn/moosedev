@@ -6,8 +6,8 @@ one episode** (a single commit or a merge to trunk) into the project knowledge g
 as you would during normal work** (recall → align → record → link → supersede → validate) — with
 two temporal twists:
 
-1. You **stamp every record with the COMMIT's date + author** (provided below), never "now" and
-   never yourself.
+1. Records are **automatically stamped with this commit's date + author** (the driver injects
+   them server-side) — you record normally and never pass timestamps/authors yourself.
 2. You see the graph **only as it stood BEFORE this commit** (the driver runs episodes in order,
    one at a time). This is **look-back, never forward** — it is what lets you create honest
    `supersedes` edges when this commit reverses an earlier decision.
@@ -40,12 +40,12 @@ yields few or zero records — do not pad (invariant #6).
 For any concept whose `kind` isn't an obvious ontology class, `align_concepts(label, definition?)`
 before recording, so the graph doesn't drift. (Class resolution — distinct from link-or-mint.)
 
-### 3. Record nodes — stamped at the commit date/author
-`record_important_decision(kind, title, description, status, timestamp, author)`:
+### 3. Record nodes
+`record_important_decision(kind, title, description, status)`:
 - `description` = the **why + evidence**: cite this commit and the diff hunk / message line.
-- **`timestamp` = the provided commit date (RFC3339); `author` = the provided commit author.**
-  Pass these on **every** call — they are what make this a real timeline. Never omit them.
 - `status`: `"accepted"` if the commit puts the decision in effect; else `"proposed"`.
+- The record's **timestamp + author are set automatically to this commit's values** by the driver
+  — record normally; do **not** pass timestamp/author yourself.
 Capture the IRI returned for each node (your link registry).
 
 ### 4. Link — `relate(subject_iri, predicate, object_iri)`
@@ -57,7 +57,7 @@ SHACL-validated; a rejected edge means the kinds/direction are wrong — fix, do
 ### 5. Supersede — only what already exists
 If this commit **reverses or replaces** a decision you found in step 0:
 `supersede_decision(superseded_iri=<the existing IRI from step 0>, title, rationale=<why it
-changed, from THIS commit>, description, timestamp=<commit date>, author=<commit author>)`.
+changed, from THIS commit>, description)` — timestamp + author are injected automatically.
 - You may supersede **only an IRI you actually saw in recall** — never invent one.
 - **Prefer mint over speculative supersede.** A refactor or extension is not a reversal. Only
   supersede when the commit clearly retires the earlier choice, and cite the evidence.

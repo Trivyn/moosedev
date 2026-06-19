@@ -29,6 +29,11 @@ SKILL = REPO_ROOT / "skills" / "temporal-episode-capture.md"
 PROJECT_GRAPH = "https://moosedev.dev/kg/project"
 PROV_GRAPH = "https://moosedev.dev/kg/provenance"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+# Driver-provided capture defaults: the serve reads these files (named via its env) as the
+# timestamp + author for a record when the agent passes none — so the bootstrap stamps each
+# episode's commit date/author DETERMINISTICALLY, without the agent (LLM) handling timestamps.
+CAPTURE_TS_FILE = str(Path(config.TB_SNAPSHOT_ROOT).parent / "temporal-capture-ts")
+CAPTURE_AUTHOR_FILE = str(Path(config.TB_SNAPSHOT_ROOT).parent / "temporal-capture-author")
 
 # --- git layer (deterministic, read-only; bench/run.py:120 style) ------------------------------
 
@@ -140,7 +145,9 @@ def start_serve(data_dir: str) -> subprocess.Popen:
     Path(data_dir).mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "MOOSEDEV_DATA_DIR": data_dir, "MOOSEDEV_ONTOLOGY_DIR": config.ONTOLOGY_DIR,
            "MOOSEDEV_LLM_BASE_URL": config.LLM_BASE_URL, "MOOSEDEV_LLM_API_KEY": config.LLM_API_KEY,
-           "MOOSEDEV_LLM_MODEL": config.NLQ_MODEL}
+           "MOOSEDEV_LLM_MODEL": config.NLQ_MODEL,
+           "MOOSEDEV_CAPTURE_TS_FILE": CAPTURE_TS_FILE,
+           "MOOSEDEV_CAPTURE_AUTHOR_FILE": CAPTURE_AUTHOR_FILE}
     proc = subprocess.Popen([config.MOOSEDEV_BIN, "--serve"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = Path(data_dir) / "moosedev.sock"
@@ -218,10 +225,10 @@ BODY:
 DIFF:
 {diff}
 
-CRITICAL: pass timestamp="{ep.date}" and author="{ep.author} <{ep.email}>" on EVERY
-record_important_decision and supersede_decision call (the commit's values, never now / yourself).
-If this commit reverses a decision you find in recall, supersede that existing IRI (do not invent).
-If it is not decision-bearing, record nothing and say so. End with the skill's report."""
+The record timestamp + author are set automatically to this commit's values by the driver —
+record normally, do NOT pass timestamp/author yourself. If this commit reverses a decision you
+find in recall, supersede that existing IRI (do not invent). If it is not decision-bearing,
+record nothing and say so. End with the skill's report."""
 
 
 def run_capture_agent(ep: Episode, diff: str, repo_name: str, mcp_config: str, model: str) -> str:
@@ -279,14 +286,17 @@ def run(repo, data_dir, trunk_override, limit, dry_run, resume, model, milestone
                 print(f"[{i}/{len(episodes)}] SKIP {ep.sha[:8]} ({reason})", flush=True)
                 continue
             sent += 1
+            # Inject this commit's date + author for the server to use as the capture defaults
+            # (resolve_when/resolve_author read these files), so the agent records normally and the
+            # timeline is deterministic — never the LLM's responsibility.
+            Path(CAPTURE_TS_FILE).write_text(ep.date)
+            Path(CAPTURE_AUTHOR_FILE).write_text(f"{ep.author} <{ep.email}>")
             before = count_records(data_dir)
             run_capture_agent(ep, diff, repo_name, mcp_config, model)
             new = count_records(data_dir) - before
-            on_day = records_on_day(data_dir, ep.date)
             applied += 1
             applied_log.open("a").write(ep.sha + "\n")
-            flag = "" if (new == 0 or on_day >= new) else "  !!STAMP-MISMATCH (records not on commit day)"
-            print(f"[{i}/{len(episodes)}] DONE {ep.sha[:8]} +{new} records (on-day~{on_day}){flag}", flush=True)
+            print(f"[{i}/{len(episodes)}] DONE {ep.sha[:8]} +{new} records", flush=True)
             if applied % config.TB_VALIDATE_EVERY == 0:
                 print(f"    {mcp(data_dir, 'validate_against_architecture', {}).splitlines()[0]}", flush=True)
             if milestone_every and applied % milestone_every == 0:
