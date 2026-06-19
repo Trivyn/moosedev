@@ -33,8 +33,11 @@ async def main(corpus: str) -> None:
     for c in chunks:
         if c["iri"] not in gmap:
             continue
-        body = c["text"].split("\n\n", 1)[1] if "\n\n" in c["text"] else ""
-        if body.strip() != gmap[c["iri"]].strip():
+        # The chunk text is intentionally richer than the raw description: it prepends
+        # "# title" and a "Lifecycle status:" line (currency-aware BM25). Parity means the
+        # record's rationale (hasDescription) is CARRIED in the chunk, so check containment.
+        desc = gmap[c["iri"]].strip()
+        if desc and desc not in c["text"]:
             mismatched.append(c["iri"])
 
     print(f"chunks missing from graph: {len(missing)}")

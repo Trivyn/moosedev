@@ -6,8 +6,10 @@ relevance-ranked retrieval surface hard-capped at 100 (src/mcp/mod.rs: clamp(1,1
 B1 corpus needs EVERY record. (The product-side equivalent is the planned KG dump, Requirement
 d459cac2; sparql is the existing bulk-read primitive, so the bench uses it now.)
 
-Predicates are matched by local-name (STRENDS) so the ontology namespace isn't hardcoded
-(decouple-code-from-ontology-ttl).
+The title is read from rdfs:label — the canonical label every record carries, including
+SystemComponents (whose typed label property is hasComponentName, not hasTitle) and the same
+field B2's get_relevant_context searches. Other predicates are matched by local-name (STRENDS)
+so the ontology namespace isn't hardcoded (decouple-code-from-ontology-ttl).
 """
 import asyncio
 import json
@@ -21,8 +23,7 @@ PROJECT_GRAPH = "https://moosedev.dev/kg/project"
 QUERY = f"""
 SELECT ?s ?kind ?title ?desc ?status WHERE {{
   GRAPH <{PROJECT_GRAPH}> {{
-    ?s a ?kind ; ?tp ?title .
-    FILTER(STRENDS(STR(?tp), "hasTitle"))
+    ?s a ?kind ; <http://www.w3.org/2000/01/rdf-schema#label> ?title .
     OPTIONAL {{ ?s ?dp ?desc .   FILTER(STRENDS(STR(?dp), "hasDescription")) }}
     OPTIONAL {{ ?s ?sp ?status . FILTER(STRENDS(STR(?sp), "hasLifecycleStatus")) }}
   }}
@@ -44,12 +45,17 @@ def rows_to_chunks(sparql_json: str) -> list[dict]:
         seen.add(iri)
         title = b["title"]["value"]
         desc = b.get("desc", {}).get("value", "")
+        status = b.get("status", {}).get("value", "")
+        # Bake lifecycle status INTO the searchable text (fair parity): B1 then holds the same
+        # currency info B2 has, so a currency win reflects whether the delivery ACTS on the
+        # lifecycle, not whether the info was hidden from free-text.
+        status_line = f"\n\nLifecycle status: {status}" if status else ""
         chunks.append({
             "iri": iri,
             "title": title,
             "kind": _local(b["kind"]["value"]),
-            "status": b.get("status", {}).get("value", ""),
-            "text": f"# {title}\n\n{desc}".rstrip(),  # self-contained: title + rationale
+            "status": status,
+            "text": f"# {title}{status_line}\n\n{desc}".rstrip(),  # self-contained: title + status + rationale
         })
     return chunks
 
