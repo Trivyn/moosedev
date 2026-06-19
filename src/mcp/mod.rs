@@ -48,6 +48,34 @@ fn format_context(items: &[graph::ContextItem]) -> String {
     out
 }
 
+/// Resolve an optional RFC3339 `timestamp` arg to a UTC instant (defaults to now).
+/// Lets the temporal bootstrap replay historical commit dates; errors on a malformed
+/// value so the handler surfaces it rather than silently using now.
+fn resolve_when(ts: &Option<String>) -> Result<chrono::DateTime<Utc>, String> {
+    match ts.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(Utc::now()),
+        Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| format!("invalid `timestamp` (expected RFC3339): {e}")),
+    }
+}
+
+/// Resolve the author: an explicit `author` arg (e.g. a commit author for the
+/// temporal bootstrap), else the MCP client name.
+fn resolve_author(arg: &Option<String>, context: &RequestContext<RoleServer>) -> String {
+    arg.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            context
+                .peer
+                .peer_info()
+                .map(|ci| ci.client_info.name.clone())
+                .unwrap_or_else(|| "unknown-mcp-client".to_string())
+        })
+}
+
 /// Arguments for the `record_important_decision` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecordDecisionArgs {
@@ -60,6 +88,11 @@ pub struct RecordDecisionArgs {
     pub description: Option<String>,
     /// Optional lifecycle status (e.g. "proposed", "accepted", "superseded").
     pub status: Option<String>,
+    /// Optional RFC3339 timestamp to stamp the record with (defaults to now).
+    /// Used by the temporal bootstrap to replay historical commit dates.
+    pub timestamp: Option<String>,
+    /// Optional author to attribute the record to (defaults to the MCP client name).
+    pub author: Option<String>,
 }
 
 /// Arguments for the `query` tool.
@@ -95,6 +128,10 @@ pub struct SupersedeArgs {
     /// Ignored: the replacement always inherits the superseded item's class
     /// (type-preserving). Kept for backward compatibility.
     pub kind: Option<String>,
+    /// Optional RFC3339 timestamp to stamp the replacement + rationale with (defaults to now).
+    pub timestamp: Option<String>,
+    /// Optional author to attribute the replacement to (defaults to the MCP client name).
+    pub author: Option<String>,
 }
 
 /// Arguments for the `retract_decision` tool.
@@ -105,6 +142,10 @@ pub struct RetractArgs {
     pub iri: String,
     /// Why the item is being withdrawn — captured as a linked Rationale. Required.
     pub rationale: String,
+    /// Optional RFC3339 timestamp to stamp the rationale with (defaults to now).
+    pub timestamp: Option<String>,
+    /// Optional author to attribute the retraction to (defaults to the MCP client name).
+    pub author: Option<String>,
 }
 
 /// Arguments for the `relate` tool.
@@ -218,12 +259,11 @@ impl MooseDevServer {
             properties.push((cap.status.clone(), status));
         }
 
-        let agent = context
-            .peer
-            .peer_info()
-            .map(|ci| ci.client_info.name.clone())
-            .unwrap_or_else(|| "unknown-mcp-client".to_string());
-        let now = Utc::now();
+        let agent = resolve_author(&args.author, &context);
+        let now = match resolve_when(&args.timestamp) {
+            Ok(t) => t,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
         let input = RecordInput {
             class_iri,
             class_local: kind.clone(),
@@ -282,12 +322,11 @@ impl MooseDevServer {
             properties.push((cap.description.clone(), desc));
         }
 
-        let agent = context
-            .peer
-            .peer_info()
-            .map(|ci| ci.client_info.name.clone())
-            .unwrap_or_else(|| "unknown-mcp-client".to_string());
-        let now = Utc::now();
+        let agent = resolve_author(&args.author, &context);
+        let now = match resolve_when(&args.timestamp) {
+            Ok(t) => t,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
         let input = SupersedeInput {
             superseded_iri,
             // Class is inferred from the superseded record (type-preserving) inside
@@ -339,12 +378,11 @@ impl MooseDevServer {
             ));
         }
 
-        let agent = context
-            .peer
-            .peer_info()
-            .map(|ci| ci.client_info.name.clone())
-            .unwrap_or_else(|| "unknown-mcp-client".to_string());
-        let now = Utc::now();
+        let agent = resolve_author(&args.author, &context);
+        let now = match resolve_when(&args.timestamp) {
+            Ok(t) => t,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
         match graph::retract_decision(&self.state, &iri, &rationale, &agent, now) {
             Ok(out) => {
                 // Provenance the minted rationale node (best-effort; never fails the write).
@@ -448,7 +486,7 @@ impl MooseDevServer {
         }
     }
 
-    /// Edit provenance for a recorded knowledge item: who recorded it, and when.
+    /// Get the Edit provenance for a recorded knowledge item: who recorded it, and when.
     #[tool(
         description = "Get the edit provenance (which agent recorded it, and when) for a knowledge item, by IRI."
     )]
@@ -569,5 +607,28 @@ impl ServerHandler for MooseDevServer {
             "MOOSEDev: structured, long-term project memory built on the MOOSE engine. Use sparql for deterministic read-only graph queries and validate_against_architecture to check recorded knowledge against loaded shapes.".to_string(),
         );
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_when;
+
+    #[test]
+    fn resolve_when_parses_rfc3339() {
+        let dt = resolve_when(&Some("2020-01-02T03:04:05Z".to_string())).unwrap();
+        assert_eq!(dt.to_rfc3339(), "2020-01-02T03:04:05+00:00");
+    }
+
+    #[test]
+    fn resolve_when_defaults_to_now_when_absent_or_blank() {
+        assert!(resolve_when(&None).is_ok());
+        assert!(resolve_when(&Some("   ".to_string())).is_ok());
+    }
+
+    #[test]
+    fn resolve_when_rejects_malformed() {
+        let err = resolve_when(&Some("not-a-date".to_string())).unwrap_err();
+        assert!(err.contains("RFC3339"), "error names the expected format: {err}");
     }
 }
