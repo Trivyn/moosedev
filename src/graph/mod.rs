@@ -22,6 +22,7 @@ use moose::types::{
     CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, VocabularyEntry, WalkBudgets,
 };
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
+use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 
 use crate::llm::{LlmConfig, OpenAiCompatClient};
@@ -35,17 +36,12 @@ pub const PROJECT_KG_GRAPH_IRI: &str = "https://moosedev.dev/kg/project";
 /// vocabulary at bootstrap, so the ontology can be regenerated under a different
 /// namespace with no code change.
 ///
-/// `hasTitle` is the label property of `InformationRecord`, the root every capture
-/// class inherits. A fully class-generic title would read each class's
-/// `trivyn:labelProperty` from the ontology, but MOOSE doesn't yet surface that
-/// annotation (`VocabularyEntry.label_property` stays unpopulated for these), so
-/// binding to the shared root property is the pragmatic choice for v1's capture
-/// classes (all `InformationRecord` subclasses).
 const CAPTURE_TITLE_LOCAL: &str = "hasTitle";
 const CAPTURE_DESCRIPTION_LOCAL: &str = "hasDescription";
 const CAPTURE_STATUS_LOCAL: &str = "hasLifecycleStatus";
 const CAPTURE_AUTHOR_LOCAL: &str = "hasAuthor";
 const CAPTURE_TIMESTAMP_LOCAL: &str = "hasTimestamp";
+const LABEL_PROPERTY_LOCAL: &str = "labelProperty";
 const DEFAULT_LIFECYCLE_STATUS: &str = "proposed";
 const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
@@ -268,21 +264,26 @@ pub fn record_instance_with_relations(
 ) -> anyhow::Result<String> {
     let subject = mint_instance_iri(&input.class_local);
     let timestamp = when.to_rfc3339();
-    let mut datatype_props: Vec<DatatypeAssertion> = input
-        .properties
+    let literal_props = normalize_capture_literal_props(
+        &state.store,
+        &state.capture,
+        &input.class_iri,
+        &input.properties,
+    );
+    let mut datatype_props: Vec<DatatypeAssertion> = literal_props
         .iter()
         .map(|(predicate, value)| DatatypeAssertion {
             predicate_iri: predicate.as_str(),
             literal: AssertionLiteral::Simple(value.as_str()),
         })
         .collect();
-    if !has_property(input, &state.capture.author) {
+    if !has_literal_property(&literal_props, &state.capture.author) {
         datatype_props.push(DatatypeAssertion {
             predicate_iri: state.capture.author.as_str(),
             literal: AssertionLiteral::Simple(author),
         });
     }
-    if !has_property(input, &state.capture.timestamp) {
+    if !has_literal_property(&literal_props, &state.capture.timestamp) {
         datatype_props.push(DatatypeAssertion {
             predicate_iri: state.capture.timestamp.as_str(),
             literal: AssertionLiteral::Typed {
@@ -291,7 +292,7 @@ pub fn record_instance_with_relations(
             },
         });
     }
-    if !has_property(input, &state.capture.status) {
+    if !has_literal_property(&literal_props, &state.capture.status) {
         datatype_props.push(DatatypeAssertion {
             predicate_iri: state.capture.status.as_str(),
             literal: AssertionLiteral::Simple(DEFAULT_LIFECYCLE_STATUS),
@@ -319,13 +320,75 @@ pub fn record_instance_with_relations(
     Ok(subject)
 }
 
-/// Check whether the caller already supplied a property so write-path defaults
-/// do not duplicate explicit values.
-fn has_property(input: &RecordInput, predicate_iri: &str) -> bool {
-    input
-        .properties
+/// Check whether the caller already supplied a property so write-path defaults do
+/// not duplicate explicit values.
+fn has_literal_property(literal_props: &[(String, String)], predicate_iri: &str) -> bool {
+    literal_props
         .iter()
         .any(|(predicate, _)| predicate == predicate_iri)
+}
+
+/// Mirror the canonical `rdfs:label` value into the class-specific datatype
+/// property identified by the ontology's `labelProperty` annotation. This keeps
+/// retrieval label-driven while satisfying shapes such as
+/// `SystemComponent.hasComponentName minCount 1`.
+fn normalize_capture_literal_props(
+    store: &Store,
+    capture: &CapturePredicates,
+    class_iri: &str,
+    literal_props: &[(String, String)],
+) -> Vec<(String, String)> {
+    let label_mirror_property = class_label_mirror_property_iri(store, capture, class_iri);
+    let title_value = literal_props
+        .iter()
+        .find(|(predicate, _)| predicate == &label_mirror_property)
+        .or_else(|| {
+            literal_props
+                .iter()
+                .find(|(predicate, _)| predicate == &capture.title)
+        })
+        .map(|(_, value)| value.clone());
+
+    let mut out = Vec::with_capacity(literal_props.len() + 1);
+    for (predicate, value) in literal_props {
+        if predicate == &capture.title && label_mirror_property != capture.title {
+            continue;
+        }
+        out.push((predicate.clone(), value.clone()));
+    }
+
+    if !has_literal_property(&out, &label_mirror_property) {
+        if let Some(title) = title_value {
+            out.push((label_mirror_property, title));
+        }
+    }
+
+    out
+}
+
+/// Read the datatype property that mirrors `rdfs:label` for a class. If the
+/// class has no direct annotation, preserve the existing `hasTitle` behavior.
+fn class_label_mirror_property_iri(
+    store: &Store,
+    capture: &CapturePredicates,
+    class_iri: &str,
+) -> String {
+    let Ok(class) = NamedNode::new(class_iri) else {
+        return capture.title.clone();
+    };
+    store
+        .quads_for_pattern(Some(class.as_ref().into()), None, None, None)
+        .flatten()
+        .find_map(|q| {
+            if local_name(q.predicate.as_str()) != LABEL_PROPERTY_LOCAL {
+                return None;
+            }
+            match q.object {
+                Term::NamedNode(label_property) => Some(label_property.as_str().to_string()),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| capture.title.clone())
 }
 
 /// A decision change: the replacement to record, the decision it supersedes, and
@@ -360,6 +423,7 @@ struct CaptureStamp<'a> {
 /// several instances *plus* a status change in one transaction. The default set
 /// mirrors `record_instance_with_relations` — keep the two in sync.
 fn capture_instance_quads(
+    store: &Store,
     subject_iri: &str,
     class_iri: &str,
     literal_props: &[(String, String)],
@@ -373,6 +437,7 @@ fn capture_instance_quads(
     let graph = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
     let subject = NamedNode::new(subject_iri)
         .map_err(|e| anyhow::anyhow!("invalid subject IRI {subject_iri}: {e}"))?;
+    let literal_props = normalize_capture_literal_props(store, capture, class_iri, literal_props);
 
     let mut quads = vec![Quad::new(
         subject.clone(),
@@ -381,7 +446,7 @@ fn capture_instance_quads(
             .map_err(|e| anyhow::anyhow!("invalid class IRI {class_iri}: {e}"))?,
         graph.clone(),
     )];
-    for (predicate, value) in literal_props {
+    for (predicate, value) in &literal_props {
         quads.push(Quad::new(
             subject.clone(),
             NamedNode::new(predicate)?,
@@ -431,6 +496,13 @@ fn capture_instance_quads(
 
 /// `rdfs:subClassOf` — class-subsumption predicate (moose's const set omits it).
 const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+const SH_TARGET_CLASS: &str = "http://www.w3.org/ns/shacl#targetClass";
+const SH_PROPERTY: &str = "http://www.w3.org/ns/shacl#property";
+const SH_PATH: &str = "http://www.w3.org/ns/shacl#path";
+const SH_CLASS: &str = "http://www.w3.org/ns/shacl#class";
+const SH_OR: &str = "http://www.w3.org/ns/shacl#or";
 
 /// True if `class_iri` equals `ancestor_iri` or is a transitive `rdfs:subClassOf`
 /// of it, per the loaded ontology. Bounded, cycle-safe walk over subClassOf edges
@@ -489,6 +561,186 @@ fn require_information_record(state: &AppState, subject: &NamedNode) -> anyhow::
                 subject.as_str()
             )
         })
+}
+
+#[derive(Debug, Clone)]
+struct RelationConstraint {
+    subject_class: String,
+    object_class: String,
+}
+
+/// Asserted rdf:type classes for a project-graph subject. No inference is
+/// performed here; callers compare with `is_subclass_of` against ontology axioms.
+fn asserted_project_types(state: &AppState, subject: &NamedNode) -> Vec<String> {
+    let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    state
+        .store
+        .quads_for_pattern(
+            Some(subject.as_ref().into()),
+            Some(NamedNodeRef::new_unchecked(moose::RDF_TYPE)),
+            None,
+            Some(GraphNameRef::NamedNode(project_graph)),
+        )
+        .flatten()
+        .filter_map(|q| match q.object {
+            Term::NamedNode(t) => Some(t.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Load the SHACL object constraints for a relationship predicate. The shape
+/// target class is the subject/domain constraint; each property branch's
+/// `sh:class` is the object/range constraint.
+fn shacl_relation_constraints(state: &AppState, predicate_iri: &str) -> Vec<RelationConstraint> {
+    let sparql = format!(
+        r#"
+SELECT DISTINCT ?subjectClass ?objectClass
+WHERE {{
+  VALUES ?shapeGraph {{ <{}> <{}> }}
+  GRAPH ?shapeGraph {{
+    ?shape <{}> ?subjectClass .
+    {{
+      ?shape <{}> ?propertyShape .
+    }} UNION {{
+      ?shape <{}>/<{}>*/<{}> ?propertyShape .
+    }}
+    ?propertyShape <{}> <{}> ;
+                   <{}> ?objectClass .
+  }}
+}}"#,
+        ontology::SE_SHAPES_GRAPH_IRI,
+        ontology::ARCH_SHAPES_GRAPH_IRI,
+        SH_TARGET_CLASS,
+        SH_PROPERTY,
+        SH_OR,
+        RDF_REST,
+        RDF_FIRST,
+        SH_PATH,
+        predicate_iri,
+        SH_CLASS
+    );
+
+    let Ok(QueryResults::Solutions(solutions)) = run_sparql(&state.store, &sparql) else {
+        return Vec::new();
+    };
+    solutions
+        .flatten()
+        .filter_map(|solution| {
+            Some(RelationConstraint {
+                subject_class: iri_value(solution.get("subjectClass"))?,
+                object_class: iri_value(solution.get("objectClass"))?,
+            })
+        })
+        .collect()
+}
+
+fn run_sparql<'a>(store: &'a Store, sparql: &str) -> anyhow::Result<QueryResults<'a>> {
+    let prepared = SparqlEvaluator::new()
+        .parse_query(sparql)
+        .map_err(|e| anyhow::anyhow!("graph query parse failed: {e}\n{sparql}"))?;
+    prepared
+        .on_store(store)
+        .execute()
+        .map_err(|e| anyhow::anyhow!("graph query failed: {e}"))
+}
+
+fn iri_value(term: Option<&Term>) -> Option<String> {
+    match term {
+        Some(Term::NamedNode(node)) => Some(node.as_str().to_string()),
+        _ => None,
+    }
+}
+
+fn any_subclass_of(store: &Store, actual: &[String], expected: &[String]) -> bool {
+    actual
+        .iter()
+        .any(|a| expected.iter().any(|e| is_subclass_of(store, a, e)))
+}
+
+fn class_list(classes: &[String]) -> String {
+    if classes.is_empty() {
+        "<none>".to_string()
+    } else {
+        classes
+            .iter()
+            .map(|iri| local_name(iri).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn unique_classes(classes: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for class in classes {
+        if !out.contains(&class) {
+            out.push(class);
+        }
+    }
+    out
+}
+
+/// Validate a relation against the loaded SHACL shape contract before writing.
+/// If the predicate has no object constraint in the shapes, preserve the legacy
+/// safe default: both endpoints must be InformationRecords.
+fn validate_relation_endpoints(
+    state: &AppState,
+    subject: &NamedNode,
+    predicate_iri: &str,
+    object: &NamedNode,
+) -> anyhow::Result<()> {
+    let constraints = shacl_relation_constraints(state, predicate_iri);
+    if constraints.is_empty() {
+        require_information_record(state, subject)
+            .map_err(|e| anyhow::anyhow!("cannot relate subject {}: {e}", subject.as_str()))?;
+        require_information_record(state, object)
+            .map_err(|e| anyhow::anyhow!("cannot relate object {}: {e}", object.as_str()))?;
+        return Ok(());
+    }
+
+    let subject_types = asserted_project_types(state, subject);
+    let object_types = asserted_project_types(state, object);
+    let expected_subjects = unique_classes(
+        constraints
+            .iter()
+            .map(|constraint| constraint.subject_class.clone()),
+    );
+
+    let matching_subject_constraints: Vec<&RelationConstraint> = constraints
+        .iter()
+        .filter(|constraint| {
+            any_subclass_of(
+                &state.store,
+                &subject_types,
+                std::slice::from_ref(&constraint.subject_class),
+            )
+        })
+        .collect();
+
+    if matching_subject_constraints.is_empty() {
+        anyhow::bail!(
+            "cannot relate subject {}: actual class(es) [{}], expected [{}]",
+            subject.as_str(),
+            class_list(&subject_types),
+            class_list(&expected_subjects)
+        );
+    }
+
+    let expected_objects = unique_classes(
+        matching_subject_constraints
+            .iter()
+            .map(|constraint| constraint.object_class.clone()),
+    );
+    if !any_subclass_of(&state.store, &object_types, &expected_objects) {
+        anyhow::bail!(
+            "cannot relate object {}: actual class(es) [{}], expected [{}]",
+            object.as_str(),
+            class_list(&object_types),
+            class_list(&expected_objects)
+        );
+    }
+
+    Ok(())
 }
 
 /// Record a new knowledge item that supersedes an existing one, capture *why* it
@@ -554,6 +806,7 @@ pub fn supersede_decision(
         status: "accepted",
     };
     let rationale_quads = capture_instance_quads(
+        &state.store,
         &rationale_iri,
         &rationale_class,
         &rationale_literals,
@@ -568,6 +821,7 @@ pub fn supersede_decision(
         (supersedes_pred, input.superseded_iri.clone()),
     ];
     let new_quads = capture_instance_quads(
+        &state.store,
         &new_iri,
         &superseded_class,
         &input.new.properties,
@@ -672,6 +926,7 @@ pub fn retract_decision(
         status: "accepted",
     };
     let rationale_quads = capture_instance_quads(
+        &state.store,
         &rationale_iri,
         &rationale_class,
         &rationale_literals,
@@ -729,6 +984,71 @@ pub fn retract_decision(
     })
 }
 
+/// The edge written by [`relate`]: subject, the resolved predicate IRI, object.
+pub struct RelateOutcome {
+    pub subject_iri: String,
+    pub predicate_iri: String,
+    pub object_iri: String,
+}
+
+/// Assert a typed relationship edge between two existing recorded knowledge items
+/// — e.g. an `AntiPattern` `violates` a `Constraint`, or an `ArchitecturalDecision`
+/// `isMotivatedBy` a `Requirement` / `concerns` a component. The predicate is an
+/// object property resolved from the loaded ontology by local name (keeping the
+/// volatile namespace out of the code and rejecting ad-hoc, untyped edges). Both
+/// endpoints must already be `InformationRecord`s (or subclasses) in the project
+/// graph — else this errors and writes nothing. Atomic and idempotent: one quad is
+/// inserted in a transaction (re-asserting an existing edge is a no-op) and the
+/// entity index is invalidated once on success. This is the primitive that turns
+/// capture from a typed *list* into a traversable *graph*: the ontology already
+/// declares these relations (`supersedes`, `violates`, `isMotivatedBy`, …), but
+/// only `supersede_decision` ever wrote one before.
+pub fn relate(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+) -> anyhow::Result<RelateOutcome> {
+    let subject = NamedNode::new(subject_iri)
+        .map_err(|e| anyhow::anyhow!("invalid subject IRI {subject_iri}: {e}"))?;
+    let object = NamedNode::new(object_iri)
+        .map_err(|e| anyhow::anyhow!("invalid object IRI {object_iri}: {e}"))?;
+
+    // Resolve the relation IRI from the ontology by local name. Restricting to a
+    // declared object property keeps the graph well-typed and the namespace out of
+    // the code (decouple-code-from-ontology-ttl).
+    let predicate_iri = state.resolve_object_property(predicate_local).map_err(|e| {
+        anyhow::anyhow!(
+            "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
+        )
+    })?;
+
+    // Preconditions: endpoint classes must satisfy the predicate's SHACL shape
+    // contract. Checked before the transaction, so a bad edge writes nothing.
+    validate_relation_endpoints(state, &subject, &predicate_iri, &object)?;
+
+    let edge = Quad::new(
+        subject,
+        NamedNode::new(&predicate_iri)?,
+        object,
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+    );
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("relate transaction: {e}"))?;
+    txn.insert(edge.as_ref());
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("relate commit: {e}"))?;
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+
+    Ok(RelateOutcome {
+        subject_iri: subject_iri.to_string(),
+        predicate_iri,
+        object_iri: object_iri.to_string(),
+    })
+}
+
 /// Result of an NLQ query: the synthesized answer, a confidence label, and a
 /// human-readable reasoning trace (auditability — invariant #6).
 pub struct QueryResult {
@@ -751,9 +1071,9 @@ pub async fn query(state: &AppState, nlq: &str) -> anyhow::Result<QueryResult> {
     let llm = state.llm.with_fresh_usage();
     let mut result = query_with_llm_client(state, &llm, &state.model, nlq).await?;
     let (prompt, completion) = llm.take_usage();
-    result
-        .trace
-        .push_str(&format!("\ntokens: prompt={prompt} completion={completion}"));
+    result.trace.push_str(&format!(
+        "\ntokens: prompt={prompt} completion={completion}"
+    ));
     Ok(result)
 }
 
@@ -928,7 +1248,96 @@ pub fn relevant_context(
     if !include_history {
         items.retain(|item| !item.is_historical());
     }
+
+    // Bounded relational expansion (Constraint aa8b3fa3): for a focused topic, reach
+    // the few linked records that COMPLETE an answer — the lexically-distant neighbor
+    // BM25 alone misses — WITHOUT dumping the neighborhood (context efficiency is the
+    // whole point, AD 7b824b26). Skipped for list-all and when MOOSEDEV_EXPAND_HOPS=0.
+    let max_hops = std::env::var("MOOSEDEV_EXPAND_HOPS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(EXPAND_MAX_HOPS);
+    if topic.map(str::trim).filter(|t| !t.is_empty()).is_some() && max_hops > 0 {
+        let mut seen: std::collections::HashSet<String> =
+            items.iter().map(|i| i.iri.clone()).collect();
+        let mut expanded: Vec<ContextItem> = Vec::new();
+        let mut frontier: Vec<String> = items
+            .iter()
+            .take(EXPAND_FROM_TOP)
+            .map(|i| i.iri.clone())
+            .collect();
+        'hops: for _ in 0..max_hops {
+            let mut next: Vec<String> = Vec::new();
+            for src in &frontier {
+                for (pred, neighbor_iri, neighbor_class) in record_neighbors(state, src) {
+                    if !seen.insert(neighbor_iri.clone()) {
+                        continue; // already a seed or already expanded
+                    }
+                    let mut item = build_context_item(state, neighbor_iri.clone(), neighbor_class);
+                    if !include_history && item.is_historical() {
+                        continue; // stay in the current working set
+                    }
+                    item.properties.insert(0, ("linkedVia".to_string(), pred));
+                    expanded.push(item);
+                    next.push(neighbor_iri);
+                    if expanded.len() >= EXPAND_MAX {
+                        break 'hops;
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        items.extend(expanded);
+    }
+
     Ok(items)
+}
+
+/// Bounds for relational expansion in [`relevant_context`] (Constraint aa8b3fa3):
+/// expansion is a budgeted reach to the few neighbors that complete an answer, never
+/// a neighborhood dump — context efficiency is the whole point (AD 7b824b26).
+const EXPAND_FROM_TOP: usize = 3; // expand only from the top-N most-relevant seed hits
+const EXPAND_MAX_HOPS: usize = 2; // follow at most this many hops outward
+const EXPAND_MAX: usize = 5; // hard cap on total appended (linked) records
+
+/// Outbound edges from `iri` to other recorded knowledge items, as
+/// `(predicate_local, neighbor_iri, neighbor_class)`. Only edges whose object is an
+/// `InformationRecord` (or subclass) are returned — excluding the `prov:*` metadata
+/// firehose and literal properties — and `hasRationale` is skipped because its text
+/// is already inlined by [`build_context_item`].
+fn record_neighbors(state: &AppState, iri: &str) -> Vec<(String, String, String)> {
+    let Ok(subject) = NamedNodeRef::new(iri) else {
+        return Vec::new();
+    };
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut out = Vec::new();
+    for q in state
+        .store
+        .quads_for_pattern(
+            Some(subject.into()),
+            None,
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+    {
+        if q.predicate.as_str() == moose::RDF_TYPE {
+            continue;
+        }
+        let pred_local = local_name(q.predicate.as_str()).to_string();
+        if pred_local == "hasRationale" {
+            continue; // its text is already inlined by build_context_item
+        }
+        if let Term::NamedNode(obj) = &q.object {
+            if let Ok(class) = require_information_record(state, obj) {
+                out.push((pred_local, obj.as_str().to_string(), class));
+            }
+        }
+    }
+    out
 }
 
 /// List up to `limit` instances of the given classes in the project KG graph.
