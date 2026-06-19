@@ -93,3 +93,14 @@ def corpus_runs_path(corpus: str) -> Path:
 CORPUS_DIR = BENCH / "corpus"          # B1 chunk exports (gitignored)
 RUNS_DIR = BENCH / "runs"              # JSONL rows (gitignored)
 WORK_ROOT = BENCH_HOME / "_work"        # throwaway per-run working dirs
+
+# Temporal (git-walk) bootstrap. The per-episode CAPTURE is a real headless agent (claude -p)
+# following skills/temporal-episode-capture.md — it calls read/align/record/relate/supersede/
+# validate itself (the normal workflow), stamping records with the commit's date+author.
+TB_CAPTURE_MODEL = os.environ.get("TB_CAPTURE_MODEL", "sonnet")          # claude -p model for the capture agent
+TB_MAX_TURNS = int(os.environ.get("TB_MAX_TURNS", "60"))                 # max agent turns per episode
+TB_MAX_DIFF_BYTES = int(os.environ.get("TB_MAX_DIFF_BYTES", "24000"))    # per-episode diff cap in the agent prompt
+TB_VALIDATE_EVERY = int(os.environ.get("TB_VALIDATE_EVERY", "10"))       # validate_against_architecture every N applied episodes
+TB_SNAPSHOT_ROOT = os.environ.get("TB_SNAPSHOT_ROOT", str(BENCH_HOME / "_temporal_snapshots"))
+TB_TRIVIAL_LINES = int(os.environ.get("TB_TRIVIAL_LINES", "8"))          # mechanical-subject episodes below this many changed lines are skipped
+TB_MIN_LINES = int(os.environ.get("TB_MIN_LINES", "2"))                  # tiny diffs without a why-cue are skipped
