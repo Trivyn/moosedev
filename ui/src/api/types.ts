@@ -3,6 +3,8 @@ export interface HealthResponse {
   version: string;
   project_graph: string;
   data_dir: string;
+  project_name: string;
+  project_root: string;
 }
 
 export interface ChatMessage {

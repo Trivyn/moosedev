@@ -23,6 +23,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+async function download(path: string): Promise<Blob> {
+  const response = await fetch(`/api/v1${path}`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    const message = data?.error ?? `${response.status} ${response.statusText}`;
+    throw new Error(message);
+  }
+  return response.blob();
+}
+
 export const api = {
   health: () => request<HealthResponse>('/health'),
   chat: (payload: {
@@ -48,4 +58,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query }),
     }),
+  exportGraph: (params: { format?: string; graph?: string } = {}) => {
+    const search = new URLSearchParams();
+    if (params.format) {
+      search.set('format', params.format);
+    }
+    if (params.graph) {
+      search.set('graph', params.graph);
+    }
+    const suffix = search.toString();
+    return download(`/graph/export${suffix ? `?${suffix}` : ''}`);
+  },
 };

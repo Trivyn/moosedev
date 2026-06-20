@@ -18,6 +18,7 @@ use rmcp::{
 };
 
 use crate::alignment;
+use crate::export::{self, ExportFormat, ExportScope};
 use crate::graph::{self, AppState, RecordInput, SupersedeInput};
 use crate::provenance;
 use crate::{sparql, validation};
@@ -210,6 +211,17 @@ pub struct SuggestMappingsArgs {
 pub struct SparqlArgs {
     /// Read-only SPARQL query to run against the local project store.
     pub query: String,
+}
+
+/// Arguments for the `export_graph` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExportGraphArgs {
+    /// Output format: nq, nt, or ttl. Defaults to nq.
+    pub format: Option<String>,
+    /// Named graph scope: project, provenance, or all. Defaults to project.
+    pub graph: Option<String>,
+    /// Optional output path. Prefer an absolute path. If omitted, the RDF text is returned inline.
+    pub path: Option<String>,
 }
 
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
@@ -591,6 +603,49 @@ impl MooseDevServer {
         match sparql::run_query(&self.state.store, query) {
             Ok(output) => Ok(tool_ok(output)),
             Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),
+        }
+    }
+
+    /// Export the project knowledge graph as RDF text.
+    #[tool(
+        description = "Export the project knowledge graph as RDF text. Defaults to canonical N-Quads for the project graph. N-Triples is deterministic after graph names are dropped; Turtle is human-readable, not byte-canonical. Optional args: format nq|nt|ttl, graph project|provenance|all, path for writing to a file instead of returning inline text (absolute paths recommended)."
+    )]
+    async fn export_graph(
+        &self,
+        Parameters(args): Parameters<ExportGraphArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let format = match args.format.as_deref() {
+            Some(raw) => match ExportFormat::parse(raw) {
+                Ok(format) => format,
+                Err(e) => return Ok(tool_error(e.to_string())),
+            },
+            None => ExportFormat::default(),
+        };
+        let scope = match args.graph.as_deref() {
+            Some(raw) => match ExportScope::parse(raw) {
+                Ok(scope) => scope,
+                Err(e) => return Ok(tool_error(e.to_string())),
+            },
+            None => ExportScope::default(),
+        };
+
+        let dump = match export::export_graph(&self.state.store, scope, format) {
+            Ok(dump) => dump,
+            Err(e) => return Ok(tool_error(format!("export failed: {e}"))),
+        };
+
+        if let Some(path) = args.path.filter(|path| !path.trim().is_empty()) {
+            if let Err(e) = std::fs::write(&path, dump.text) {
+                return Ok(tool_error(format!("write export {path}: {e}")));
+            }
+            Ok(tool_ok(format!(
+                "exported {} quads from {} to {}",
+                dump.quad_count,
+                dump.graphs.join(", "),
+                path
+            )))
+        } else {
+            Ok(tool_ok(dump.text))
         }
     }
 

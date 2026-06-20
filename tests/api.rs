@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use axum::http::header::CONTENT_DISPOSITION;
 use axum_test::TestServer;
 use chrono::Utc;
 use moosedev::api::routes::build_routes;
@@ -46,8 +47,46 @@ async fn health_reports_project_graph_and_data_dir() {
     assert_eq!(body["status"], "ok");
     assert_eq!(body["project_graph"], PROJECT_KG_GRAPH_IRI);
     assert_eq!(body["data_dir"], dir.to_string_lossy().as_ref());
+    assert_eq!(
+        body["project_name"],
+        dir.file_name().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        body["project_root"],
+        std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn health_reports_project_root_for_conventional_data_dir() {
+    let project = temp_dir("health-project-root");
+    let dir = project.join(".moosedev");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/health").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(
+        body["project_name"],
+        project.file_name().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        body["project_root"],
+        std::fs::canonicalize(&project)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(body["data_dir"], dir.to_string_lossy().as_ref());
+
+    let _ = std::fs::remove_dir_all(&project);
 }
 
 #[tokio::test]
@@ -125,6 +164,72 @@ async fn sparql_rejects_empty_query() {
         response.text().contains("query must not be empty"),
         "empty query error should be explicit"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn graph_export_downloads_project_nquads_only() {
+    let dir = temp_dir("graph-export");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    let project_iri = graph::record_instance(
+        &state,
+        &RecordInput {
+            class_iri,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), "Export visible".to_string()),
+                (state.capture.title.clone(), "Export visible".to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record project decision");
+
+    let provenance_subject = NamedNode::new("https://example.test/export-provenance-only").unwrap();
+    state
+        .store
+        .insert(&Quad::new(
+            provenance_subject.clone(),
+            NamedNode::new(moose::RDFS_LABEL).unwrap(),
+            Term::Literal(Literal::new_simple_literal("Export provenance only")),
+            GraphName::NamedNode(NamedNode::new(PROVENANCE_GRAPH_IRI).unwrap()),
+        ))
+        .expect("insert provenance-only triple");
+
+    let server = test_server(state);
+    let response = server
+        .get("/api/v1/graph/export?format=nq&graph=project")
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(response.content_type(), "application/n-quads");
+    assert!(response
+        .header(CONTENT_DISPOSITION)
+        .to_str()
+        .expect("content-disposition is text")
+        .contains("attachment; filename=\"moosedev-project.nq\""));
+    let body = response.text();
+    assert!(body.contains(&project_iri));
+    assert!(!body.contains(provenance_subject.as_str()));
+    assert!(!body.contains(PROVENANCE_GRAPH_IRI));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn graph_export_rejects_unknown_format() {
+    let dir = temp_dir("graph-export-bad-format");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/graph/export?format=bogus").await;
+
+    response.assert_status_bad_request();
+    assert!(response.text().contains("unknown export format"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

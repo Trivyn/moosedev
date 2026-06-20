@@ -43,9 +43,23 @@ export default function AppShell({
         <Box sx={{ px: 2, py: 1.5, display: 'flex', gap: 1, alignItems: 'flex-start' }}>
           <Box sx={{ minWidth: 0, flex: 1 }}>
             <Typography variant="h6">MOOSEDev</Typography>
-            <Typography variant="caption" color="text.secondary">
-              Project knowledge graph
+            <Typography
+              variant="body2"
+              title={health?.project_root ?? undefined}
+              sx={{ display: 'block', fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
+              {health?.project_name ?? 'Project'}
             </Typography>
+            {health && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                title={health.project_root}
+                sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}
+              >
+                {health.project_root}
+              </Typography>
+            )}
           </Box>
           <Tooltip title={themeMode === 'dark' ? 'Use light mode' : 'Use dark mode'}>
             <IconButton size="small" onClick={onToggleThemeMode} aria-label="Toggle color mode">

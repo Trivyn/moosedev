@@ -46,6 +46,11 @@ const SERVE_LOG_FILE_NAME: &str = "moosedev-serve.log";
 /// Filename for the detached backend pidfile, co-located in the data dir.
 const PIDFILE_NAME: &str = "moosedev-serve.pid";
 
+/// Filename for the published HTTP UI address, co-located in the data dir. The
+/// UI binds an ephemeral loopback port by default, so `--status`/`ui` read this
+/// file to discover where the backend's web UI is actually listening.
+const HTTP_ADDR_FILE_NAME: &str = "http.addr";
+
 /// Conservative cap on a Unix-socket path length. `sockaddr_un.sun_path` is 104
 /// bytes on macOS (108 on Linux) including the NUL terminator; stay well under
 /// the smaller limit so a deeply nested data dir falls back to a hashed path
@@ -85,30 +90,65 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
 }
 
 /// Start the local human-facing HTTP API/UI unless explicitly disabled.
-pub async fn spawn_http_if_enabled(
-    state: Arc<AppState>,
-) -> anyhow::Result<Option<tokio::task::JoinHandle<anyhow::Result<()>>>> {
+///
+/// Infallible by design: a UI bind failure (port in use, bad `MOOSEDEV_HTTP_ADDR`,
+/// headless box) must never take down the MCP backend, which is the actual reason
+/// the process exists. On failure this logs a warning and returns `None`; on
+/// success it returns the bound address (used by `--serve --open` to launch a
+/// browser, and published to `http.addr` for `--status`/`ui`).
+pub async fn spawn_http_if_enabled(state: Arc<AppState>, data_dir: &Path) -> Option<SocketAddr> {
     if http_disabled() {
         tracing::info!("MOOSEDev HTTP UI disabled by MOOSEDEV_NO_HTTP");
-        return Ok(None);
+        return None;
     }
-    let addr = http_addr()?;
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("bind HTTP UI on {addr}: {e}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|e| anyhow::anyhow!("read HTTP UI local address: {e}"))?;
+    let addr = http_addr()
+        .map_err(|e| tracing::warn!("HTTP UI unavailable: {e}; MCP backend continues"))
+        .ok()?;
+    let (listener, local_addr) = bind_http_listener(addr, data_dir).await?;
     tracing::info!("MOOSEDev web UI serving at http://{local_addr}");
     // HTTP and MCP share the same Arc<AppState>. That is the important safety
     // property: only the `--serve` backend opens RocksDB, so the UI cannot create
     // a second writer beside the MCP server.
     let app = api::routes::build_routes(state);
-    Ok(Some(tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| anyhow::anyhow!("HTTP UI server failed: {e}"))
-    })))
+    // Dropping the JoinHandle does not cancel the spawned task — the UI serves for
+    // the life of the process.
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::warn!("HTTP UI server stopped: {e}");
+        }
+    });
+    Some(local_addr)
+}
+
+/// Bind the HTTP UI's TCP listener at `addr` and publish the resolved address to
+/// `http.addr` in the data dir. Returns `None` (never errors) on bind failure so
+/// the caller can keep the MCP backend running. Split out from
+/// [`spawn_http_if_enabled`] so the bind/publish path is unit-testable without
+/// building an [`AppState`].
+async fn bind_http_listener(
+    addr: SocketAddr,
+    data_dir: &Path,
+) -> Option<(TcpListener, SocketAddr)> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| tracing::warn!("HTTP UI unavailable: bind {addr}: {e}; MCP backend continues"))
+        .ok()?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| {
+            tracing::warn!("HTTP UI unavailable: read local address: {e}; MCP backend continues")
+        })
+        .ok()?;
+    // Publish where the (possibly ephemeral) UI actually bound so `--status`/`ui`
+    // can find it. A write failure only costs discoverability, not the UI itself.
+    let addr_file = http_addr_file_path_for(data_dir);
+    if let Err(e) = std::fs::write(&addr_file, format!("{local_addr}\n")) {
+        tracing::warn!(
+            "could not publish HTTP address to {}: {e}; --status/ui will not see the web UI",
+            addr_file.display()
+        );
+    }
+    Some((listener, local_addr))
 }
 
 fn http_disabled() -> bool {
@@ -118,7 +158,12 @@ fn http_disabled() -> bool {
 }
 
 fn http_addr() -> anyhow::Result<SocketAddr> {
-    let raw = std::env::var("MOOSEDEV_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:7474".to_string());
+    // Default to an ephemeral loopback port (`:0`): a fixed port would collide
+    // across the per-data-dir backends this design runs in parallel. The OS picks
+    // a free port; the resolved address is published to `http.addr` and surfaced
+    // by `--status`/`ui`. Set MOOSEDEV_HTTP_ADDR for a stable port or to expose
+    // the UI on a network interface.
+    let raw = std::env::var("MOOSEDEV_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:0".to_string());
     raw.parse()
         .map_err(|e| anyhow::anyhow!("parse MOOSEDEV_HTTP_ADDR={raw:?}: {e}"))
 }
@@ -153,6 +198,24 @@ pub fn pidfile_path_for(data_dir: &Path) -> PathBuf {
     data_dir.join(PIDFILE_NAME)
 }
 
+/// Path to the per-data-dir file recording the HTTP UI's bound address.
+pub fn http_addr_file_path_for(data_dir: &Path) -> PathBuf {
+    data_dir.join(HTTP_ADDR_FILE_NAME)
+}
+
+/// Read the HTTP UI address published by a running backend, if any. Symmetric
+/// with the write in [`bind_http_listener`]: it re-parses to a [`SocketAddr`], so
+/// a missing, empty, or corrupt `http.addr` yields `None` rather than a bad URL.
+/// Trust it only while the backend is live ([`backend_is_live`]) — a stale file
+/// can outlive a crashed backend.
+pub fn read_http_addr(data_dir: &Path) -> Option<SocketAddr> {
+    std::fs::read_to_string(http_addr_file_path_for(data_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Run the MCP server over stdio (the default mode; unchanged single-client
 /// behavior). The calling client owns this process's lifetime.
 pub async fn serve_stdio(server: MooseDevServer) -> anyhow::Result<()> {
@@ -168,13 +231,20 @@ pub async fn serve_stdio(server: MooseDevServer) -> anyhow::Result<()> {
 /// [`build_server`] — opening the store would otherwise fail first with the raw
 /// RocksDB lock error (and waste a model load) for a same-data-dir conflict.
 pub async fn ensure_no_live_backend(socket: &Path) -> anyhow::Result<()> {
-    if UnixStream::connect(socket).await.is_ok() {
+    if backend_is_live(socket).await {
         anyhow::bail!(
             "a MOOSEDev backend is already listening on {} — refusing to start a second",
             socket.display()
         );
     }
     Ok(())
+}
+
+/// Lock-free liveness probe: is a backend accepting on this socket? A successful
+/// connect proves one is, without opening RocksDB — so `--status`/`ui` can report
+/// state without taking the store's exclusive write lock.
+pub async fn backend_is_live(socket: &Path) -> bool {
+    UnixStream::connect(socket).await.is_ok()
 }
 
 fn should_spawn(kind: ErrorKind) -> bool {
@@ -378,11 +448,17 @@ mod tests {
     }
 
     #[test]
-    fn http_addr_defaults_to_loopback() {
+    fn http_addr_defaults_to_ephemeral_loopback() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::remove("MOOSEDEV_HTTP_ADDR");
 
-        assert_eq!(http_addr().unwrap().to_string(), "127.0.0.1:7474");
+        let addr = http_addr().unwrap();
+        assert!(addr.ip().is_loopback(), "default must stay on loopback");
+        assert_eq!(
+            addr.port(),
+            0,
+            "default must be an OS-assigned ephemeral port"
+        );
     }
 
     #[test]
@@ -411,5 +487,60 @@ mod tests {
         let _restore = EnvRestore::set("MOOSEDEV_NO_HTTP", "1");
 
         assert!(http_disabled());
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("moosedev-runtime-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn bind_http_listener_publishes_resolved_ephemeral_port() {
+        let dir = scratch_dir("http-publish");
+
+        let (listener, addr) = bind_http_listener("127.0.0.1:0".parse().unwrap(), &dir)
+            .await
+            .expect("ephemeral loopback bind should succeed");
+        assert_ne!(addr.port(), 0, "ephemeral bind must resolve to a real port");
+
+        let published = std::fs::read_to_string(http_addr_file_path_for(&dir))
+            .expect("http.addr should be written on a successful bind");
+        let parsed: SocketAddr = published
+            .trim()
+            .parse()
+            .expect("http.addr must contain a parseable host:port");
+        assert_eq!(
+            parsed, addr,
+            "published address must match the bound listener"
+        );
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bind_http_listener_returns_none_when_port_in_use() {
+        let dir = scratch_dir("http-in-use");
+
+        // Hold a listener on an ephemeral port, then try to bind that exact port.
+        let occupant = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind occupant");
+        let taken = occupant.local_addr().expect("occupant local addr");
+
+        assert!(
+            bind_http_listener(taken, &dir).await.is_none(),
+            "binding an in-use port must return None, not error"
+        );
+        assert!(
+            !http_addr_file_path_for(&dir).exists(),
+            "a failed bind must not publish a stale http.addr"
+        );
+
+        drop(occupant);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

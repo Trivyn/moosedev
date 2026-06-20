@@ -161,6 +161,24 @@ clients are lightweight proxies — they never open the store or load the model.
 When no backend is listening, `--connect` auto-spawns a detached `--serve`
 backend for the same resolved socket unless `MOOSEDEV_NO_AUTOSPAWN=1` is set.
 
+### Web UI
+
+A `--serve` backend also exposes the human-facing web UI on a **loopback-only,
+ephemeral port** by default — the OS picks a free port, so per-project backends
+never collide. The backend writes the resolved address to
+`<MOOSEDEV_DATA_DIR>/http.addr`; discover or open it with:
+
+```bash
+moosedev --status   # is a backend running? where is its web UI?
+moosedev ui         # open the web UI in a browser (auto-spawns a backend if needed)
+moosedev --serve --open   # start the backend and open the UI once it is up
+```
+
+`--status` and `ui` are socket-only — they never open the store. Set
+`MOOSEDEV_HTTP_ADDR` for a stable port or to expose the UI on a network
+interface (e.g. `0.0.0.0:7474`), or `MOOSEDEV_NO_HTTP=1` to disable it. A UI bind
+failure never takes down the MCP backend.
+
 ### Configuration
 
 MOOSEDev is configured via environment variables (this surface is filling in as features land).
@@ -171,6 +189,7 @@ auto-spawned backend inherits the resolved configuration.
 - **LLM endpoint** (for natural-language `query`): an OpenAI-compatible `base_url` / `api_key` / `model` — point it at a local runtime (e.g. Ollama, LM Studio) or a hosted provider. *Local-first by default; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
+- **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.
 - **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live (defaults to the crate's `ontologies/`).
 
 ## Project layout

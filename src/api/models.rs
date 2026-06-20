@@ -13,6 +13,8 @@ pub struct HealthResponse {
     pub version: String,
     pub project_graph: String,
     pub data_dir: String,
+    pub project_name: String,
+    pub project_root: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

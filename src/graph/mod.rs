@@ -46,6 +46,11 @@ const LABEL_PROPERTY_LOCAL: &str = "labelProperty";
 const DEFAULT_LIFECYCLE_STATUS: &str = "proposed";
 const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
+/// Open the persistent Oxigraph store under a MOOSEDev data directory.
+pub fn open_store(data_dir: &Path) -> anyhow::Result<Store> {
+    Store::open(data_dir.join("kg")).map_err(|e| anyhow::anyhow!("open persistent store: {e}"))
+}
+
 /// Architecture-ontology predicate IRIs the capture tool writes, resolved from
 /// the loaded vocabulary at bootstrap by local name (see the `CAPTURE_*_LOCAL`
 /// constants). Resolving up front fails fast if the ontology lacks an expected
@@ -128,8 +133,7 @@ impl AppState {
     pub fn bootstrap(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
-        let store = Store::open(data_dir.join("kg"))
-            .map_err(|e| anyhow::anyhow!("open persistent store: {e}"))?;
+        let store = open_store(data_dir)?;
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
         let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
