@@ -92,6 +92,7 @@ export interface GraphNode {
   id: string;
   label: string;
   type: string;
+  properties?: GraphProperty[];
 }
 
 export interface GraphEdge {
@@ -100,4 +101,11 @@ export interface GraphEdge {
   target: string;
   label: string;
   type: string;
+  predicate?: string;
+  properties?: GraphProperty[];
+}
+
+export interface GraphProperty {
+  predicate: string;
+  values: QueryValue[];
 }

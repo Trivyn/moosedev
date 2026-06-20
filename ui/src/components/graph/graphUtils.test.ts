@@ -33,8 +33,32 @@ describe('queryToGraph', () => {
 
     expect(queryToGraph(result)).toEqual({
       nodes: [
-        { id: 'https://moosedev.dev/kg/A', label: 'kg:A', type: 'uri' },
-        { id: 'https://moosedev.dev/kg/B', label: 'kg:B', type: 'uri' },
+        {
+          id: 'https://moosedev.dev/kg/A',
+          label: 'A label',
+          type: 'projectRecord',
+          properties: [
+            {
+              predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
+              values: [{ type: 'literal', value: 'A label' }],
+            },
+            {
+              predicate: 'http://www.w3.org/2000/01/rdf-schema#seeAlso',
+              values: [{ type: 'uri', value: 'https://moosedev.dev/kg/B' }],
+            },
+          ],
+        },
+        {
+          id: 'https://moosedev.dev/kg/B',
+          label: 'kg:B',
+          type: 'projectRecord',
+          properties: [
+            {
+              predicate: 'urn:moosedev:incomingPredicate',
+              values: [{ type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#seeAlso' }],
+            },
+          ],
+        },
       ],
       edges: [
         {
@@ -43,6 +67,13 @@ describe('queryToGraph', () => {
           target: 'https://moosedev.dev/kg/B',
           label: 'rdfs:seeAlso',
           type: 'rdfs:seeAlso',
+          predicate: 'http://www.w3.org/2000/01/rdf-schema#seeAlso',
+          properties: [
+            {
+              predicate: 'urn:moosedev:predicate',
+              values: [{ type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#seeAlso' }],
+            },
+          ],
         },
       ],
     });
@@ -64,5 +95,20 @@ describe('queryToGraph', () => {
     };
 
     expect(queryToGraph(result).edges).toHaveLength(1);
+  });
+
+  it('classifies MOOSE execution and stage-run resources as trace nodes', () => {
+    const result: QueryResponse = {
+      query_type: 'CONSTRUCT',
+      triples: [
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/session/execution/1' },
+          predicate: { type: 'uri', value: 'https://moosedev.dev/kg/ranStage' },
+          object: { type: 'uri', value: 'https://moosedev.dev/kg/session/stage-run/2' },
+        },
+      ],
+    };
+
+    expect(queryToGraph(result).nodes.map((node) => node.type)).toEqual(['mooseTrace', 'mooseTrace']);
   });
 });

@@ -1,4 +1,4 @@
-import { GraphEdge, GraphNode, QueryResponse, QueryValue } from '../../api/types';
+import { GraphEdge, GraphNode, GraphProperty, QueryResponse, QueryValue } from '../../api/types';
 
 const PREFIXES: Record<string, string> = {
   'http://www.w3.org/1999/02/22-rdf-syntax-ns#': 'rdf:',
@@ -11,12 +11,40 @@ const PREFIXES: Record<string, string> = {
   'https://trivyn.io/ontologies/software/engineering/domain/': 'se:',
 };
 
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
+
 export function shortName(value: string): string {
   for (const [prefix, replacement] of Object.entries(PREFIXES)) {
     if (value.startsWith(prefix)) return value.replace(prefix, replacement);
   }
   const parts = value.split(/[\/#]/).filter(Boolean);
   return parts[parts.length - 1] || value;
+}
+
+function graphNodeType(term: QueryValue, rdfTypes: QueryValue[] = []): string {
+  if (term.type === 'bnode') return 'bnode';
+
+  const values = [term.value, ...rdfTypes.map((value) => value.value)].map((value) => value.toLowerCase());
+  if (values.some((value) => value.includes('/execution/') || value.includes('/stage-run/') || value.includes('executiontrace') || value.includes('stagerun'))) {
+    return 'mooseTrace';
+  }
+  if (term.value.startsWith('https://moosedev.dev/kg/')) return 'projectRecord';
+  if (term.value.includes('www.w3.org/')) return 'schema';
+  if (term.value.includes('trivyn.io/ontologies/software/')) return 'ontology';
+  return term.type;
+}
+
+function setProperty(properties: Map<string, QueryValue[]>, predicate: string, value: QueryValue) {
+  const values = properties.get(predicate) ?? [];
+  values.push(value);
+  properties.set(predicate, values);
+}
+
+function mapProperties(properties: Map<string, QueryValue[]>): GraphProperty[] {
+  return [...properties.entries()]
+    .sort(([left], [right]) => shortName(left).localeCompare(shortName(right)))
+    .map(([predicate, values]) => ({ predicate, values }));
 }
 
 /**
@@ -32,15 +60,46 @@ export function queryToGraph(result?: QueryResponse | null): { nodes: GraphNode[
   if (!result) return { nodes: [], edges: [] };
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
+  const nodeProperties = new Map<string, Map<string, QueryValue[]>>();
+  const nodeTerms = new Map<string, QueryValue>();
+
+  const propertiesFor = (id: string) => {
+    let properties = nodeProperties.get(id);
+    if (!properties) {
+      properties = new Map();
+      nodeProperties.set(id, properties);
+    }
+    return properties;
+  };
 
   const addNode = (term: QueryValue) => {
     if (term.type !== 'uri' && term.type !== 'bnode') return;
-    if (!nodes.has(term.value)) {
-      nodes.set(term.value, {
-        id: term.value,
-        label: shortName(term.value),
-        type: term.type,
-      });
+    nodeTerms.set(term.value, term);
+    const properties = propertiesFor(term.value);
+    const labelValue = properties.get(RDFS_LABEL)?.find((value) => value.type === 'literal')?.value;
+    const rdfTypes = properties.get(RDF_TYPE) ?? [];
+    const existing = nodes.get(term.value);
+    const next = {
+      id: term.value,
+      label: labelValue ?? existing?.label ?? shortName(term.value),
+      type: graphNodeType(term, rdfTypes),
+      properties: mapProperties(properties),
+    };
+    nodes.set(term.value, next);
+  };
+
+  const attachProperty = (subject: QueryValue, predicate: QueryValue, object: QueryValue) => {
+    if (subject.type !== 'uri' && subject.type !== 'bnode') return;
+    setProperty(propertiesFor(subject.value), predicate.value, object);
+    const subjectTerm = nodeTerms.get(subject.value) ?? subject;
+    addNode(subjectTerm);
+  };
+
+  const addTriple = (subject: QueryValue, predicate: QueryValue, object: QueryValue, index: number) => {
+    attachProperty(subject, predicate, object);
+    if (object.type === 'uri' || object.type === 'bnode') {
+      attachProperty(object, { type: 'uri', value: 'urn:moosedev:incomingPredicate' }, predicate);
+      addEdge(subject, predicate, object, index);
     }
   };
 
@@ -57,11 +116,13 @@ export function queryToGraph(result?: QueryResponse | null): { nodes: GraphNode[
       target: object.value,
       label: shortName(predicate.value),
       type: shortName(predicate.value),
+      predicate: predicate.value,
+      properties: [{ predicate: 'urn:moosedev:predicate', values: [predicate] }],
     });
   };
 
   if (result.triples) {
-    result.triples.forEach((triple, index) => addEdge(triple.subject, triple.predicate, triple.object, index));
+    result.triples.forEach((triple, index) => addTriple(triple.subject, triple.predicate, triple.object, index));
   }
 
   const bindingTriple = (binding: Record<string, QueryValue>) => ({
@@ -72,7 +133,7 @@ export function queryToGraph(result?: QueryResponse | null): { nodes: GraphNode[
 
   result.results?.bindings.forEach((binding, index) => {
     const { subject, predicate, object } = bindingTriple(binding);
-    if (subject && predicate && object) addEdge(subject, predicate, object, index);
+    if (subject && predicate && object) addTriple(subject, predicate, object, index);
   });
 
   return { nodes: [...nodes.values()], edges: [...edges.values()] };

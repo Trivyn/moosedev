@@ -1,16 +1,24 @@
-import { useEffect, useRef } from 'react';
-import { Box, Typography } from '@mui/material';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Divider, Menu, MenuItem, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
 import fcose from 'cytoscape-fcose';
 import { GraphEdge, GraphNode } from '../../api/types';
+import GraphDetailsPanel from './GraphDetailsPanel';
 
 cytoscape.use(dagre);
 cytoscape.use(fcose);
 
 // Cytoscape's default wheel zoom is conservative; this keeps graph exploration responsive.
 const WHEEL_SENSITIVITY = 0.45;
+
+interface GraphMenuState {
+  x: number;
+  y: number;
+  targetType: 'node' | 'edge' | 'core';
+  targetId?: string;
+}
 
 interface CytoscapeGraphProps {
   nodes: GraphNode[];
@@ -21,6 +29,13 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
   const theme = useTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [menu, setMenu] = useState<GraphMenuState | null>(null);
+  const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const edgeById = useMemo(() => new Map(edges.map((edge) => [edge.id, edge])), [edges]);
+  const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
+  const selectedEdge = selectedEdgeId ? edgeById.get(selectedEdgeId) : null;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -30,6 +45,7 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
           id: node.id,
           label: node.label,
           type: node.type,
+          properties: node.properties ?? [],
         },
       })),
       ...edges.map((edge) => ({
@@ -39,6 +55,8 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
           target: edge.target,
           label: edge.label,
           type: edge.type,
+          predicate: edge.predicate,
+          properties: edge.properties ?? [],
         },
       })),
     ];
@@ -50,16 +68,64 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
         {
           selector: 'node',
           style: {
-            'background-color': theme.palette.primary.main,
+            'background-color': theme.palette.grey[500],
             label: 'data(label)',
             color: theme.palette.text.primary,
-            'font-size': '10px',
+            'font-size': '11px',
+            'min-zoomed-font-size': 8,
             'text-wrap': 'wrap',
             'text-max-width': '120px',
             'text-valign': 'bottom',
             'text-margin-y': 6,
-            width: 18,
-            height: 18,
+            'text-outline-width': theme.palette.mode === 'dark' ? 2 : 0,
+            'text-outline-color': theme.palette.background.default,
+            width: 28,
+            height: 28,
+            shape: 'ellipse',
+          },
+        },
+        {
+          selector: 'node[type="projectRecord"]',
+          style: {
+            'background-color': theme.palette.primary.main,
+            shape: 'round-rectangle',
+            width: 34,
+            height: 28,
+          },
+        },
+        {
+          selector: 'node[type="mooseTrace"]',
+          style: {
+            'background-color': theme.palette.success.main,
+            shape: 'tag',
+            width: 42,
+            height: 30,
+          },
+        },
+        {
+          selector: 'node[type="ontology"], node[type="schema"]',
+          style: {
+            'background-color': theme.palette.info.main,
+            shape: 'diamond',
+            width: 34,
+            height: 34,
+          },
+        },
+        {
+          selector: 'node[type="bnode"]',
+          style: {
+            'background-color': theme.palette.warning.main,
+            shape: 'rectangle',
+          },
+        },
+        {
+          selector: 'node.user-selected, edge.user-selected',
+          style: {
+            'border-width': 4,
+            'border-color': theme.palette.secondary.main,
+            'overlay-color': theme.palette.secondary.main,
+            'overlay-opacity': 0.18,
+            'overlay-padding': 8,
           },
         },
         {
@@ -90,11 +156,112 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
       animate: false,
     } as cytoscape.LayoutOptions).run();
 
+    const selectElement = (element: cytoscape.NodeSingular | cytoscape.EdgeSingular) => {
+      cy.elements().removeClass('user-selected');
+      element.addClass('user-selected');
+      setMenu(null);
+      if (element.isNode()) {
+        setSelectedNodeId(element.id());
+        setSelectedEdgeId(null);
+      } else if (element.isEdge()) {
+        setSelectedEdgeId(element.id());
+        setSelectedNodeId(null);
+      }
+    };
+
+    const openMenu = (event: cytoscape.EventObject, targetType: GraphMenuState['targetType']) => {
+      event.preventDefault();
+      const position = event.renderedPosition ?? { x: 0, y: 0 };
+      const rect = containerRef.current?.getBoundingClientRect();
+      setMenu({
+        x: (rect?.left ?? 0) + position.x,
+        y: (rect?.top ?? 0) + position.y,
+        targetType,
+        targetId: targetType === 'core' ? undefined : event.target.id(),
+      });
+    };
+
+    cy.on('tap', 'node, edge', (event) => selectElement(event.target));
+    cy.on('tap', (event) => {
+      if (event.target === cy) setMenu(null);
+    });
+    cy.on('cxttap', 'node', (event) => openMenu(event, 'node'));
+    cy.on('cxttap', 'edge', (event) => openMenu(event, 'edge'));
+    cy.on('cxttap', (event) => {
+      if (event.target === cy) openMenu(event, 'core');
+    });
+
     return () => {
       cy.destroy();
       cyRef.current = null;
     };
   }, [nodes, edges, theme]);
+
+  useEffect(() => {
+    setSelectedNodeId((id) => (id && nodeById.has(id) ? id : null));
+    setSelectedEdgeId((id) => (id && edgeById.has(id) ? id : null));
+  }, [edgeById, nodeById]);
+
+  const closeMenu = () => setMenu(null);
+
+  const runLayout = (name: cytoscape.LayoutOptions['name']) => {
+    closeMenu();
+    cyRef.current
+      ?.layout({
+        name,
+        fit: true,
+        padding: 35,
+        animate: false,
+      } as cytoscape.LayoutOptions)
+      .run();
+  };
+
+  const showAll = () => {
+    closeMenu();
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.elements().style('display', 'element');
+    cy.elements().removeClass('user-selected');
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    cy.fit(undefined, 35);
+  };
+
+  const hideSelected = () => {
+    closeMenu();
+    if (!menu?.targetId) return;
+    const element = cyRef.current?.getElementById(menu.targetId);
+    element?.style('display', 'none');
+  };
+
+  const isolateSelectedNode = () => {
+    closeMenu();
+    if (!menu?.targetId || menu.targetType !== 'node') return;
+    const cy = cyRef.current;
+    const node = cy?.getElementById(menu.targetId);
+    if (!cy || !node) return;
+    const visible = node.closedNeighborhood();
+    cy.elements().style('display', 'none');
+    visible.style('display', 'element');
+    cy.fit(visible, 35);
+  };
+
+  const hideHighDegreeNodes = () => {
+    closeMenu();
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.nodes().forEach((node) => {
+      if (node.degree() > 10) {
+        node.style('display', 'none');
+        node.connectedEdges().style('display', 'none');
+      }
+    });
+  };
+
+  const fitGraph = () => {
+    closeMenu();
+    cyRef.current?.fit(undefined, 35);
+  };
 
   if (nodes.length === 0) {
     return (
@@ -104,5 +271,33 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
     );
   }
 
-  return <Box ref={containerRef} sx={{ height: '100%', width: '100%' }} />;
+  return (
+    <Box sx={{ height: '100%', width: '100%', position: 'relative' }}>
+      <Box ref={containerRef} sx={{ height: '100%', width: '100%' }} />
+      <GraphDetailsPanel node={selectedNode} edge={selectedEdge} onClose={() => {
+        cyRef.current?.elements().removeClass('user-selected');
+        setSelectedNodeId(null);
+        setSelectedEdgeId(null);
+      }} />
+      <Menu
+        open={Boolean(menu)}
+        onClose={closeMenu}
+        anchorReference="anchorPosition"
+        anchorPosition={menu ? { top: menu.y, left: menu.x } : undefined}
+      >
+        {menu?.targetType === 'node' && <MenuItem onClick={isolateSelectedNode}>Isolate Node</MenuItem>}
+        {menu?.targetType !== 'core' && <MenuItem onClick={hideSelected}>Hide Selected</MenuItem>}
+        {(menu?.targetType === 'node' || menu?.targetType === 'edge') && <Divider />}
+        <MenuItem onClick={showAll}>Show All</MenuItem>
+        <MenuItem onClick={hideHighDegreeNodes}>Hide High-Degree Nodes</MenuItem>
+        <Divider />
+        <MenuItem onClick={fitGraph}>Fit Graph</MenuItem>
+        <MenuItem onClick={() => runLayout(nodes.length > 80 ? 'fcose' : 'dagre')}>Auto Layout</MenuItem>
+        <MenuItem onClick={() => runLayout('fcose')}>CoSE Layout</MenuItem>
+        <MenuItem onClick={() => runLayout('dagre')}>Hierarchy Layout</MenuItem>
+        <MenuItem onClick={() => runLayout('circle')}>Circle Layout</MenuItem>
+        <MenuItem onClick={() => runLayout('grid')}>Grid Layout</MenuItem>
+      </Menu>
+    </Box>
+  );
 }
