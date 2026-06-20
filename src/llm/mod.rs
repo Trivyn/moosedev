@@ -100,7 +100,9 @@ impl OpenAiCompatClient {
             self.usage.prompt.fetch_add(prompt, Ordering::Relaxed);
         }
         if completion > 0 {
-            self.usage.completion.fetch_add(completion, Ordering::Relaxed);
+            self.usage
+                .completion
+                .fetch_add(completion, Ordering::Relaxed);
         }
     }
 }

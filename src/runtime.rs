@@ -23,6 +23,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,8 +31,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::{transport::stdio, ServiceExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 
+use crate::api;
 use crate::graph::AppState;
 use crate::mcp::MooseDevServer;
 
@@ -55,11 +57,20 @@ const MAX_SOCKET_PATH_LEN: usize = 100;
 /// write lock, so exactly one process (the stdio server or the `--serve`
 /// backend) does this per data dir; `--connect` clients never call it.
 pub async fn build_server(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<MooseDevServer> {
+    Ok(MooseDevServer::new(
+        build_state(data_dir, ontology_dir).await?,
+    ))
+}
+
+/// Bootstrap durable state and enable every shared-backend subsystem that needs
+/// async setup (currently the MOOSE chat session DB for the web UI).
+pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<Arc<AppState>> {
     tracing::info!(
         "MOOSEDev: bootstrapping state (data dir: {})…",
         data_dir.display()
     );
     let mut state = AppState::bootstrap(data_dir, ontology_dir)?;
+    state.enable_chat_sessions().await?;
     // Build the alignment index (loads the embedding model). Non-fatal by design:
     // if the model can't load (e.g. offline with no bundled weights), the
     // alignment tools report it per call, but the rest of the server (capture,
@@ -70,7 +81,46 @@ pub async fn build_server(data_dir: &Path, ontology_dir: &Path) -> anyhow::Resul
             "alignment index unavailable — align_concepts/suggest_mappings disabled: {e}"
         );
     }
-    Ok(MooseDevServer::new(Arc::new(state)))
+    Ok(Arc::new(state))
+}
+
+/// Start the local human-facing HTTP API/UI unless explicitly disabled.
+pub async fn spawn_http_if_enabled(
+    state: Arc<AppState>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<anyhow::Result<()>>>> {
+    if http_disabled() {
+        tracing::info!("MOOSEDev HTTP UI disabled by MOOSEDEV_NO_HTTP");
+        return Ok(None);
+    }
+    let addr = http_addr()?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("bind HTTP UI on {addr}: {e}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| anyhow::anyhow!("read HTTP UI local address: {e}"))?;
+    tracing::info!("MOOSEDev web UI serving at http://{local_addr}");
+    // HTTP and MCP share the same Arc<AppState>. That is the important safety
+    // property: only the `--serve` backend opens RocksDB, so the UI cannot create
+    // a second writer beside the MCP server.
+    let app = api::routes::build_routes(state);
+    Ok(Some(tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTP UI server failed: {e}"))
+    })))
+}
+
+fn http_disabled() -> bool {
+    std::env::var_os("MOOSEDEV_NO_HTTP")
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+fn http_addr() -> anyhow::Result<SocketAddr> {
+    let raw = std::env::var("MOOSEDEV_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:7474".to_string());
+    raw.parse()
+        .map_err(|e| anyhow::anyhow!("parse MOOSEDEV_HTTP_ADDR={raw:?}: {e}"))
 }
 
 /// Derive the rendezvous socket path for a data dir. Both `--serve` and
@@ -289,4 +339,77 @@ pub async fn connect_unix(socket: &Path, data_dir: &Path) -> anyhow::Result<()> 
         .map_err(|e| anyhow::anyhow!("proxy relay failed: {e}"))?;
     tracing::info!("MOOSEDev proxy: connection closed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn http_addr_defaults_to_loopback() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::remove("MOOSEDEV_HTTP_ADDR");
+
+        assert_eq!(http_addr().unwrap().to_string(), "127.0.0.1:7474");
+    }
+
+    #[test]
+    fn http_addr_accepts_configured_socket_addr() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::set("MOOSEDEV_HTTP_ADDR", "0.0.0.0:7475");
+
+        assert_eq!(http_addr().unwrap().to_string(), "0.0.0.0:7475");
+    }
+
+    #[test]
+    fn http_disabled_treats_empty_and_zero_as_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let _restore = EnvRestore::set("MOOSEDEV_NO_HTTP", "");
+        assert!(!http_disabled());
+        drop(_restore);
+
+        let _restore = EnvRestore::set("MOOSEDEV_NO_HTTP", "0");
+        assert!(!http_disabled());
+    }
+
+    #[test]
+    fn http_disabled_accepts_any_nonzero_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::set("MOOSEDEV_NO_HTTP", "1");
+
+        assert!(http_disabled());
+    }
 }
