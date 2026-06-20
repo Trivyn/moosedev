@@ -98,6 +98,18 @@ cargo build --release           # add --offline if the oxigraph fork is already 
 
 The default build bundles a CPU embedding backend (`candle-cpu`) and the Arctic-Embed-S model used by the alignment engine.
 
+To embed the human-facing web UI in the Rust binary, build the generated frontend assets first:
+
+```sh
+cd ui
+npm install
+npm run build
+cd ..
+cargo build --release --features embedded-frontend
+```
+
+`ui/dist/` is generated output from Vite and is intentionally not tracked in Git.
+
 ### Run as an MCP server
 
 MOOSEDev speaks MCP over **stdio**. Point an MCP client at the binary. For example, in an `.mcp.json` (or your Claude Desktop config):

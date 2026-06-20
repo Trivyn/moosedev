@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Box, Typography } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import cytoscape from 'cytoscape';
 import dagre from 'cytoscape-dagre';
 import fcose from 'cytoscape-fcose';
@@ -8,12 +9,16 @@ import { GraphEdge, GraphNode } from '../../api/types';
 cytoscape.use(dagre);
 cytoscape.use(fcose);
 
+// Cytoscape's default wheel zoom is conservative; this keeps graph exploration responsive.
+const WHEEL_SENSITIVITY = 0.45;
+
 interface CytoscapeGraphProps {
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
 
 export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
+  const theme = useTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
 
@@ -45,9 +50,9 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
         {
           selector: 'node',
           style: {
-            'background-color': '#1f6f5b',
+            'background-color': theme.palette.primary.main,
             label: 'data(label)',
-            color: '#1f2933',
+            color: theme.palette.text.primary,
             'font-size': '10px',
             'text-wrap': 'wrap',
             'text-max-width': '120px',
@@ -61,20 +66,20 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
           selector: 'edge',
           style: {
             width: 1.5,
-            'line-color': '#8a9a9b',
-            'target-arrow-color': '#8a9a9b',
+            'line-color': theme.palette.text.disabled,
+            'target-arrow-color': theme.palette.text.disabled,
             'target-arrow-shape': 'triangle',
             'curve-style': 'bezier',
             label: 'data(label)',
             'font-size': '9px',
-            color: '#475569',
-            'text-background-color': '#ffffff',
+            color: theme.palette.text.secondary,
+            'text-background-color': theme.palette.background.default,
             'text-background-opacity': 0.8,
             'text-background-padding': '2px',
           },
         },
       ],
-      wheelSensitivity: 0.18,
+      wheelSensitivity: WHEEL_SENSITIVITY,
     });
     cyRef.current = cy;
     const layoutName = nodes.length > 80 ? 'fcose' : 'dagre';
@@ -89,7 +94,7 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
       cy.destroy();
       cyRef.current = null;
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, theme]);
 
   if (nodes.length === 0) {
     return (

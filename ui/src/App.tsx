@@ -7,8 +7,14 @@ import ChatPage from './pages/ChatPage';
 import SparqlPage from './pages/SparqlPage';
 import { api } from './api/client';
 import { HealthResponse } from './api/types';
+import { MooseThemeMode } from './styles/theme';
 
-export default function App() {
+interface AppProps {
+  themeMode: MooseThemeMode;
+  onToggleThemeMode: () => void;
+}
+
+export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   const [page, setPage] = useState<PageKey>('chat');
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +32,14 @@ export default function App() {
   ];
 
   return (
-    <AppShell page={page} onPageChange={setPage} nav={nav} health={health}>
+    <AppShell
+      page={page}
+      onPageChange={setPage}
+      nav={nav}
+      health={health}
+      themeMode={themeMode}
+      onToggleThemeMode={onToggleThemeMode}
+    >
       {error && (
         <Alert severity="error" sx={{ m: 2 }}>
           {error}

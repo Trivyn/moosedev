@@ -1,6 +1,9 @@
 import { ReactNode } from 'react';
-import { Box, ButtonBase, Divider, Stack, Typography } from '@mui/material';
+import { alpha, Box, ButtonBase, Divider, IconButton, Stack, Tooltip, Typography } from '@mui/material';
+import DarkModeIcon from '@mui/icons-material/DarkMode';
+import LightModeIcon from '@mui/icons-material/LightMode';
 import { HealthResponse } from '../../api/types';
+import { MooseThemeMode } from '../../styles/theme';
 
 export type PageKey = 'chat' | 'sparql';
 
@@ -10,9 +13,19 @@ interface AppShellProps {
   onPageChange: (page: PageKey) => void;
   nav: Array<{ key: PageKey; label: string; icon: ReactNode }>;
   health: HealthResponse | null;
+  themeMode: MooseThemeMode;
+  onToggleThemeMode: () => void;
 }
 
-export default function AppShell({ children, page, onPageChange, nav, health }: AppShellProps) {
+export default function AppShell({
+  children,
+  page,
+  onPageChange,
+  nav,
+  health,
+  themeMode,
+  onToggleThemeMode,
+}: AppShellProps) {
   return (
     <Box sx={{ height: '100%', display: 'flex', overflow: 'hidden' }}>
       <Box
@@ -27,11 +40,18 @@ export default function AppShell({ children, page, onPageChange, nav, health }: 
           flexDirection: 'column',
         }}
       >
-        <Box sx={{ px: 2, py: 1.5 }}>
-          <Typography variant="h6">MOOSEDev</Typography>
-          <Typography variant="caption" color="text.secondary">
-            Project knowledge graph
-          </Typography>
+        <Box sx={{ px: 2, py: 1.5, display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+          <Box sx={{ minWidth: 0, flex: 1 }}>
+            <Typography variant="h6">MOOSEDev</Typography>
+            <Typography variant="caption" color="text.secondary">
+              Project knowledge graph
+            </Typography>
+          </Box>
+          <Tooltip title={themeMode === 'dark' ? 'Use light mode' : 'Use dark mode'}>
+            <IconButton size="small" onClick={onToggleThemeMode} aria-label="Toggle color mode">
+              {themeMode === 'dark' ? <LightModeIcon fontSize="small" /> : <DarkModeIcon fontSize="small" />}
+            </IconButton>
+          </Tooltip>
         </Box>
         <Divider />
         <Stack sx={{ p: 1 }} spacing={0.5}>
@@ -46,8 +66,8 @@ export default function AppShell({ children, page, onPageChange, nav, health }: 
                 py: 1,
                 borderRadius: 1,
                 color: page === item.key ? 'primary.main' : 'text.primary',
-                bgcolor: page === item.key ? 'rgba(31, 111, 91, 0.10)' : 'transparent',
-                '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.04)' },
+                bgcolor: page === item.key ? (theme) => alpha(theme.palette.primary.main, 0.12) : 'transparent',
+                '&:hover': { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08) },
               }}
             >
               {item.icon}
