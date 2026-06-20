@@ -6,6 +6,7 @@
 //! makes every module reachable from integration tests in `tests/`.
 
 pub mod alignment;
+pub mod api;
 pub mod graph;
 pub mod llm;
 pub mod mcp;

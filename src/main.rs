@@ -153,7 +153,9 @@ async fn main() -> anyhow::Result<()> {
             // would otherwise fail first with the raw RocksDB lock error after a
             // wasted model load. This gives a clear message and exits fast.
             runtime::ensure_no_live_backend(&socket).await?;
-            let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
+            let state = runtime::build_state(&data_dir, &ontology_dir()).await?;
+            let server = moosedev::mcp::MooseDevServer::new(state.clone());
+            let _http = runtime::spawn_http_if_enabled(state).await?;
             let pidfile = runtime::pidfile_path_for(&data_dir);
             std::fs::write(&pidfile, format!("{}\n", std::process::id()))
                 .map_err(|e| anyhow::anyhow!("write pidfile {}: {e}", pidfile.display()))?;

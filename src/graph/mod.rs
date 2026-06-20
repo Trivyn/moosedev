@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use moose::chat::session_db::SessionDb;
 use moose::embeddings::vec_store::VecStore;
 use moose::entity_index::EntityIndexCache;
 use moose::kg::{
@@ -17,7 +18,7 @@ use moose::kg::{
 };
 use moose::moose_ontology::MooseOntologyCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
-use moose::traits::{EngineConfig, LlmClient};
+use moose::traits::{ChatConfig, EngineConfig, LlmClient};
 use moose::types::{
     CompactVocabulary, HybridConfig, LlmAssistLevel, PipelineTimings, VocabularyEntry, WalkBudgets,
 };
@@ -111,6 +112,9 @@ pub struct AppState {
     pub llm: OpenAiCompatClient,
     pub ontology_resolver: MooseDevOntologyResolver,
     pub model: String,
+    /// Durable multi-turn MOOSE chat sessions, enabled by the shared backend for
+    /// the human web UI.
+    pub session_db: Option<Arc<SessionDb>>,
     /// Data dir (the persistent KG store and the built vector DB live here).
     pub data_dir: PathBuf,
 }
@@ -161,9 +165,48 @@ impl AppState {
             llm,
             ontology_resolver,
             model: llm_cfg.model,
+            session_db: None,
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
         })
+    }
+
+    /// Enable MOOSE's real multi-turn chat layer for host surfaces that need it
+    /// (the web UI). Kept separate from `bootstrap` so existing synchronous tests
+    /// and MCP-only paths do not need an async constructor.
+    pub async fn enable_chat_sessions(&mut self) -> anyhow::Result<()> {
+        let db_path = self.data_dir.join("moose_sessions.db");
+        let session_db_url = format!("sqlite://{}", db_path.display());
+        // MOOSE session state is intentionally separate from the project KG:
+        // transcripts/focus stacks are UI conversation state, while durable
+        // decisions/lessons/constraints remain typed records in Oxigraph.
+        let session_db = SessionDb::new(&session_db_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("open MOOSE chat session DB: {e}"))?;
+        session_db
+            .migrate()
+            .await
+            .map_err(|e| anyhow::anyhow!("migrate MOOSE chat session DB: {e}"))?;
+
+        self.engine_config.chat = Some(ChatConfig {
+            session_db_url,
+            session_ttl_days: 7,
+            max_turns: 100,
+            salience_decay: 0.7,
+            focus_stack_max: 20,
+            subgraph_quad_cap: 20_000,
+            symbolic_coref_threshold: 0.5,
+            // Teach MOOSE chat's slash-command/search layer which project-record
+            // literals matter for memory recall. This mirrors get_relevant_context
+            // without adding an A-box vector index.
+            search_text_fields: Some(vec![
+                (moose::RDFS_LABEL.to_string(), 2.0),
+                (self.capture.description.clone(), 1.0),
+            ]),
+            clarification: Default::default(),
+        });
+        self.session_db = Some(Arc::new(session_db));
+        Ok(())
     }
 
     /// Build the ontology embedding vector store (MOOSE's L2 alignment tier) from

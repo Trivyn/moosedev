@@ -1,0 +1,19 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+.yasqe-container,
+.yasqe-container .yasqe,
+.yasqe-container .CodeMirror {
+  height: 100%;
+}
+
+.yasqe-container .CodeMirror {
+  font-size: 12px;
+}

@@ -647,6 +647,9 @@ mod tests {
     #[test]
     fn resolve_when_rejects_malformed() {
         let err = resolve_when(&Some("not-a-date".to_string())).unwrap_err();
-        assert!(err.contains("RFC3339"), "error names the expected format: {err}");
+        assert!(
+            err.contains("RFC3339"),
+            "error names the expected format: {err}"
+        );
     }
 }
