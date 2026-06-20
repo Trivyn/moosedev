@@ -64,10 +64,14 @@ export function queryToGraph(result?: QueryResponse | null): { nodes: GraphNode[
     result.triples.forEach((triple, index) => addEdge(triple.subject, triple.predicate, triple.object, index));
   }
 
+  const bindingTriple = (binding: Record<string, QueryValue>) => ({
+    subject: binding.subject ?? binding.s,
+    predicate: binding.predicate ?? binding.p,
+    object: binding.object ?? binding.o,
+  });
+
   result.results?.bindings.forEach((binding, index) => {
-    const subject = binding.subject;
-    const predicate = binding.predicate;
-    const object = binding.object;
+    const { subject, predicate, object } = bindingTriple(binding);
     if (subject && predicate && object) addEdge(subject, predicate, object, index);
   });
 

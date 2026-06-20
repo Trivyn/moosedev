@@ -47,4 +47,22 @@ describe('queryToGraph', () => {
       ],
     });
   });
+
+  it('also understands conventional s/p/o bindings', () => {
+    const result: QueryResponse = {
+      query_type: 'SELECT',
+      head: { vars: ['s', 'p', 'o'] },
+      results: {
+        bindings: [
+          {
+            s: { type: 'uri', value: 'https://moosedev.dev/kg/A' },
+            p: { type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#seeAlso' },
+            o: { type: 'uri', value: 'https://moosedev.dev/kg/B' },
+          },
+        ],
+      },
+    };
+
+    expect(queryToGraph(result).edges).toHaveLength(1);
+  });
 });
