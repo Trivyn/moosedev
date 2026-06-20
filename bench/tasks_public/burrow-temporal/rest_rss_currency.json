@@ -1,0 +1,12 @@
+{
+  "type": "context_qa",
+  "materialize_tree": false,
+  "prompt": "In THIS project (burrow), which service types does Phase 1 routine execution CURRENTLY register in buildRegistry — only REST, or REST and RSS? Answer in one sentence.",
+  "memory_topic": "phase 1 routine service registry REST RSS buildRegistry current behavior",
+  "ground_truth": {
+    "must_include_any": [["rss"]],
+    "stale_answer_markers": ["rest services only", "rest only", "only rest", "rest-only", "mcp not implemented", "only registers rest"],
+    "decision_title": ""
+  },
+  "_note": "Currency pair: 'Phase 1 registers REST services only; MCP not implemented' (superseded, commit pre-14cf326e) -> 'registers REST and RSS' (accepted, commit 14cf326e). Verified at burrow HEAD d641966: cmd/gd/cmd_routines.go imports pkg/rss and buildRegistry has `case \"rss\"` -> NewRSSService. Current answer must name RSS; currency-blind B1 may serve the stale REST-only constraint."
+}

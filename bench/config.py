@@ -21,7 +21,7 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "lmstudio/qwen3.6-35b-a3b-mlx")   # 
 
 VENV_PY = BENCH / ".venv" / "bin" / "python"
 
-ARMS = ["B0", "B1-md", "B1-rag", "B2"]
+ARMS = ["B0", "B1-md", "B1-rag", "B1-notes", "B2"]  # B1-notes = the team's REAL accumulated docs (ecological)
 CELL_TIMEOUT = int(os.environ.get("BENCH_CELL_TIMEOUT", "600"))  # per-cell opencode wall-clock cap (s)
 KEEP_WORK = bool(os.environ.get("BENCH_KEEP_WORK"))  # keep throwaway per-run workdirs (debug); default: delete
 
@@ -66,6 +66,24 @@ CORPORA = {
         # faithful append-only baseline. Q&A-only (materialize_tree:false on its tasks).
         "data_dir": str(Path.home() / ".moosedev-stores" / "moosedev-temporal"),
         "repo": str(REPO),
+    },
+    "burrow-temporal": {
+        # The temporally-bootstrapped burrow graph (gpt-5.4-mini/codex capture; real 2026-02 timeline
+        # + 4 supersede chains). Second-corpus currency A/B, same shape as moosedev-temporal: B2 serves
+        # CURRENT only; B1 is the currency-blind free-text export (--no-status). Q&A-only.
+        "data_dir": str(Path.home() / ".moosedev-stores" / "burrow-temporal"),
+        "repo": str(Path.home() / "code" / "burrow"),
+    },
+    "trivyn-temporal": {
+        # The temporally-bootstrapped trivyn graph (gpt-5.4-mini/codex; real 2025-07..2026-06 timeline,
+        # 416 records, 42 supersede chains incl. ~20 rank-inverted). At-scale currency A/B. PRIVATE:
+        # graph/export/tasks/runs stay under BENCH_HOME, never the open repo (records ref trivyn code).
+        "data_dir": str(Path.home() / ".moosedev-stores" / "trivyn-temporal"),
+        "repo": str(BENCH_HOME / "trivyn"),
+        "private": True,
+        # B1-notes ecological free-text memory = the team's REAL accumulated docs (NOT the graph export).
+        # tasks/*.md = lessons.md (2263 lines) + topical guides; excludes the benchmark *.json specs.
+        "notes_paths": ["tasks/*.md", "CONVENTIONS.md"],
     },
 }
 

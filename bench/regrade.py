@@ -83,8 +83,11 @@ def regrade_all() -> list[dict]:
 
 
 def currency_summary(rows: list[dict], as_md: bool = False) -> None:
-    """Currency = the answer asserts the CURRENT state, measured by full coverage of the
-    must_include_any markers (robust); `stale` is shown as a secondary, non-authoritative hint."""
+    """Currency (STRICT) = the answer asserts the CURRENT state (full must_include_any coverage)
+    AND does NOT assert the superseded state (no negation-aware `stale` marker). The AND-not-stale
+    guard is essential: coverage alone is fooled by a NEGATED current marker ("not routing through
+    MOOSE") and by binary-choice prompt echoes — the trivyn local_embeddings B1-notes case scored
+    coverage 1.0 while actually serving the stale Candle answer (Lesson 046bc2d8/9fc21dc0)."""
     cur = [r for r in rows if r["task_id"].endswith("currency")]
     by = collections.defaultdict(lambda: collections.defaultdict(list))
     for r in cur:
@@ -98,7 +101,8 @@ def currency_summary(rows: list[dict], as_md: bool = False) -> None:
         for arm in sorted(by[task]):
             rs = by[task][arm]
             n = len(rs)
-            current = sum(1 for r in rs if (r["metrics"] or {}).get("coverage") == 1.0)
+            current = sum(1 for r in rs if (r["metrics"] or {}).get("coverage") == 1.0
+                           and not (r["metrics"] or {}).get("stale"))  # STRICT: current AND not-stale
             mean = sum(r["score"] for r in rs) / n
             staleflag = sum(1 for r in rs if (r["metrics"] or {}).get("stale"))
             pct = round(100 * current / n)

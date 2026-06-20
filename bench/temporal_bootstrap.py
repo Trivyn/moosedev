@@ -243,10 +243,42 @@ def run_capture_agent(ep: Episode, diff: str, repo_name: str, mcp_config: str, m
     return (r.stdout or "")[-600:] + (f"\n[stderr] {r.stderr[-300:]}" if r.returncode != 0 else "")
 
 
+def _codex_moosedev_overrides(data_dir: str) -> list:
+    """codex `-c` flags attaching the moosedev MCP via a thin --connect proxy to the running serve
+    (mirrors run.py's B2 override; the serve owns the store + NLQ model, so the proxy needs only the
+    data dir + NO_AUTOSPAWN)."""
+    env = {"MOOSEDEV_DATA_DIR": data_dir, "MOOSEDEV_ONTOLOGY_DIR": config.ONTOLOGY_DIR,
+           "MOOSEDEV_NO_AUTOSPAWN": "1"}
+    toml_args = '["--connect"]'
+    toml_env = "{ " + ", ".join(f'{k} = "{v}"' for k, v in env.items()) + " }"
+    return ["-c", f'mcp_servers.moosedev.command="{config.MOOSEDEV_BIN}"',
+            "-c", f"mcp_servers.moosedev.args={toml_args}",
+            "-c", f"mcp_servers.moosedev.env={toml_env}"]
+
+
+def run_capture_agent_codex(ep: Episode, diff: str, repo_name: str, data_dir: str, model: str) -> str:
+    """Capture via the codex CLI (gpt-5.x) instead of claude -p. Codex's tool-calling is the more
+    reliable/cheaper driver for the recall->supersede sequence (Lesson c0aa3509); Haiku drops
+    supersessions and Sonnet is slow/expensive. The episode prompt + deterministic stamping are
+    backend-agnostic — only the harness invocation differs."""
+    final_file = Path(config.TB_SNAPSHOT_ROOT).parent / "temporal-codex-final.txt"
+    cmd = ["codex", "exec", "-m", model, "--dangerously-bypass-approvals-and-sandbox",
+           "--skip-git-repo-check", "--json", "-o", str(final_file)]
+    cmd += _codex_moosedev_overrides(data_dir)
+    cmd += [episode_prompt(ep, diff, repo_name)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=str(REPO_ROOT))
+    except subprocess.TimeoutExpired:
+        return "[capture agent TIMED OUT after 900s]"
+    tail = final_file.read_text()[-600:] if final_file.exists() else (r.stdout or "")[-600:]
+    return tail + (f"\n[stderr] {r.stderr[-300:]}" if r.returncode != 0 else "")
+
+
 # --- run loop ----------------------------------------------------------------------------------
 
 
-def run(repo, data_dir, trunk_override, limit, dry_run, resume, model, milestone_every):
+def run(repo, data_dir, trunk_override, limit, dry_run, resume, model, milestone_every,
+        backend="claude"):
     trunk = detect_trunk(repo, trunk_override)
     repo_name = Path(repo).name
     episodes = enumerate_episodes(repo, trunk)
@@ -272,7 +304,7 @@ def run(repo, data_dir, trunk_override, limit, dry_run, resume, model, milestone
         print(f"\nDRY RUN: would send {sent}, skip {skipped} (of {len(episodes)})", flush=True)
         return
 
-    mcp_config = write_mcp_config(data_dir)
+    mcp_config = write_mcp_config(data_dir) if backend == "claude" else None
     serve = start_serve(data_dir)
     applied = sent = skipped = 0
     try:
@@ -292,7 +324,10 @@ def run(repo, data_dir, trunk_override, limit, dry_run, resume, model, milestone
             Path(CAPTURE_TS_FILE).write_text(ep.date)
             Path(CAPTURE_AUTHOR_FILE).write_text(f"{ep.author} <{ep.email}>")
             before = count_records(data_dir)
-            run_capture_agent(ep, diff, repo_name, mcp_config, model)
+            if backend == "codex":
+                run_capture_agent_codex(ep, diff, repo_name, data_dir, model)
+            else:
+                run_capture_agent(ep, diff, repo_name, mcp_config, model)
             new = count_records(data_dir) - before
             applied += 1
             applied_log.open("a").write(ep.sha + "\n")
@@ -320,10 +355,15 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="only the first N episodes")
     ap.add_argument("--dry-run", action="store_true", help="enumerate + triage only, no capture")
     ap.add_argument("--resume", action="store_true", help="skip episodes in temporal-applied.log")
-    ap.add_argument("--model", default=config.TB_CAPTURE_MODEL, help="claude -p model")
+    ap.add_argument("--backend", default="claude", choices=["claude", "codex"],
+                    help="capture harness: claude -p (Sonnet) or codex CLI (gpt-5.x)")
+    ap.add_argument("--model", default=None,
+                    help="capture model; default sonnet (claude) / gpt-5.4-mini (codex)")
     ap.add_argument("--milestone-every", type=int, default=0, help="snapshot every K applied episodes")
     a = ap.parse_args()
-    run(a.repo, a.data_dir, a.trunk, a.limit, a.dry_run, a.resume, a.model, a.milestone_every)
+    model = a.model or (config.TB_CAPTURE_MODEL if a.backend == "claude" else "gpt-5.4-mini")
+    run(a.repo, a.data_dir, a.trunk, a.limit, a.dry_run, a.resume, model, a.milestone_every,
+        backend=a.backend)
 
 
 if __name__ == "__main__":

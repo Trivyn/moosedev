@@ -1,0 +1,12 @@
+{
+  "type": "context_qa",
+  "materialize_tree": false,
+  "prompt": "In THIS project (burrow), what does `gd quickstart` CURRENTLY set up — a single zero-key weather.gov demo, or a multi-source daily brief across several free APIs? Answer in one sentence.",
+  "memory_topic": "gd quickstart current behavior multi-source daily brief or single weather demo",
+  "ground_truth": {
+    "must_include_any": [["multi-source", "multiple sources", "daily brief", "five", "5 free", "several sources", "five free"]],
+    "stale_answer_markers": ["single weather", "only a weather", "just a weather", "weather.gov demo", "zero-key weather", "centers on weather", "only weather.gov"],
+    "decision_title": ""
+  },
+  "_note": "Currency pair: 'quickstart = a single zero-key weather.gov demo' (superseded, commit ce733610) -> 'multi-source daily brief' (accepted, later commit). Verified at burrow HEAD d641966: cmd/gd/cmd_quickstart.go = 'multi-source pipeline using 5 free APIs (NWS weather, Open-Meteo, USGS, Hacker News, ArXiv) ... daily brief ... No API keys'. NOTE weather.gov is now ONE of 5 sources, so 'weather.gov' alone is NOT a stale marker; the stale framing is 'single/only weather demo'. Current answer must convey multi-source/daily-brief."
+}

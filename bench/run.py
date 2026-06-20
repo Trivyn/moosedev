@@ -14,6 +14,7 @@ import shlex
 from collections import Counter
 import shutil
 import subprocess
+from pathlib import Path
 import time
 import uuid
 
@@ -117,6 +118,22 @@ def write_markdown_corpus(corpus: str, wd):
     return len(chunks)
 
 
+def write_notes_corpus(corpus: str, wd):
+    """B1-notes (ecological, AD b3205dcb): copy the team's REAL accumulated docs (e.g. lessons.md +
+    topical guides, per corpus `notes_paths`) into the workdir so the agent greps them — how knowledge
+    is ACTUALLY kept, NOT the graph export. Source is the corpus repo, not corpus_chunks_path."""
+    repo = Path(config.CORPORA[corpus]["repo"])
+    dest = wd / "docs" / "notes"
+    dest.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for pat in config.CORPORA[corpus].get("notes_paths", []):
+        for src in sorted(repo.glob(pat)):
+            if src.is_file():
+                shutil.copy(src, dest / src.name)
+                n += 1
+    return n
+
+
 def materialize_tree(corpus: str, wd):
     """Lay down the corpus's pinned tracked tree (no .git, no gitignored target/.moosedev) into wd
     via `git archive`. Excluding .git enforces the comprehension-debt premise (no history for the
@@ -153,6 +170,8 @@ def prepare_workdir(run_id: str, arm: str, corpus: str, task: dict, mode: str = 
     (wd / "opencode.json").write_text(json.dumps(arm_opencode_config(arm, corpus, mode), indent=2))
     if arm == "B1-md":
         write_markdown_corpus(corpus, wd)
+    if arm == "B1-notes":
+        write_notes_corpus(corpus, wd)
     if task["type"] in CODE_TASK_TYPES:
         git_baseline(wd)  # overlays (AGENTS.md, docs/) are baseline too -> excluded from the diff
     return wd
@@ -259,6 +278,10 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
     is_code = task["type"] in CODE_TASK_TYPES
     run_id = f"{corpus}_{task_id}_{arm}_{mode}_{(agent or 'build')}_{uuid.uuid4().hex[:8]}"
     prompt = task["prompt"]
+    if arm == "B1-notes" and mode == "oracle":
+        # B1-notes is the agent-grep-the-real-docs baseline -> tooluse only. Oracle-over-notes (a
+        # retriever pushing chunks of the real docs) is the future B1-rag-notes variant (AD b3205dcb).
+        raise SystemExit("B1-notes is tooluse-only; oracle-over-notes is not implemented (use B1-rag).")
     if mode == "oracle" and arm != "B0":  # inject what the agent's memory tool would have returned
         # Best-case retrieval: a focused topic (the task subject, NOT the answer), so a null is
         # unambiguous — the relevant record is front-and-center, isolating knowledge-value from both
