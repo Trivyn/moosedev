@@ -17,3 +17,37 @@ body {
 .yasqe-container .CodeMirror {
   font-size: 12px;
 }
+
+html[data-theme='dark'] .yasqe-container,
+html[data-theme='dark'] .yasqe-container .yasqe,
+html[data-theme='dark'] .yasqe-container .CodeMirror,
+html[data-theme='dark'] .yasqe-container .CodeMirror-gutters {
+  background: #182020;
+  color: #e4eeee;
+}
+
+html[data-theme='dark'] .yasqe-container .CodeMirror-gutters {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+html[data-theme='dark'] .yasqe-container .CodeMirror-cursor {
+  border-left-color: #e4eeee;
+}
+
+html[data-theme='dark'] .yasqe-container .CodeMirror-selected {
+  background: rgba(102, 194, 168, 0.22);
+}
+
+html[data-theme='dark'] .yasqe-container .cm-keyword,
+html[data-theme='dark'] .yasqe-container .cm-atom {
+  color: #8fd8c4;
+}
+
+html[data-theme='dark'] .yasqe-container .cm-string,
+html[data-theme='dark'] .yasqe-container .cm-variable-2 {
+  color: #d7b95c;
+}
+
+html[data-theme='dark'] .yasqe-container .cm-comment {
+  color: #8fa3a3;
+}
