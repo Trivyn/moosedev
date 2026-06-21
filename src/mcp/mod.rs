@@ -313,6 +313,13 @@ impl MooseDevServer {
                 {
                     tracing::warn!("provenance write failed for {iri}: {e}");
                 }
+                // Best-effort dense indexing so the new record is reachable by the
+                // hybrid (paraphrase-tolerant) seed of get_relevant_context. Like
+                // provenance, a failure must never fail the write — the symbolic
+                // record is primary (invariant #1).
+                if let Err(e) = self.state.index_record(&iri).await {
+                    tracing::warn!("dense index failed for {iri}: {e}");
+                }
                 Ok(tool_ok(format!("Recorded {kind} → {iri}")))
             }
             Err(e) => Ok(tool_error(format!("failed to record: {e}"))),
@@ -378,6 +385,13 @@ impl MooseDevServer {
                     {
                         tracing::warn!("provenance write failed for {iri}: {e}");
                     }
+                    // Re-embed the replacement + its rationale so the new current
+                    // record is dense-seedable. The superseded record's text is
+                    // unchanged (only its status flips), so its vector stays valid;
+                    // the post-fetch is_historical filter hides it by default.
+                    if let Err(e) = self.state.index_record(iri).await {
+                        tracing::warn!("dense index failed for {iri}: {e}");
+                    }
                 }
                 Ok(tool_ok(format!(
                     "Superseded {} → {} (rationale {})",
@@ -423,6 +437,12 @@ impl MooseDevServer {
                     now,
                 ) {
                     tracing::warn!("provenance write failed for {}: {e}", out.rationale_iri);
+                }
+                // Embed the minted rationale. The retracted record's text is
+                // unchanged (only its status flips to deprecated), so its vector
+                // stays valid and remains visible to include_history callers.
+                if let Err(e) = self.state.index_record(&out.rationale_iri).await {
+                    tracing::warn!("dense index failed for {}: {e}", out.rationale_iri);
                 }
                 Ok(tool_ok(format!(
                     "Retracted {} (deprecated; rationale {})",

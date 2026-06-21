@@ -86,6 +86,16 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
             "alignment index unavailable — align_concepts/suggest_mappings disabled: {e}"
         );
     }
+    // Build the instance (ABox) dense index that seeds get_relevant_context. Same
+    // soft contract as the alignment index: if the embedding backbone can't load,
+    // the store stays empty and hybrid seeding degrades to lexical-only BM25 — the
+    // rest of the server still starts.
+    tracing::info!("MOOSEDev: building instance (ABox) dense index for context retrieval…");
+    if let Err(e) = state.build_instance_index().await {
+        tracing::warn!(
+            "instance dense index unavailable — get_relevant_context falls back to lexical-only seeding: {e}"
+        );
+    }
     Ok(Arc::new(state))
 }
 

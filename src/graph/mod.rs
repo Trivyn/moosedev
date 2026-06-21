@@ -12,7 +12,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use moose::chat::session_db::SessionDb;
 use moose::embeddings::vec_store::VecStore;
-use moose::entity_index::EntityIndexCache;
+use moose::embeddings::{
+    default_backbone, embed_and_index_instance, retrieval_embed_query, InstanceVecStore,
+};
+use moose::entity_index::{EntityIndexCache, DEFAULT_DENSE_FLOOR};
 use moose::kg::{
     assert_instance, AssertionLiteral, DatatypeAssertion, InstanceAssertion, ObjectAssertion,
 };
@@ -107,6 +110,13 @@ fn object_property_iri(vocab: &CompactVocabulary, local: &str) -> anyhow::Result
 pub struct AppState {
     pub store: Store,
     pub entity_index: Arc<EntityIndexCache>,
+    /// Instance (ABox) dense vector index — the dense seed channel for
+    /// `get_relevant_context`. A durable, model-stamped store opened by
+    /// `build_instance_index`, reconciled incrementally at startup (only records
+    /// not already persisted are embedded) and kept coherent on write by
+    /// `index_record`. Bootstrap installs an empty ephemeral placeholder (so the
+    /// hybrid seed soft-falls to pure BM25) until the durable store is opened.
+    pub instance_store: Arc<InstanceVecStore>,
     pub moose_cache: Arc<MooseOntologyCache>,
     pub arch_vocab: CompactVocabulary,
     pub capture: CapturePredicates,
@@ -162,6 +172,10 @@ impl AppState {
         Ok(Self {
             store,
             entity_index,
+            // Empty ephemeral placeholder (hybrid seed soft-falls to BM25) until
+            // `build_instance_index` swaps in the durable store; `index_record`
+            // keeps that store coherent thereafter.
+            instance_store: Arc::new(InstanceVecStore::ephemeral()),
             moose_cache,
             arch_vocab,
             capture,
@@ -232,6 +246,159 @@ impl AppState {
         self.engine_config.embedding_store = Some(vec_store.clone());
         self.vector_store = Some(vec_store);
         Ok(())
+    }
+
+    /// Embed one record's text-bearing literals (label + description) into the
+    /// instance vector store so the dense channel of `get_relevant_context` stays
+    /// coherent with the write. Reads the record's class and text straight from the
+    /// store, so every caller (startup backfill, capture, supersede, retract) needs
+    /// only the IRI. Best-effort and idempotent: `upsert` overwrites any prior
+    /// vector, and a record with no text — or an unavailable embedding backbone — is
+    /// a no-op (`Ok(false)`), never an error, so the symbolic write stays primary
+    /// (invariant #1). The label+description pair mirrors the BM25 `text_fields`, so
+    /// the lexical and dense channels see the same document text. `hasTitle` is
+    /// skipped because it duplicates `rdfs:label`.
+    pub async fn index_record(&self, iri: &str) -> anyhow::Result<bool> {
+        let Ok(subject) = NamedNode::new(iri) else {
+            return Ok(false);
+        };
+        let Ok(class_iri) = require_information_record(self, &subject) else {
+            return Ok(false); // not a typed record — nothing to index
+        };
+        let label = first_literal(&self.store, iri, moose::RDFS_LABEL);
+        let description = first_literal(&self.store, iri, &self.capture.description);
+        let mut props: Vec<DatatypeAssertion> = Vec::new();
+        if let Some(value) = label.as_deref() {
+            props.push(DatatypeAssertion {
+                predicate_iri: moose::RDFS_LABEL,
+                literal: AssertionLiteral::Simple(value),
+            });
+        }
+        if let Some(value) = description.as_deref() {
+            props.push(DatatypeAssertion {
+                predicate_iri: self.capture.description.as_str(),
+                literal: AssertionLiteral::Simple(value),
+            });
+        }
+        let text_preds = [moose::RDFS_LABEL, self.capture.description.as_str()];
+        embed_and_index_instance(&self.instance_store, iri, &class_iri, &props, &text_preds)
+            .await
+            .map_err(|e| anyhow::anyhow!("embed_and_index_instance({iri}): {e}"))
+    }
+
+    /// Open the durable instance (ABox) dense index — the dense seed channel for
+    /// `get_relevant_context` — and reconcile it incrementally against the project
+    /// KG. Mirrors [`Self::build_alignment_index`] (the TBox/ontology tier) and is
+    /// likewise non-fatal: with no embedding backbone the store stays empty and the
+    /// hybrid seed soft-falls to pure BM25.
+    ///
+    /// The store persists at `instance-vectors.db`, so a warm restart loads the
+    /// vectors from disk and [`Self::sync_instance_index`] embeds only records not
+    /// already present — startup cost is proportional to churn, not graph size
+    /// (write-time [`Self::index_record`] keeps the store coherent in between). A
+    /// model-stamp mismatch or corrupt store is rebuilt from scratch, mirroring the
+    /// ontology store's reuse-or-rebuild contract. Returns the number of records
+    /// embedded this pass (0 on a fully warm restart).
+    pub async fn build_instance_index(&mut self) -> anyhow::Result<usize> {
+        let db_path = self.data_dir.join("instance-vectors.db");
+        let store = match InstanceVecStore::open(&db_path).await {
+            Ok(store) => store,
+            Err(e) => {
+                // Stamp mismatch (the embedding model changed) or a corrupt store:
+                // discard and rebuild fresh rather than fail the server start.
+                tracing::warn!(
+                    "[instance-vectors] reopening {} failed ({e}); rebuilding fresh",
+                    db_path.display()
+                );
+                let _ = std::fs::remove_file(&db_path);
+                InstanceVecStore::open(&db_path).await?
+            }
+        };
+        self.instance_store = Arc::new(store);
+        self.sync_instance_index().await
+    }
+
+    /// Embed every project record not already present in the (durable) instance
+    /// store, in one batched document-side pass. Incremental by construction: a
+    /// store warmed by a prior run leaves nothing to do. Returns the count embedded
+    /// this pass. Soft-fails to a no-op when no embedding backbone is available.
+    async fn sync_instance_index(&self) -> anyhow::Result<usize> {
+        let class_iris: Vec<String> = self
+            .arch_vocab
+            .classes
+            .iter()
+            .map(|c| c.iri.clone())
+            .collect();
+        let records = list_instances(&self.store, &class_iris, usize::MAX);
+
+        // The delta: records with no stored vector yet, paired with their document
+        // text (label + description — the same text `index_record` embeds on write).
+        let mut pending: Vec<(String, String, String)> = Vec::new();
+        for (iri, class_iri) in &records {
+            if self.instance_store.contains(iri) {
+                continue;
+            }
+            let text = self.record_embed_text(iri);
+            if !text.trim().is_empty() {
+                pending.push((iri.clone(), class_iri.clone(), text));
+            }
+        }
+        if pending.is_empty() {
+            tracing::info!(
+                "[instance-vectors] index warm ({} records, 0 to embed)",
+                records.len()
+            );
+            return Ok(0);
+        }
+
+        // Batched document embedding — the matched counterpart to the query side,
+        // identical to `retrieval_embed_document` per record but amortized for the
+        // one-time cold build. No backbone → soft-fall to lexical-only seeding.
+        let backbone = match default_backbone() {
+            Ok(backbone) => backbone,
+            Err(e) => {
+                tracing::warn!(
+                    "[instance-vectors] no embedding backbone ({e}); dense seed disabled"
+                );
+                return Ok(0);
+            }
+        };
+        let texts: Vec<&str> = pending.iter().map(|(_, _, text)| text.as_str()).collect();
+        let embeddings = backbone
+            .embed_documents_batch(&texts)
+            .map_err(|e| anyhow::anyhow!("batch-embed {} instances: {e}", texts.len()))?;
+
+        let mut indexed = 0usize;
+        for ((iri, class_iri, _), embedding) in pending.iter().zip(embeddings.iter()) {
+            if let Err(e) = self.instance_store.upsert(iri, class_iri, embedding).await {
+                tracing::warn!("[instance-vectors] upsert {iri}: {e}");
+                continue;
+            }
+            indexed += 1;
+        }
+        tracing::info!(
+            "[instance-vectors] embedded {indexed} new of {} project records",
+            records.len()
+        );
+        Ok(indexed)
+    }
+
+    /// The document text indexed for one record: its label then description, joined
+    /// like core's `gather_text`, so the batched build and per-record
+    /// [`Self::index_record`] produce identical vectors.
+    fn record_embed_text(&self, iri: &str) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(label) = first_literal(&self.store, iri, moose::RDFS_LABEL) {
+            if !label.is_empty() {
+                parts.push(label);
+            }
+        }
+        if let Some(description) = first_literal(&self.store, iri, &self.capture.description) {
+            if !description.is_empty() {
+                parts.push(description);
+            }
+        }
+        parts.join("\n")
     }
 
     /// Resolve a knowledge `kind` (e.g. "ArchitecturalDecision") to its class IRI
@@ -1256,29 +1423,52 @@ pub fn relevant_context(
         .collect();
     let data_graphs = [PROJECT_KG_GRAPH_IRI.to_string()];
 
-    // BM25 relevance over each record's label (weighted) + description. We search rdfs:label —
-    // every record carries it as its title — rather than hasTitle, so label-only records are still
-    // found and the title text isn't double-counted. Scores are raw/corpus-relative, so we rank and
-    // take top-k rather than applying an absolute floor; records sharing no query term are excluded
-    // by search_records, preserving the honest empty state (invariant #6).
+    // Document text for both retrieval channels: rdfs:label (weighted) + description.
+    // We search rdfs:label — every record carries it as its title — rather than hasTitle,
+    // so label-only records are still found and the title text isn't double-counted. The
+    // same two fields feed the dense document embedding (see `AppState::index_record`), so
+    // the lexical and dense channels score the same text.
     let text_fields = [
         (moose::RDFS_LABEL, 2.0_f32),
         (state.capture.description.as_str(), 1.0_f32),
     ];
-    let subjects: Vec<(String, String)> = match topic.map(str::trim).filter(|t| !t.is_empty()) {
-        Some(t) => state
-            .entity_index
-            .search_records(
-                t,
-                &class_iris,
-                &state.store,
-                &data_graphs,
-                &text_fields,
-                limit,
-            )
-            .into_iter()
-            .map(|h| (h.iri, h.class_iri))
-            .collect(),
+    // A focused topic, trimmed to None when blank — drives both the seed and the
+    // (topic-only) relational expansion below.
+    let query = topic.map(str::trim).filter(|t| !t.is_empty());
+    let subjects: Vec<(String, String)> = match query {
+        Some(t) => {
+            // Hybrid BM25F ⊕ dense seed: the dense channel surfaces records whose
+            // meaning matches `t` with no shared term (paraphrase / vocabulary
+            // mismatch) — the lexical blind spot that otherwise gates the whole
+            // expansion. The confidence floor preserves the honest empty state
+            // (invariant #6): an irrelevant query still seeds nothing. Soft-falls to
+            // pure BM25 when the instance index is empty or the backbone is absent.
+            let mut hits: Vec<(String, String)> = state
+                .entity_index
+                .search_records_hybrid(
+                    t,
+                    &class_iris,
+                    &state.store,
+                    &data_graphs,
+                    &text_fields,
+                    limit,
+                    &state.instance_store,
+                    dense_floor(),
+                )
+                .into_iter()
+                .map(|h| (h.iri, h.class_iri))
+                .collect();
+            // Symbolic-first anchoring (invariant #1): when `t` names an existing
+            // record by an exact label/title match, seed it FIRST — ahead of the
+            // lexical+dense ranking — so the named record is guaranteed to expand.
+            // Free-text topics that name no record fall through to the hybrid seed.
+            if let Some(anchor) = resolve_topic_to_record(state, t) {
+                hits.retain(|(iri, _)| iri != &anchor.0);
+                hits.insert(0, anchor);
+                hits.truncate(limit);
+            }
+            hits
+        }
         None => list_instances(&state.store, &class_iris, limit),
     };
 
@@ -1300,11 +1490,18 @@ pub fn relevant_context(
     // the few linked records that COMPLETE an answer — the lexically-distant neighbor
     // BM25 alone misses — WITHOUT dumping the neighborhood (context efficiency is the
     // whole point, AD 7b824b26). Skipped for list-all and when MOOSEDEV_EXPAND_HOPS=0.
+    // Candidate neighbors are RANKED (typed-edge priority, then dense topic-similarity)
+    // before the EXPAND_MAX budget is spent, so the links that survive the cap are the
+    // answer-completing ones rather than whatever order the store happened to yield.
     let max_hops = std::env::var("MOOSEDEV_EXPAND_HOPS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(EXPAND_MAX_HOPS);
-    if topic.map(str::trim).filter(|t| !t.is_empty()).is_some() && max_hops > 0 {
+    if let Some(t) = query.filter(|_| max_hops > 0) {
+        // One query embedding for the whole expansion, reused to rank each hop's
+        // neighbors by topic similarity. `None` (no backbone) → ranking falls back to
+        // typed-edge priority then IRI; seeding was already lexical-only in that case.
+        let query_emb = retrieval_embed_query(t).ok();
         let mut seen: std::collections::HashSet<String> =
             items.iter().map(|i| i.iri.clone()).collect();
         let mut expanded: Vec<ContextItem> = Vec::new();
@@ -1313,26 +1510,44 @@ pub fn relevant_context(
             .take(EXPAND_FROM_TOP)
             .map(|i| i.iri.clone())
             .collect();
-        'hops: for _ in 0..max_hops {
-            let mut next: Vec<String> = Vec::new();
+        for _ in 0..max_hops {
+            // Gather this hop's fresh neighbors across the whole frontier, deduped,
+            // then rank the pool together so the budget is spent on the best — not on
+            // whichever source/edge happened to come first in store order.
+            let mut candidates: Vec<(String, String, String)> = Vec::new();
+            let mut pooled: std::collections::HashSet<String> = std::collections::HashSet::new();
             for src in &frontier {
                 for (pred, neighbor_iri, neighbor_class) in record_neighbors(state, src) {
-                    if !seen.insert(neighbor_iri.clone()) {
-                        continue; // already a seed or already expanded
+                    if seen.contains(&neighbor_iri) || !pooled.insert(neighbor_iri.clone()) {
+                        continue; // already a seed/expanded, or already pooled this hop
                     }
-                    let mut item = build_context_item(state, neighbor_iri.clone(), neighbor_class);
-                    if !include_history && item.is_historical() {
-                        continue; // stay in the current working set
-                    }
-                    item.properties.insert(0, ("linkedVia".to_string(), pred));
-                    expanded.push(item);
-                    next.push(neighbor_iri);
-                    if expanded.len() >= EXPAND_MAX {
-                        break 'hops;
-                    }
+                    candidates.push((pred, neighbor_iri, neighbor_class));
                 }
             }
-            if next.is_empty() {
+            if candidates.is_empty() {
+                break;
+            }
+            rank_neighbors(state, query_emb.as_deref(), &mut candidates);
+
+            let mut next: Vec<String> = Vec::new();
+            let mut budget_spent = false;
+            for (pred, neighbor_iri, neighbor_class) in candidates {
+                if !seen.insert(neighbor_iri.clone()) {
+                    continue; // ranked pool is deduped, but keep `seen` authoritative
+                }
+                let mut item = build_context_item(state, neighbor_iri.clone(), neighbor_class);
+                if !include_history && item.is_historical() {
+                    continue; // stay in the current working set
+                }
+                item.properties.insert(0, ("linkedVia".to_string(), pred));
+                expanded.push(item);
+                next.push(neighbor_iri);
+                if expanded.len() >= EXPAND_MAX {
+                    budget_spent = true;
+                    break;
+                }
+            }
+            if budget_spent || next.is_empty() {
                 break;
             }
             frontier = next;
@@ -1388,6 +1603,115 @@ fn record_neighbors(state: &AppState, iri: &str) -> Vec<(String, String, String)
 }
 
 /// List up to `limit` instances of the given classes in the project KG graph.
+/// Confidence floor for the dense channel of the hybrid seed, from
+/// `MOOSEDEV_DENSE_FLOOR` (an absolute cosine), defaulting to core's
+/// [`DEFAULT_DENSE_FLOOR`]. The floor preserves the honest empty state (invariant
+/// #6): cosine has no natural zero, so without it RRF would always promote *some*
+/// nearest neighbor and manufacture a seed for an irrelevant query. Mirrors the
+/// `MOOSEDEV_EXPAND_HOPS` override pattern. Always `Some` — config never disables
+/// the guarantee (an unparseable value falls back to the default).
+fn dense_floor() -> Option<f32> {
+    let floor = std::env::var("MOOSEDEV_DENSE_FLOOR")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(DEFAULT_DENSE_FLOOR);
+    Some(floor)
+}
+
+/// Symbolic-first anchor: resolve a free-text `topic` to an existing record by an
+/// exact (normalized) match on its `rdfs:label` or `hasTitle`, returning the
+/// record's `(iri, class_iri)`. Lets [`relevant_context`] seed a *named* record as
+/// the top anchor before lexical+dense ranking (invariant #1 — the symbolic layer
+/// is primary; dense is the open-vocabulary fallback). Returns `None` for a topic
+/// that names no record. Alias (`skos:altLabel`) anchoring is a later refinement —
+/// records carry none today.
+fn resolve_topic_to_record(state: &AppState, topic: &str) -> Option<(String, String)> {
+    let needle = normalize_match(topic);
+    if needle.is_empty() {
+        return None;
+    }
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    for pred_iri in [moose::RDFS_LABEL, state.capture.title.as_str()] {
+        let Ok(pred) = NamedNodeRef::new(pred_iri) else {
+            continue;
+        };
+        for q in state
+            .store
+            .quads_for_pattern(None, Some(pred), None, Some(GraphNameRef::NamedNode(graph)))
+            .flatten()
+        {
+            let Term::Literal(lit) = &q.object else {
+                continue;
+            };
+            if normalize_match(lit.value()) != needle {
+                continue;
+            }
+            if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
+                if let Ok(class) = require_information_record(state, s) {
+                    return Some((s.as_str().to_string(), class));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Lightweight normalization for exact-ish anchor matching: collapse whitespace and
+/// lowercase. Deliberately simpler than MOOSE's entity normalizer — anchoring wants
+/// a high-precision exact match, not fuzzy recall (that is the dense channel's job).
+fn normalize_match(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Rank candidate expansion neighbors in place before the `EXPAND_MAX` budget is
+/// spent, so the links that survive the cap are the answer-completing ones rather
+/// than whatever order `record_neighbors` yielded. Primary key: a typed-edge
+/// priority tier ([`edge_priority`]); secondary: dense similarity of the neighbor to
+/// the query topic (`None` query embedding → all 0.0, so ranking is edge-tier then
+/// IRI); final tie-break: IRI, for determinism.
+fn rank_neighbors(
+    state: &AppState,
+    query_emb: Option<&[f32]>,
+    candidates: &mut [(String, String, String)],
+) {
+    let sims: std::collections::HashMap<String, f32> = match query_emb {
+        Some(q) => {
+            let iris: Vec<&str> = candidates.iter().map(|(_, iri, _)| iri.as_str()).collect();
+            state
+                .instance_store
+                .score_candidates(q, &iris, None)
+                .map(|scores| scores.into_iter().map(|s| (s.iri, s.cosine)).collect())
+                .unwrap_or_default()
+        }
+        None => std::collections::HashMap::new(),
+    };
+    candidates.sort_by(|a, b| {
+        let sa = sims.get(&a.1).copied().unwrap_or(0.0);
+        let sb = sims.get(&b.1).copied().unwrap_or(0.0);
+        edge_priority(&a.0)
+            .cmp(&edge_priority(&b.0))
+            .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+}
+
+/// Host-side priority tier for a typed edge (lower = expand first). The strong
+/// answer-completing links of a decision/constraint/lesson — the *why* and *what it
+/// touches* — outrank structural/containment edges. MOOSEDev domain policy, kept out
+/// of MOOSE core (which stays domain-neutral, invariant #11); names are the object
+/// properties declared in the architecture/engineering ontologies.
+/// JAMES: Code coupled to the ontology object properties, FIX
+fn edge_priority(predicate_local: &str) -> u8 {
+    match predicate_local {
+        "isMotivatedBy" | "violates" | "supersedes" | "constrains" | "concerns" | "learnedFrom"
+        | "resultsIn" | "weighs" | "dependsOn" => 0,
+        _ => 1,
+    }
+}
+
 fn list_instances(store: &Store, class_iris: &[String], limit: usize) -> Vec<(String, String)> {
     let rdf_type = NamedNodeRef::new_unchecked(moose::RDF_TYPE);
     let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
