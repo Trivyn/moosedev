@@ -42,7 +42,14 @@ before recording, so the graph doesn't drift. (Class resolution — distinct fro
 
 ### 3. Record nodes
 `record_important_decision(kind, title, description, status)`:
-- `description` = the **why + evidence**: cite this commit and the diff hunk / message line.
+- `title` = a short **handle** (≤ ~80 chars / ~12 words): the concept's NAME — what you'd *say* to
+  refer to it ("Adopt RocksDB for the durable store"), **not** the claim. No sentence-long titles,
+  no dashes/parentheticals/metrics. `rdfs:label` is weighted **2× in retrieval**, so a sentence-long
+  title packs the entire claim into the top-weighted field and makes lexical retrieval trivially
+  saturate (self-announcing records BM25 always finds) — keep it a name.
+- `description` = **lead with the one-line claim** (the assertion the record makes), THEN the
+  **why + evidence**: cite this commit and the diff hunk / message line. The claim lives here, not
+  in the title.
 - `status`: `"accepted"` if the commit puts the decision in effect; else `"proposed"`.
 - The record's **timestamp + author are set automatically to this commit's values** by the driver
   — record normally; do **not** pass timestamp/author yourself.

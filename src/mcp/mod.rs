@@ -95,15 +95,33 @@ fn read_capture_default(env_var: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Soft nudge appended to record/supersede results when a title is long. Titles should be a short
+/// handle (a NAME); the claim belongs in the description — a claim-as-title bloats the 2×-weighted
+/// `rdfs:label` (saturating lexical retrieval) and the verbose label dilutes NLQ grounding. The note
+/// is advisory: the record is still written.
+fn long_title_note(title: &str) -> String {
+    let n = title.chars().count();
+    if n > 100 {
+        format!(
+            "\n\nnote: title is {n} chars — a title should be a short handle (≤80, a NAME not the \
+             claim). Move the claim to the start of the description."
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// Arguments for the `record_important_decision` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecordDecisionArgs {
     /// Knowledge class to record — a class in the architecture ontology.
     /// Defaults to "ArchitecturalDecision".
     pub kind: Option<String>,
-    /// Short human-readable title for the item.
+    /// Short human-readable title — a NAME/handle (≤~80 chars), NOT the claim. It is `rdfs:label`,
+    /// weighted 2× in retrieval and used heavily for NLQ grounding, so keep it a distinctive name;
+    /// put the claim and detail in `description`.
     pub title: String,
-    /// Optional longer description / body.
+    /// Optional longer description / body. LEAD with the one-line claim, then the why + evidence.
     pub description: Option<String>,
     /// Optional lifecycle status (e.g. "proposed", "accepted", "superseded").
     pub status: Option<String>,
@@ -138,7 +156,8 @@ pub struct GetRelevantContextArgs {
 pub struct SupersedeArgs {
     /// IRI of the existing decision being replaced (it will be marked "superseded").
     pub superseded_iri: String,
-    /// Short human-readable title for the new (replacement) decision.
+    /// Short human-readable title for the new (replacement) decision — a NAME/handle (≤~80 chars),
+    /// NOT the claim (put the claim at the start of `description`).
     pub title: String,
     /// Why the decision changed — captured as a linked Rationale node. Required.
     pub rationale: String,
@@ -265,6 +284,7 @@ impl MooseDevServer {
         if title.is_empty() {
             return Ok(tool_error("`title` must not be empty"));
         }
+        let title_note = long_title_note(&title);
         let class_iri = match self.state.resolve_class(&kind) {
             Ok(iri) => iri,
             Err(e) => return Ok(tool_error(e.to_string())),
@@ -320,7 +340,7 @@ impl MooseDevServer {
                 if let Err(e) = self.state.index_record(&iri).await {
                     tracing::warn!("dense index failed for {iri}: {e}");
                 }
-                Ok(tool_ok(format!("Recorded {kind} → {iri}")))
+                Ok(tool_ok(format!("Recorded {kind} → {iri}{title_note}")))
             }
             Err(e) => Ok(tool_error(format!("failed to record: {e}"))),
         }
@@ -346,6 +366,7 @@ impl MooseDevServer {
                 "`rationale` must not be empty — capture WHY the decision changed",
             ));
         }
+        let title_note = long_title_note(&title);
         if superseded_iri.is_empty() {
             return Ok(tool_error("`superseded_iri` must not be empty"));
         }
@@ -394,7 +415,7 @@ impl MooseDevServer {
                     }
                 }
                 Ok(tool_ok(format!(
-                    "Superseded {} → {} (rationale {})",
+                    "Superseded {} → {} (rationale {}){title_note}",
                     out.superseded_iri, out.new_iri, out.rationale_iri
                 )))
             }

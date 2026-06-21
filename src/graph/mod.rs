@@ -158,6 +158,10 @@ impl AppState {
             context_budget: 8_192,
             budgets: WalkBudgets::default(),
             hybrid: HybridConfig::default(),
+            // Label-designator contract: take Core's default trip (>80 chars / >8
+            // words / sentence-break = content → demoted out of name-resolution and
+            // BM25F boost). Matches the ≤80-char handle convention used for capture.
+            label_shape: Default::default(),
             chat: None,
             moose_cache: moose_cache.clone(),
             llm_assist_level: assist_level_from_env(),

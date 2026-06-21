@@ -102,9 +102,13 @@ and anti-patterns that prevent repeating a mistake.
 
 **Discipline (invariant #2 — structured over free text):**
 - **One fact per node.** Don't pack three decisions into one.
-- Title = the claim in a line; description = the *why* + **the evidence** (the file/section or
-  commit it came from). `relate()` has no description field, so the edge's justification lives
-  in the endpoint nodes' descriptions + your link plan.
+- **Title = a short handle** (≤ ~80 chars / ~12 words): the concept's NAME — what you'd *say* to
+  refer to it ("Adopt RocksDB for the durable store") — **not** the claim, no sentence-long titles
+  with dashes/parentheticals/metrics. `rdfs:label` is weighted **2× in retrieval**, so a
+  claim-as-title saturates lexical search (self-announcing records BM25 always finds) and bloats
+  every list/graph view. **The description LEADS with the one-line claim**, then the *why* +
+  **the evidence** (the file/section or commit it came from). `relate()` has no description field,
+  so the edge's justification lives in the endpoint nodes' descriptions + your link plan.
 - Prefer the typed `kind` and an explicit edge over vague prose.
 
 ## Where to mine rationale
@@ -172,10 +176,10 @@ Walk the node table. For each node apply **link-or-mint grounding** (below); whe
 
 ```
 record_important_decision(
-  kind:        "Requirement",                       // or the aligned kind
-  title:       "A rebuild on unchanged input must emit a byte-identical KG",
-  description: "Reproducible diffs for the review/audit workflow. Evidence: spec/SPEC.md §Ingestion.",
-  status:      "proposed"                            // default; use "accepted" only when the source states it
+  kind:        "Requirement",                          // or the aligned kind
+  title:       "Byte-identical KG on unchanged input", // a NAME (≤~80 chars) — not the claim
+  description: "A rebuild on unchanged input must emit a byte-identical KG — reproducible diffs for the review/audit workflow. Evidence: spec/SPEC.md §Ingestion.",
+  status:      "proposed"                              // default; use "accepted" only when the source states it
 )
 ```
 
