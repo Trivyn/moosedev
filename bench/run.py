@@ -321,7 +321,12 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
     t0 = time.time()
     timed_out = False
     try:
+        # stdin=DEVNULL: `codex exec` reads extra instructions from stdin when stdin is piped (not a
+        # TTY) and BLOCKS on EOF — so an unattended/agent launch (no TTY) hangs the full CELL_TIMEOUT
+        # with zero output. The prompt is always passed as an arg, so the agent never needs stdin.
+        # (Masked when launched via the user's interactive `!` TTY; surfaces under automation.)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.CELL_TIMEOUT,
+                              stdin=subprocess.DEVNULL,
                               cwd=str(wd) if backend == "codex" else None)
         stdout, returncode = proc.stdout, proc.returncode
     except subprocess.TimeoutExpired as e:

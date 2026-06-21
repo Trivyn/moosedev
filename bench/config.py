@@ -118,7 +118,11 @@ def corpus_runs_path(corpus: str) -> Path:
 # Output / scratch (kept out of the open repo).
 CORPUS_DIR = BENCH / "corpus"          # B1 chunk exports (gitignored)
 RUNS_DIR = BENCH / "runs"              # JSONL rows (gitignored)
-WORK_ROOT = BENCH_HOME / "_work"        # throwaway per-run working dirs
+# Throwaway per-run working dirs. Override with BENCH_WORK_ROOT to ISOLATE a run's workdirs from the
+# shared default — a materialize_tree:false (pure-memory) agent runs `find ..` and will read any
+# sibling workdir's source tree left by a CONCURRENT run, confounding the memory test + ballooning
+# tokens. An isolated /tmp root keeps `..` barren.
+WORK_ROOT = Path(os.environ.get("BENCH_WORK_ROOT", str(BENCH_HOME / "_work")))
 
 # Temporal (git-walk) bootstrap. The per-episode CAPTURE is a real headless agent (claude -p)
 # following skills/temporal-episode-capture.md — it calls read/align/record/relate/supersede/

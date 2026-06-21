@@ -53,3 +53,8 @@ moose_sessions.db
 ui/node_modules/
 ui/dist/
 
+# ── Benchmark output ──────────────────────────────────────────────────────
+# The Instrument A/B harness under bench/ is committed; its regenerable run
+# output (seed-recall JSONs) is not.
+bench/seed_recall/
+
