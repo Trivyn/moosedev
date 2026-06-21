@@ -13,6 +13,7 @@
 # SQLite session DB are created at runtime. Keep all runtime state under /data/
 # (MOOSE's SessionDb also defaults to sqlite:./data/moose_sessions.db).
 /data/
+moose_sessions.db
 
 # Live dogfood store — MOOSEDEV_DATA_DIR for the self-hosted MCP server.
 /.moosedev/
@@ -51,3 +52,4 @@
 # --- UI -------------------------------------------------------------------
 ui/node_modules/
 ui/dist/
+

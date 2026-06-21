@@ -248,8 +248,13 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = parse_mode(&args)?;
 
-    let data_dir =
-        PathBuf::from(std::env::var("MOOSEDEV_DATA_DIR").unwrap_or_else(|_| "data".to_string()));
+    // Runtime data lives in a per-repo, gitignored `.moosedev/` dir by convention
+    // (mirrored by .mcp.json, .codex/config.toml, start-moosedev.sh, and the README).
+    // The default must agree so a bare `--serve` in any repo honors the convention
+    // instead of spawning a stray `data/`.
+    let data_dir = PathBuf::from(
+        std::env::var("MOOSEDEV_DATA_DIR").unwrap_or_else(|_| ".moosedev".to_string()),
+    );
 
     match mode {
         // The proxy never opens the store (no RocksDB lock, no model load) — it
