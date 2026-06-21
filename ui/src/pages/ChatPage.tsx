@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Box, CircularProgress, Divider, Tab, Tabs, Typography } from '@mui/material';
+import { Alert, Box, CircularProgress, Divider, FormControlLabel, Switch, Tab, Tabs, Typography } from '@mui/material';
 import { api } from '../api/client';
 import { ChatMessage, ChatSessionSummary, FocusEntry, QueryResponse } from '../api/types';
 import ChatInput from '../components/chat/ChatInput';
@@ -18,6 +18,7 @@ export default function ChatPage() {
   const [subgraph, setSubgraph] = useState<QueryResponse | null>(null);
   const [metrics, setMetrics] = useState<unknown>(null);
   const [tab, setTab] = useState(0);
+  const [showMooseTraces, setShowMooseTraces] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,7 +31,7 @@ export default function ChatPage() {
     loadSessions().catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [loadSessions]);
 
-  const graph = useMemo(() => queryToGraph(subgraph), [subgraph]);
+  const graph = useMemo(() => queryToGraph(subgraph, { showMooseTraces }), [showMooseTraces, subgraph]);
 
   const startNew = () => {
     setSessionId(undefined);
@@ -137,11 +138,39 @@ export default function ChatPage() {
       </Box>
       <Divider orientation="vertical" flexItem />
       <Box sx={{ width: '42%', minWidth: 420, display: 'flex', flexDirection: 'column' }}>
-        <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Tab label="Graph" />
-          <Tab label="Focus" />
-          <Tab label="Metrics" />
-        </Tabs>
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            borderBottom: 1,
+            borderColor: 'divider',
+            pr: 1,
+          }}
+        >
+          <Tabs value={tab} onChange={(_, value) => setTab(value)}>
+            <Tab label="Graph" />
+            <Tab label="Focus" />
+            <Tab label="Metrics" />
+          </Tabs>
+          {tab === 0 && (
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={showMooseTraces}
+                  onChange={(event) => setShowMooseTraces(event.target.checked)}
+                />
+              }
+              label="Pipeline traces"
+              sx={{
+                m: 0,
+                ml: 1,
+                '.MuiFormControlLabel-label': { typography: 'caption', color: 'text.secondary' },
+              }}
+            />
+          )}
+        </Box>
         <Box sx={{ flex: 1, minHeight: 0 }}>
           {tab === 0 && <CytoscapeGraph nodes={graph.nodes} edges={graph.edges} />}
           {tab === 1 && <FocusStack focus={focus} />}

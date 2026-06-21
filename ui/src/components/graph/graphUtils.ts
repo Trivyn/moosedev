@@ -1,5 +1,14 @@
 import { GraphEdge, GraphNode, GraphProperty, QueryResponse, QueryValue } from '../../api/types';
 
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface GraphOptions {
+  showMooseTraces?: boolean;
+}
+
 const PREFIXES: Record<string, string> = {
   'http://www.w3.org/1999/02/22-rdf-syntax-ns#': 'rdf:',
   'http://www.w3.org/2000/01/rdf-schema#': 'rdfs:',
@@ -47,6 +56,15 @@ function mapProperties(properties: Map<string, QueryValue[]>): GraphProperty[] {
     .map(([predicate, values]) => ({ predicate, values }));
 }
 
+function filterGraph(graph: GraphData, options: GraphOptions = {}): GraphData {
+  if (options.showMooseTraces !== false) return graph;
+
+  const nodes = graph.nodes.filter((node) => node.type !== 'mooseTrace');
+  const visibleNodeIds = new Set(nodes.map((node) => node.id));
+  const edges = graph.edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target));
+  return { nodes, edges };
+}
+
 /**
  * Convert SPARQL-ish API results into a Cytoscape graph.
  *
@@ -56,7 +74,7 @@ function mapProperties(properties: Map<string, QueryValue[]>): GraphProperty[] {
  * in table/raw views and deliberately omitted here so the graph is not swamped
  * by value nodes.
  */
-export function queryToGraph(result?: QueryResponse | null): { nodes: GraphNode[]; edges: GraphEdge[] } {
+export function queryToGraph(result?: QueryResponse | null, options: GraphOptions = {}): GraphData {
   if (!result) return { nodes: [], edges: [] };
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
@@ -136,5 +154,5 @@ export function queryToGraph(result?: QueryResponse | null): { nodes: GraphNode[
     if (subject && predicate && object) addTriple(subject, predicate, object, index);
   });
 
-  return { nodes: [...nodes.values()], edges: [...edges.values()] };
+  return filterGraph({ nodes: [...nodes.values()], edges: [...edges.values()] }, options);
 }

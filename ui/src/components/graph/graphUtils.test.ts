@@ -111,4 +111,33 @@ describe('queryToGraph', () => {
 
     expect(queryToGraph(result).nodes.map((node) => node.type)).toEqual(['mooseTrace', 'mooseTrace']);
   });
+
+  it('can hide MOOSE trace nodes and their connected edges', () => {
+    const result: QueryResponse = {
+      query_type: 'CONSTRUCT',
+      triples: [
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/A' },
+          predicate: { type: 'uri', value: 'https://moosedev.dev/kg/relatesTo' },
+          object: { type: 'uri', value: 'https://moosedev.dev/kg/B' },
+        },
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/A' },
+          predicate: { type: 'uri', value: 'https://moosedev.dev/kg/hasExecution' },
+          object: { type: 'uri', value: 'https://moosedev.dev/kg/session/execution/1' },
+        },
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/session/execution/1' },
+          predicate: { type: 'uri', value: 'https://moosedev.dev/kg/ranStage' },
+          object: { type: 'uri', value: 'https://moosedev.dev/kg/session/stage-run/2' },
+        },
+      ],
+    };
+
+    const graph = queryToGraph(result, { showMooseTraces: false });
+
+    expect(graph.nodes.map((node) => node.id)).toEqual(['https://moosedev.dev/kg/A', 'https://moosedev.dev/kg/B']);
+    expect(graph.edges).toHaveLength(1);
+    expect(graph.edges[0].label).toBe('kg:relatesTo');
+  });
 });

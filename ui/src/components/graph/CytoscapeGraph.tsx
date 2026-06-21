@@ -25,6 +25,12 @@ interface CytoscapeGraphProps {
   edges: GraphEdge[];
 }
 
+interface LegendItem {
+  label: string;
+  color: string;
+  shape: 'ellipse' | 'round-rectangle' | 'tag' | 'diamond' | 'rectangle';
+}
+
 export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
   const theme = useTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -36,6 +42,16 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
   const edgeById = useMemo(() => new Map(edges.map((edge) => [edge.id, edge])), [edges]);
   const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
   const selectedEdge = selectedEdgeId ? edgeById.get(selectedEdgeId) : null;
+  const legendItems: LegendItem[] = useMemo(
+    () => [
+      { label: 'Project record', color: theme.palette.primary.main, shape: 'round-rectangle' },
+      { label: 'MOOSE trace', color: theme.palette.success.main, shape: 'tag' },
+      { label: 'Ontology/schema', color: theme.palette.info.main, shape: 'diamond' },
+      { label: 'Blank node', color: theme.palette.warning.main, shape: 'rectangle' },
+      { label: 'Other', color: theme.palette.grey[500], shape: 'ellipse' },
+    ],
+    [theme],
+  );
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -274,6 +290,54 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
   return (
     <Box sx={{ height: '100%', width: '100%', position: 'relative' }}>
       <Box ref={containerRef} sx={{ height: '100%', width: '100%' }} />
+      <Box
+        aria-label="Graph node legend"
+        sx={{
+          position: 'absolute',
+          left: 10,
+          top: 10,
+          zIndex: 1,
+          px: 1,
+          py: 0.75,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 0.5,
+          bgcolor: (currentTheme) =>
+            currentTheme.palette.mode === 'dark' ? 'rgba(24, 32, 32, 0.9)' : 'rgba(255, 255, 255, 0.92)',
+          border: 1,
+          borderColor: 'divider',
+          borderRadius: 1,
+          boxShadow: 1,
+          pointerEvents: 'none',
+        }}
+      >
+        {legendItems.map((item) => (
+          <Box key={item.label} sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+            <Box
+              sx={{
+                width: 12,
+                height: 12,
+                bgcolor: item.color,
+                borderRadius:
+                  item.shape === 'ellipse'
+                    ? '50%'
+                    : item.shape === 'round-rectangle' || item.shape === 'tag'
+                      ? 0.75
+                      : 0,
+                transform: item.shape === 'diamond' ? 'rotate(45deg)' : 'none',
+                clipPath:
+                  item.shape === 'tag'
+                    ? 'polygon(0 0, 75% 0, 100% 50%, 75% 100%, 0 100%)'
+                    : 'none',
+                border: (currentTheme) => `1px solid ${currentTheme.palette.divider}`,
+              }}
+            />
+            <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.2 }}>
+              {item.label}
+            </Typography>
+          </Box>
+        ))}
+      </Box>
       <GraphDetailsPanel node={selectedNode} edge={selectedEdge} onClose={() => {
         cyRef.current?.elements().removeClass('user-selected');
         setSelectedNodeId(null);
