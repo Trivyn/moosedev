@@ -117,6 +117,15 @@ Design docs / ADRs / RFCs, `CHANGELOG`, "why" comments (not "what"), **commit me
 descriptions**, issue/discussion threads, naming conventions, `CONTRIBUTING`/`CLAUDE.md`/
 `README`. Git history is often the richest source of *why* (and of supersessions).
 
+**Specs are the richest source of `Requirement`s specifically.** Files clearly identifiable as
+specifications — under a `spec/` (or `specs/`) directory, or that call themselves a
+spec/specification — state intended behavior and constraints *directly*, so they map cleanly to
+typed `Requirement` nodes. Mine them deliberately: a graph that under-captures Requirements
+leaves its decisions with nothing to be `isMotivatedBy`, which is the most common reason a
+bootstrapped graph ends up decision-heavy but motivation-sparse (a flat list of choices with no
+recorded *why*). Each mined Requirement becomes a reusable **hub** (link-or-mint, Phase 4) that
+many decisions point at — exactly the multi-hop structure traversal depends on.
+
 ---
 
 ## Workflow
@@ -150,8 +159,9 @@ we tried X but" → **Alternative**; "trade-off / at the cost of / limitation" �
 "lesson / gotcha / we learned" → **Lesson**; a commit/PR that **reverts or changes** a prior
 choice → `supersede_decision`.
 
-Good starting reads: `README`, `CLAUDE.md`/`CONTRIBUTING`, `spec/`/`docs/`/`adr/`, build
-manifests, top-level module layout, `git log --oneline` / notable PRs.
+Good starting reads: `README`, `CLAUDE.md`/`CONTRIBUTING`, `spec/`/`docs/`/`adr/` (mine `spec/`
+especially for `Requirement`s — see "Where to mine rationale"), build manifests, top-level
+module layout, `git log --oneline` / notable PRs.
 
 ### Phase 2 — Shape each cluster (node table + link plan)
 
