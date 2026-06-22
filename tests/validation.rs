@@ -98,6 +98,55 @@ fn malformed_raw_instance_reports_timestamp_datatype_mismatch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn under_linked_record_is_advised_without_breaking_conformance() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-validation-advisory-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    // A well-formed decision (record_instance fills author/status/timestamp) with
+    // no isMotivatedBy link — fully conformant, but under-linked.
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    let ad = graph::record_instance(
+        &state,
+        &RecordInput {
+            class_iri,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (
+                    moose::RDFS_LABEL.to_string(),
+                    "Adopt a local cache".to_string(),
+                ),
+                (state.capture.title.clone(), "Adopt a local cache".to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record decision");
+
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        report.conforms() && report.violations.is_empty(),
+        "advisories must be non-blocking:\n{}",
+        validation::format_report(&report)
+    );
+    assert!(
+        report
+            .advisories
+            .iter()
+            .any(|a| a.node == ad && a.missing_predicate == "isMotivatedBy"),
+        "an AD with no isMotivatedBy should be advised:\n{}",
+        validation::format_report(&report)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Insert a deliberately incomplete instance directly into the project graph,
 /// bypassing `record_instance`, so validation can prove malformed data is caught.
 fn insert_raw_decision(state: &AppState, class_iri: &str, iri: &str) -> String {

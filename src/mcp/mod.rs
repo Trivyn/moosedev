@@ -32,6 +32,33 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message.into())])
 }
 
+/// Format link suggestions as confirm-ready `relate` lines. Empty when there are
+/// none, so callers can stay silent (honest empty state, invariant #6).
+fn format_suggestions(suggestions: &[graph::LinkSuggestion]) -> String {
+    let mut out = String::new();
+    for s in suggestions {
+        out.push_str(&format!(
+            "\n  • {} → \"{}\" ({})\n      relate subject_iri={} predicate={} object_iri={}",
+            s.predicate_local, s.target_title, s.target_kind, s.subject_iri, s.predicate_local, s.object_iri
+        ));
+    }
+    out
+}
+
+/// Best-effort capture-time nudge: up to three legal, unasserted links for the new
+/// record. Never fails the write — a suggestion error just yields no note.
+async fn capture_suggestion_note(state: &graph::AppState, iri: &str) -> String {
+    let suggestions =
+        graph::suggest_links_for_record(state, iri, 3, graph::dense_floor(), None).await;
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nUnconfirmed suggested links (confirm with `relate`, or ignore):{}",
+        format_suggestions(&suggestions)
+    )
+}
+
 /// Render structured context items into a readable block for the agent.
 fn format_context(items: &[graph::ContextItem]) -> String {
     let plural = if items.len() == 1 { "" } else { "s" };
@@ -130,6 +157,25 @@ pub struct RecordDecisionArgs {
     pub timestamp: Option<String>,
     /// Optional author to attribute the record to (defaults to the MCP client name).
     pub author: Option<String>,
+    /// Optional forward relations to assert from the new record, linking it into
+    /// the graph at capture time (invariant #2 — typed links, not prose). Each is a
+    /// `{predicate, target}`: `predicate` is a record→record object-property local
+    /// name (e.g. "isMotivatedBy", "violates", "learnedFrom", "dependsOn"); `target`
+    /// is an existing recorded item's IRI or its exact title. Validated against the
+    /// SHACL domain/range — an illegal or unresolvable relation fails the whole
+    /// capture. (Targets must already be recorded items; to link an auxiliary node
+    /// whose range isn't a record — e.g. concerns→SystemComponent — use `relate`.)
+    pub relations: Option<Vec<RelationArg>>,
+}
+
+/// One inline relation for `record_important_decision`: an object property plus its
+/// target record (by IRI or exact title).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RelationArg {
+    /// Object-property local name from the architecture ontology (as in `relate`).
+    pub predicate: String,
+    /// The relation's target: an existing record IRI, or its exact title.
+    pub target: String,
 }
 
 /// Arguments for the `query` tool.
@@ -232,6 +278,19 @@ pub struct SparqlArgs {
     pub query: String,
 }
 
+/// Arguments for the `suggest_links` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SuggestLinksArgs {
+    /// IRI of a single record to suggest links for. Omit to SCAN the project graph
+    /// for under-linked records (those the shapes say SHOULD carry a link).
+    pub iri: Option<String>,
+    /// Maximum suggestions per record (default 5).
+    pub top_n: Option<usize>,
+    /// In scan mode, the maximum number of under-linked records to inspect
+    /// (default 20).
+    pub max_records: Option<usize>,
+}
+
 /// Arguments for the `export_graph` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExportGraphArgs {
@@ -319,8 +378,16 @@ impl MooseDevServer {
             class_local: kind.clone(),
             properties,
         };
-        match graph::record_instance(&self.state, &input, &agent, now) {
-            Ok(iri) => {
+        let relations: Vec<(String, String)> = args
+            .relations
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.predicate, r.target))
+            .collect();
+        match graph::record_instance_with_relation_args(&self.state, &input, &relations, &agent, now)
+        {
+            Ok(outcome) => {
+                let iri = outcome.iri;
                 // Best-effort edit provenance: who (the MCP client) asserted this,
                 // and when. Post-write — a provenance failure must not fail the
                 // record (mirrors MOOSE's `ProvenanceWriter` contract). v1 wires
@@ -342,7 +409,21 @@ impl MooseDevServer {
                 }
                 // A new record (+ any edges) invalidates the materialized inverse edges.
                 self.state.mark_inferred_stale();
-                Ok(tool_ok(format!("Recorded {kind} → {iri}{title_note}")))
+                let edge_note = if outcome.applied_edges.is_empty() {
+                    String::new()
+                } else {
+                    let edges = outcome
+                        .applied_edges
+                        .iter()
+                        .map(|e| format!("{} → {}", e.predicate_local, e.object_iri))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("\nLinked: {edges}")
+                };
+                let suggestion_note = capture_suggestion_note(&self.state, &iri).await;
+                Ok(tool_ok(format!(
+                    "Recorded {kind} → {iri}{title_note}{edge_note}{suggestion_note}"
+                )))
             }
             Err(e) => Ok(tool_error(format!("failed to record: {e}"))),
         }
@@ -509,6 +590,87 @@ impl MooseDevServer {
                 )))
             }
             Err(e) => Ok(tool_error(format!("failed to relate: {e}"))),
+        }
+    }
+
+    /// Suggest typed links to add to the project knowledge graph (suggest-only).
+    #[tool(
+        description = "Suggest typed links to add to the project knowledge GRAPH — ranked, ontology-legal candidate relationships between recorded items, so memory can be TRAVERSED, not just searched. Suggest-only: it writes nothing; confirm a suggestion by calling `relate` with the printed arguments. Pass `iri` to get link candidates for one record; omit it to SCAN for under-linked records (records the shapes say SHOULD carry a link — e.g. an ArchitecturalDecision with no isMotivatedBy). Candidates are generated symbolically (hybrid retrieval + SHACL domain/range) and never invented."
+    )]
+    async fn suggest_links(
+        &self,
+        Parameters(args): Parameters<SuggestLinksArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        // Materialize inferred inverses first, so "already-linked" sees them.
+        self.state.ensure_enriched();
+        let top_n = args.top_n.unwrap_or(5).clamp(1, 25);
+        let floor = graph::dense_floor();
+        match args.iri.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            Some(iri) => {
+                let suggestions =
+                    graph::suggest_links_for_record(&self.state, &iri, top_n, floor, None).await;
+                if suggestions.is_empty() {
+                    Ok(tool_ok(format!("No legal unasserted links found for {iri}.")))
+                } else {
+                    Ok(tool_ok(format!(
+                        "Suggested links for {iri} (confirm with `relate`):{}",
+                        format_suggestions(&suggestions)
+                    )))
+                }
+            }
+            None => {
+                let max_records = args.max_records.unwrap_or(20).clamp(1, 200);
+                let under = graph::under_linked_records(&self.state, max_records);
+                if under.is_empty() {
+                    return Ok(tool_ok(
+                        "No under-linked records: every record the shapes flag already carries its expected link.".to_string(),
+                    ));
+                }
+                let cap = 50usize;
+                let mut total = 0usize;
+                let mut out = format!(
+                    "{} under-linked record(s) (the shapes say each SHOULD carry a link). Confirm any suggestion with `relate`:",
+                    under.len()
+                );
+                for u in &under {
+                    let suggestions = graph::suggest_links_for_record(
+                        &self.state,
+                        &u.iri,
+                        top_n,
+                        floor,
+                        Some(u.missing_predicate.as_str()),
+                    )
+                    .await;
+                    // If gap-targeting couldn't surface the missing predicate, say so —
+                    // the listed links are still legal, just not the flagged one.
+                    let note = if suggestions
+                        .iter()
+                        .any(|s| s.predicate_local == u.missing_predicate)
+                    {
+                        ""
+                    } else {
+                        " (no direct candidate — other legal links)"
+                    };
+                    out.push_str(&format!(
+                        "\n\n• {} ({}) — should have {}{}:",
+                        u.iri, u.class_local, u.missing_predicate, note
+                    ));
+                    if suggestions.is_empty() {
+                        out.push_str("\n  (no confident candidate found)");
+                        continue;
+                    }
+                    let take = suggestions.len().min(cap - total);
+                    out.push_str(&format_suggestions(&suggestions[..take]));
+                    total += take;
+                    if total >= cap {
+                        out.push_str(
+                            "\n\n… suggestion cap reached; narrow with `iri` or a smaller `max_records`.",
+                        );
+                        break;
+                    }
+                }
+                Ok(tool_ok(out))
+            }
         }
     }
 

@@ -120,6 +120,10 @@ pub struct AppState {
     pub moose_cache: Arc<MooseOntologyCache>,
     pub arch_vocab: CompactVocabulary,
     pub capture: CapturePredicates,
+    /// Object-property domain/range table from the SHACL shapes, built once at
+    /// bootstrap. The legality source for relation writes (`relate` + inline
+    /// capture) and candidate enumeration for the link-suggester.
+    pub catalogue: RelationCatalogue,
     /// Ontology embedding vectors (L2 alignment tier); `None` until
     /// `build_alignment_index` runs. Also mirrored into `engine_config`.
     pub vector_store: Option<Arc<VecStore>>,
@@ -154,6 +158,7 @@ impl AppState {
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
         let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
         let capture = CapturePredicates::resolve(&arch_vocab)?;
+        let catalogue = build_relation_catalogue(&store);
         let entity_index = Arc::new(EntityIndexCache::new(64));
 
         let llm_cfg = LlmConfig::from_env();
@@ -189,6 +194,7 @@ impl AppState {
             moose_cache,
             arch_vocab,
             capture,
+            catalogue,
             engine_config,
             llm,
             ontology_resolver,
@@ -586,6 +592,94 @@ pub fn record_instance_with_relations(
     Ok(subject)
 }
 
+/// A forward relation written by [`record_instance_with_relation_args`].
+#[derive(Debug, Clone)]
+pub struct AppliedEdge {
+    pub predicate_local: String,
+    pub object_iri: String,
+}
+
+/// Result of a capture that may also assert inline relations.
+#[derive(Debug, Clone)]
+pub struct RecordOutcome {
+    pub iri: String,
+    pub applied_edges: Vec<AppliedEdge>,
+}
+
+/// Like [`record_instance`], but also asserts forward inline relations from the new
+/// record (subject = the record being created). Each `(predicate_local, target)`
+/// is resolved and SHACL-validated against the new record's class *before* any
+/// write, so an invalid relation fails the whole capture — no orphan record is left
+/// behind (validation precedes the single `assert_instance`). `target` is an
+/// existing record IRI or its exact (normalized) title; an ambiguous title is
+/// rejected (Req 5565038e). Identical `(predicate, object)` pairs are deduped.
+pub fn record_instance_with_relation_args(
+    state: &AppState,
+    input: &RecordInput,
+    relations: &[(String, String)],
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<RecordOutcome> {
+    let subject_types = std::slice::from_ref(&input.class_iri);
+    let mut object_props: Vec<(String, String)> = Vec::new();
+    let mut applied_edges: Vec<AppliedEdge> = Vec::new();
+
+    for (predicate_local, target) in relations {
+        let predicate_iri = state.resolve_object_property(predicate_local).map_err(|e| {
+            anyhow::anyhow!(
+                "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
+            )
+        })?;
+        let object_iri = resolve_relation_target(state, target)?;
+        let object = NamedNode::new(&object_iri)
+            .map_err(|e| anyhow::anyhow!("invalid target IRI {object_iri:?}: {e}"))?;
+        validate_relation_for_subject_types(
+            state,
+            subject_types,
+            &input.class_local,
+            &predicate_iri,
+            &object,
+        )?;
+        if object_props
+            .iter()
+            .any(|(p, o)| p == &predicate_iri && o == &object_iri)
+        {
+            continue; // dedup identical (predicate, object) pairs
+        }
+        applied_edges.push(AppliedEdge {
+            predicate_local: predicate_local.clone(),
+            object_iri: object_iri.clone(),
+        });
+        object_props.push((predicate_iri, object_iri));
+    }
+
+    let iri = record_instance_with_relations(state, input, &object_props, author, when)?;
+    Ok(RecordOutcome { iri, applied_edges })
+}
+
+/// Resolve an inline-relation target to an existing record IRI. Accepts an exact
+/// project record IRI, or an exact (normalized) title — rejecting "not found" and
+/// "ambiguous title" so a typo or a duplicate title can't silently mislink.
+fn resolve_relation_target(state: &AppState, target: &str) -> anyhow::Result<String> {
+    // An exact IRI of an existing record wins (titles with spaces fail IRI parse
+    // and fall through to title resolution).
+    if let Ok(node) = NamedNode::new(target) {
+        if require_information_record(state, &node).is_ok() {
+            return Ok(target.to_string());
+        }
+    }
+    let matches = resolve_record_exact_all(state, target);
+    match matches.len() {
+        0 => anyhow::bail!(
+            "relation target {target:?} matches no recorded item (by IRI or exact title)"
+        ),
+        1 => Ok(matches.into_iter().next().unwrap().0),
+        n => anyhow::bail!(
+            "relation target {target:?} is ambiguous — {n} records share that title; pass the IRI instead"
+        ),
+    }
+}
+
 /// Check whether the caller already supplied a property so write-path defaults do
 /// not duplicate explicit values.
 fn has_literal_property(literal_props: &[(String, String)], predicate_iri: &str) -> bool {
@@ -855,13 +949,106 @@ fn asserted_project_types(state: &AppState, subject: &NamedNode) -> Vec<String> 
         .collect()
 }
 
-/// Load the SHACL object constraints for a relationship predicate. The shape
-/// target class is the subject/domain constraint; each property branch's
-/// `sh:class` is the object/range constraint.
-fn shacl_relation_constraints(state: &AppState, predicate_iri: &str) -> Vec<RelationConstraint> {
+/// A single SHACL-declared object-property constraint: `predicate_iri` admits a
+/// subject of `subject_class` (the shape's `sh:targetClass`, the domain) pointing
+/// at an object of `object_class` (the property branch's `sh:class`, the range).
+#[derive(Debug, Clone)]
+struct CatalogEntry {
+    predicate_iri: String,
+    predicate_local: String,
+    subject_class: String,
+    object_class: String,
+}
+
+/// Direction a legal edge must run for an ordered class pair `(a, b)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDirection {
+    /// `a --predicate--> b` (a is the domain/subject).
+    Forward,
+    /// `b --predicate--> a` (b is the domain/subject).
+    Inverse,
+}
+
+/// An object property legal between a class pair, with the direction it runs.
+#[derive(Debug, Clone)]
+pub struct LegalEdge {
+    pub predicate_local: String,
+    pub predicate_iri: String,
+    pub direction: EdgeDirection,
+}
+
+/// The project's object-property domain/range table, read once from the loaded
+/// SHACL shape graphs at bootstrap (shapes are static post-load, so it never needs
+/// invalidation). The single in-memory source of truth for relation legality:
+/// `relate` and inline capture validate against it, and the link-suggester
+/// enumerates candidate predicates from it — replacing per-call SPARQL.
+#[derive(Debug, Clone, Default)]
+pub struct RelationCatalogue {
+    entries: Vec<CatalogEntry>,
+}
+
+impl RelationCatalogue {
+    /// Domain/range constraints declared for one predicate IRI — the subject/object
+    /// class pairs its shapes permit. Replaces the old per-call shapes query.
+    fn constraints_for_predicate(&self, predicate_iri: &str) -> Vec<RelationConstraint> {
+        self.entries
+            .iter()
+            .filter(|e| e.predicate_iri == predicate_iri)
+            .map(|e| RelationConstraint {
+                subject_class: e.subject_class.clone(),
+                object_class: e.object_class.clone(),
+            })
+            .collect()
+    }
+
+    /// Object properties legal between two record classes, in either direction,
+    /// subclass-aware (so `InformationRecord`-level constraints apply to every
+    /// pair). `Forward` ⇒ the edge is `a --pred--> b`; `Inverse` ⇒ `b --pred--> a`.
+    /// Deduplicated by (predicate, direction).
+    pub fn legal_predicates(&self, store: &Store, a_class: &str, b_class: &str) -> Vec<LegalEdge> {
+        let mut out: Vec<LegalEdge> = Vec::new();
+        for entry in &self.entries {
+            let forward = is_subclass_of(store, a_class, &entry.subject_class)
+                && is_subclass_of(store, b_class, &entry.object_class);
+            let inverse = is_subclass_of(store, b_class, &entry.subject_class)
+                && is_subclass_of(store, a_class, &entry.object_class);
+            for (matched, direction) in [
+                (forward, EdgeDirection::Forward),
+                (inverse, EdgeDirection::Inverse),
+            ] {
+                if matched
+                    && !out
+                        .iter()
+                        .any(|e| e.predicate_iri == entry.predicate_iri && e.direction == direction)
+                {
+                    out.push(LegalEdge {
+                        predicate_local: entry.predicate_local.clone(),
+                        predicate_iri: entry.predicate_iri.clone(),
+                        direction,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Local names of every object property in the catalogue (for drift checks).
+    #[cfg(test)]
+    fn predicate_locals(&self) -> std::collections::HashSet<&str> {
+        self.entries.iter().map(|e| e.predicate_local.as_str()).collect()
+    }
+}
+
+/// Read every object-property constraint from the loaded SHACL shape graphs into a
+/// [`RelationCatalogue`]. Generalizes the old per-predicate query: it binds
+/// `?predicate` instead of fixing one, and keeps only property branches declaring
+/// an `sh:class` (range) — `sh:datatype` branches drop out — so the table is
+/// exactly the record→record object-property vocabulary, including `sh:or` union
+/// ranges (e.g. `isMotivatedBy` → Constraint|Requirement).
+fn build_relation_catalogue(store: &Store) -> RelationCatalogue {
     let sparql = format!(
         r#"
-SELECT DISTINCT ?subjectClass ?objectClass
+SELECT DISTINCT ?predicate ?subjectClass ?objectClass
 WHERE {{
   VALUES ?shapeGraph {{ <{}> <{}> }}
   GRAPH ?shapeGraph {{
@@ -871,7 +1058,7 @@ WHERE {{
     }} UNION {{
       ?shape <{}>/<{}>*/<{}> ?propertyShape .
     }}
-    ?propertyShape <{}> <{}> ;
+    ?propertyShape <{}> ?predicate ;
                    <{}> ?objectClass .
   }}
 }}"#,
@@ -883,22 +1070,26 @@ WHERE {{
         RDF_REST,
         RDF_FIRST,
         SH_PATH,
-        predicate_iri,
         SH_CLASS
     );
 
-    let Ok(QueryResults::Solutions(solutions)) = run_sparql(&state.store, &sparql) else {
-        return Vec::new();
+    let Ok(QueryResults::Solutions(solutions)) = run_sparql(store, &sparql) else {
+        return RelationCatalogue::default();
     };
-    solutions
+    let entries = solutions
         .flatten()
         .filter_map(|solution| {
-            Some(RelationConstraint {
+            let predicate_iri = iri_value(solution.get("predicate"))?;
+            let predicate_local = local_name(&predicate_iri).to_string();
+            Some(CatalogEntry {
+                predicate_iri,
+                predicate_local,
                 subject_class: iri_value(solution.get("subjectClass"))?,
                 object_class: iri_value(solution.get("objectClass"))?,
             })
         })
-        .collect()
+        .collect();
+    RelationCatalogue { entries }
 }
 
 fn run_sparql<'a>(store: &'a Store, sparql: &str) -> anyhow::Result<QueryResults<'a>> {
@@ -946,25 +1137,55 @@ fn unique_classes(classes: impl IntoIterator<Item = String>) -> Vec<String> {
     out
 }
 
-/// Validate a relation against the loaded SHACL shape contract before writing.
-/// If the predicate has no object constraint in the shapes, preserve the legacy
-/// safe default: both endpoints must be InformationRecords.
+/// Validate a relation against the loaded SHACL shape contract before writing, for
+/// an *existing* subject record. Thin wrapper over
+/// [`validate_relation_for_subject_types`] that reads the subject's asserted types.
 fn validate_relation_endpoints(
     state: &AppState,
     subject: &NamedNode,
     predicate_iri: &str,
     object: &NamedNode,
 ) -> anyhow::Result<()> {
-    let constraints = shacl_relation_constraints(state, predicate_iri);
+    let subject_types = asserted_project_types(state, subject);
+    validate_relation_for_subject_types(
+        state,
+        &subject_types,
+        subject.as_str(),
+        predicate_iri,
+        object,
+    )
+}
+
+/// Validate a relation against the SHACL contract using *supplied* subject types,
+/// so it works before the subject is minted (inline capture) as well as for an
+/// existing subject (`relate`). `subject_desc` labels the subject in error
+/// messages. The object must already exist in the project graph. If the predicate
+/// has no object constraint in the shapes, preserve the legacy safe default: the
+/// subject's types must include an `InformationRecord` and the object must be one.
+fn validate_relation_for_subject_types(
+    state: &AppState,
+    subject_types: &[String],
+    subject_desc: &str,
+    predicate_iri: &str,
+    object: &NamedNode,
+) -> anyhow::Result<()> {
+    let constraints = state.catalogue.constraints_for_predicate(predicate_iri);
     if constraints.is_empty() {
-        require_information_record(state, subject)
-            .map_err(|e| anyhow::anyhow!("cannot relate subject {}: {e}", subject.as_str()))?;
+        let info_record = state.resolve_class("InformationRecord")?;
+        if !subject_types
+            .iter()
+            .any(|t| is_subclass_of(&state.store, t, &info_record))
+        {
+            anyhow::bail!(
+                "cannot relate subject {subject_desc}: actual class(es) [{}], expected [InformationRecord]",
+                class_list(subject_types)
+            );
+        }
         require_information_record(state, object)
             .map_err(|e| anyhow::anyhow!("cannot relate object {}: {e}", object.as_str()))?;
         return Ok(());
     }
 
-    let subject_types = asserted_project_types(state, subject);
     let object_types = asserted_project_types(state, object);
     let expected_subjects = unique_classes(
         constraints
@@ -977,7 +1198,7 @@ fn validate_relation_endpoints(
         .filter(|constraint| {
             any_subclass_of(
                 &state.store,
-                &subject_types,
+                subject_types,
                 std::slice::from_ref(&constraint.subject_class),
             )
         })
@@ -985,9 +1206,8 @@ fn validate_relation_endpoints(
 
     if matching_subject_constraints.is_empty() {
         anyhow::bail!(
-            "cannot relate subject {}: actual class(es) [{}], expected [{}]",
-            subject.as_str(),
-            class_list(&subject_types),
+            "cannot relate subject {subject_desc}: actual class(es) [{}], expected [{}]",
+            class_list(subject_types),
             class_list(&expected_subjects)
         );
     }
@@ -1667,7 +1887,7 @@ fn record_neighbors(state: &AppState, iri: &str) -> Vec<(String, String, String)
 /// nearest neighbor and manufacture a seed for an irrelevant query. Mirrors the
 /// `MOOSEDEV_EXPAND_HOPS` override pattern. Always `Some` — config never disables
 /// the guarantee (an unparseable value falls back to the default).
-fn dense_floor() -> Option<f32> {
+pub fn dense_floor() -> Option<f32> {
     let floor = std::env::var("MOOSEDEV_DENSE_FLOOR")
         .ok()
         .and_then(|v| v.trim().parse::<f32>().ok())
@@ -1713,6 +1933,47 @@ fn resolve_topic_to_record(state: &AppState, topic: &str) -> Option<(String, Str
     None
 }
 
+/// Resolve a free-text target to recorded project items by an exact (normalized)
+/// match on `rdfs:label` or `hasTitle`, returning *all* distinct matches as
+/// `(iri, class)`. The many-match analogue of [`resolve_topic_to_record`], so a
+/// caller can tell "not found" (empty) from "ambiguous" (>1). Deduped by IRI (a
+/// record matches on both its label and its title).
+fn resolve_record_exact_all(state: &AppState, target: &str) -> Vec<(String, String)> {
+    let needle = normalize_match(target);
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for pred_iri in [moose::RDFS_LABEL, state.capture.title.as_str()] {
+        let Ok(pred) = NamedNodeRef::new(pred_iri) else {
+            continue;
+        };
+        for q in state
+            .store
+            .quads_for_pattern(None, Some(pred), None, Some(GraphNameRef::NamedNode(graph)))
+            .flatten()
+        {
+            let Term::Literal(lit) = &q.object else {
+                continue;
+            };
+            if normalize_match(lit.value()) != needle {
+                continue;
+            }
+            if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
+                let iri = s.as_str().to_string();
+                if out.iter().any(|(existing, _)| existing == &iri) {
+                    continue;
+                }
+                if let Ok(class) = require_information_record(state, s) {
+                    out.push((iri, class));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Lightweight normalization for exact-ish anchor matching: collapse whitespace and
 /// lowercase. Deliberately simpler than MOOSE's entity normalizer — anchoring wants
 /// a high-precision exact match, not fuzzy recall (that is the dense channel's job).
@@ -1755,17 +2016,32 @@ fn rank_neighbors(
     });
 }
 
-/// Host-side priority tier for a typed edge (lower = expand first). The strong
-/// answer-completing links of a decision/constraint/lesson — the *why* and *what it
-/// touches* — outrank structural/containment edges. MOOSEDev domain policy, kept out
-/// of MOOSE core (which stays domain-neutral, invariant #11); names are the object
-/// properties declared in the architecture/engineering ontologies.
-/// JAMES: Code coupled to the ontology object properties, FIX
+/// Object-property local names whose edges rank highest for graph-walk expansion —
+/// the *why* and *what it touches* of a decision/constraint/lesson outrank
+/// structural/containment edges. Host-side domain policy, kept out of MOOSE core
+/// (which stays domain-neutral, invariant #11). Every name here is an object
+/// property declared in the architecture/engineering SHACL shapes; the
+/// `priority_edges_are_all_in_catalogue` test asserts each appears in the
+/// [`RelationCatalogue`], so an ontology rename can't silently break ranking.
+const PRIORITY_EDGES: &[&str] = &[
+    "isMotivatedBy",
+    "violates",
+    "supersedes",
+    "constrains",
+    "concerns",
+    "learnedFrom",
+    "resultsIn",
+    "weighs",
+    "dependsOn",
+];
+
+/// Host-side priority tier for a typed edge (lower = expand first); see
+/// [`PRIORITY_EDGES`].
 fn edge_priority(predicate_local: &str) -> u8 {
-    match predicate_local {
-        "isMotivatedBy" | "violates" | "supersedes" | "constrains" | "concerns" | "learnedFrom"
-        | "resultsIn" | "weighs" | "dependsOn" => 0,
-        _ => 1,
+    if PRIORITY_EDGES.contains(&predicate_local) {
+        0
+    } else {
+        1
     }
 }
 
@@ -1901,4 +2177,453 @@ fn first_literal(store: &Store, subject_iri: &str, predicate_iri: &str) -> Optio
             Term::Literal(l) => Some(l.value().to_string()),
             _ => None,
         })
+}
+
+// ============================================================================
+// Link suggester — symbolic-first, suggest-only (invariants #1, #4, #6)
+//
+// Candidate generation is the hybrid retriever; legality is the SHACL relation
+// catalogue; the LLM is at most a gated tiebreaker. Nothing here writes: it
+// returns ranked legal candidates the agent confirms via `relate`/inline
+// relations. Co-located with `relevant_context` because it reuses the same
+// retrieval, neighbor, and catalogue primitives.
+// ============================================================================
+
+/// Lifecycle object properties owned by `supersede`/`retract` (and their inverses)
+/// — legal between any record pair, but never *suggested*: they record decision
+/// evolution, not an abductive semantic link.
+const LIFECYCLE_PREDICATES: &[&str] = &[
+    "supersedes",
+    "isSupersededBy",
+    "hasRationale",
+    "isRationaleFor",
+];
+
+/// A candidate link from the suggester: a legal, currently-unasserted edge to a
+/// similar record. Suggest-only — the agent confirms it through the validated
+/// `relate` path (or inline relations); [`LinkSuggestion::confirm`] yields the
+/// exact `relate` arguments.
+#[derive(Debug, Clone)]
+pub struct LinkSuggestion {
+    pub predicate_local: String,
+    /// The edge's subject IRI (orientation already resolved from the direction).
+    pub subject_iri: String,
+    /// The edge's object IRI.
+    pub object_iri: String,
+    /// Display label of the *other* record (the candidate, not the seed record).
+    pub target_title: String,
+    /// Class local name of the other record (e.g. "Requirement").
+    pub target_kind: String,
+    /// Relevance-derived rank score (higher = stronger).
+    pub score: f32,
+}
+
+impl LinkSuggestion {
+    /// Exact `(subject_iri, predicate_local, object_iri)` arguments for
+    /// [`relate`] that assert this suggested edge.
+    pub fn confirm(&self) -> (String, String, String) {
+        (
+            self.subject_iri.clone(),
+            self.predicate_local.clone(),
+            self.object_iri.clone(),
+        )
+    }
+}
+
+/// A record that the shapes say SHOULD carry a link it currently lacks.
+#[derive(Debug, Clone)]
+pub struct UnderLinked {
+    pub iri: String,
+    pub class_local: String,
+    pub missing_predicate: String,
+}
+
+/// Whether the gated LLM predicate tiebreak runs (default OFF — symbolic-first).
+fn llm_tiebreak_enabled(level: LlmAssistLevel) -> bool {
+    matches!(
+        level,
+        LlmAssistLevel::AssistedValidation | LlmAssistLevel::FallbackExecutor
+    )
+}
+
+/// True if any object-property edge (excluding `rdf:type`) already connects the two
+/// records in the project graph, in either direction — so the suggester never
+/// re-proposes an existing link.
+fn record_pair_linked(state: &AppState, a: &str, b: &str) -> bool {
+    object_edge_exists(state, a, b) || object_edge_exists(state, b, a)
+}
+
+fn object_edge_exists(state: &AppState, subject: &str, object: &str) -> bool {
+    let (Ok(s), Ok(o)) = (NamedNodeRef::new(subject), NamedNodeRef::new(object)) else {
+        return false;
+    };
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    state
+        .store
+        .quads_for_pattern(
+            Some(s.into()),
+            None,
+            Some(o.into()),
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .any(|q| q.predicate.as_str() != moose::RDF_TYPE)
+}
+
+/// Choose the best legal *semantic* predicate for an ordered class pair (lifecycle
+/// predicates excluded). Symbolic order is priority-tier then name; a gated LLM
+/// tiebreak (default OFF) may reorder among the already-legal options when more
+/// than one fits — it can never introduce a predicate. `None` ⇒ no semantic
+/// predicate is legal, so prefer not-suggesting (anti-confabulation).
+async fn pick_predicate(
+    state: &AppState,
+    iri: &str,
+    hit_iri: &str,
+    legal: &[LegalEdge],
+    prioritize: Option<&str>,
+) -> Option<LegalEdge> {
+    let mut semantic: Vec<LegalEdge> = legal
+        .iter()
+        .filter(|e| !LIFECYCLE_PREDICATES.contains(&e.predicate_local.as_str()))
+        .cloned()
+        .collect();
+    if semantic.is_empty() {
+        return None;
+    }
+    // Gap-targeting: when the caller is filling a specific missing predicate and it
+    // is legal for this candidate, use it — so a scan for a record "missing
+    // isMotivatedBy" surfaces isMotivatedBy candidates, not just the most
+    // lexically-similar legal link.
+    if let Some(want) = prioritize {
+        if let Some(edge) = semantic.iter().find(|e| e.predicate_local == want) {
+            return Some(edge.clone());
+        }
+    }
+    semantic.sort_by(|a, b| {
+        edge_priority(&a.predicate_local)
+            .cmp(&edge_priority(&b.predicate_local))
+            .then_with(|| a.predicate_local.cmp(&b.predicate_local))
+    });
+    if semantic.len() > 1 && llm_tiebreak_enabled(state.engine_config.llm_assist_level) {
+        if let Some(chosen) = llm_pick_predicate(state, iri, hit_iri, &semantic).await {
+            return Some(chosen);
+        }
+    }
+    semantic.into_iter().next()
+}
+
+/// Gated LLM tiebreak: ask the in-process sensor which single legal predicate (if
+/// any) best holds between the two records. Reorders only among `candidates`; a
+/// miss/"none"/error returns `None` so the caller keeps the symbolic top.
+async fn llm_pick_predicate(
+    state: &AppState,
+    iri: &str,
+    hit_iri: &str,
+    candidates: &[LegalEdge],
+) -> Option<LegalEdge> {
+    let a = first_literal(&state.store, iri, moose::RDFS_LABEL)?;
+    let a_desc = first_literal(&state.store, iri, &state.capture.description).unwrap_or_default();
+    let b = first_literal(&state.store, hit_iri, moose::RDFS_LABEL)?;
+    let b_desc = first_literal(&state.store, hit_iri, &state.capture.description).unwrap_or_default();
+    let options: Vec<&str> = candidates.iter().map(|e| e.predicate_local.as_str()).collect();
+    let prompt = format!(
+        "Two software-project records:\n\
+         A: \"{a}\" — {a_desc}\n\
+         B: \"{b}\" — {b_desc}\n\n\
+         Which ONE of these typed relationships best holds between A and B, if any?\n\
+         Options: {}.\n\
+         Reply with exactly one option name, or \"none\" if no relationship clearly holds.",
+        options.join(", ")
+    );
+    let reply = state
+        .llm
+        .chat_completion(&state.model, &prompt, None)
+        .await
+        .ok()?
+        .trim()
+        .to_lowercase();
+    candidates
+        .iter()
+        .find(|e| reply.contains(&e.predicate_local.to_lowercase()))
+        .cloned()
+}
+
+/// Rank legal, currently-unasserted links from `iri` to records similar to it.
+/// Symbolic candidate generation (hybrid retrieval) + symbolic legality (the SHACL
+/// catalogue); self, already-linked pairs, and candidates with no legal semantic
+/// predicate are dropped (prefer not-suggesting). Suggest-only — writes nothing.
+pub async fn suggest_links_for_record(
+    state: &AppState,
+    iri: &str,
+    top_n: usize,
+    floor: Option<f32>,
+    prioritize: Option<&str>,
+) -> Vec<LinkSuggestion> {
+    let Ok(subject) = NamedNode::new(iri) else {
+        return Vec::new();
+    };
+    let Ok(class_iri) = require_information_record(state, &subject) else {
+        return Vec::new();
+    };
+    let seed_text = state.record_embed_text(iri);
+    if seed_text.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let class_iris: Vec<String> = state
+        .arch_vocab
+        .classes
+        .iter()
+        .map(|c| c.iri.clone())
+        .collect();
+    let data_graphs = [PROJECT_KG_GRAPH_IRI.to_string()];
+    let text_fields = [
+        (moose::RDFS_LABEL, 2.0_f32),
+        (state.capture.description.as_str(), 1.0_f32),
+    ];
+    // Over-fetch so the legality / already-linked filters still leave enough.
+    let want = (top_n * 4).max(10);
+    let ranked: Vec<(usize, String, String)> = state
+        .entity_index
+        .search_records_hybrid(
+            &seed_text,
+            &class_iris,
+            &state.store,
+            &data_graphs,
+            &text_fields,
+            want,
+            &state.instance_store,
+            floor,
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(rank, h)| (rank, h.iri, h.class_iri))
+        .collect();
+
+    let mut suggestions: Vec<LinkSuggestion> = Vec::new();
+    for (rank, hit_iri, hit_class) in ranked {
+        if hit_iri == iri || record_pair_linked(state, iri, &hit_iri) {
+            continue;
+        }
+        let legal = state
+            .catalogue
+            .legal_predicates(&state.store, &class_iri, &hit_class);
+        let Some(edge) = pick_predicate(state, iri, &hit_iri, &legal, prioritize).await else {
+            continue;
+        };
+        let (subject_iri, object_iri) = match edge.direction {
+            EdgeDirection::Forward => (iri.to_string(), hit_iri.clone()),
+            EdgeDirection::Inverse => (hit_iri.clone(), iri.to_string()),
+        };
+        suggestions.push(LinkSuggestion {
+            predicate_local: edge.predicate_local,
+            subject_iri,
+            object_iri,
+            target_title: first_literal(&state.store, &hit_iri, moose::RDFS_LABEL)
+                .unwrap_or_else(|| hit_iri.clone()),
+            target_kind: local_name(&hit_class).to_string(),
+            score: 1.0 / (1.0 + rank as f32),
+        });
+    }
+    // Prioritized predicate (the record's missing link) first, then typed-edge
+    // priority, then similarity, then IRI for determinism.
+    let prio_rank = |p: &str| -> u8 {
+        match prioritize {
+            Some(want) if want == p => 0,
+            _ => 1,
+        }
+    };
+    suggestions.sort_by(|a, b| {
+        prio_rank(&a.predicate_local)
+            .cmp(&prio_rank(&b.predicate_local))
+            .then(edge_priority(&a.predicate_local).cmp(&edge_priority(&b.predicate_local)))
+            .then(
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then_with(|| a.object_iri.cmp(&b.object_iri))
+    });
+    suggestions.truncate(top_n);
+    suggestions
+}
+
+/// The `sh:or` "should-have-a-link" requirements: each NodeShape with an `sh:or`
+/// maps its `sh:targetClass` to the branch predicates a conforming record SHOULD
+/// carry at least one of. The declarative source of truth for the link advisory.
+fn shacl_or_link_requirements(state: &AppState) -> Vec<(String, Vec<String>)> {
+    let sparql = format!(
+        r#"
+SELECT DISTINCT ?targetClass ?predicate
+WHERE {{
+  VALUES ?shapeGraph {{ <{}> <{}> }}
+  GRAPH ?shapeGraph {{
+    ?shape <{}> ?targetClass ;
+           <{}>/<{}>*/<{}> ?branch .
+    ?branch <{}> ?predicate .
+  }}
+}}"#,
+        ontology::SE_SHAPES_GRAPH_IRI,
+        ontology::ARCH_SHAPES_GRAPH_IRI,
+        SH_TARGET_CLASS,
+        SH_OR,
+        RDF_REST,
+        RDF_FIRST,
+        SH_PATH,
+    );
+    let Ok(QueryResults::Solutions(solutions)) = run_sparql(&state.store, &sparql) else {
+        return Vec::new();
+    };
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for sol in solutions.flatten() {
+        let (Some(target_class), Some(predicate)) =
+            (iri_value(sol.get("targetClass")), iri_value(sol.get("predicate")))
+        else {
+            continue;
+        };
+        if let Some((_, preds)) = groups.iter_mut().find(|(c, _)| c == &target_class) {
+            if !preds.contains(&predicate) {
+                preds.push(predicate);
+            }
+        } else {
+            groups.push((target_class, vec![predicate]));
+        }
+    }
+    groups
+}
+
+/// Records the shapes say SHOULD carry a link (an `sh:or` branch predicate) but
+/// currently lack every one of those predicates. Drives the non-blocking validate
+/// advisory and the `suggest_links` scan. Bounded by `max_records`.
+pub fn under_linked_records(state: &AppState, max_records: usize) -> Vec<UnderLinked> {
+    let mut out: Vec<UnderLinked> = Vec::new();
+    for (target_class, predicates) in shacl_or_link_requirements(state) {
+        let not_exists: String = predicates
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("    FILTER NOT EXISTS {{ ?node <{p}> ?v{i} }}\n"))
+            .collect();
+        // Records are typed directly as these leaf classes, so an exact `rdf:type`
+        // match in the project graph suffices (no cross-graph subclass path).
+        // Exclude superseded/deprecated records: like every other read, the advisory
+        // concerns the current working set, not history.
+        let sparql = format!(
+            "SELECT DISTINCT ?node\nWHERE {{\n  GRAPH <{}> {{\n    ?node <{}> <{}> .\n{}    FILTER NOT EXISTS {{ ?node <{}> ?st . FILTER(STR(?st) = \"superseded\" || STR(?st) = \"deprecated\") }}\n  }}\n}}",
+            PROJECT_KG_GRAPH_IRI,
+            moose::RDF_TYPE,
+            target_class,
+            not_exists,
+            state.capture.status
+        );
+        let Ok(QueryResults::Solutions(solutions)) = run_sparql(&state.store, &sparql) else {
+            continue;
+        };
+        for sol in solutions.flatten() {
+            if let Some(node) = iri_value(sol.get("node")) {
+                out.push(UnderLinked {
+                    iri: node,
+                    class_local: local_name(&target_class).to_string(),
+                    missing_predicate: local_name(&predicates[0]).to_string(),
+                });
+                if out.len() >= max_records {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Architecture-domain class namespace (matches the shipped ontologies).
+    const ARCH: &str = "https://trivyn.io/ontologies/software/architecture/domain/";
+
+    /// In-memory store with just the shipped domain + SHACL shape graphs loaded —
+    /// enough to build and exercise the relation catalogue.
+    fn shapes_store() -> Store {
+        let store = Store::new().expect("in-memory store");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+        ontology::load_ontologies(&store, &dir).expect("load ontologies");
+        store
+    }
+
+    fn cls(local: &str) -> String {
+        format!("{ARCH}{local}")
+    }
+
+    #[test]
+    fn catalogue_captures_object_properties_including_union_ranges() {
+        let store = shapes_store();
+        let cat = build_relation_catalogue(&store);
+        let locals = cat.predicate_locals();
+        for p in [
+            "isMotivatedBy",
+            "violates",
+            "constrains",
+            "learnedFrom",
+            "concerns",
+            "weighs",
+            "resultsIn",
+            "supersedes",
+            "dependsOn",
+        ] {
+            assert!(locals.contains(p), "catalogue missing object property {p:?}");
+        }
+        // `isMotivatedBy` has a SHACL `sh:or` union range — both branches present.
+        let to_req =
+            cat.legal_predicates(&store, &cls("ArchitecturalDecision"), &cls("Requirement"));
+        let to_con =
+            cat.legal_predicates(&store, &cls("ArchitecturalDecision"), &cls("Constraint"));
+        assert!(to_req
+            .iter()
+            .any(|e| e.predicate_local == "isMotivatedBy" && e.direction == EdgeDirection::Forward));
+        assert!(to_con
+            .iter()
+            .any(|e| e.predicate_local == "isMotivatedBy" && e.direction == EdgeDirection::Forward));
+    }
+
+    #[test]
+    fn legal_predicates_respects_domain_range_and_direction() {
+        let store = shapes_store();
+        let cat = build_relation_catalogue(&store);
+        // No *semantic* object property links an AntiPattern to a Requirement
+        // (`violates` ranges over Constraint, `isMotivatedBy`'s domain is a
+        // decision). Only the InformationRecord-level lifecycle predicates
+        // (supersedes/isSupersededBy) apply to any record pair — the suggester
+        // filters those out.
+        let semantic: Vec<_> = cat
+            .legal_predicates(&store, &cls("AntiPattern"), &cls("Requirement"))
+            .into_iter()
+            .filter(|e| {
+                !matches!(
+                    e.predicate_local.as_str(),
+                    "supersedes" | "isSupersededBy" | "hasRationale" | "isRationaleFor"
+                )
+            })
+            .collect();
+        assert!(semantic.is_empty(), "unexpected semantic links: {semantic:?}");
+        // From a Requirement to a decision, `isMotivatedBy` is legal but Inverse
+        // (the edge runs decision -> requirement).
+        let from_req =
+            cat.legal_predicates(&store, &cls("Requirement"), &cls("ArchitecturalDecision"));
+        assert!(from_req
+            .iter()
+            .any(|e| e.predicate_local == "isMotivatedBy" && e.direction == EdgeDirection::Inverse));
+    }
+
+    #[test]
+    fn priority_edges_are_all_in_catalogue() {
+        let store = shapes_store();
+        let cat = build_relation_catalogue(&store);
+        let locals = cat.predicate_locals();
+        for p in PRIORITY_EDGES {
+            assert!(
+                locals.contains(p),
+                "PRIORITY_EDGES lists {p:?} but no SHACL shape declares it (ontology drift)"
+            );
+        }
+    }
 }

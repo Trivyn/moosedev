@@ -49,15 +49,31 @@ pub struct Violation {
     pub detail: String,
 }
 
+/// A non-blocking "SHOULD carry a link" finding: a record whose shape declares an
+/// `sh:or` link requirement (e.g. ArchitecturalDecision → isMotivatedBy) that the
+/// record does not yet satisfy. Advisory only — it never affects conformance.
+#[derive(Debug, Clone)]
+pub struct Advisory {
+    pub node: String,
+    pub target_class: String,
+    pub missing_predicate: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
     pub violations: Vec<Violation>,
+    /// Non-blocking under-linked findings (the shapes' `sh:or` branches). These do
+    /// NOT affect `conforms()` — a flat graph still validates — they nudge the agent
+    /// to densify the graph via `suggest_links` / `relate`. MOOSE's M3 validator has
+    /// no `sh:severity`, so this advisory is computed in Rust from the same shapes.
+    pub advisories: Vec<Advisory>,
     pub shapes_checked: usize,
     pub skipped: usize,
 }
 
 impl ValidationReport {
-    /// Whether the report has no validation violations.
+    /// Whether the report has no validation violations. Advisories are non-blocking
+    /// and deliberately excluded.
     pub fn conforms(&self) -> bool {
         self.violations.is_empty()
     }
@@ -82,8 +98,21 @@ pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
         }
     }
 
+    // Non-blocking advisory: records the shapes say SHOULD carry a link (an `sh:or`
+    // branch predicate) but don't. Computed from the same shapes; excluded from
+    // `conforms()`. Source of truth: graph::under_linked_records.
+    let advisories = crate::graph::under_linked_records(state, usize::MAX)
+        .into_iter()
+        .map(|u| Advisory {
+            node: u.iri,
+            target_class: u.class_local,
+            missing_predicate: u.missing_predicate,
+        })
+        .collect();
+
     Ok(ValidationReport {
         violations,
+        advisories,
         shapes_checked,
         skipped,
     })
@@ -111,6 +140,25 @@ pub fn format_report(report: &ValidationReport) -> String {
             local_name(&violation.target_class),
             local_name(&violation.path)
         ));
+    }
+    if !report.advisories.is_empty() {
+        // Show the count plus a bounded sample — on a large graph there can be
+        // hundreds; the full set is the `suggest_links` scan's job, not validate's.
+        const ADVISORY_SAMPLE: usize = 10;
+        out.push_str(&format!(
+            "\n\nAdvisories (SHOULD, non-blocking): {} — run `suggest_links` for candidates",
+            report.advisories.len()
+        ));
+        for advisory in report.advisories.iter().take(ADVISORY_SAMPLE) {
+            out.push_str(&format!(
+                "\n  - {} ({}) should carry {}",
+                advisory.node, advisory.target_class, advisory.missing_predicate
+            ));
+        }
+        let remaining = report.advisories.len().saturating_sub(ADVISORY_SAMPLE);
+        if remaining > 0 {
+            out.push_str(&format!("\n  … and {remaining} more"));
+        }
     }
     out
 }
@@ -313,4 +361,33 @@ fn integer_value(term: Option<&Term>) -> Option<u32> {
 /// Render the final IRI segment in reports.
 fn local_name(iri: &str) -> &str {
     iri.rsplit(['/', '#']).next().unwrap_or(iri)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_report_caps_advisory_listing_and_conforms() {
+        let advisories: Vec<Advisory> = (0..15)
+            .map(|i| Advisory {
+                node: format!("urn:node:{i}"),
+                target_class: "ArchitecturalDecision".to_string(),
+                missing_predicate: "isMotivatedBy".to_string(),
+            })
+            .collect();
+        let report = ValidationReport {
+            violations: Vec::new(),
+            advisories,
+            shapes_checked: 0,
+            skipped: 0,
+        };
+        // Advisories are non-blocking: an all-advisory report still conforms.
+        assert!(report.conforms());
+        let out = format_report(&report);
+        assert!(out.contains("Advisories (SHOULD, non-blocking): 15"));
+        assert!(out.contains("… and 5 more"));
+        assert!(out.contains("urn:node:0")); // first sample shown
+        assert!(!out.contains("urn:node:14")); // beyond the sample, elided
+    }
 }
