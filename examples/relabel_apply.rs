@@ -24,15 +24,28 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let apply = args.iter().any(|a| a == "--apply");
     let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    let map_path = pos.first().map(|s| s.as_str()).unwrap_or("/tmp/final_map.json");
+    let map_path = pos
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("/tmp/final_map.json");
     let kg_path = pos.get(1).map(|s| s.as_str()).unwrap_or(".moosedev/kg");
 
-    let map: BTreeMap<String, String> =
-        serde_json::from_reader(std::fs::File::open(map_path)?)?;
-    println!("map: {} entries from {map_path}\nstore: {kg_path}  mode: {}",
-             map.len(), if apply { "APPLY (exclusive)" } else { "DRY-RUN (read-only)" });
+    let map: BTreeMap<String, String> = serde_json::from_reader(std::fs::File::open(map_path)?)?;
+    println!(
+        "map: {} entries from {map_path}\nstore: {kg_path}  mode: {}",
+        map.len(),
+        if apply {
+            "APPLY (exclusive)"
+        } else {
+            "DRY-RUN (read-only)"
+        }
+    );
 
-    let store = if apply { Store::open(kg_path)? } else { Store::open_read_only(kg_path)? };
+    let store = if apply {
+        Store::open(kg_path)?
+    } else {
+        Store::open_read_only(kg_path)?
+    };
     let label = NamedNodeRef::new(RDFS_LABEL)?;
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
 
@@ -40,7 +53,12 @@ fn main() -> anyhow::Result<()> {
     for (iri, handle) in &map {
         let subj = NamedNode::new(iri)?;
         let existing: Vec<Quad> = store
-            .quads_for_pattern(Some(subj.as_ref().into()), Some(label), None, Some(graph.into()))
+            .quads_for_pattern(
+                Some(subj.as_ref().into()),
+                Some(label),
+                None,
+                Some(graph.into()),
+            )
             .collect::<Result<_, _>>()?;
         if existing.is_empty() {
             missing += 1;
@@ -49,7 +67,10 @@ fn main() -> anyhow::Result<()> {
         }
         if existing.len() > 1 {
             multi += 1;
-            eprintln!("  {} label quads (will collapse to 1): {iri}", existing.len());
+            eprintln!(
+                "  {} label quads (will collapse to 1): {iri}",
+                existing.len()
+            );
         }
         let new_obj: Term = match &existing[0].object {
             Term::Literal(l) => match l.language() {
@@ -62,7 +83,12 @@ fn main() -> anyhow::Result<()> {
             for q in &existing {
                 store.remove(q)?;
             }
-            store.insert(&Quad::new(subj, label.into_owned(), new_obj, graph.into_owned()))?;
+            store.insert(&Quad::new(
+                subj,
+                label.into_owned(),
+                new_obj,
+                graph.into_owned(),
+            ))?;
         }
         updated += 1;
     }
@@ -72,7 +98,11 @@ fn main() -> anyhow::Result<()> {
 
     println!(
         "\n{} {updated} records | missing label: {missing} | multi-label: {multi}",
-        if apply { "APPLIED →" } else { "DRY-RUN would update" }
+        if apply {
+            "APPLIED →"
+        } else {
+            "DRY-RUN would update"
+        }
     );
     if !apply {
         println!("(nothing written — rerun with --apply, serve stopped, to mutate)");

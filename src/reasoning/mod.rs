@@ -308,8 +308,18 @@ mod tests {
         // A-box: a concerns b. Both carry a label, so both are asserted A-box subjects
         // (as every real record is) and survive the A-box-subject delta scoping.
         store.insert(&Quad::new(a.clone(), concerns.clone(), b.clone(), data))?;
-        store.insert(&Quad::new(a.clone(), label.clone(), Literal::new_simple_literal("a"), data))?;
-        store.insert(&Quad::new(b.clone(), label, Literal::new_simple_literal("b"), data))?;
+        store.insert(&Quad::new(
+            a.clone(),
+            label.clone(),
+            Literal::new_simple_literal("a"),
+            data,
+        ))?;
+        store.insert(&Quad::new(
+            b.clone(),
+            label,
+            Literal::new_simple_literal("b"),
+            data,
+        ))?;
         // T-box: concerns owl:inverseOf isConcernedBy (+ ObjectProperty typing).
         store.insert(&Quad::new(
             concerns.clone(),
@@ -394,7 +404,9 @@ mod tests {
                     None,
                     Some(is_concerned_by.as_ref()),
                     None,
-                    Some(GraphNameRef::NamedNode(NamedNodeRef::new(data_iri).unwrap())),
+                    Some(GraphNameRef::NamedNode(
+                        NamedNodeRef::new(data_iri).unwrap(),
+                    )),
                 )
                 .count()
         };
@@ -415,13 +427,21 @@ mod tests {
         let n = enrich(&store, data_iri, &["urn:test:onto"], Utc::now())?;
         assert_eq!(n, 1, "one inverse edge materialized");
         assert_eq!(count_inverse(), 1, "inverse co-located in the data graph");
-        assert_eq!(count_reifies(), 1, "inverse reified in the provenance graph");
+        assert_eq!(
+            count_reifies(),
+            1,
+            "inverse reified in the provenance graph"
+        );
 
         // Re-run: drop-and-rerun keeps exactly one inverse edge + one reifier (idempotent).
         let n2 = enrich(&store, data_iri, &["urn:test:onto"], Utc::now())?;
         assert_eq!(n2, 1);
         assert_eq!(count_inverse(), 1, "no edge duplication after re-enrich");
-        assert_eq!(count_reifies(), 1, "no provenance duplication after re-enrich");
+        assert_eq!(
+            count_reifies(),
+            1,
+            "no provenance duplication after re-enrich"
+        );
         Ok(())
     }
 }

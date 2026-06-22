@@ -44,7 +44,10 @@ async fn main() -> anyhow::Result<()> {
     let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
     for u in &under {
         *by_class
-            .entry(format!("{} (missing {})", u.class_local, u.missing_predicate))
+            .entry(format!(
+                "{} (missing {})",
+                u.class_local, u.missing_predicate
+            ))
             .or_default() += 1;
     }
     for (k, n) in &by_class {
@@ -85,16 +88,14 @@ async fn main() -> anyhow::Result<()> {
                     println!("    (no confident candidate)");
                 }
                 for s in sugg {
-                    let from = if s.subject_iri == u.iri {
-                        "this".to_string()
-                    } else {
-                        short(&s.subject_iri)
-                    };
+                    // Oriented subject→object, matching the `relate` it would emit.
                     println!(
-                        "    {from} --{}--> \"{}\" ({})  [score {:.3}]",
+                        "    \"{}\" ({}) --{}--> \"{}\" ({})  [score {:.3}]",
+                        clip(&s.subject_title, 48),
+                        s.subject_kind,
                         s.predicate_local,
-                        clip(&s.target_title, 64),
-                        s.target_kind,
+                        clip(&s.object_title, 48),
+                        s.object_kind,
                         s.score
                     );
                 }
