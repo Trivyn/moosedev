@@ -121,7 +121,10 @@ fn under_linked_record_is_advised_without_breaking_conformance() {
                     moose::RDFS_LABEL.to_string(),
                     "Adopt a local cache".to_string(),
                 ),
-                (state.capture.title.clone(), "Adopt a local cache".to_string()),
+                (
+                    state.capture.title.clone(),
+                    "Adopt a local cache".to_string(),
+                ),
             ],
         },
         "test-agent",

@@ -21,7 +21,9 @@ use oxigraph::store::Store;
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let kg_path = args.next().unwrap_or_else(|| ".moosedev/kg".to_string());
-    let graph_iri = args.next().unwrap_or_else(|| PROJECT_KG_GRAPH_IRI.to_string());
+    let graph_iri = args
+        .next()
+        .unwrap_or_else(|| PROJECT_KG_GRAPH_IRI.to_string());
 
     let store = Store::open_read_only(&kg_path)
         .map_err(|e| anyhow::anyhow!("open {kg_path} read-only: {e}"))?;

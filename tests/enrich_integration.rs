@@ -75,7 +75,11 @@ fn enrich_materializes_inverse_keeps_shacl_clean_and_is_idempotent() {
     graph::relate(&state, &ad, "isMotivatedBy", &req).expect("relate isMotivatedBy");
 
     // Baseline: no inverse edge yet; capture a violation count to measure enrichment against.
-    assert_eq!(motivates_count(&state, &req, &ad), 0, "no inverse before enrich");
+    assert_eq!(
+        motivates_count(&state, &req, &ad),
+        0,
+        "no inverse before enrich"
+    );
     let base_violations = validate_project(&state).expect("validate").violations.len();
 
     // Drive the lazy trigger exactly as the MCP write + read paths do.

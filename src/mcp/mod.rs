@@ -37,9 +37,13 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
 fn format_suggestions(suggestions: &[graph::LinkSuggestion]) -> String {
     let mut out = String::new();
     for s in suggestions {
+        // Render in subject→object order with both endpoints named, so the arrow
+        // points the same way as the `relate` below it (an Inverse-direction edge
+        // shown as `predicate → candidate` reads as the reverse, illegal orientation).
         out.push_str(&format!(
-            "\n  • {} → \"{}\" ({})\n      relate subject_iri={} predicate={} object_iri={}",
-            s.predicate_local, s.target_title, s.target_kind, s.subject_iri, s.predicate_local, s.object_iri
+            "\n  • \"{}\" ({}) -{}-> \"{}\" ({})\n      relate subject_iri={} predicate={} object_iri={}",
+            s.subject_title, s.subject_kind, s.predicate_local, s.object_title, s.object_kind,
+            s.subject_iri, s.predicate_local, s.object_iri
         ));
     }
     out
@@ -384,8 +388,13 @@ impl MooseDevServer {
             .into_iter()
             .map(|r| (r.predicate, r.target))
             .collect();
-        match graph::record_instance_with_relation_args(&self.state, &input, &relations, &agent, now)
-        {
+        match graph::record_instance_with_relation_args(
+            &self.state,
+            &input,
+            &relations,
+            &agent,
+            now,
+        ) {
             Ok(outcome) => {
                 let iri = outcome.iri;
                 // Best-effort edit provenance: who (the MCP client) asserted this,
@@ -605,12 +614,18 @@ impl MooseDevServer {
         self.state.ensure_enriched();
         let top_n = args.top_n.unwrap_or(5).clamp(1, 25);
         let floor = graph::dense_floor();
-        match args.iri.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        match args
+            .iri
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             Some(iri) => {
                 let suggestions =
                     graph::suggest_links_for_record(&self.state, &iri, top_n, floor, None).await;
                 if suggestions.is_empty() {
-                    Ok(tool_ok(format!("No legal unasserted links found for {iri}.")))
+                    Ok(tool_ok(format!(
+                        "No legal unasserted links found for {iri}."
+                    )))
                 } else {
                     Ok(tool_ok(format!(
                         "Suggested links for {iri} (confirm with `relate`):{}",
@@ -918,6 +933,41 @@ mod tests {
         assert!(
             err.contains("RFC3339"),
             "error names the expected format: {err}"
+        );
+    }
+
+    #[test]
+    fn inverse_suggestion_renders_in_relate_direction() {
+        // Seed record = an AD that is the OBJECT of `learnedFrom`; the candidate
+        // Lesson is the subject. The rendered line must read subject→object in the
+        // same direction as the `relate` it emits, so a reader never mistakes it for
+        // the reverse (illegal) `AD -learnedFrom-> Lesson`.
+        let s = crate::graph::LinkSuggestion {
+            predicate_local: "learnedFrom".to_string(),
+            subject_iri: "https://moosedev.dev/kg/Lesson/lesson-1".to_string(),
+            object_iri: "https://moosedev.dev/kg/ArchitecturalDecision/ad-1".to_string(),
+            subject_title: "Comment new integration seams".to_string(),
+            subject_kind: "Lesson".to_string(),
+            object_title: "Split the graph module".to_string(),
+            object_kind: "ArchitecturalDecision".to_string(),
+            score: 0.5,
+        };
+        let rendered = super::format_suggestions(&[s]);
+
+        // Headline reads subject (Lesson) before object (AD), predicate in the arrow.
+        let subj = rendered.find("Comment new integration seams").unwrap();
+        let obj = rendered.find("Split the graph module").unwrap();
+        assert!(subj < obj, "subject must render before object:\n{rendered}");
+        assert!(
+            rendered.contains("-learnedFrom->"),
+            "predicate belongs in the arrow:\n{rendered}"
+        );
+        // The relate args carry that same orientation (Lesson subject, AD object).
+        assert!(
+            rendered.contains("subject_iri=https://moosedev.dev/kg/Lesson/lesson-1")
+                && rendered
+                    .contains("object_iri=https://moosedev.dev/kg/ArchitecturalDecision/ad-1"),
+            "relate line must match the rendered direction:\n{rendered}"
         );
     }
 }
