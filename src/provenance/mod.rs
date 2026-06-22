@@ -9,7 +9,9 @@
 
 use chrono::{DateTime, Utc};
 use moose::{RDFS_LABEL, RDF_TYPE};
-use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
+use oxigraph::model::{
+    GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, Term, Triple,
+};
 use oxigraph::store::Store;
 
 /// Companion named graph holding PROV-O edit provenance.
@@ -194,4 +196,173 @@ pub fn read_provenance(store: &Store, entity_iri: &str) -> anyhow::Result<Option
         time,
         activity,
     }))
+}
+
+/// Stable name of the GROWL reasoner agent. Reasoner-materialized triples are attributed
+/// to it, and [`clear_reasoner_inferences`] finds prior inferences by it.
+pub const REASONER_AGENT: &str = "growl-owl2rl";
+
+/// `rdf:reifies` (RDF 1.2) — links a reifier to the triple term it is *about*.
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+
+/// Build the PROV-O + RDF 1.2 reification quads that attribute the inferred `delta`
+/// (triples destined for the data graph) to a fresh reasoner-inference activity, for
+/// insertion into the provenance graph. Performs **no** writes.
+///
+/// Each inferred triple `(s,p,o)` gets a reifier `R` with `R rdf:reifies «s p o»` and
+/// `R prov:wasGeneratedBy <activity>`; the activity is `prov:wasAssociatedWith` the
+/// reasoner agent. The reified triple term sits in OBJECT position — the only place RDF
+/// 1.2 admits it — so every quad is writable through the ordinary Transaction API (no
+/// SPARQL UPDATE, which this codebase deliberately rejects).
+pub fn reasoner_inference_quads(delta: &[Quad], when: DateTime<Utc>) -> Vec<Quad> {
+    let graph = GraphName::NamedNode(NamedNode::new_unchecked(PROVENANCE_GRAPH_IRI));
+    let activity = NamedNode::new_unchecked(format!(
+        "https://moosedev.dev/kg/Activity/{}",
+        uuid::Uuid::new_v4()
+    ));
+    let agent = NamedNode::new_unchecked(agent_iri(REASONER_AGENT));
+    let ts = Literal::new_typed_literal(when.to_rfc3339(), NamedNode::new_unchecked(XSD_DATETIME));
+    let reifies = NamedNode::new_unchecked(RDF_REIFIES);
+    let was_generated_by = NamedNode::new_unchecked(PROV_WAS_GENERATED_BY);
+
+    let mut quads = vec![
+        Quad::new(
+            activity.clone(),
+            NamedNode::new_unchecked(RDF_TYPE),
+            NamedNode::new_unchecked(PROV_ACTIVITY),
+            graph.clone(),
+        ),
+        Quad::new(
+            activity.clone(),
+            NamedNode::new_unchecked(PROV_WAS_ASSOCIATED_WITH),
+            agent.clone(),
+            graph.clone(),
+        ),
+        Quad::new(
+            activity.clone(),
+            NamedNode::new_unchecked(PROV_ENDED_AT_TIME),
+            ts,
+            graph.clone(),
+        ),
+        Quad::new(
+            agent.clone(),
+            NamedNode::new_unchecked(RDF_TYPE),
+            NamedNode::new_unchecked(PROV_SOFTWARE_AGENT),
+            graph.clone(),
+        ),
+        Quad::new(
+            agent,
+            NamedNode::new_unchecked(RDFS_LABEL),
+            Literal::new_simple_literal(REASONER_AGENT),
+            graph.clone(),
+        ),
+    ];
+
+    for q in delta {
+        let reifier = NamedNode::new_unchecked(format!(
+            "https://moosedev.dev/kg/Reifier/{}",
+            uuid::Uuid::new_v4()
+        ));
+        let triple_term = Term::Triple(Box::new(Triple::new(
+            q.subject.clone(),
+            q.predicate.clone(),
+            q.object.clone(),
+        )));
+        quads.push(Quad::new(
+            reifier.clone(),
+            reifies.clone(),
+            triple_term,
+            graph.clone(),
+        ));
+        quads.push(Quad::new(
+            reifier,
+            was_generated_by.clone(),
+            activity.clone(),
+            graph.clone(),
+        ));
+    }
+    quads
+}
+
+/// Remove every triple previously materialized by the reasoner from `data_graph_iri`,
+/// along with its reification provenance in the provenance graph. Inferred triples are
+/// recovered from the reifiers whose activity is `prov:wasAssociatedWith` the reasoner
+/// agent. Idempotent (a no-op when nothing was materialized). Returns the count of
+/// data-graph triples removed.
+pub fn clear_reasoner_inferences(store: &Store, data_graph_iri: &str) -> anyhow::Result<usize> {
+    let prov = GraphNameRef::NamedNode(NamedNodeRef::new_unchecked(PROVENANCE_GRAPH_IRI));
+    let data_graph = GraphName::NamedNode(nn(data_graph_iri)?);
+    let agent = NamedNode::new_unchecked(agent_iri(REASONER_AGENT));
+
+    // Reasoner-inference activities = those associated with the reasoner agent.
+    let activities: Vec<NamedNode> = store
+        .quads_for_pattern(
+            None,
+            Some(NamedNodeRef::new_unchecked(PROV_WAS_ASSOCIATED_WITH)),
+            Some(agent.as_ref().into()),
+            Some(prov),
+        )
+        .flatten()
+        .filter_map(|q| match q.subject {
+            NamedOrBlankNode::NamedNode(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+
+    let was_generated_by = NamedNodeRef::new_unchecked(PROV_WAS_GENERATED_BY);
+    let mut data_removals: Vec<Quad> = Vec::new();
+    let mut prov_removals: Vec<Quad> = Vec::new();
+
+    for activity in &activities {
+        // Reifiers generated by this activity.
+        let reifiers: Vec<NamedOrBlankNode> = store
+            .quads_for_pattern(
+                None,
+                Some(was_generated_by),
+                Some(activity.as_ref().into()),
+                Some(prov),
+            )
+            .flatten()
+            .map(|q| q.subject)
+            .collect();
+        for r in &reifiers {
+            for q in store
+                .quads_for_pattern(Some(r.as_ref()), None, None, Some(prov))
+                .flatten()
+            {
+                if q.predicate.as_str() == RDF_REIFIES {
+                    if let Term::Triple(t) = &q.object {
+                        data_removals.push(Quad::new(
+                            t.subject.clone(),
+                            t.predicate.clone(),
+                            t.object.clone(),
+                            data_graph.clone(),
+                        ));
+                    }
+                }
+                prov_removals.push(q);
+            }
+        }
+        // The activity's own quads.
+        for q in store
+            .quads_for_pattern(Some(activity.as_ref().into()), None, None, Some(prov))
+            .flatten()
+        {
+            prov_removals.push(q);
+        }
+    }
+
+    let removed = data_removals.len();
+    if data_removals.is_empty() && prov_removals.is_empty() {
+        return Ok(0);
+    }
+    let mut txn = store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("clear_reasoner_inferences transaction: {e}"))?;
+    for q in data_removals.iter().chain(prov_removals.iter()) {
+        txn.remove(q.as_ref());
+    }
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("clear_reasoner_inferences commit: {e}"))?;
+    Ok(removed)
 }

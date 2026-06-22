@@ -14,6 +14,13 @@ moose = { path = "../moose", features = ["candle-cpu", "arctic-s"] }
 # `Store` crosses the moose API boundary, so moosedev must resolve the identical crate.
 oxigraph = { version = "0.5.6", features = ["rdf-12"] }
 
+# GROWL — Trivyn's OWL 2 RL reasoner (its own term model, no oxigraph dep → no [patch]
+# conflict). App-layer enrichment: materializes inferred A-box edges (inverses,
+# subproperty, domain/range, subclass) from the declared ontology axioms. Wired in at the
+# moosedev layer exactly as trivyn/src/rdf/reasoning.rs does — NOT in the moose engine
+# (invariant #11). See tasks/growl-integration.md.
+growl = "0.5.1"
+
 # MCP server over stdio — the official Rust SDK. `schemars` enables tool input
 # schemas (re-exported as `rmcp::schemars`, so versions always match).
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "schemars"] }

@@ -17,7 +17,10 @@
 
 shape:AlternativeShape a sh:NodeShape ;
     sh:targetClass domain:Alternative ;
-    sh:closed false .
+    sh:property [
+        sh:path domain:isWeighedBy ;
+        sh:class domain:ArchitecturalDecision
+    ] .
 
 shape:AntiPatternShape a sh:NodeShape ;
     sh:targetClass domain:AntiPattern ;
@@ -47,14 +50,21 @@ shape:ArchitecturalDecisionShape a sh:NodeShape ;
 
 shape:ConsequenceShape a sh:NodeShape ;
     sh:targetClass domain:Consequence ;
-    sh:closed false .
+    sh:property [
+        sh:path domain:resultsFrom ;
+        sh:class domain:ArchitecturalDecision
+    ] .
 
 shape:ConstraintShape a sh:NodeShape ;
     sh:targetClass domain:Constraint ;
     sh:or (
         [ sh:path domain:constrains ; sh:class domain:ArchitecturalDecision ]
         [ sh:path domain:constrains ; sh:class domain:SystemComponent ]
-    ) .
+    ) ;
+    sh:property [
+        sh:path domain:isViolatedBy ;
+        sh:class domain:AntiPattern
+    ] .
 
 shape:InformationRecordShape a sh:NodeShape ;
     sh:targetClass domain:InformationRecord ;
@@ -86,6 +96,10 @@ shape:InformationRecordShape a sh:NodeShape ;
         sh:datatype xsd:string
     ] ;
     sh:property [
+        sh:path domain:isSupersededBy ;
+        sh:class domain:InformationRecord
+    ] ;
+    sh:property [
         sh:path domain:supersedes ;
         sh:class domain:InformationRecord
     ] .
@@ -103,7 +117,10 @@ shape:PatternShape a sh:NodeShape ;
 
 shape:RationaleShape a sh:NodeShape ;
     sh:targetClass domain:Rationale ;
-    sh:closed false .
+    sh:property [
+        sh:path domain:isRationaleFor ;
+        sh:class domain:InformationRecord
+    ] .
 
 shape:RequirementShape a sh:NodeShape ;
     sh:targetClass domain:Requirement ;
@@ -115,5 +132,9 @@ shape:SystemComponentShape a sh:NodeShape ;
         sh:path domain:hasComponentName ;
         sh:datatype xsd:string ;
         sh:minCount 1
+    ] ;
+    sh:property [
+        sh:path domain:isConcernedBy ;
+        sh:class domain:ArchitecturalDecision
     ] .
 

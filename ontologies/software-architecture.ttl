@@ -287,6 +287,73 @@ trivyn:confidence a owl:AnnotationProperty ;
     rdfs:domain :AntiPattern ;
     rdfs:range :Constraint ;
     skos:definition "Relates an AntiPattern to the Constraint it fails to satisfy.".
+:motivates a owl:ObjectProperty ;
+      rdfs:label "motivates" ;
+      owl:inverseOf :isMotivatedBy ;
+      dcam:domainIncludes :Requirement, :Constraint ;
+      rdfs:range :ArchitecturalDecision ;
+      skos:definition "Relates a requirement or constraint to the architectural decision it drives." ;
+      skos:altLabel "drives" .
+:isConcernedBy a owl:ObjectProperty ;
+      rdfs:label "is concerned by" ;
+      owl:inverseOf :concerns ;
+      rdfs:domain :SystemComponent ;
+      rdfs:range :ArchitecturalDecision ;
+      skos:definition "Relates a system component to an architectural decision that affects it." ;
+      skos:altLabel "is affected by" .
+
+:isRationaleFor a owl:ObjectProperty ;
+      rdfs:label "is rationale for" ;
+      owl:inverseOf :hasRationale ;
+      rdfs:domain :Rationale ;
+      rdfs:range :InformationRecord ;
+      skos:definition "Relates a rationale to the information record whose reasoning it provides." ;
+      skos:altLabel "justifies" .
+
+:isWeighedBy a owl:ObjectProperty ;
+      rdfs:label "is weighed by" ;
+      owl:inverseOf :weighs ;
+      rdfs:domain :Alternative ;
+      rdfs:range :ArchitecturalDecision ;
+      skos:definition "Relates an alternative to the architectural decision that evaluates it." ;
+      skos:altLabel "is considered by" .
+
+:resultsFrom a owl:ObjectProperty ;
+      rdfs:label "results from" ;
+      owl:inverseOf :resultsIn ;
+      rdfs:domain :Consequence ;
+      rdfs:range :ArchitecturalDecision ;
+      skos:definition "Relates a consequence to the architectural decision that produced it." ;
+      skos:altLabel "is consequence of" .
+
+:isSupersededBy a owl:ObjectProperty ;
+      rdfs:label "is superseded by" ;
+      owl:inverseOf :supersedes ;
+      rdfs:domain :InformationRecord ;
+      rdfs:range :InformationRecord ;
+      skos:definition "Relates an information record to the record that replaces it." .
+
+:isConstrainedBy a owl:ObjectProperty ;
+      rdfs:label "is constrained by" ;
+      owl:inverseOf :constrains ;
+      dcam:domainIncludes :SystemComponent, :ArchitecturalDecision ;
+      rdfs:range :Constraint ;
+      skos:definition "Relates a system component or architectural decision to a constraint that restricts it." .
+
+:yieldsLesson a owl:ObjectProperty ;
+      rdfs:label "yields lesson" ;
+      owl:inverseOf :learnedFrom ;
+      dcam:domainIncludes :ArchitecturalDecision, :AntiPattern ;
+      rdfs:range :Lesson ;
+      skos:definition "Relates an architectural decision or anti-pattern to a lesson learned from it." ;
+      skos:altLabel "is lesson source for" .
+
+:isViolatedBy a owl:ObjectProperty ;
+      rdfs:label "is violated by" ;
+      owl:inverseOf :violates ;
+      rdfs:domain :Constraint ;
+      rdfs:range :AntiPattern ;
+      skos:definition "Relates a constraint to an anti-pattern that fails to satisfy it." .
 
 # Competency questions this ontology was built to answer (synthesis).
 <https://trivyn.io/ontologies/software/architecture/domain/>

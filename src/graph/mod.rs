@@ -132,6 +132,12 @@ pub struct AppState {
     pub session_db: Option<Arc<SessionDb>>,
     /// Data dir (the persistent KG store and the built vector DB live here).
     pub data_dir: PathBuf,
+    /// Set true by any write that changes the project graph; drained by
+    /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
+    /// inferred inverse/subproperty edges lazily — one pass per capture burst.
+    pub inferred_stale: std::sync::atomic::AtomicBool,
+    /// Serializes enrichment so concurrent reads enrich at most once.
+    enrich_lock: std::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -190,7 +196,49 @@ impl AppState {
             session_db: None,
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
+            // Start stale so the first read after startup materializes inferred edges.
+            inferred_stale: std::sync::atomic::AtomicBool::new(true),
+            enrich_lock: std::sync::Mutex::new(()),
         })
+    }
+
+    /// Mark the reasoner-materialized edges stale — call after any write that changes the
+    /// project graph, so the next read re-enriches.
+    pub fn mark_inferred_stale(&self) {
+        self.inferred_stale
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Lazily re-run GROWL enrichment when a prior write invalidated the materialized
+    /// inverse/subproperty edges, so a read traverses fresh edges. Best-effort: a reasoner
+    /// failure is logged and leaves the flag set (retried next read) rather than failing
+    /// the read. Serialized by `enrich_lock` so concurrent reads enrich at most once.
+    pub fn ensure_enriched(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.inferred_stale.load(Ordering::Acquire) {
+            return; // fast path — nothing changed since the last enrichment
+        }
+        let _guard = self
+            .enrich_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.inferred_stale.load(Ordering::Acquire) {
+            return; // another reader enriched while we waited on the lock
+        }
+        match crate::reasoning::enrich_now(
+            &self.store,
+            PROJECT_KG_GRAPH_IRI,
+            &[
+                ontology::SE_DOMAIN_GRAPH_IRI,
+                ontology::ARCH_DOMAIN_GRAPH_IRI,
+            ],
+        ) {
+            Ok(n) => {
+                self.inferred_stale.store(false, Ordering::Release);
+                tracing::debug!("enrich: materialized {n} inferred edge(s)");
+            }
+            Err(e) => tracing::warn!("enrich failed (serving possibly-stale edges): {e}"),
+        }
     }
 
     /// Enable MOOSE's real multi-turn chat layer for host surfaces that need it
@@ -1323,6 +1371,8 @@ async fn execute_query(
     model: &str,
     nlq: &str,
 ) -> anyhow::Result<QueryResult> {
+    // Fresh inferred edges before a structural walk (the query class that benefits most).
+    state.ensure_enriched();
     let data_graphs = [PROJECT_KG_GRAPH_IRI.to_string()];
     let output = execute_graph_walk_nlq_with_context(
         &state.store,
@@ -1419,6 +1469,9 @@ pub fn relevant_context(
     limit: usize,
     include_history: bool,
 ) -> anyhow::Result<Vec<ContextItem>> {
+    // Materialize inferred edges if a write invalidated them, so the typed expansion
+    // traverses fresh inverse/subproperty links (bidirectional walk).
+    state.ensure_enriched();
     let class_iris: Vec<String> = state
         .arch_vocab
         .classes

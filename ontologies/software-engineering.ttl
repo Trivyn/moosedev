@@ -222,6 +222,70 @@ trivyn:confidence a owl:AnnotationProperty ;
     rdfs:domain :Module ;
     rdfs:range :Module ;
     rdfs:subPropertyOf obo:BFO_0000178 {| trivyn:confidence "0.70"^^xsd:decimal ; trivyn:parentLabel "has continuant part" ; trivyn:rrfRank "2"^^xsd:integer ; skos:historyNote "Aligned to has continuant part via embedding similarity" ; dcterms:created "2026-06-16T19:35:29Z"^^xsd:dateTime |}.
+:containedInSoftwareSystem a owl:ObjectProperty ;
+    rdfs:label "is part of" ;
+    owl:inverseOf :softwareSystemContains ;
+    rdfs:domain :Subsystem ;
+    rdfs:range :SoftwareSystem ;
+    rdfs:subPropertyOf obo:BFO_0000176 ;
+    skos:definition "Relates a subsystem to the software system that contains it." ;
+    skos:altLabel "contained in" ;
+    skos:historyNote "Logical inverse of :softwareSystemContains; subProperty of 'continuant part of' (BFO_0000176), the BFO inverse of 'has continuant part' (BFO_0000178)." .
+
+ :containedInSubsystem a owl:ObjectProperty ;
+    rdfs:label "is part of" ;
+    owl:inverseOf :subsystemContains ;
+    rdfs:domain :Component ;
+    rdfs:range :Subsystem ;
+    rdfs:subPropertyOf obo:BFO_0000176 ;
+    skos:definition "Relates a component to the subsystem that contains it." ;
+    skos:altLabel "contained in" ;
+    skos:historyNote "Logical inverse of :subsystemContains; subProperty of 'continuant part of' (BFO_0000176)." .
+
+ :containedInModule a owl:ObjectProperty ;
+    rdfs:label "is part of" ;
+    owl:inverseOf :moduleContains ;
+    rdfs:domain :Module ;
+    rdfs:range :Module ;
+    rdfs:subPropertyOf obo:BFO_0000176 ;
+    skos:definition "Relates a module to the module that contains it." ;
+    skos:altLabel "contained in" ;
+    skos:historyNote "Logical inverse of :moduleContains; subProperty of 'continuant part of' (BFO_0000176)." .
+ 
+ :isDependencyOf a owl:ObjectProperty ;
+    rdfs:label "is dependency of" ;
+    owl:inverseOf :dependsOn ;
+    rdfs:domain :Component ;
+    rdfs:range :Component ;
+    skos:definition "Relates a component to another component that depends on it." ;
+    skos:altLabel "is depended on by" .
+
+ :isImplementedBy a owl:ObjectProperty ;
+    rdfs:label "is implemented by" ;
+    owl:inverseOf :implements ;
+    rdfs:domain :Interface ;
+    rdfs:range :Component ;
+    skos:definition "Relates an interface to a component that implements it." .
+
+ :isUsedBy a owl:ObjectProperty ;
+    rdfs:label "is used by" ;
+    owl:inverseOf :uses ;
+    rdfs:domain :Interface ;
+    rdfs:range :Component ;
+    skos:definition "Relates an interface to a component that uses it." .
+ :isAccessedBy a owl:ObjectProperty ;
+    rdfs:label "is accessed by" ;
+    owl:inverseOf :accesses ;
+    rdfs:domain :DataStore ;
+    rdfs:range :Component ;
+    skos:definition "Relates a data store to a component that accesses it." .
+
+ :isExposedBy a owl:ObjectProperty ;
+    rdfs:label "is exposed by" ;
+    owl:inverseOf :exposes ;
+    rdfs:domain :Interface ;
+    rdfs:range :Service ;
+    skos:definition "Relates an interface to the service that exposes it." .
 
 # Competency questions this ontology was built to answer (synthesis).
 <https://trivyn.io/ontologies/software/engineering/domain/>

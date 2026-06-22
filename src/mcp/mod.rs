@@ -340,6 +340,8 @@ impl MooseDevServer {
                 if let Err(e) = self.state.index_record(&iri).await {
                     tracing::warn!("dense index failed for {iri}: {e}");
                 }
+                // A new record (+ any edges) invalidates the materialized inverse edges.
+                self.state.mark_inferred_stale();
                 Ok(tool_ok(format!("Recorded {kind} → {iri}{title_note}")))
             }
             Err(e) => Ok(tool_error(format!("failed to record: {e}"))),
@@ -414,6 +416,7 @@ impl MooseDevServer {
                         tracing::warn!("dense index failed for {iri}: {e}");
                     }
                 }
+                self.state.mark_inferred_stale();
                 Ok(tool_ok(format!(
                     "Superseded {} → {} (rationale {}){title_note}",
                     out.superseded_iri, out.new_iri, out.rationale_iri
@@ -465,6 +468,7 @@ impl MooseDevServer {
                 if let Err(e) = self.state.index_record(&out.rationale_iri).await {
                     tracing::warn!("dense index failed for {}: {e}", out.rationale_iri);
                 }
+                self.state.mark_inferred_stale();
                 Ok(tool_ok(format!(
                     "Retracted {} (deprecated; rationale {})",
                     out.retracted_iri, out.rationale_iri
@@ -496,10 +500,14 @@ impl MooseDevServer {
             ));
         }
         match graph::relate(&self.state, &subject_iri, &predicate, &object_iri) {
-            Ok(out) => Ok(tool_ok(format!(
-                "Related {} -{}-> {}",
-                out.subject_iri, predicate, out.object_iri
-            ))),
+            Ok(out) => {
+                // A new edge changes what inverse-materialization yields.
+                self.state.mark_inferred_stale();
+                Ok(tool_ok(format!(
+                    "Related {} -{}-> {}",
+                    out.subject_iri, predicate, out.object_iri
+                )))
+            }
             Err(e) => Ok(tool_error(format!("failed to relate: {e}"))),
         }
     }
@@ -641,6 +649,8 @@ impl MooseDevServer {
         if query.is_empty() {
             return Ok(tool_error("`query` must not be empty"));
         }
+        // Inferred edges are queryable too — refresh them if a write invalidated them.
+        self.state.ensure_enriched();
         match sparql::run_query(&self.state.store, query) {
             Ok(output) => Ok(tool_ok(output)),
             Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),

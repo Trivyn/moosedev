@@ -2,6 +2,7 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix moose: <https://trivyn.io/ontologies/moose#> .
 @prefix shape: <https://trivyn.io/ontologies/software/engineering/SoftwareEngineering/shapes#> .
 @prefix domain: <https://trivyn.io/ontologies/software/engineering/domain/> .
 
@@ -20,6 +21,10 @@ shape:ComponentShape a sh:NodeShape ;
         sh:class domain:DataStore
     ] ;
     sh:property [
+        sh:path domain:containedInSubsystem ;
+        sh:class domain:Subsystem
+    ] ;
+    sh:property [
         sh:path domain:dependsOn ;
         sh:class domain:Component
     ] ;
@@ -32,6 +37,10 @@ shape:ComponentShape a sh:NodeShape ;
         sh:class domain:Interface
     ] ;
     sh:property [
+        sh:path domain:isDependencyOf ;
+        sh:class domain:Component
+    ] ;
+    sh:property [
         sh:path domain:uses ;
         sh:class domain:Interface
     ] .
@@ -41,6 +50,10 @@ shape:DataStoreShape a sh:NodeShape ;
     sh:property [
         sh:path domain:hasStorageType ;
         sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:isAccessedBy ;
+        sh:class domain:Component
     ] .
 
 shape:ExternalDependencyShape a sh:NodeShape ;
@@ -59,6 +72,18 @@ shape:InterfaceShape a sh:NodeShape ;
     sh:property [
         sh:path domain:hasInterfaceName ;
         sh:datatype xsd:string
+    ] ;
+    sh:property [
+        sh:path domain:isExposedBy ;
+        sh:class domain:Service
+    ] ;
+    sh:property [
+        sh:path domain:isImplementedBy ;
+        sh:class domain:Component
+    ] ;
+    sh:property [
+        sh:path domain:isUsedBy ;
+        sh:class domain:Component
     ] .
 
 shape:InterfaceDefinitionShape a sh:NodeShape ;
@@ -70,6 +95,10 @@ shape:InterfaceDefinitionShape a sh:NodeShape ;
 
 shape:ModuleShape a sh:NodeShape ;
     sh:targetClass domain:Module ;
+    sh:property [
+        sh:path domain:containedInModule ;
+        sh:class domain:Module
+    ] ;
     sh:property [
         sh:path domain:hasModuleName ;
         sh:datatype xsd:string
@@ -103,6 +132,10 @@ shape:SoftwareSystemShape a sh:NodeShape ;
 
 shape:SubsystemShape a sh:NodeShape ;
     sh:targetClass domain:Subsystem ;
+    sh:property [
+        sh:path domain:containedInSoftwareSystem ;
+        sh:class domain:SoftwareSystem
+    ] ;
     sh:property [
         sh:path domain:hasSubsystemName ;
         sh:datatype xsd:string

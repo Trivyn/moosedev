@@ -1452,6 +1452,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "growl"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b37a06b602a31ea4d469e0b2db07fc4770e2e2b4c3b3c4103bcdd2fd3bad1d9f"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2227,6 +2236,7 @@ dependencies = [
  "axum-test",
  "chrono",
  "dotenvy",
+ "growl",
  "include_dir",
  "mime_guess",
  "moose",
