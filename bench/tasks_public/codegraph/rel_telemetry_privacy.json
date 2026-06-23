@@ -1,0 +1,20 @@
+{
+  "id": "rel_telemetry_privacy",
+  "type": "context_qa",
+  "capability_class": "relevance",
+  "materialize_tree": false,
+  "prompt": "What is codegraph's telemetry privacy stance — what does it collect, and what does it guarantee about user code and privacy? Answer in 2-3 sentences.",
+  "memory_topic": "codegraph telemetry privacy what it collects and guarantees about user code",
+  "ground_truth": {
+    "must_include_any": [
+      ["never leaves", "leaves your machine", "leaves the machine", "stays local", "local-first", "local first"],
+      ["anonymous"],
+      ["no source code", "no file paths", "no file names", "no paths", "no code", "no symbol names", "no query", "no contents"],
+      ["allowlist", "documented field", "field-by-field", "field by field"],
+      ["random uuid", "uuidv4", "uuid", "machine id", "not derived", "no fingerprint", "no hardware"],
+      ["turn off", "opt out", "opt-out", "do_not_track", "disable", "off is off", "codegraph_telemetry"]
+    ],
+    "decision_title": ""
+  },
+  "_note": "Relevance / single-fact recall — mem0's home turf. Answer lives in docs/design/telemetry.md + the graph's telemetry constraints/ADs. Coverage-graded (fair to all arms; no exact-title dependency). Expect mem0 ~= B2."
+}

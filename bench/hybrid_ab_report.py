@@ -1,12 +1,13 @@
 """Instrument B report: B2 hybrid (floor 0.5) vs pure-BM25F (floor 0.99), end-to-end.
 
 Reads the floor-tagged runs_{bm25f,hybrid}.jsonl produced by run_hybrid_ab.sh and prints, per
-(task, mode): n, STRICT-currency rate (coverage==1 AND not stale — Lesson 9fc21dc0), mean coverage,
-mean score, and mean agent tokens, with the hybrid−bm25f delta. Flags cells where hybrid changes
-the strict-currency outcome (the end-to-end payoff of the dense seed). No grading here — uses the
-metrics run.py already logged.
+(task, mode): n, currency rate (coverage==1 — Lesson 9fc21dc0; the stale flag is a hint, not a
+gate), mean coverage, mean score, and mean agent tokens, with the hybrid−bm25f delta. Flags cells
+where hybrid changes the currency outcome (the end-to-end payoff of the dense seed). No grading
+here — uses the metrics run.py already logged (regrade-safe: edit this and re-run, no agent re-run).
 """
 import collections
+import functools
 import json
 import math
 from pathlib import Path
@@ -15,14 +16,29 @@ import config
 
 OUT = Path.home() / "code" / "moosedev_benches" / "trivyn-temporal" / "runs"
 DRIFT = {"merge_ns_currency", "objprop_validate_currency", "nlq_deadline_currency", "align_confidence_currency"}
-# A pure-memory cell that reads external SOURCE to answer balloons its prompt; treat that as a memory
-# MISS (the agent had to LEAVE memory). The cutoff is MODE-AWARE: an ORACLE cell gets one pushed context
-# (clean ~50k), so 120k cleanly flags a source-escape (250k-900k). A TOOLUSE cell legitimately makes 3-4
-# MCP calls, and codex re-sends the whole transcript each turn, so honest multi-call cells reach 120-190k
-# WITHOUT reading source — only nt<=2 cells at 363-709k actually shelled out. A single 120k cutoff for
-# both wrongly scored ~10 successful tooluse cells (all >=3 MCP calls, all score 1.0) as escapes.
+# A cell that reads external SOURCE to answer balloons its prompt; treat that as a memory MISS (the
+# agent had to LEAVE memory). The cutoff is MODE-AWARE: an ORACLE cell gets one pushed context
+# (clean ~50k), so 120k cleanly flags a source-escape (250k-900k). A TOOLUSE cell legitimately makes
+# 3-4 MCP calls, and codex re-sends the whole transcript each turn, so honest multi-call cells reach
+# 120-190k WITHOUT reading source — only nt<=2 cells at 363-709k actually shelled out. The escape
+# proxy is ALSO gated on materialize_tree (see `materializes_tree`): a pure-memory task has no source
+# tree, so a token balloon there is reasoning thrash, never an escape.
 ESCAPE_TOK = {"oracle": 120_000, "tooluse": 250_000}
 ESCAPE_TOK_DEFAULT = 250_000
+
+
+@functools.lru_cache(maxsize=None)
+def materializes_tree(task_id: str) -> bool:
+    """Does this task lay down a source tree the agent could read? context_qa/constraint_code tasks
+    materialize the (docs-stripped) tree BY DEFAULT (run.py), unless the task opts out with
+    materialize_tree:false. A pure-memory task (false) has NO source to escape to, so the
+    token-balloon escape proxy must NOT fire for it (high tokens there are internal reasoning thrash,
+    not a memory miss — e.g. the 339k-token geospatial cell that still answered correctly)."""
+    try:
+        d = json.loads((config.corpus_tasks_path("trivyn-temporal") / f"{task_id}.json").read_text())
+    except FileNotFoundError:
+        return True  # unknown task: assume a tree exists (conservative — keep the escape guard on)
+    return d.get("materialize_tree", True)
 
 
 def load(label: str) -> list[dict]:
@@ -31,11 +47,19 @@ def load(label: str) -> list[dict]:
 
 
 def strict_current(r: dict) -> bool:
-    m = r.get("metrics") or {}
-    return m.get("coverage") == 1.0 and not m.get("stale")
+    # Coverage of the current-state markers IS the currency verdict (Lesson 9fc21dc0). The `stale`
+    # substring flag is NOT a gate: it false-positives on a correct answer that NARRATES the old
+    # state to deny it (e.g. "no `debug_assert!` anymore") — backticks/markdown defeat the
+    # negation window — and on stale markers that overlap the cited decision's OWN title. Hint only.
+    return (r.get("metrics") or {}).get("coverage") == 1.0
 
 
 def escaped(r: dict) -> bool:
+    # An escape = the agent LEFT memory to read source. Only possible if a source tree was laid down:
+    # a materialize_tree:false (pure-memory) cell has nothing to escape to, so a token balloon there
+    # is internal reasoning thrash, not an escape — never count it as a memory miss.
+    if not materializes_tree(r["task_id"]):
+        return False
     t = r["tokens"]
     thr = ESCAPE_TOK.get(r.get("mode"), ESCAPE_TOK_DEFAULT)
     return (t["agent_prompt"] + t["agent_completion"]) > thr
@@ -84,9 +108,10 @@ def main() -> None:
         hy_by[key(r)].append(r)
 
     print("\n=== Instrument B: end-to-end B2 hybrid(0.5) vs BM25F(0.99), trivyn-temporal, codex/gpt-5.4-mini ===")
-    print("mem% = answered the CURRENT state FROM MEMORY (strict currency AND not an escape-to-source).")
-    print(f"esc = read external source to answer (agent tokens > {ESCAPE_TOK['oracle']//1000}k oracle / {ESCAPE_TOK['tooluse']//1000}k tooluse) — memory MISS.")
-    print("cur% = raw strict-currency (any means, incl. escape). Δ = hybrid − bm25f mem%.\n")
+    print("currency verdict = coverage of current-state markers (Lesson 9fc21dc0); the stale flag is a hint, not a gate.")
+    print("mem% = current-by-coverage AND not an escape-to-source.")
+    print(f"esc = read external source (tokens > {ESCAPE_TOK['oracle']//1000}k oracle / {ESCAPE_TOK['tooluse']//1000}k tooluse), gated on materialize_tree — memory MISS.")
+    print("cur% = raw current-by-coverage (any means, incl. escape). Δ = hybrid − bm25f mem%.\n")
     hdr = (f"{'task':<26}{'mode':<8}{'n':>6}{'mem%b':>7}{'mem%h':>7}{'Δmem':>7}"
            f"{'esc b/h':>9}{'cur b/h':>9}{'tok b':>8}{'tok h':>8}")
     for group, title in ((DRIFT, "DRIFT (vocabulary-drift — the signal)"),

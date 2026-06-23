@@ -1,0 +1,502 @@
+{
+  "id": "set_all_constraints",
+  "type": "capability_qa",
+  "capability_class": "set_completeness",
+  "materialize_tree": false,
+  "prompt": "List EVERY Constraint recorded for this project. Be exhaustive; give each constraint's title.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s a ?k ; <http://www.w3.org/2000/01/rdf-schema#label> ?title . FILTER(STRENDS(STR(?k),\"Constraint\"))  } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/8a126cac-3e85-4b5a-8bd9-6c73544fd927",
+        "title": "ASCII terminal output on Windows"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/2489ef27-a222-43cc-84d6-4ac9efe30585",
+        "title": "Adaptive explore escape hatch"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/4f46a266-4094-4cca-a3ee-96d4f3e06da8",
+        "title": "Additive synthesized edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/e9457379-a7fb-4e55-b537-a2e0f4c5bd55",
+        "title": "Additive value-ref emission"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/67d1a687-b03d-4a19-b372-b66c5338f53d",
+        "title": "Adoption metrics over token cost"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/ea0beb43-791a-4356-8d2e-83fb509b1f42",
+        "title": "Ambiguous mapper collisions drop"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/cd0cbcf8-3de0-486d-a953-3a8964e82db9",
+        "title": "Boundary reporting is observational"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/a343615c-1ca6-40aa-8ea2-9644234de30d",
+        "title": "Bridge built-in blocklists"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/d2d34c91-004a-4924-8fe8-91ace1923c20",
+        "title": "Bridging headers stay ordinary"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/30bb32cc-45bc-4590-839e-c0c1d10e2078",
+        "title": "C assignment callback uniqueness gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/2de6e48e-2603-485d-aa06-012bc618b5d8",
+        "title": "C fn-pointer struct-field key"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/7605e134-0bf1-433e-8403-97ebc754163c",
+        "title": "Callable string position gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/780d2115-92cc-4728-a903-e0f7bd4d1249",
+        "title": "Celery task-decorator gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/e002bbd6-4b8d-4c0d-a1bf-2f6e8b859e46",
+        "title": "Closure collection element-invoke gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/304c16aa-edb5-4c00-a649-be3dccf9ada7",
+        "title": "Cold daemon exceeds startup window"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/5a226cf3-7376-4e75-9d87-6fef10f2ba8e",
+        "title": "Cross-OS index sharing is unsafe"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/01b20cea-4f14-41fe-a4a6-8c56c0e448f5",
+        "title": "Declarator grammar verification"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/2917fb62-b62f-4bf0-953d-445eab84e66e",
+        "title": "Declared return type requirement"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/dd54b1f1-26e0-464f-9cfa-8bdd1935d5a8",
+        "title": "Disabled telemetry opens no socket"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/14f642f0-6373-487d-8dbd-1eb492dc8c6a",
+        "title": "Distinctive value-ref target gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/848436bd-6636-4c1f-889e-a4485b57ecc0",
+        "title": "Downloaded bundles verify integrity"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/e59e085c-ea95-45dc-af58-ea8101382361",
+        "title": "Dual extraction path coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/acf740e9-69a6-48da-9461-7cc21f23daef",
+        "title": "Embedded API Node floor"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/bbd75c39-908a-4f85-aec2-376bcb0b1ecb",
+        "title": "End-to-end dispatch flow closure"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/245540ea-acef-48a9-aac0-1952aea38182",
+        "title": "Event fan-out cap"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/68acadf4-b04c-4630-926d-a04834b1ef11",
+        "title": "Exact function-ref resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6b61e1c3-7743-4f1a-999d-7e29195c4d54",
+        "title": "Exact valueRef edge filter"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/b5c19fa6-8eea-419c-bbec-5d649d070e5c",
+        "title": "Explicit telemetry schema growth"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/89f011eb-bb42-47d1-aad5-139436c51c41",
+        "title": "Explore complete source units"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/45f8b529-4963-4fb0-b312-8a133f050f8c",
+        "title": "Explore output hard cap"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/5b38c7a8-c42c-4d4b-95ba-f64bc2d2f1ca",
+        "title": "Explore ranking compatibility escape hatch"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/e6e99082-4fa4-437c-a700-297c75c8d040",
+        "title": "Express final handler rule"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/2d204479-a093-49eb-908d-2f39e8079f9a",
+        "title": "Extension config fail-soft"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/afe0e2b4-962b-4784-9eda-9c331048b858",
+        "title": "Extraction blast-radius validation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/45e4aade-407c-44e6-a18e-7a99c8d710e5",
+        "title": "First-party telemetry endpoint"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/c12b027c-7a92-4577-885f-7ba3a553fd24",
+        "title": "Flow spine stays full"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/0d9aa011-502a-4907-985b-ff761225973d",
+        "title": "Framework hooks need call sites"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/5fa55452-6d2c-45c4-b295-9ddfdb86e503",
+        "title": "Function-ref extraction gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/1fdedfa2-143a-4661-bd94-9a122b18b931",
+        "title": "Function-ref validation invariants"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/5f29c365-7bd2-44a0-860f-025521d7ab7f",
+        "title": "Gate needs separable candidates"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/0133f794-3ff5-4152-a093-5a8236ee6262",
+        "title": "Generated-file guard is path-only"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/17e3d1d6-a095-4e32-a38d-da676ed6e4d8",
+        "title": "Global CLI binary executable bit"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/1b60c67a-176d-4966-8f04-f01bac356ae9",
+        "title": "GoFrame request-type signature key"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/63f179a6-1c6d-4e07-a578-43b7ee39e64f",
+        "title": "Independent framework resolver commits"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/bcdfb022-02ad-47d5-84e8-05a00225a2bd",
+        "title": "Indexed resolver detection"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/cfe35a1c-bada-41e5-9a8b-91dc371b66f9",
+        "title": "Instance-chain preservation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/14014541-d000-49b2-91e2-e88385788de4",
+        "title": "Laravel event-call gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/2062647e-9588-4704-bf34-2e76b829732b",
+        "title": "Literal native bridge keys"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/ccd6b231-c6f7-4ea7-a965-4637ec8bd8cc",
+        "title": "Lombok explicit-source guard"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/5d868c8c-338e-41d2-8fd8-bfb34cf2cd03",
+        "title": "Manual prewarm is not general"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/e8f3372e-6fa9-431c-8c9d-6de9debb8298",
+        "title": "MediatR handler-map gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/7922d9ff-c528-4f26-be42-6fa5252c7143",
+        "title": "Mixed iOS bridge closure"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/b19ba86e-db25-4121-a51b-4fa8dd4a0180",
+        "title": "Named spare requires uniqueness"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/71625182-089f-48d9-b1f6-b3891f70885e",
+        "title": "Named-handler synthesis guard"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/05bf6393-2a5b-4fa0-8cd1-069a2b092c62",
+        "title": "Native bridge validation bar"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/5b739ee2-e7a2-47a4-9d50-72de73ada1bf",
+        "title": "Nested repository ignore boundaries"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/878080ae-a14f-459f-9965-568c74915dca",
+        "title": "No JVM extractor redesign"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/8c3ff37d-0150-48c5-a558-16a5ff9c81b0",
+        "title": "No codegraph-pro telemetry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/fb9c0d89-44f5-417c-9a4b-9efe2c4ed270",
+        "title": "No dependency route wiring"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/c5a0cb63-0b56-4d15-afb4-3acc516671a9",
+        "title": "No explosion dispatch validation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/4bb8c96a-309d-42de-bd09-cab041b09cb2",
+        "title": "No identity-derived telemetry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/21ed22ff-e346-4659-aeac-419dd1adcba2",
+        "title": "No lingering extractNodes hooks"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/516553c8-8114-4e87-80fd-b7a9f80b931e",
+        "title": "No project-content telemetry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/69050d71-67bd-4540-b60e-9c7ac1b10bf7",
+        "title": "Node 25 remains blocked"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6606ed25-d416-4d59-9ded-edf2bfde6fe9",
+        "title": "Npm git dependencies stay excluded"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/53dd0258-3e4e-45c9-a402-1baa8fd53be5",
+        "title": "Over-approximate instance reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/83451ba0-1168-409b-a16a-f9fe45c85557",
+        "title": "Pascal constant-only value-ref targets"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/be3ea60d-de0c-47f5-a251-7dd2e9d79ef2",
+        "title": "Phase one bridge gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6e497d19-f8c2-4810-827d-7fce0d024029",
+        "title": "Prefer deterministic adoption levers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/7b467feb-deab-4de5-af25-58b20e5c73a9",
+        "title": "Preserve JSONC user edits"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/8322cab8-3bb7-42d9-93fe-834e0748f827",
+        "title": "Project-name term exception"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/cdcd66f8-7d16-4b73-a653-0311da48974b",
+        "title": "Prompt hook degrades safely"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/7cb2f033-99a7-49b5-89f0-ba7332151923",
+        "title": "Property-string binding exclusion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/de638855-36b0-4bad-b618-8d58b69d9066",
+        "title": "Query-only boundary notes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/50e9143d-d362-44b6-98f0-b6bd53cab087",
+        "title": "Query-seedable synthesized endpoints"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/9409fc3f-38e8-4bc9-9e3f-8979b45b6bd6",
+        "title": "RN legacy same-PR platforms"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/d49162f3-bf39-402c-9cf5-cd4054792b57",
+        "title": "Raw JSI bridge deferred"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/fd4de0b9-3e3e-4304-bf15-fc67698a0bd2",
+        "title": "React Native bridge closure"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/297977a5-10b2-4656-bde7-b66ad6fa0392",
+        "title": "Read-compatible pagination"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/a74ffaad-046e-461a-9084-8938e989d0b6",
+        "title": "Read-format parity"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6870334e-3841-497f-8bb9-9ade09816e1b",
+        "title": "Real inheritance sibling signal"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/61adcd5b-9d2f-4c5f-b9f0-6b2cbe206b50",
+        "title": "Real-repo chained-call validation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/9e303aac-65ee-48ad-9e92-927237d015b5",
+        "title": "Reference-existence dispatch routing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/0edeb054-a91e-4be6-bf9d-2a934c078d8e",
+        "title": "Release verifies npm package presence"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/689e9e90-99b0-439c-9315-02ae4c865782",
+        "title": "Root-confined file reads"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6573871b-1dcc-48ed-b800-bc860dfb5d45",
+        "title": "Runtime selector dispatch out of scope"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6df719ac-bab2-4933-900f-a922892bae7a",
+        "title": "Safe temp marker open"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/0452cdcd-1af0-4c11-88e3-37756a8482b7",
+        "title": "Same-file value-ref scope"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/3030e6b5-2ae9-42fe-9358-6fe40cd329f2",
+        "title": "Sensitive config summarization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/d7adc64b-11e9-4df9-be9c-ada887abdc99",
+        "title": "Shadow prune counts syntax declarators"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/407ba480-2b8b-481b-9428-71ef5153a0de",
+        "title": "Shadowed value-ref targets pruned"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/db2c8804-f2b0-4584-9d40-9e0a7f723f1a",
+        "title": "Sibling threshold at three implementers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/ba5f69d5-2a92-48ad-ae76-2fefdec1c4b8",
+        "title": "Sidekiq worker-include gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/1bacdda1-40c8-495e-a8d9-8fc2f8f00e7f",
+        "title": "Silent beats wrong synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/cc2a0776-3920-4842-a525-02e4a9974714",
+        "title": "Single FrameworkExtractionResult type"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/b6ba0719-4437-4d26-8ca6-dcf45388451a",
+        "title": "Sizing requires skeletonization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/dea878ca-4027-4e9a-9781-ea6169b6e029",
+        "title": "Spring exact event-type match"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/0c48f73b-d15a-4bdb-b5c7-688364f8074b",
+        "title": "Stale files must be named"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/003db1a1-c609-4926-adcd-5417b3f59464",
+        "title": "Static identifier value-ref boundary"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/c06bd98f-26d4-48be-adac-5df99fa15db6",
+        "title": "Swift bare reference uniqueness gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6c3e80f1-c889-402c-8b85-161da4871048",
+        "title": "Telemetry off deletes buffers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/23a66b98-064d-4de0-9239-600306a2b967",
+        "title": "Telemetry schema allowlist"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/b504e500-a040-4fc6-b2e1-917bf6f9a795",
+        "title": "Template graph shape stability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/6ca3468f-2443-4cfa-9a75-c722220ec25f",
+        "title": "Tool calls may await daemon"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/d2895ac7-6888-46f8-81fb-e59a5fe7729e",
+        "title": "TypeScript contract noise guard"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/57976c29-313f-4aec-81d0-b08bbf714661",
+        "title": "Uninstall preserves user edits"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/3810326b-687b-426b-8362-18d476dc3e79",
+        "title": "Validate on two pattern repos"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/ffc1b8b7-0388-4829-a34a-378ec172e120",
+        "title": "Validate startup by actual use"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/7bfb8ac1-157a-401a-8ff8-ef0369f85c78",
+        "title": "Validate with real-agent A/B"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/4f21b08d-4328-4a8e-a2c8-36187dc1fc71",
+        "title": "Validation before chained edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/44db1604-35e4-455a-a5f2-f7c9e12f71ee",
+        "title": "Value-ref PR workflow"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/363347c1-b7a0-499a-a654-74eb81eec80b",
+        "title": "Value-ref env opt-out"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/a27dd40c-b6d3-47c2-b43c-780ebae9bd98",
+        "title": "Value-ref extractor kind check"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/e4112e48-dc67-4363-b827-d07cac069cfa",
+        "title": "Value-ref false-positive handling"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/a40fb1ab-f8e9-496d-be84-eeb892cf1927",
+        "title": "Value-ref parent-kind gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/010eb52a-d51e-4c4e-86af-90002cc36f2c",
+        "title": "Value-ref public OSS validation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/d5120274-9701-4bcf-8bce-f53338277a4a",
+        "title": "Value-ref validation invariants"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/53bdeb8e-2094-4039-82a7-56d06d7722b8",
+        "title": "Watcher resource cost bounded"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/c4ba4c0a-bdb0-41dd-979c-39f4dce8fa4d",
+        "title": "Worker-safe framework transfer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/cb01dfb6-ab66-4204-8781-defbb371b0b1",
+        "title": "Wrong edge drops silently"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/32e5690d-3c59-47c6-9d28-a5e33b5fcc58",
+        "title": "Zero-cost telemetry path"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Constraint/943a6d5c-f406-4436-866f-e2fc25f75c39",
+        "title": "Zero-edge non-pattern controls"
+      }
+    ],
+    "expected_size": 122
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "sup_head_of_reversal",
+  "type": "capability_qa",
+  "capability_class": "supersession",
+  "materialize_tree": false,
+  "prompt": "The decision titled \"Default-on value refs\" was later reversed. What is the CURRENT decision that replaced it? Give its exact title.",
+  "ground_truth": {
+    "answer_kind": "scalar",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?old <http://www.w3.org/2000/01/rdf-schema#label> \"Default-on value refs\" . ?s ?p ?old . FILTER(STRENDS(STR(?p),\"supersedes\")) ?s <http://www.w3.org/2000/01/rdf-schema#label> ?title } }",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/90ef68e1-06f6-4691-8b80-a73ad30afb83",
+        "title": "Default-on value refs"
+      }
+    ],
+    "expected_size": 1
+  }
+}

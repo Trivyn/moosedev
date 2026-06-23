@@ -1,0 +1,114 @@
+{
+  "id": "set_superseded_ads",
+  "type": "capability_qa",
+  "capability_class": "set_completeness",
+  "materialize_tree": false,
+  "prompt": "List every architectural decision that has been SUPERSEDED (replaced by a later decision). Be exhaustive.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s a ?k ; <http://www.w3.org/2000/01/rdf-schema#label> ?title . FILTER(STRENDS(STR(?k),\"ArchitecturalDecision\")) FILTER EXISTS { ?h ?p ?s . FILTER(STRENDS(STR(?p),\"supersedes\")) } } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e5487bbb-aefb-4d15-b535-24ff53bd7cdc",
+        "title": "Default-on value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f4815366-0606-4350-8f11-2f8f5576b584",
+        "title": "Django resolver extract port"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/97511649-2795-4c56-be06-0eea8f921a01",
+        "title": "Express resolver extract port"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/820727ac-e253-442d-b750-331c43915cfc",
+        "title": "Flask FastAPI resolver extract port"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a62bd6e7-c8b3-4fdf-a2b9-6c64e387ed02",
+        "title": "Framework extract hook"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0929cfe8-f06b-46c1-93c3-51708332d7ce",
+        "title": "Framework extraction dispatch"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/65b2ea21-c843-4232-a820-7bb9425ea5fa",
+        "title": "Framework extraction test split"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/64d80981-2a96-46a3-b0ab-ae243ee014c4",
+        "title": "Installer marker block cleanup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f5a0374c-9015-4ace-af31-dfa30985c5a3",
+        "title": "Instant static tools list"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ead314f0-65a3-4408-ab38-85c344c9b0ae",
+        "title": "Lua value-ref backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d4eabe2c-c6aa-4324-a045-3a73638c6a2a",
+        "title": "MCP clientInfo telemetry plumbing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fcb3aace-cdc5-42a1-82e7-5eb148502826",
+        "title": "MCP tool subset env var"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5d9c4afc-c9e8-473a-b47b-141df78b8980",
+        "title": "Native bridge phased rollout"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8c3421cb-dbfe-49f3-88ad-21bd7ded3ad5",
+        "title": "ORM metaprogramming frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/363a8a8c-8b8a-4744-8ae1-beb9928eca5f",
+        "title": "Per-symbol focused skeletons"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eccb0abb-36d1-4a40-9cf6-a65183cfd30d",
+        "title": "Public-codegraph anonymous telemetry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7c7bee46-f81a-4642-8564-f3fc86366028",
+        "title": "Python decorator route helper"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/901bb647-ffb9-4c8d-8767-20b45056f5c5",
+        "title": "Razor using disambiguation frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6c08a656-8340-4501-876b-74e4674ab897",
+        "title": "Reactive proxy deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c09de64e-dc8c-4ae7-98be-503a5bfe3c0e",
+        "title": "Route references reuse resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/00d898e3-6927-4654-ae76-338218e2a6d0",
+        "title": "Task 6 resolver extract rollout"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/94c5feb0-7d9a-4fbc-9767-08974bc84f96",
+        "title": "Trace flow dossier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2dba0e9e-e5ed-42dd-a00f-3ffe6c957446",
+        "title": "UI resolver node-only migration"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cf8f1900-0f4f-4615-b0e9-385321fc56ab",
+        "title": "Whole-file family skeletonization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/95b0fc1e-c4de-4d63-947d-97188c048f53",
+        "title": "Whole-graph callback synthesis"
+      }
+    ],
+    "expected_size": 25
+  }
+}

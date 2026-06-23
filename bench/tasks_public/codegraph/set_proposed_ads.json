@@ -1,0 +1,162 @@
+{
+  "id": "set_proposed_ads",
+  "type": "capability_qa",
+  "capability_class": "set_completeness",
+  "materialize_tree": false,
+  "prompt": "List EVERY architectural decision whose status is 'proposed'. Be exhaustive; give each title.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s a ?k ; <http://www.w3.org/2000/01/rdf-schema#label> ?title . FILTER(STRENDS(STR(?k),\"ArchitecturalDecision\")) ?s ?sp ?st . FILTER(STRENDS(STR(?sp),\"hasLifecycleStatus\")) FILTER(LCASE(STR(?st))=\"proposed\") } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0b9be451-353b-426d-bbf1-2e40d297cbd8",
+        "title": "Anonymous route handler backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/071d189f-a4f9-42bd-8a2f-bd13745ab2ad",
+        "title": "Arrow body link-through synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/1f9134e1-1c53-45ff-95d9-9e575ef759ab",
+        "title": "Bridge heuristic references"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9c9bff16-7ea3-444c-96db-52e610d6f846",
+        "title": "Build output exclusion backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/85f794b4-0785-4f38-b3b4-3ec2b81b9bcd",
+        "title": "Callback synthesis corpus audit"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a40c9845-4d09-4210-860a-5981cf2083f4",
+        "title": "Callback synthesis test coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a752c5ea-f481-49b4-b4ea-b1e4e05833f7",
+        "title": "Convention app residual frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3343b57d-ea91-495a-b403-1908a5f9e520",
+        "title": "DRF inherited action frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e7b266be-a8e2-4b68-adf8-44d5ae4743ec",
+        "title": "Do not depend on host pending retry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ee134a1b-149e-4bb8-8ba3-f9a6cc3598e6",
+        "title": "Drupal entity handler frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c023126f-ff8c-4131-9dcb-483b2a24e6fb",
+        "title": "Endpoint before telemetry release"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/aba1ca99-effa-4e61-a24b-9a6ae466712a",
+        "title": "Express custom router frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/1611a113-a749-486b-a617-e5e02bee5a47",
+        "title": "Flutter app-dispatch frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/68681958-1e10-4b1d-9413-c0c97446e782",
+        "title": "Framework extractor warning isolation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c7a71572-6715-4174-ab3d-a07231c4c4ab",
+        "title": "Framework-aware route docs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/70f5bb04-345a-4bc1-98d0-252f64f4227b",
+        "title": "Incremental callback synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/214e3c8b-c6b0-40cd-b19c-66a13a61dfec",
+        "title": "Laravel fluent handler frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dd49ff08-ea23-451d-bade-8c7663349c56",
+        "title": "Lua/Luau value-ref backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/78d697be-79cd-455b-9d47-0e1e4c8d0ba4",
+        "title": "MyBatis cross-module include frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/05a5aa00-a878-4168-a786-675573bb01d0",
+        "title": "Native bridge dynamic frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f3121c8d-cccf-4a2b-9d49-648da9e93368",
+        "title": "NgRx effects synthesizer backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cc9a14f5-faef-4251-a0eb-f8b90a824e57",
+        "title": "Objective-C value-ref backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/12c9980d-12b4-4a66-b65f-73e4ca7c0868",
+        "title": "Per-channel native bridge resolvers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/63e00094-bcd4-4670-bb6e-c4a0e07f5b95",
+        "title": "R value-ref backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c91fa5d4-859a-4082-a2ed-f970d110cd2c",
+        "title": "Rails engine routing frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9e041ce2-cb68-4dd7-9d36-27c9e5995477",
+        "title": "Receiver member-value frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/bdc0bf34-308f-4b5c-8c35-f2dc87819165",
+        "title": "Receiver-typed EventEmitter synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/21ac69ef-4516-4473-9b68-0bde13452417",
+        "title": "Route prefix propagation backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/17e3cd6f-0da3-4267-845a-447a19508a95",
+        "title": "Scala programmatic dispatch frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6c725c3d-1fb9-4ef0-a2c6-b8ea05e4dbf5",
+        "title": "Scalar callback field synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6be3ce51-072c-4664-aa9c-708b452746be",
+        "title": "SessionStart daemon prewarm hook"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/806f5fef-05ee-431e-8fae-aa893cdea3e5",
+        "title": "Spring external config frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/68b1932e-439c-448b-a578-6ab1437c93d2",
+        "title": "Svelte action namespace frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/57d688c2-5dac-44f6-8e54-f85b3778fceb",
+        "title": "Swift ObjC alias-name extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/63206af1-915a-4542-9e7d-91841d50526c",
+        "title": "Thymeleaf Django template deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/41a05a91-f9b7-490b-ba22-6bc6e0d42abf",
+        "title": "Tree-sitter registration arg recovery"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/795b116e-cafa-40cf-b347-913b4d842406",
+        "title": "Vue prefix kebab frontier"
+      }
+    ],
+    "expected_size": 37
+  }
+}

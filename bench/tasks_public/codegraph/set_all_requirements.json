@@ -1,0 +1,442 @@
+{
+  "id": "set_all_requirements",
+  "type": "capability_qa",
+  "capability_class": "set_completeness",
+  "materialize_tree": false,
+  "prompt": "List EVERY Requirement recorded for this project. Be exhaustive; give each requirement's title.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s a ?k ; <http://www.w3.org/2000/01/rdf-schema#label> ?title . FILTER(STRENDS(STR(?k),\"Requirement\"))  } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/3a7e83e0-d2fa-4a8e-9eda-a6beacd3cd6e",
+        "title": "Actual dependent test reporting"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/dd1a69bf-9f63-46a9-a32e-31fd9c7b79dc",
+        "title": "Agent process cleanup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/e9fc4077-9b70-4822-9798-1739833b3554",
+        "title": "Agent usage attribution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/70b06156-3063-43b5-bce2-b1b16a5b45a4",
+        "title": "Anonymous aggregate usage answers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/46433d39-5522-4f6f-864a-66d52310d772",
+        "title": "Anonymous handler link-through-body"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/beb5aac7-c90d-47b6-b1ef-f09cc3678ccb",
+        "title": "Anonymous route handler bodies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/188aa3ec-d337-485f-904c-a529189b63ef",
+        "title": "Answer-sized explore output"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/bd17fe0f-e925-490e-b2a8-edad88793177",
+        "title": "Apply MCP runtime memory flag"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/a9c24bfd-701a-4d81-b76c-12082861a202",
+        "title": "Arrow callback link-through"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/43f80787-545b-4a6b-b007-8be1a3b08ba6",
+        "title": "Auto-sync trust signaling"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/f82c42a2-494a-4052-a186-7a79079e87e5",
+        "title": "Avoid avoidable tool round-trips"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/70f42320-730e-4ca3-8873-8266db813b46",
+        "title": "Avoid explore read-backs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/cabf1473-3302-4d8b-87c0-5a64ee2ec807",
+        "title": "Big non-sibling file clustering"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/ddc48d6f-69f9-463e-9d6d-521635b0e800",
+        "title": "Bounded background process lifetime"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/4f8e26f5-4b5d-4108-8a99-93809661a6af",
+        "title": "Build output exclusion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/3bb5d32e-6dab-4c11-91f1-0fab069fbf67",
+        "title": "CSharp static value reads"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/622f8df4-7f08-483f-b0a1-f74d4fbf3ef9",
+        "title": "Callback flow reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/fb7aff37-7003-4de7-8d50-56ad5643704e",
+        "title": "Callback registration visibility"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/7c0c5bf1-5e33-4f43-99d8-8136362a75ca",
+        "title": "Callback synthesis corpus audit"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/30e95c32-baea-448e-95a0-0abb23ec9681",
+        "title": "Callback synthesis tests"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/ef6bd857-5863-4dca-85d9-cb8eabdf0d27",
+        "title": "Canonical flow corpus case"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/392388dc-4caa-47a7-a0e8-3cd28fd9b035",
+        "title": "Clean reversible agent setup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/fbb3a58f-f349-454e-9f26-f40aa53b635e",
+        "title": "Concurrent reads without lock failures"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/2bec1802-5739-4a00-9c1d-cf288723d898",
+        "title": "Cross-language bridge flow reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/da100648-9e9e-45fb-9c8d-613ffdddc2ec",
+        "title": "Current-code query results"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/73a8c108-25e2-403e-acdc-e6399b1ee7c8",
+        "title": "Daemon restart session continuity"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/1df62c16-a06c-4263-a503-74072f685e87",
+        "title": "Daemon-independent tool discovery"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/1ff7fb4a-4f7f-48f9-86d8-28514923c924",
+        "title": "Definition-level monorepo precision"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/26524eda-ca84-4ffa-b765-35b74d49a406",
+        "title": "Dispatch indirection reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/a9d4a777-d02d-41c7-8249-e7cb3c92dc9b",
+        "title": "Dispatch mission done checklist"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/4de0ab34-82c1-4517-adff-198251c44129",
+        "title": "Django URL handler shape coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/aa95d303-3686-4ebd-8e45-c2a7f19a86ba",
+        "title": "Embeddable graph API"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/60ad0bab-602e-4261-9c5a-109f46e18a45",
+        "title": "End-to-end flow answers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/c3008213-fc56-4ebf-b40a-08c6d68d24af",
+        "title": "Enterprise Java config reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/8e19a1d3-2218-418c-a5aa-75274d443b69",
+        "title": "EventEmitter receiver matching"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/f9abb271-8812-4d8a-bae4-02c18568a588",
+        "title": "Exact symbol source locations"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/eb1fd567-7ebf-494c-88b2-cbd42e8495d6",
+        "title": "Explain static flow dead ends"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/dd730cf5-6fe5-4f77-b1f5-09ec48c507b2",
+        "title": "Explicit indexing control"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/05556958-5a28-4bd4-a4dd-30fc1a6ad020",
+        "title": "Express handler shape coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/2c381d24-bc6a-47be-b5b6-6fb44758c3e9",
+        "title": "Fail-soft ignore parsing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/4cf14059-ca35-43d3-a11f-d8ba131d5954",
+        "title": "First-turn CodeGraph availability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/bad7fe02-21b0-43d1-ab26-677360b544e4",
+        "title": "Flask FastAPI decorator coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/939b1813-025b-4829-93f5-2e8c6639ce13",
+        "title": "Flexible affected path inputs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/15a33508-7abb-4d4b-8dda-0c9759cae7d9",
+        "title": "Framework route README coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/cf40b5e9-69c1-4966-865e-5e6770451774",
+        "title": "Frontier dispatch surfacing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/cb0702c9-788a-49dc-b065-24047dfd7e52",
+        "title": "Honest full index rebuilds"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/16d8de38-7658-454c-8ba1-d148e7b9a12d",
+        "title": "Human CLI affordances"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/b2397944-8229-4ee2-a0fb-5d05ae45456f",
+        "title": "Implicit framework wiring reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/13071546-5f81-4fe2-bfc6-3bd9af863cbf",
+        "title": "Inactive CodeGraph preserves trust"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/3b2b02c8-5d2f-4889-baf8-8a40d107ec19",
+        "title": "Incremental synthesis refresh"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/00cbb798-03e9-456e-89c5-bd1d0b47addf",
+        "title": "Index artifacts stay out of VCS status"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/b3c27a94-7373-41b8-8e01-c70a4aec7d1a",
+        "title": "Init leaves project ready"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/a8201a3c-5e8f-4417-8ba4-89b3e89d3b06",
+        "title": "Install freshness management"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/99ec5ced-a350-4949-9f2f-2b61cefae31c",
+        "title": "Install without local Node"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/fdbe0a96-3e11-4b81-8352-12d3facb48d9",
+        "title": "Large repo indexing completes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/22fd02a1-28a6-4058-b927-68a9780ffb1e",
+        "title": "Layer-balanced explore retrieval"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/854083eb-c89c-44d2-8451-285e57bbfaff",
+        "title": "Local-first privacy promise"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/c7e3bc97-6394-4f3f-8a9e-767b7ceed8ba",
+        "title": "Lombok generated member reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/4f679cf8-43a9-4605-b5cb-086616e5f5d6",
+        "title": "MCP guidance single source"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/d60c87ba-224d-4533-b09f-58f860d3539e",
+        "title": "MCP process self-recovery"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/7c157196-4713-4030-a466-4ea7d846e978",
+        "title": "MCP tool-surface scoping"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/5a99decc-f18a-4383-ad30-40f06fc2557d",
+        "title": "Markdown client transcript readability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/0846fc1f-2ccb-413d-b694-f7f1beb9466b",
+        "title": "Mirror-lag install resilience"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/e8997f20-0912-4a3a-b3e0-11f5d2d2f372",
+        "title": "Multi-repository workspace coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/184ae71b-fe27-416c-85e5-40b0fe605541",
+        "title": "Native bridge validation corpus"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/7663a08f-baa4-4178-b4f8-b249ff28a9fd",
+        "title": "Natural Read replacement"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/cb5f080c-6e60-45d3-815f-d32ca59586da",
+        "title": "No phantom symbols in impact"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/cc3e75ce-6bdc-453a-b2ea-167df442e947",
+        "title": "No-read flow answers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/5ec96cf3-2f49-4c9b-8b7d-cd51936bdc88",
+        "title": "Non-call dependency reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/2d8d1657-ec0a-4c2b-9d24-455cea9336bb",
+        "title": "Non-fatal framework extractor failures"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/55f5b672-0aa5-450d-a563-a2d2bca68d5d",
+        "title": "Non-interface sibling detection"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/f0b7173d-4b7f-4c73-ba3b-0943923252cc",
+        "title": "One install covers active agents"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/6af12d2f-8676-4bb4-a0f9-f12626b393c9",
+        "title": "Per-OS index isolation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/165f8385-5ecb-4ff1-b3df-22047ae50b83",
+        "title": "Per-symbol family skeletonization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/da0e9985-506d-45c5-9c94-02bb845e5472",
+        "title": "Pre-edit blast radius visibility"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/b389ce96-c162-45f5-aa00-044399f9d182",
+        "title": "Preserve diffuse flow breadth"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/160e2494-4091-41b1-b0fb-99355f0cd6f1",
+        "title": "Project-name-neutral intent ranking"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/fd42157d-7eaa-4a88-87df-339aeeb1392d",
+        "title": "Qualified symbol disambiguation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/a9b63a4a-a6c0-418f-bf32-32838fdeb269",
+        "title": "Quiet healthy daemon attach"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/85a44ab3-2d52-41d7-adee-0a7b26435171",
+        "title": "Real implementation result priority"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/58ff5e27-d550-4476-86f7-82c5abdc9077",
+        "title": "Receiver-return typed chained calls"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/69d3f0b2-90a4-4124-bae3-de764b80f4a1",
+        "title": "Recognize source file variants"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/803a6de9-9fb6-4ce1-96d7-907668ee1417",
+        "title": "Reflection DI registration modeling"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/8c54ed54-ca72-4461-8001-6e1aa95a250c",
+        "title": "Replace implementation Reads"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/50841b93-65ae-4061-9013-27d5c26a5b2a",
+        "title": "Request route flow reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/3e046b03-6955-45da-bb5d-abed1cd35ad5",
+        "title": "Route prefix propagation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/0f4fdcc6-ce01-46cf-91bc-40e0d4bbc7da",
+        "title": "Schema-advertised filter behavior"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/1aa704f4-820e-41d9-a6da-5f61424473dc",
+        "title": "Scriptable index freshness checks"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/fba25199-3c1c-463f-a329-83067fbf0052",
+        "title": "Scriptable installer operation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/dccb2761-6234-4fad-960c-fd3c3a3fc265",
+        "title": "Shared project indexing cost"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/b76dccd1-e31c-4e26-ab63-bb8b4ea12134",
+        "title": "Shell-only graph access"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/3cfb40ba-f798-4393-868d-b95aac587be3",
+        "title": "Sibling exemplar selection"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/9b6b8685-0033-4c64-9aa4-fefafc01446f",
+        "title": "Single-callback field synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/12c8e3c9-65a0-440d-a92d-2a0999ed53dc",
+        "title": "Specific project root indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/47883efd-c0e2-4b58-8ebd-ba995f9530c6",
+        "title": "Structural prompt graph grounding"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/85a66c6a-e09a-4b62-b413-22e8a5bcc911",
+        "title": "Subagent-visible CodeGraph guidance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/32f0a724-daf2-4236-afd9-039dca6656c5",
+        "title": "Symbol documentation coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/bbac83bc-cb90-40c9-b7cc-3b0d2c7f5ba0",
+        "title": "Symlinked SDK project indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/17ced9fe-d945-49c8-b176-10e0cd3040de",
+        "title": "Synthesized dispatch hop surfacing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/704ff1cc-c398-48d2-8b5b-156c08e01d56",
+        "title": "Team-shared custom extension indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/9d5b3f75-c441-4729-9971-e3c29d2c5cca",
+        "title": "Telemetry user control"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/c1289ff6-dcff-46a4-becf-0a304f032ddb",
+        "title": "Template-only dependent reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/ec63465d-ce56-40d4-a794-a198e8315532",
+        "title": "Tree-sitter callback arg recovery"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/ab43149c-5ef5-401a-8eaa-180a2df7c47f",
+        "title": "Typed RPC surface searchability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/a3f3d80a-ea1e-42c2-a862-643185a6a54b",
+        "title": "Universal dynamic-dispatch coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/19e44283-e9fe-4782-bef5-1e89e56930a8",
+        "title": "Value-reader impact reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/e3ec59de-4462-432d-9faf-2277a44fec82",
+        "title": "Zero-config ignore semantics"
+      }
+    ],
+    "expected_size": 107
+  }
+}

@@ -1,5 +1,6 @@
 .venv/
 runs/
 corpus/
+scale/
 __pycache__/
 *.pyc

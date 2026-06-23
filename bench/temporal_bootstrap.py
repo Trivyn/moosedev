@@ -39,7 +39,10 @@ CAPTURE_AUTHOR_FILE = str(Path(config.TB_SNAPSHOT_ROOT).parent / "temporal-captu
 
 
 def _git(repo: str, *args: str) -> str:
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=True).stdout
+    # errors="replace": some repos (e.g. oxigraph) have binary test fixtures whose diffs aren't valid
+    # UTF-8 — strict decoding crashes the whole enumeration on one bad byte. episode_diff re-truncates.
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=True,
+                          encoding="utf-8", errors="replace").stdout
 
 
 def detect_trunk(repo: str, override: str | None) -> str:

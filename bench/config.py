@@ -11,8 +11,29 @@ REPO = Path(__file__).resolve().parent.parent          # the moosedev repo
 BENCH = Path(__file__).resolve().parent                 # bench/
 BENCH_HOME = Path(os.environ.get("BENCH_HOME", Path.home() / "code" / "moosedev_benches"))
 
+
+def _load_dotenv(path: Path, keys=("OPENROUTER_API_KEY",)) -> None:
+    """Pull ONLY the named secret keys from the repo .env into os.environ (without overriding existing).
+    The bench computes every other setting from its own defaults below; loading the moosedev binary's
+    WHOLE .env clobbers path vars — notably MOOSEDEV_BIN=$ROOT/... (unexpanded $ROOT) — which silently
+    breaks the MCP client (the server never launches, so the agent has no get_relevant_context tool and
+    falls back to grepping). So this is a narrow secret-loader, NOT a general .env importer."""
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                if k.strip() in keys:
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv(REPO / ".env")
+
 # Binaries / endpoints (same OpenAI-compatible LM Studio surface for both LLM roles).
-MOOSEDEV_BIN = os.environ.get("MOOSEDEV_BIN", str(REPO / "target" / "release" / "moosedev"))
+_bin_env = os.environ.get("MOOSEDEV_BIN")  # defensive: a bad/unexpanded env path must not break the MCP
+MOOSEDEV_BIN = _bin_env if (_bin_env and os.path.exists(_bin_env)) else str(REPO / "target" / "release" / "moosedev")
 ONTOLOGY_DIR = os.environ.get("MOOSEDEV_ONTOLOGY_DIR", str(REPO / "ontologies"))  # shared shapes
 LLM_BASE_URL = os.environ.get("MOOSEDEV_LLM_BASE_URL", "http://endor:1234/v1")
 LLM_API_KEY = os.environ.get("MOOSEDEV_LLM_API_KEY", "lmstudio")
@@ -21,7 +42,25 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "lmstudio/qwen3.6-35b-a3b-mlx")   # 
 
 VENV_PY = BENCH / ".venv" / "bin" / "python"
 
-ARMS = ["B0", "B1-md", "B1-rag", "B1-notes", "B2"]  # B1-notes = the team's REAL accumulated docs (ecological)
+# ── B1-mem0 competitor arm (mem0ai) ──────────────────────────────────────────
+# A real vector-memory tool that CAPTURES the raw docs ITS OWN way (LLM extraction), never the
+# flattened B2 graph (Lesson 440abc78 — a competitor ingests raw source itself). Extraction LLM =
+# gpt-5.4-mini via OpenRouter to MATCH B2's doc-bootstrap capture model; embedder = a local
+# sentence-transformers model (OpenRouter serves no embeddings); vector store = local on-disk qdrant.
+# Only the build (mem0_build.py) needs OPENROUTER_API_KEY; the codex search-time MCP does not.
+MEM0_LLM_MODEL = os.environ.get("MEM0_LLM_MODEL", "openai/gpt-5.4-mini")        # OpenRouter slug
+MEM0_EMBED_MODEL = os.environ.get("MEM0_EMBED_MODEL", "BAAI/bge-base-en-v1.5")  # local HF embedder
+MEM0_EMBED_DIMS = int(os.environ.get("MEM0_EMBED_DIMS", "768"))                 # must match MEM0_EMBED_MODEL
+
+
+def mem0_store_path(corpus: str) -> Path:
+    """Local on-disk mem0 (qdrant) store for the B1-mem0 arm — gitignored, never the open repo."""
+    p = Path.home() / ".moosedev-stores" / f"{corpus}-mem0"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+ARMS = ["B0", "B1-md", "B1-rag", "B1-notes", "B1-mem0", "B2"]  # B1-notes = REAL docs; B1-mem0 = mem0 competitor
 CELL_TIMEOUT = int(os.environ.get("BENCH_CELL_TIMEOUT", "600"))  # per-cell opencode wall-clock cap (s)
 KEEP_WORK = bool(os.environ.get("BENCH_KEEP_WORK"))  # keep throwaway per-run workdirs (debug); default: delete
 
@@ -84,6 +123,20 @@ CORPORA = {
         # B1-notes ecological free-text memory = the team's REAL accumulated docs (NOT the graph export).
         # tasks/*.md = lessons.md (2263 lines) + topical guides; excludes the benchmark *.json specs.
         "notes_paths": ["tasks/*.md", "CONVENTIONS.md"],
+    },
+    "codegraph": {
+        # Public TS code-knowledge-graph tool (colbymchenry/codegraph). DOC-bootstrapped
+        # (doc_bootstrap.py) from docs/design + docs/plans + CHANGELOG into a typed graph — the NEUTRAL,
+        # not-our-doc-style capability corpus (Lesson 2b1513e6: decision-bearing docs, not git churn).
+        # Richer edge set than trivyn (resultsIn/violates/learnedFrom/concerns all instantiated). PUBLIC
+        # → tasks/export/runs use the open bench dirs.
+        "data_dir": str(Path.home() / ".moosedev-stores" / "codegraph"),
+        "repo": str(Path.home() / "code" / "codegraph"),
+        # B1-notes (ecological free-text): grep the SAME raw docs doc_bootstrap consumed to build B2
+        # (design + plans + CHANGELOG) — the honest "team just kept design docs" baseline, and the
+        # identical source mem0 ingests (Lesson 440abc78: a competitor captures raw source its own way,
+        # never the flattened B2 graph). Same source as B2 → only capture+representation differ.
+        "notes_paths": ["docs/design/*.md", "docs/plans/*.md", "CHANGELOG.md"],
     },
 }
 

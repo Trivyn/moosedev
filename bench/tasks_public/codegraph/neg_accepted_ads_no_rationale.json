@@ -1,0 +1,1202 @@
+{
+  "id": "neg_accepted_ads_no_rationale",
+  "type": "capability_qa",
+  "capability_class": "negation",
+  "materialize_tree": false,
+  "prompt": "Which ACCEPTED architectural decisions have NO recorded rationale? List them all.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s a ?k ; <http://www.w3.org/2000/01/rdf-schema#label> ?title . FILTER(STRENDS(STR(?k),\"ArchitecturalDecision\")) ?s ?sp ?st . FILTER(STRENDS(STR(?sp),\"hasLifecycleStatus\")) FILTER(LCASE(STR(?st))=\"accepted\") FILTER NOT EXISTS { ?s ?ep ?o . FILTER(STRENDS(STR(?ep),\"hasRationale\")) } } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b9a6051b-bf1d-4289-a6eb-9dee4d302fff",
+        "title": "ASP.NET feature-folder routes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e59201b7-5437-45ad-b46d-a6d850a60d94",
+        "title": "Adaptive sibling skeletonization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/027d84e6-853c-41b9-8369-494631a7790c",
+        "title": "Affected path normalization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d28480ff-6454-493d-b8bf-3f9d34376175",
+        "title": "Affected traces usage graph"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/86ddb52c-b86a-4664-a696-07972681fa44",
+        "title": "Agent-agnostic trust instructions"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/bd294a7c-83db-456d-864d-dfea80dd4d9d",
+        "title": "All-language cross-file impact"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/da0edd67-6a27-4bc3-8c26-c464788ebf1e",
+        "title": "All-language doc marker cleanup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0ccced0a-054d-415b-940c-66a74d793f64",
+        "title": "All-tier test-file exclusion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0bee098d-fa1e-42eb-82a4-118c6555f8a3",
+        "title": "Ambiguous node returns all definitions"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/92935fe0-1178-47ea-9f52-a879e0988bc2",
+        "title": "Anonymous PostHog event mode"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/98868acf-43e4-44de-9776-426a628cc0e2",
+        "title": "Anonymous class node indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f342c598-a7cc-42bd-9b36-913334c157f6",
+        "title": "Anonymous wrapper traversal"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7b580d50-c8ca-47d6-beca-f361dfcc22a8",
+        "title": "Astro indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/295fa3dd-f6e3-4e39-b879-e679f855ee28",
+        "title": "Auto-sync trust failure mode"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d69195a5-82c7-4d04-b393-7febbdd438a3",
+        "title": "Batched first-sync writes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ddc3c618-7237-46bb-9625-7bff8ecab362",
+        "title": "Bridged dynamic hops in trace tools"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d7775dd6-b1f9-43e7-a7c0-e388bd31e935",
+        "title": "Bundled SQLite WAL backend"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dfe7f739-6af0-420e-86cd-56c57e32df7a",
+        "title": "C fn-pointer dispatch synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fc04a468-33d7-4130-8d49-3bca5b886ee2",
+        "title": "C value-ref extraction guards"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b7e8b994-4202-44a8-9f1c-de04e0db955a",
+        "title": "C++ address-of-only registration"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/532307a0-251c-4aea-b801-99dbd2be47ac",
+        "title": "C++ export-macro misparse suppression"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/329268f0-b890-4c2a-a54d-b72bcf8f3d4c",
+        "title": "C++ free function real names"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4bc02592-99d1-44fc-9d0e-981337bc7dc2",
+        "title": "C++ override synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/30ebe539-603a-4185-926d-865f5bf1acee",
+        "title": "C++ return-typed chained receiver resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/79f54afa-a2df-4535-b50e-af6827310b87",
+        "title": "CI telemetry retained"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/16fd6b81-185d-48bf-b3e3-7016611e7afe",
+        "title": "CLI mirrors MCP graph tools"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a96777b3-00f9-4b57-8566-8ae779538438",
+        "title": "CSharp namespace-qualified types"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d8b9734c-b7c3-4041-a4d9-c82a5f48d4a3",
+        "title": "CSharp primary constructor parsing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5530114e-abcf-4fd8-8f74-014d04b609d7",
+        "title": "CSharp record struct indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a1458191-5b73-4b54-b69a-74d73206646a",
+        "title": "CSharp record type indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8f241631-3e28-44ec-895e-82b2764e717b",
+        "title": "Celery dispatch synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fc635f21-e69b-4c9c-b5da-a6182614c834",
+        "title": "Chained method call resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e5a58299-d583-45fb-860e-982cbf89c4ae",
+        "title": "Chained receiver marker encoding"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fda09fd4-19fb-4a6f-8725-8ff9a78d3589",
+        "title": "Checksum-verified release bundles"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ac2d2ce2-29a8-4d3c-ac95-ff8eeaf577b7",
+        "title": "Class instantiations are callers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/495ddc12-57d6-4aa1-979c-2b54b02a7e7e",
+        "title": "Class node member outlines"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d7aac468-c165-4315-818e-546e41a14f87",
+        "title": "Claude Code front-load hook"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b78fc2c1-42aa-4860-a706-3e907b8011dc",
+        "title": "Closure collection synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c3b5f938-1258-47ba-864a-00133f8acf88",
+        "title": "Component barrel re-export resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cbb138a4-873c-4bcd-b3a3-2b1586f5265a",
+        "title": "Config key-only indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5021fb5a-ccc4-428a-afff-44a057b16f0c",
+        "title": "Configurable index directory"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2a17304f-0729-4b26-b662-317360b917ed",
+        "title": "Conformance chained-call pass"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a9f2080b-ad96-41bc-9aaf-ca25c190e14b",
+        "title": "Cursor explicit project path"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7d49263c-9352-4b4a-80fe-d041f20b7aa8",
+        "title": "Cursor orphan rule cleanup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/498bad50-2e3b-4c41-84ec-512d7911962f",
+        "title": "Daemon opt-out and version pinning"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d7d0dac1-ec5f-4287-8c47-51f211e3a0e7",
+        "title": "Daemon-gated tool exposure"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/15643177-2a2e-46e1-9635-bb8a25f9ca75",
+        "title": "Daily local usage rollups"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d228fabc-8def-454b-bbab-c41084ea7a0a",
+        "title": "Dart full method extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eb1b74fb-cf24-4284-a5f0-c4a9cac0d9aa",
+        "title": "Dart mixin and type edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d4ff08d5-c079-4e31-a6d6-0a6254197009",
+        "title": "Dart static-final value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a5a8137e-bf71-4c6e-83e6-fb8ea23eac6f",
+        "title": "Declared-return chained-call mechanism"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9fad4ae0-1cee-4af8-996e-59cc522cc6fb",
+        "title": "Default dependency directory excludes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e6dedb4e-952d-4a6c-b46e-adc69c4691cb",
+        "title": "Default import module dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c1cd6e33-0da2-41b5-bf56-07d182a672e2",
+        "title": "Default init indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9c1c088c-16fe-49fe-abfd-1adee3bff03a",
+        "title": "Delphi form resource ownership"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dbf986e1-d928-4845-ab98-60cc0b673d0d",
+        "title": "Dependency-free telemetry client"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/35501ddf-2bc3-4299-9d50-18645d08ca8c",
+        "title": "Detached lingering daemon"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2a2102c6-4e1d-4f06-ba7f-116fed479c57",
+        "title": "Deterministic hole localization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/00f57c77-87e8-4010-89f1-9c1ed247088d",
+        "title": "Django DRF route extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/582e4a8c-b152-4b67-afdd-0e92e21ce1a4",
+        "title": "Django include URL dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5df6702d-e2cf-43eb-8388-6dab7a67bf65",
+        "title": "Drupal routing handler resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8c865859-8594-4d98-9c31-d12042aab648",
+        "title": "Dynamic flow boundary reporting"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/15ad8f55-e059-4442-9d36-efd69cf53c97",
+        "title": "Empty optional MCP lists"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/65d98a40-c9e3-4d8c-af0f-e62b3ec5197b",
+        "title": "Enterprise Spring MyBatis flow tracing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/28c84340-49fa-450a-bc8c-9a683b948528",
+        "title": "EventEmitter channel synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/209d4e4f-2208-4fe1-94b4-eb472b997805",
+        "title": "Explore blast radius footer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8819e065-29cf-4c3c-bef0-abe4bcb5e531",
+        "title": "Explore call-it-first guidance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/10241acc-a578-4295-a609-b1617a820a45",
+        "title": "Explore flow-first answers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/89de8735-b981-40c9-adae-835c93f4ac6c",
+        "title": "Explore source line numbers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6a7a3bc9-a8d1-4493-aa5d-325f7735b413",
+        "title": "Explore-only flow surfacing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b2736c35-9afa-43f0-bad4-627de034af4d",
+        "title": "Expo generic method bridge indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/112bf7c1-4ef2-42bd-8389-b67ed989669e",
+        "title": "Expo modules extractor"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/63ebdc67-9442-45a6-a6f8-4660ff750417",
+        "title": "Express inline handler resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/34737b5e-44a9-407a-a2d2-8b7a5f17d68f",
+        "title": "Fabric view extractor"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0a9ce822-a0f9-4383-b733-8876a3812acd",
+        "title": "Fail-soft gitignore parsing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/57562b62-78a4-4104-beea-ccf5c271f14d",
+        "title": "Field-observer channel synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/607a070d-65e7-4bc4-8093-126a343ac454",
+        "title": "File-wide class-scope targets"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ac7cde15-b255-4be9-90e8-5f74612eb5f9",
+        "title": "Filesystem-based change detection"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/10f348ea-a0c4-4675-8f25-46494e52f79c",
+        "title": "Flask FastAPI route expansion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dd575fec-b5c4-47fa-af5f-68ffe56ddf17",
+        "title": "Flat-cost recursive watcher"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f6ff109e-ce34-4925-9acd-275507e08990",
+        "title": "Flutter setState build synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/63cbcc58-ce1f-472d-8f52-8816234b5b4c",
+        "title": "Frameworks excluded from value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b095f1f1-2dad-4016-8a73-8a7162c4e9bd",
+        "title": "Frontier triage pass"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/62c17ab3-315a-45d5-9008-47094843a39e",
+        "title": "Full Read parity for file view"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6ca8a932-aa44-4f56-8af3-626cdde56771",
+        "title": "Full index rebuild command"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fc6ab3c0-e669-411c-be24-1dc8861feef7",
+        "title": "Function-ref registration capture"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dc3de34e-9e4d-44b8-9169-2ea6ae2e8669",
+        "title": "Gemini Antigravity installer targets"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/238986b4-1602-49a9-afc1-94051fd07a4a",
+        "title": "Generated artifact rank demotion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7e493c19-c419-4a72-9c68-5adcae6dd304",
+        "title": "Gin middleware chain tracing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dd16ab04-26b2-44b9-9409-5e7b30c4f8ff",
+        "title": "Gin middleware-chain synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3e382609-f703-4327-98d0-6d6547cb9c55",
+        "title": "GitHub release bundle fallback"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4436174d-8861-421e-bbed-e6f93d900f69",
+        "title": "Gitignore-backed indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7ed7f9c1-7165-43d8-ad1d-6a3ea146af15",
+        "title": "Go cross-file receiver binding"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8dfa14e8-9de8-4239-a0a2-597b4d89c4d2",
+        "title": "Go cross-package struct creation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/62df039d-39e5-48da-ac6e-a875f2a735c8",
+        "title": "Go enclosing declaration caller attribution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8cafb2aa-2e30-48db-b320-8b4f5b9abc35",
+        "title": "Go gRPC implementation bridging"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d508d1cb-d791-4c7d-84b4-f331aab2f84d",
+        "title": "Go generic receiver binding"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/15196122-7fc3-4e9b-8e56-71168347fe66",
+        "title": "Go group route extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3ecfeea4-5593-4faa-8c9c-8fb911736bf3",
+        "title": "Go structural interface implementations"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3ae1e2b9-c1e0-419d-9e12-ace96286ab31",
+        "title": "GoFrame g.Meta route synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cc00acbb-9278-4659-9d17-6e5a908e330d",
+        "title": "Grammar compilation V8 flag"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e8ddeee5-211e-40fa-a510-4b295509acf2",
+        "title": "Handler-array closure tracing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f1cf5a8a-442c-4d43-bdc3-3d9b5c7229a5",
+        "title": "Hermes Agent installer target"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/99460cd0-b5aa-4abb-8a5a-4af2e0de370a",
+        "title": "Hermes YAML config preservation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/63ecfaf9-2810-46ca-b699-731cc6d782ec",
+        "title": "Heuristic synthesized-edge provenance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/40bc71e3-aab9-4c3d-8c3e-73a1b262cab1",
+        "title": "Home root indexing refusal"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/80e48349-7cef-458a-ab4b-9a605c977bab",
+        "title": "Human-run MCP guidance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/08f795fa-f01e-4bc4-a90d-a5f750198198",
+        "title": "Ignored-parent project opening"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f98c1ab5-e847-48df-bf2e-36fd2f8109d8",
+        "title": "Impact follows real dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a557d79d-b26a-4b2d-917b-9fac27e33697",
+        "title": "In-place upgrade command"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/96e8ee54-1910-479d-a8a5-649f3b8271ec",
+        "title": "Inactive no-index MCP mode"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6694a34e-7092-484f-8fbd-916c24e75ff7",
+        "title": "Incoming edge preservation on sync"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b6657f53-0792-418e-8d9a-871b9a0a5dbf",
+        "title": "Indexer symlink read allowance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8f4ea163-9cd2-4fb2-a476-4abfb741bfe7",
+        "title": "Inherited callback references"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ae3762f7-a554-4e8f-b5e1-93e726b7a062",
+        "title": "Inherited template value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/36386ecd-c7a0-48f2-aa79-c45faf8a0aa7",
+        "title": "Inherited this-member resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a502de75-5cf1-40e0-b847-8b3cc6f118c1",
+        "title": "Initializer call extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/65b19302-d3f7-4fd6-8583-3dc0af2e889d",
+        "title": "Inotify limit partial watch"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/46513c26-c717-4399-a988-1d706987052b",
+        "title": "Install config-only behavior"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8786b945-7cc3-488c-993d-077eb3655fa9",
+        "title": "Interactive daemon manager"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a33d7bc9-dcf0-4a1a-8483-fee484d43168",
+        "title": "JSX route file indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c5bd1c7e-9347-41cf-8de7-014ad492c6b7",
+        "title": "JSX-scoped component resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/52ebe663-436f-49af-b0b2-7e3af8921f0a",
+        "title": "JVM and CSharp const-field kind switch"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8549e5f5-c087-4eef-8127-8a6d97ea296b",
+        "title": "JVM qualified member ungated refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/79f973b8-86d7-479b-9156-3d3001db9ce1",
+        "title": "JVM variable method-ref silence"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/89a85406-fbcd-4966-8713-4fe4d0ce221a",
+        "title": "Java annotation dependency edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ae933f99-2ead-4470-84b0-f530d541d1c5",
+        "title": "Kiro installer target"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e501854b-706f-473b-bc35-e55a9d52b735",
+        "title": "Kotlin Spring route support"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3dca3954-df6e-4cfd-8199-3a8c02335b4f",
+        "title": "Kotlin expect actual links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/63d1075f-7c2f-4c2f-b4f7-9ebc415023fc",
+        "title": "Kotlin property-declaration value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8ece6ba4-c3df-4277-a74c-c4ef0fc4f56d",
+        "title": "Laravel controller route resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b355462e-4c01-4f57-9e4e-57ba16f37f08",
+        "title": "Laravel event synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b8b599a2-d02b-47d5-a269-4fba347c784b",
+        "title": "Legacy index ignore migration"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eb1905e8-1e96-40a0-8b1d-2b5f9ad8f4e7",
+        "title": "Line-numbered source surfaces"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/af928614-8ac1-474f-a13c-78ec6e6c5fd2",
+        "title": "Local fallback after daemon restart"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/99433363-6087-4836-bf63-f079e17bb8d5",
+        "title": "Lombok generated member indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4558be5e-1455-4e97-be04-c5af59e840d2",
+        "title": "Lua language indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/035a2b58-c21d-438e-8597-d177671b1c00",
+        "title": "Lua module dispatch coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5887bdb2-bbc1-4e48-a58d-3de3b530d77c",
+        "title": "Lua require module-file links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c87f812d-b88d-4db0-a3ce-178b483af286",
+        "title": "Lua reverse require dependents"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9f61ccf5-d7b1-4ffd-8112-8b7a749e9177",
+        "title": "Luau language indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e0cb1111-9ecb-4236-9e91-068384867730",
+        "title": "MCP bold label rendering"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f68f5041-f51a-406f-9ed5-671f93390f05",
+        "title": "MCP connect catch-up"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e0e7e16a-6401-4872-9c51-8a6321998d3f",
+        "title": "MCP fatal-error exit"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9c64fca8-3d32-4449-978e-301caf9a457e",
+        "title": "MCP input failure triggers shutdown"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/961e3590-e4fd-4236-8009-a249a5bcdd33",
+        "title": "MCP watchdog shutdown"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3e717419-bd18-446a-872d-ae3330dae880",
+        "title": "MediatR dispatch synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/75686386-e1d4-404d-be0b-9b735e21901c",
+        "title": "Module-qualified symbol lookup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cc2d8e96-517f-4983-bd63-46706327981b",
+        "title": "Multi-agent install prompt"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ea56679d-9a4a-422c-a06a-2d3c955247a9",
+        "title": "Multi-agent uninstall command"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/308dddde-5198-47dc-8254-83df1dfbd1ec",
+        "title": "Multi-repository workspace indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5f5074a2-5b9c-4541-b94f-157bb2a8b4f6",
+        "title": "Multi-term explore retention"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fb892144-6532-45bd-9c6c-2f2542fe1339",
+        "title": "Multilanguage interface implementation links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/137dfc67-6909-4a95-83fa-2839d4f50c09",
+        "title": "MyBatis XML mapper extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8d42b3c6-dca1-4eea-91cd-14e57d50d6bf",
+        "title": "Named descriptor resolver pattern"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5c00c88e-cabb-405f-842a-9ac27c106c19",
+        "title": "Named nested function extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/13c73725-b601-4f28-a828-01e343caac10",
+        "title": "Named-callable spare with family override"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cf6753e7-6583-4fe7-a1df-bd94282902b6",
+        "title": "Named-cluster survival"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5f5cf834-a582-44c1-a4ba-e927b4e63673",
+        "title": "Native static reads stay in family"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/685655ca-2e52-44e6-9be1-82e31e244d51",
+        "title": "Necessary-file explore exemption"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/39488565-828c-43c8-81c9-8de05ff39327",
+        "title": "NestJS RouterModule prefix propagation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9fe8023a-bd53-401c-a5a1-3966b204e27b",
+        "title": "NestJS route extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dd75546f-ff02-47a9-8bb9-13088befb0ab",
+        "title": "Node-anchored supertype pass"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f655a830-96af-443d-acdb-9976a690f7cc",
+        "title": "Non-callable synth hop surfacing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6ab07361-95ca-4412-afe0-e758c3fd04f6",
+        "title": "Noninteractive installer flags"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2e2d42d8-72ff-45ef-af9b-63cc365cf577",
+        "title": "Nuxt directory-prefixed component matching"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/019d7e6a-d5ae-44f2-8988-50cfde6aa8fe",
+        "title": "Object function symbol extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0e253fb1-d4c8-4061-bd2f-e9005ea6bf7b",
+        "title": "Object registry synthesizer v1"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/aca93117-e2ae-495c-88c3-f994dbd29b06",
+        "title": "Objective-C message import completeness"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/20256b45-b80e-432b-bccc-17e7862d4224",
+        "title": "Objective-C structural indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b9beeba3-b627-4dc5-88e5-b6d657c99b4c",
+        "title": "One-line standalone installers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d43e3715-0718-471f-bc8f-f246ef38ee05",
+        "title": "PHP callable registration edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/1e2b8d0a-6176-4d85-bfee-50353e857d72",
+        "title": "PHP constant name reader scan"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9b5e2475-c4a6-48c8-891d-2722a14ee3ce",
+        "title": "PHP namespaced dependency edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/716cf63e-ca43-478c-ab12-3df38f7a120b",
+        "title": "PHP static include dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4ebfebf5-734e-46cd-a223-bb71d18b986d",
+        "title": "Parent-death MCP shutdown"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c359ccd5-e588-43be-9f6e-459340535380",
+        "title": "Pascal const value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e12a55c4-6271-44fc-84e0-89ee971c84bd",
+        "title": "Pascal implementation free routines"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3a2f20b9-7973-4e77-be39-e80de21d3e76",
+        "title": "Pascal paren-less calls"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ea2c299d-3d9c-42bf-8225-fb5c2ca0a539",
+        "title": "Pascal paren-less reference capture"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/74542a1c-e17a-4c00-b443-d5130b81a4a1",
+        "title": "Pending re-index warning banner"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/de0f3c47-3ed4-4b77-beb5-715631503b5c",
+        "title": "Per-call worktree index resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f38c074e-1014-40de-9747-5b45b3fe2802",
+        "title": "Per-definition ambiguous reports"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ca392e2b-6470-4ce6-965b-12db6832bb2d",
+        "title": "Pinia store instance bridge"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dd12d3d4-e434-4b79-978b-0bb4fefd7dd6",
+        "title": "Platform-local native include resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7fa582a9-7757-4889-a6c7-b3159abfc727",
+        "title": "Play routes file resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9f19e7b5-071e-4b70-9685-50a67e037fa6",
+        "title": "Post-extraction resolver initialization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e78787d6-8e2f-4151-bb36-e42b32c57494",
+        "title": "Programmatic API export"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2b548ecb-ce89-433b-b68e-b9d272dbcb3c",
+        "title": "Project-local config auto-wiring"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e907ecbe-95c7-4fc6-8063-b5ccf9e074c6",
+        "title": "Project-name-neutral search scoring"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/85954852-895b-460f-a383-0916401f5a41",
+        "title": "Python absolute import files"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7b18f872-6c94-44e5-82f1-6cc78e49c000",
+        "title": "Python handler name retention"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7d88c28b-f481-49c5-8708-fff65c19e913",
+        "title": "Python imported-module call edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d8df8459-25ba-4939-b602-8bb54f887704",
+        "title": "Python package submodule imports"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d3cb092b-7fe4-4d54-bc01-abe2114214ee",
+        "title": "Python value import dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b40e90e2-8273-45f4-8357-fd94c09caab5",
+        "title": "Python whole-module imports"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0cd5c8e8-0f49-4680-abe1-b16d722201a5",
+        "title": "Qualified resolution fixes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f6637542-d390-406a-8849-a4dd01a49078",
+        "title": "R language indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/650c522a-7db8-4233-95a3-19e7cb7f8901",
+        "title": "RN event channel synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d464cd3b-febd-44e7-984f-10997e2ae1a2",
+        "title": "RN legacy bridge resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/33e6359e-2ba4-4760-9014-1b355301f023",
+        "title": "RN native implementation sibling links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b336317e-dcd0-428a-a2ff-9fbcaca6820f",
+        "title": "RN sendEvent wrapper event links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b55dbfcd-61a2-426e-a9ea-a4936bf7d623",
+        "title": "RTK Query synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9eaafe8d-a92f-4421-8137-c6f4841a905e",
+        "title": "Rails RESTful route resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ca6c67d7-cfac-4273-a471-5f744fb5553d",
+        "title": "Razor markup extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/32b34785-0c23-4cdf-9dbe-73324ad26035",
+        "title": "Razor references resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4206a2f0-2bc3-436d-b8ba-7cb47df21e9b",
+        "title": "React route extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/52ecb014-efdd-4944-a421-80093ff276f0",
+        "title": "Redirect-based install version resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a8cd0096-3135-4b28-95ed-dec018767420",
+        "title": "Redux-thunk synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b91bc47f-1d88-4711-9610-caeef0367e02",
+        "title": "Redux-thunk thunk-first target resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/96178442-3454-47ab-af45-42ab7554d38c",
+        "title": "Reject blanket Read-deny hook"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4074be9c-18da-46fb-b98b-9b705c82225d",
+        "title": "Remove CodeGraph config file"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/bc3e6323-399e-409a-b19a-f521c17aa9a3",
+        "title": "Repeatable dispatch coverage method"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dede6939-ab35-4904-afa8-60b1a4e3b48a",
+        "title": "Repo-root extension mapping"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e6f40507-f55f-4ab0-a5c5-52bebaed1544",
+        "title": "Request-handler flow rollout"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6c28817c-5b6f-4b22-a0a7-7d4c42daa82b",
+        "title": "Rocket route macro links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a62a06ec-2721-4364-8054-abae7a06d945",
+        "title": "Root-ish files path normalization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e313f7bc-ac74-41e5-875d-accfa3acb839",
+        "title": "Ruby constant-assignment value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b618d7ed-cbcf-447c-b605-91613d1dd251",
+        "title": "Ruby lifecycle hook edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3e03e745-7e92-4488-998b-3c2fd9a1da02",
+        "title": "Ruby mixin and require edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7c4537d1-70ae-4580-a810-1969b0f3f1e6",
+        "title": "Rust module graph dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8232adc1-919c-4be0-a04f-e4836db7333f",
+        "title": "Rust relative module-path calls"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4e8b8f69-04de-452c-86cc-cdd895fca24f",
+        "title": "Rust web route extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cf17a7ba-c87a-4481-af5b-5cacba948069",
+        "title": "Scala object vals as constants"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6c150c31-67cf-405a-95b2-a12fdee5c12b",
+        "title": "Scala typeclass dependency graph"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/401ede9f-4403-4e0f-bdb1-c46caaca40f7",
+        "title": "Self-contained runtime distribution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/83570268-4ed7-4595-8c47-6c7f29508dab",
+        "title": "Self-ignoring index folder"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7528bfac-c100-4ff9-b149-09df33fb88fc",
+        "title": "Shape-oriented dispatch backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b4a97b4d-cfaf-469e-b631-9e8c1e1cd4c5",
+        "title": "Shared chained-call resolvers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3284f1ec-b118-4597-83aa-949c6804cf2a",
+        "title": "Shared daemon lingers never"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/393de165-779d-48d4-85b8-057d7e8095f8",
+        "title": "Shared project daemon"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7b5a2a35-f432-45df-86fc-bb34cf0e0f95",
+        "title": "Shopify JSON section links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e54ef889-674f-4597-bb57-e620d8e25742",
+        "title": "Sidekiq dispatch synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a992039a-50c5-4c08-8b1b-4021b8e1d924",
+        "title": "Silent daemon attach by default"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/842174c2-c946-4720-a6ee-b8f275f72af5",
+        "title": "Single-hop event bus rendering"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e7ce82af-7abe-4523-8be8-6a71b90dfbec",
+        "title": "Slow-filesystem MCP startup tolerance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/1f059d68-b813-4a76-b006-091972220c52",
+        "title": "Spring controller bean bridging"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f2ec901f-fefe-412b-900f-6eaa122a1a66",
+        "title": "Spring event synthesizer"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/1d042038-46ae-4b59-bd05-e8265c3d54e2",
+        "title": "Stale-engine status warning"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/454ec4af-0d6d-4572-a0a2-efd32b40addb",
+        "title": "Stale-lock watcher accuracy"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a35d6570-5415-4e2f-a6c6-cbd7e5798b41",
+        "title": "Standalone template extractor pattern"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/51def34a-6715-4a5b-b4b8-37323e79d5ba",
+        "title": "Static member type dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5aa012b7-fd96-4ee4-b2d2-d3e115bcca0b",
+        "title": "Static method target resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6025fdee-4fa5-446d-9413-86a291f5d582",
+        "title": "Status freshness JSON"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ce5223bd-c91d-4dc0-bd95-7e9dc83bc413",
+        "title": "Status ignore-rule parity"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ecdbd8bb-3e8c-45b9-bb9b-4f8eff9c4675",
+        "title": "Status reports journal mode"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5f22e302-a369-4283-b455-931f5f286e5e",
+        "title": "Streaming dynamic call linking"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dc542e36-b4ce-45b1-8343-fffe8007d5f3",
+        "title": "Submodule worktree exclusion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0f96176e-2677-4eac-9185-cb57d8cde3db",
+        "title": "Svelte Vue script line offsets"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d7d0f887-a173-47b9-9cd8-3f4d9dc5d9f6",
+        "title": "SvelteKit action extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9ea69efa-fcc3-4239-afed-23d2da53b028",
+        "title": "SvelteKit route file convention links"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7d6171fe-b9f0-47d5-8fce-f322144f903f",
+        "title": "Swapped database reopen"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b2ab9924-5dfd-4c01-a334-17620f36edc2",
+        "title": "Swift Fluent wrapper arguments"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/41e5c818-e207-47e7-abe0-33efa342355c",
+        "title": "Swift ObjC bridge resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fe065dcf-bafa-463a-bf90-a59ad340bcb0",
+        "title": "Swift attribute dependency edges"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b7a88544-2269-4bc1-bbe3-242560a809ba",
+        "title": "Swift static stored constants"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/08f5f996-235d-4711-8c00-2ac322f2ec08",
+        "title": "Symlink realpath root confinement"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fda18f94-83d4-4029-902a-d0eee8d70f9f",
+        "title": "TS JS class field properties"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/3f6d115d-55cd-4158-8159-ad209a5af878",
+        "title": "TS imports stay in language family"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/813c0686-88da-42bd-bdb5-6827902c14b8",
+        "title": "TS value-reference dependencies"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ff279430-ffe5-47ff-b409-99bfee323980",
+        "title": "TSX JSX value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/99fb926d-acfa-43b2-9dd6-4c74a7faa2e9",
+        "title": "Telemetry allowlist contract"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dcd15918-01bf-4210-a8e6-9aa0cf225675",
+        "title": "Telemetry consent resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/b8cf4179-1c0e-4eac-9ff5-5c7efc75dc98",
+        "title": "This-member callback resolution"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/88760684-773f-476a-8fc3-724c8b8eb03d",
+        "title": "Trace endpoint node relevance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/10dec324-a2f1-4bab-95e3-9886ab22f420",
+        "title": "TurboModule spec resolver"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/54775e33-d6b9-4237-b4c0-0fe82f4dd70a",
+        "title": "Type reference edge coverage"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c750601b-4b93-4694-9de6-6fa55137cb25",
+        "title": "Type-alias search filter"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8855469e-248a-4adf-967b-15a6f1fff664",
+        "title": "Type-anchored method references"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f433a97e-e777-40a3-a9f8-114e66fb0c11",
+        "title": "TypeScript RPC tuple symbols"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/30b0f5ef-b933-4af6-b932-5ee333431bdd",
+        "title": "TypeScript module extension indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ce54f8a0-75a5-4d90-83a1-653e11c8bd61",
+        "title": "Unicode directory traversal"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8a2d2161-956f-4866-8898-ba1a5a9346a9",
+        "title": "Value-reference edge capture"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/64170890-cbdc-4ce4-bd7f-81073b502049",
+        "title": "Vapor route extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/662dca92-fc1a-4542-8c52-f7227778ee62",
+        "title": "Version command aliases"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fac77eb5-2090-4860-a2b6-7a4cb3117d16",
+        "title": "Vue composable handler aliases"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/238873de-fc31-47cd-a7e1-09de9369457a",
+        "title": "Vue store extraction foundation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/283042af-5dc6-4ff6-a23e-61b08948e953",
+        "title": "Vue template component usages"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eee7e6a2-458c-474e-8e51-7166b7c05eb4",
+        "title": "Vue template flow extraction"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8584fb61-fb59-40da-8a7c-275539efc857",
+        "title": "Vuex string-key dispatch bridge"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/025ac3fa-c60a-43a8-a9a8-fcf1c8e0b57d",
+        "title": "WSL mnt watcher auto-skip"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/14d34bbc-5589-42a4-b1d3-2c5e97a2e365",
+        "title": "Watch sync stale-edge tolerance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fc4a97ee-0463-46d6-9e4c-f996825515af",
+        "title": "Watcher debounce tuning"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/40ba8ee2-1255-4ff1-8357-585cc393933d",
+        "title": "Watcher excludes ignored paths"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6aa2e431-b66f-4cef-bc4f-cecd45838ff3",
+        "title": "Whole-method explore truncation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e7fd8a5e-ce18-4298-9b66-d5bea0efc080",
+        "title": "Windows parent-exit helper shutdown"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/71c85c26-1f12-4b13-afbd-7b7d077dc87a",
+        "title": "Worker-mediated PostHog ingest"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d24e6abf-eebe-4385-980b-01ef3e789356",
+        "title": "Worktree duplicate exclusion"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e5643d0f-5116-4f44-ae50-aa66b91374f1",
+        "title": "Worktree index conflict detection"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8ac9b759-5170-4aa4-a0b2-cf06826e4c66",
+        "title": "Wrapped React component detection"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/be4b3e19-400b-469a-9f8d-9bec8a799653",
+        "title": "Wrapped declaration doc comments"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/70697f53-8cf2-4c17-9e80-28702a1aa043",
+        "title": "XSJS JavaScript indexing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/74210952-888e-4ede-b336-d8798516ffe6",
+        "title": "Yielding startup reconcile"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eb92e694-7d1c-49d5-bade-4f9de8bbb550",
+        "title": "opencode AGENTS guidance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/06c9cee5-6927-4c2a-b8ec-19794df4923e",
+        "title": "opencode XDG config path"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6848e339-1156-4fff-8439-62016b77236f",
+        "title": "opencode stale APPDATA cleanup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a4aec971-a6b7-42b9-adc0-51256865664b",
+        "title": "opencode surgical config edits"
+      }
+    ],
+    "expected_size": 297
+  }
+}

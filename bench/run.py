@@ -20,6 +20,7 @@ import uuid
 
 import config
 from grade import grade
+from grade_set import grade_set
 from grade_code import grade_patch
 
 # Code tasks materialize the corpus working tree and are graded on the resulting patch (diff).
@@ -268,6 +269,14 @@ def codex_mcp_overrides(arm: str, corpus: str, mode: str) -> list:
             "MOOSEDEV_DATA_DIR": c["data_dir"], "MOOSEDEV_NO_AUTOSPAWN": "1",
             "MOOSEDEV_LLM_BASE_URL": config.LLM_BASE_URL, "MOOSEDEV_LLM_API_KEY": config.LLM_API_KEY,
             "MOOSEDEV_LLM_MODEL": config.NLQ_MODEL})
+    if arm == "B1-mem0":  # competitor: mem0 over its OWN capture of the raw docs (Lesson 440abc78)
+        return srv("mem0", str(config.VENV_PY),
+                   [str(config.BENCH / "mem0_mcp" / "server.py")],
+                   {"MEM0_STORE": str(config.mem0_store_path(corpus) / "qdrant"),
+                    "MEM0_CORPUS": corpus,
+                    "MEM0_EMBED_MODEL": config.MEM0_EMBED_MODEL,
+                    "MEM0_EMBED_DIMS": str(config.MEM0_EMBED_DIMS),
+                    "OPENAI_API_KEY": "sk-noop"})
     return []
 
 
@@ -356,6 +365,9 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         g = grade_patch(patch, task["ground_truth"])
         metrics = {k: g[k] for k in ("implemented", "violated", "complied", "files")}
         metrics["patch_len"] = len(patch)
+    elif task["type"] == "capability_qa":  # set recall/precision/F1 vs the graph-derived expected set
+        g = grade_set(ev["final_text"], task["ground_truth"])
+        metrics = {k: g[k] for k in ("recall", "precision", "f1", "n_expected", "n_predicted", "n_matched")}
     else:
         g = grade(ev["final_text"], task["ground_truth"])
         metrics = {k: g[k] for k in ("coverage", "cited", "stale")}
@@ -363,6 +375,7 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
     row = {
         "run_id": run_id, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0)),  # UTC cell start
         "corpus": corpus, "task_id": task_id, "task_type": task["type"],
+        "capability_class": task.get("capability_class"),  # grouping key for capability_qa rows
         "hop_count": task.get("hop_count"), "arm": arm, "mode": mode, "agent_model": model,
         "backend": backend,
         "internal_nlq_model": config.NLQ_MODEL if arm == "B2" else None,

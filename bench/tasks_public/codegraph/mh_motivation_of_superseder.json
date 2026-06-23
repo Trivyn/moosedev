@@ -1,0 +1,18 @@
+{
+  "id": "mh_motivation_of_superseder",
+  "type": "capability_qa",
+  "capability_class": "multi_hop",
+  "materialize_tree": false,
+  "prompt": "What requirement or constraint motivated the decision that REPLACED \"MCP tool subset env var\"? List them.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?old <http://www.w3.org/2000/01/rdf-schema#label> \"MCP tool subset env var\" . ?head ?sp ?old . FILTER(STRENDS(STR(?sp),\"supersedes\")) ?head ?mp ?s . FILTER(STRENDS(STR(?mp),\"isMotivatedBy\")) ?s <http://www.w3.org/2000/01/rdf-schema#label> ?title } }",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/7c157196-4713-4030-a466-4ea7d846e978",
+        "title": "MCP tool-surface scoping"
+      }
+    ],
+    "expected_size": 1
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "id": "sup_current_replacements",
+  "type": "capability_qa",
+  "capability_class": "supersession",
+  "materialize_tree": false,
+  "prompt": "List every decision that REPLACED an earlier one (i.e., that supersedes a previous decision). Be exhaustive.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s ?p ?o . FILTER(STRENDS(STR(?p),\"supersedes\")) ?s <http://www.w3.org/2000/01/rdf-schema#label> ?title } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/fe69f31c-d5f4-488b-a9b6-f54a978ced0f",
+        "title": "Agent identity telemetry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/054e3f88-c95d-4d33-b533-bc7da596b929",
+        "title": "All-language callback registrations"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e4c5ad48-6a9f-42c1-85c8-4c6a19fbe367",
+        "title": "Anonymous usage telemetry"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/90ef68e1-06f6-4691-8b80-a73ad30afb83",
+        "title": "Default-on value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a21507ed-0d76-41eb-b96f-4778d3db0735",
+        "title": "Django resolver extract shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ea1bc1c5-be30-43b8-abc5-09cff06398a4",
+        "title": "Explore primary MCP surface"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/7c969f43-8720-4d49-afe9-c2759a3b718d",
+        "title": "Express resolver extract shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/4ba58890-4b06-4d2b-9010-f45b3b7b3c05",
+        "title": "Flask FastAPI resolver extract shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ac328b9e-f9cf-4e42-aa27-6e1847134e12",
+        "title": "Focused default MCP tools"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5b9046b3-10c1-4119-9b5c-32bc28ff1b71",
+        "title": "Framework extract hook shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/de2eebbb-dad2-4998-b56e-d608c24ae71a",
+        "title": "Framework extraction test coverage shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/448a3af2-920b-4b90-9858-6989eaa0a730",
+        "title": "Instant MCP handshake"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/362b3b8c-1f36-4a89-b084-53a3962d262c",
+        "title": "Language-gated framework extraction dispatch"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/84205757-1219-4ce9-bac3-ac5ee82bfb65",
+        "title": "Lua value-ref backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/59dde191-0d1d-4e5b-8814-c51443f166ae",
+        "title": "Marker-fenced agent instructions"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cdcb04cc-f04b-41a2-be02-e0f04e1bf7c8",
+        "title": "Mixed native bridge rollout shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/6afaa20e-0a9e-4821-bf19-14673f549c0f",
+        "title": "ORM metaprogramming frontier"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/85e693fd-3999-474d-82e5-6588ac2bda17",
+        "title": "Python decorator route helper shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/14f7e819-2968-4d80-8bd7-5fd1fe93e356",
+        "title": "Razor using disambiguation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eefb8f76-00bd-494a-ad41-53bf471634d7",
+        "title": "Route references reuse resolution shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f7da5385-ec2b-476b-bf1c-57c5db1713fa",
+        "title": "Runtime-keyed boundary surfacing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/bdf4f401-4f6f-4141-b76c-801b148a9235",
+        "title": "Server resolver extract rollout shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/85a66c6a-e09a-4b62-b413-22e8a5bcc911",
+        "title": "Subagent-visible CodeGraph guidance"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/744b8ef3-26b8-4482-9c99-c0a5118964ee",
+        "title": "UI resolver extract rollout shipped"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cf8f1900-0f4f-4615-b0e9-385321fc56ab",
+        "title": "Whole-file family skeletonization"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/490d1b9f-4727-4e6c-8661-0beb750eeb58",
+        "title": "Whole-file family skeletonization"
+      }
+    ],
+    "expected_size": 26
+  }
+}

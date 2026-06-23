@@ -79,3 +79,58 @@ This is the **retrieval slice** only: point-in-time currency + delivery. It does
 MOOSEDev's longitudinal, capability, or trust/governance advantages, which need their own
 instruments (Lesson `8a06ad1d`). A null elsewhere must never be read as "structured memory does
 not help."
+
+---
+
+## Hybrid retrieval — does the dense channel earn its keep?
+
+**Question.** `get_relevant_context` seeds with a hybrid BM25F⊕dense retriever (AD `b933bd10`). Does
+the dense channel improve end-to-end answers over pure BM25F, or just cost tokens? A clean A/B on the
+**same binary and graph** — only `MOOSEDEV_DENSE_FLOOR` differs (0.50 hybrid vs 0.99 pure-BM25F).
+Corpus: a **private** 416-record temporal graph (GROWL-enriched — Pattern `613cb623`); agent
+gpt-5.4-mini via codex. Per-decision content stays private; only methodology + aggregates here.
+
+### Instrument A — seed-recall (retrieval slice, deterministic, $0)
+
+Over 37 currency chains, hybrid is a **head-of-ranking re-ranker, not a recall expander**: within
+k=10 it recovers nothing BM25F misses (0 recovered), but it **promotes the current record higher in
+19/37 chains** and lifts the hard old-framing **recall@3 by +0.216** (0.622→0.838) and MRR +0.03, at
+a small tail-recall cost. The lift sits at the top of the list — where a pushed top-k decides the answer.
+
+### Instrument B — end-to-end (110 cells), graded by coverage (Lesson `9fc21dc0`)
+
+| pooled drift | BM25F | hybrid |
+|---|---|---|
+| oracle (top-k pushed) | 17/20 | **20/20** (+15pp) |
+| tooluse (agent queries) | 18/20 | 19/20 (tie) |
+
+- **Efficiency: hybrid −19% agent tokens** (5.66M→4.58M) — finds the current record faster, less
+  thrash. Grading-independent; the solid headline.
+- **Accuracy: near-ceiling for both arms.** Hybrid's one decisive edge is the **hardest-to-retrieve
+  drifted item** (full coverage 5/5 vs 2/5) — where the current record's vocabulary has diverged far
+  from the query, so lexical BM25F cannot reach it. Tooluse is a tie; every cell hybrid ≥ BM25F.
+
+### Why these numbers are trustworthy: a correction caught by a free regrade
+
+The first Instrument B report claimed a "drift/tooluse **+20pp**" win. A regrade over the **immutable
+transcripts** (no agent re-run) **overturned it** — that gap was a **grading artifact**, not a
+retrieval win. Two bugs in `hybrid_ab_report.py`: (1) `mem%` folded in a `stale`-substring flag that
+false-positives on a correct answer *narrating* the old state to deny it (backtick-wrapped negations
+defeat the negation window) and on stale markers overlapping the cited decision's own title →
+suppressed BM25F (tooluse 10/20→18/20 once fixed); fix: currency = coverage only. (2) an escape proxy
+(tokens > threshold ⇒ "read source") fired on `materialize_tree=false` pure-memory tasks with **no
+source to escape to**; fix: gate escape on `materialize_tree`. A grading artifact can **manufacture**
+a false signal, not only hide a true one — always regrade after a grader change (Lesson `a03dbe13`).
+
+### Honest scope
+
+Single model, single corpus, n=5 drift / 3 currency (Wilson intervals overlap on the tooluse tie).
+This corpus is **near-ceiling by coverage** for both arms — a *weak accuracy discriminator*; the
+differentiation lives in the 1–2 hardest-retrieval tasks. Testing the dense channel's accuracy
+properly needs more hard-drift tasks, not more N on easy ones.
+
+- Graph (source of truth): Lesson `410d6c73` (regraded finding), Lesson `a03dbe13` (grading-artifact
+  methodology, extends `9fc21dc0`), Pattern `613cb623` (re-serve modernization), AD `b933bd10`
+  (hybrid retrieval). Correction trail: supersede chain `51932e6f→75f622d7→410d6c73`.
+- Reproduce (private corpus — artifacts under `BENCH_HOME`, never the open repo): `hybrid_ab_report.py`
+  over `runs_{bm25f,hybrid}.jsonl` (regrade-safe, no agent re-run); seed-recall `seed_recall/*.json`.

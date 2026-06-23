@@ -1,0 +1,16 @@
+{
+  "id": "cur_mcp_handshake",
+  "type": "context_qa",
+  "capability_class": "currency",
+  "materialize_tree": false,
+  "prompt": "In codegraph CURRENTLY, when you make the first MCP tool call on a large or freshly-opened repo while index reconciliation is still running, does the call hang/block until reconciliation finishes, or does it return promptly? Answer in one sentence.",
+  "memory_topic": "codegraph first MCP tool call large repo hang or return promptly during index reconciliation current behavior",
+  "ground_truth": {
+    "must_include_any": [
+      ["promptly", "instantly", "instant", "immediately", "right away", "no longer hangs", "does not hang", "doesn't hang", "non-blocking", "without blocking", "returns quickly", "no longer blocks", "does not block", "won't hang"]
+    ],
+    "stale_answer_markers": ["hangs", "blocks", "blocked", "stalls", "freezes", "must wait", "waits until", "until reconciliation finishes", "until indexing"],
+    "decision_title": ""
+  },
+  "_note": "Currency/temporal — mem0's temporal-reasoning turf. CHANGELOG reversal 'Instant MCP handshake': the first MCP tool call on a fresh/large repo USED TO hang while index reconciliation ran; CURRENTLY it returns promptly (reconciliation moved off the hot path). Binary: coverage of the current marker is the verdict; stale markers (hangs/blocks) are the negation-aware diagnostic per grade.py (so 'no longer hangs' is current, not stale)."
+}

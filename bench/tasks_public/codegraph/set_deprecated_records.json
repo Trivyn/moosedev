@@ -1,0 +1,58 @@
+{
+  "id": "set_deprecated_records",
+  "type": "capability_qa",
+  "capability_class": "set_completeness",
+  "materialize_tree": false,
+  "prompt": "List every recorded item whose lifecycle status is 'deprecated'. Be exhaustive; give each title.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?title ; ?sp ?st . FILTER(STRENDS(STR(?sp),\"hasLifecycleStatus\")) FILTER(LCASE(STR(?st))=\"deprecated\") } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/46433d39-5522-4f6f-864a-66d52310d772",
+        "title": "Anonymous handler link-through-body"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d5e018f8-c4b9-498b-99ec-857f3ad94a0b",
+        "title": "C callback struct deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2a680f48-6a0b-4fc8-ab44-8aea62544c9e",
+        "title": "C++ value-ref support"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5776c53f-ab58-4883-8c13-a6e5ba0673cc",
+        "title": "Dispatch resolution deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/84205757-1219-4ce9-bac3-ac5ee82bfb65",
+        "title": "Lua value-ref backlog"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e366d37b-4255-46ed-b70f-c27e91a80d71",
+        "title": "Redux-Saga deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/78a3a05e-5e2b-415a-9e88-a1d321807755",
+        "title": "RxJS subscribe deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/067da6b3-818a-487a-a67e-930d084dd366",
+        "title": "Skip Luau chained calls"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e985a51c-4bba-432f-b9d0-d11231c6f439",
+        "title": "Skip TypeScript chained calls"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/856ed9c0-303c-40cb-8d06-c163cdb62c8a",
+        "title": "Trezor barrel namespace deferral"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d08d23fb-e80b-442d-b189-6275794ac7e1",
+        "title": "Trezor facade skip"
+      }
+    ],
+    "expected_size": 11
+  }
+}

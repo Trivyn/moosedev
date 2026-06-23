@@ -1,0 +1,26 @@
+{
+  "id": "mh_req_through_constraint",
+  "type": "capability_qa",
+  "capability_class": "multi_hop",
+  "materialize_tree": false,
+  "prompt": "For the constraint titled \"RN legacy same-PR platforms\", find the requirement(s) that motivated the architectural decision this constraint shaped. List them.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?c <http://www.w3.org/2000/01/rdf-schema#label> \"RN legacy same-PR platforms\" . ?c ?cp ?ad . FILTER(STRENDS(STR(?cp),\"constrains\")) ?ad ?mp ?s . FILTER(STRENDS(STR(?mp),\"isMotivatedBy\")) ?s a ?rk . FILTER(STRENDS(STR(?rk),\"Requirement\")) ?s <http://www.w3.org/2000/01/rdf-schema#label> ?title } }",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/2bec1802-5739-4a00-9c1d-cf288723d898",
+        "title": "Cross-language bridge flow reachability"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/184ae71b-fe27-416c-85e5-40b0fe605541",
+        "title": "Native bridge validation corpus"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Requirement/a3f3d80a-ea1e-42c2-a862-643185a6a54b",
+        "title": "Universal dynamic-dispatch coverage"
+      }
+    ],
+    "expected_size": 3
+  }
+}

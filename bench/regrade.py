@@ -19,6 +19,7 @@ from pathlib import Path
 
 import config
 from grade import grade
+from grade_set import grade_set
 from grade_code import grade_patch
 
 CODE_TASK_TYPES = {"constraint_code"}  # graded on the saved patch, not final_text (mirrors run.py)
@@ -39,6 +40,8 @@ def regrade_row(row: dict, runs_dir: Path) -> dict | None:
         patch = patch_path.read_text()
         g = grade_patch(patch, gt)
         g["patch_len"] = len(patch)
+    elif row["task_type"] == "capability_qa":
+        g = grade_set(row.get("final_text", ""), gt)
     else:
         g = grade(row.get("final_text", ""), gt)
     new = dict(row)

@@ -1,0 +1,246 @@
+{
+  "id": "set_all_lessons",
+  "type": "capability_qa",
+  "capability_class": "set_completeness",
+  "materialize_tree": false,
+  "prompt": "In this project, list EVERY Lesson that has been recorded. Give each lesson's title; be exhaustive.",
+  "ground_truth": {
+    "answer_kind": "set",
+    "sparql": "SELECT DISTINCT ?s ?title WHERE { GRAPH <https://moosedev.dev/kg/project> { ?s a ?k ; <http://www.w3.org/2000/01/rdf-schema#label> ?title . FILTER(STRENDS(STR(?k),\"Lesson\"))  } } ORDER BY ?title",
+    "expected_set": [
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/a4f25b1d-b945-4f11-ac99-9b625a4a9b6a",
+        "title": "Agent A/B needs repo fit"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/7a869b4e-ea53-40b7-b1fd-679401e1d535",
+        "title": "Big value-ref sweeps need cleanup"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/fb83df60-dfd4-45e3-8771-33060a38afb2",
+        "title": "Bridge built-ins are not bridge targets"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/1a5464aa-2cca-4e7e-a986-93c6fbb57a10",
+        "title": "C fn-pointer double-hop assignment"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/aab0e498-138a-41fc-9122-916c544bf687",
+        "title": "C macro prototype misparse"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/4aa31fc0-9176-43fc-83f6-5c8376abafd3",
+        "title": "C# handler type from base list"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/47dc6a1a-4e7e-4f8f-b639-e59a9aa8c467",
+        "title": "Celery decorator gate"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/468adabb-bf57-4f97-b5d4-6dd90b7353a3",
+        "title": "CommonJS bindings are value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/9f08d58b-10a8-4091-8963-192566ebf3bc",
+        "title": "Completeness before cost drops"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/9232395d-8a7e-43c7-8422-37c98e0665f9",
+        "title": "Confirm value-ref nodes exist"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/c5b50359-b0bb-4ae4-b5bc-e80e776380c7",
+        "title": "Constant read node check"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/a140c8f1-f491-4bc5-889d-567a2037a5bc",
+        "title": "Coverage drives CodeGraph sufficiency"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/fe9054a7-3ce6-4592-ad4c-7e6931dc4805",
+        "title": "Declared return types define chain fit"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/40633485-7e56-420f-bc84-3676b171138b",
+        "title": "Dispatch difficulty gradient"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/b2bea9b3-a1f0-46cd-a497-cc3e872128d3",
+        "title": "Extend tools before adding tools"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/4742d2ed-0289-459c-9e0c-b7eedee9112e",
+        "title": "Far endpoints must be queryable"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/01051675-dac7-4f6b-a1da-9241f2b85b79",
+        "title": "Flag A/B preserves indexes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/3d45255e-6517-42c8-8571-0f6a0a94c677",
+        "title": "Forced CodeGraph-only isolates sufficiency"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/0a28cd17-a9a0-495d-bb19-66397ceb00de",
+        "title": "Forks are not independent validation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/b0a8ff78-7241-4d7d-b8b6-d6e73e4171cc",
+        "title": "Function-ref false positives are language-specific"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/1cf933fb-21af-45c0-a764-a449f0bfab59",
+        "title": "Graph fixes still need trace adoption"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/9d19ade4-3154-4b23-a452-f43f37969dc0",
+        "title": "Index-dependent detectors need populated indexes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/692d769a-349f-4b34-b7bc-94726e777a29",
+        "title": "InitSync options are ignored"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/414b58ed-1648-4f6b-9bec-82690042b8e6",
+        "title": "Inline named handlers need nodes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/591e3c2b-7e0e-4a06-b20c-782b7bd92636",
+        "title": "Java annotation range fact"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/5372a69f-b240-470a-a58a-ab9935cfc439",
+        "title": "Kotlin companion fixture trap"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/73d5ab86-c6c4-400e-a42e-d448f7d3f085",
+        "title": "Laravel dual registration sources"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/a4770207-bb64-4299-988c-b03e23dd1530",
+        "title": "MCP timeout is not exposure timing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/e06e3285-0e7b-4a1b-83ae-4e45a50f9e6f",
+        "title": "Measure before assuming holes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/cc39adf3-2e3a-4bda-8f71-322472286aef",
+        "title": "MediatR variable-passed idiom"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/d2b8a4b6-1d02-4e84-a237-ce6ef4c7b7d7",
+        "title": "One framework hides many shapes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/cb181180-4026-4623-be1a-90ef85ce58f0",
+        "title": "Parent-kind sample check"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/8ee9c602-cfce-4b8d-a45b-9789c04c6585",
+        "title": "Parse fidelity before C++ value refs"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/0b07ff9e-a1d6-4c11-bae4-b42f6300b87c",
+        "title": "Precision is recall's price"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/4bc5a87b-6090-4eb2-af01-d8626bf69fad",
+        "title": "Probe the parsed call shape"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/5c386e35-1c08-4500-8e5a-cc475ba36a7b",
+        "title": "Python builtin-name filter tax"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/9ee9eed2-e8b1-425c-a679-6ac4e003dded",
+        "title": "Real-agent A/B before trusting probes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/ffcdca78-d144-44c2-aa80-25db3788f30a",
+        "title": "Redux-thunk name collisions"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/b4c2a2fe-1122-4ab2-b867-3a405166220a",
+        "title": "Regex captures need consumers"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/bd2d1b02-a830-4293-bc1a-a5dccdba8f0c",
+        "title": "Route counts catch regressions"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/c3eb70fb-7fd6-4f85-92ef-c018e8857594",
+        "title": "Sample variable targets before trusting"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/028e289f-ffbe-4d5f-9202-0d1b6bd794be",
+        "title": "Search result shape gotcha"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/4e2055c6-7dff-4d09-93cb-9c7684138df1",
+        "title": "Sequential spines are irreducible"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/0e1433f4-02bf-4104-a24d-fe4690770a5a",
+        "title": "Sibling gate protects distinct steps"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/f06d21f9-f7c2-4626-a901-314f54828807",
+        "title": "Sibling-body reader scans"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/5438e578-a428-49c2-b2bc-bb989d286a92",
+        "title": "Sidekiq namespace disambiguation"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/bdb9061a-b0d2-4c7a-b745-0a10bc91ec87",
+        "title": "Single-repo synthesis is unvalidated"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/401ee0a9-d800-4370-a2ce-4272c32ff8c3",
+        "title": "Slice-index dispatch needs synthesis"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/989124c1-2b27-423d-af1d-3963d99d8797",
+        "title": "Sufficiency beats forced routing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/0cd8f877-728e-4918-a595-9d9b880801bc",
+        "title": "Supertype signal overrides sparing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/b43b5d63-003d-442b-9070-92be1ac62ac3",
+        "title": "Synth edges need endpoint surfacing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/def86fd7-b4b8-4a8d-80d1-b1674274d733",
+        "title": "Trace from concrete methods"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/4299ba8f-7d57-4764-91e9-f55a6080836e",
+        "title": "Trace wrongness masquerades as adoption floor"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/0044433c-d193-4c34-a550-668f33c02047",
+        "title": "Value-ref agents need impact calls"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/a9dbeadd-633e-4f81-8ccf-af725f149cf5",
+        "title": "Value-ref wiring check is load-bearing"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/e4caac53-7b07-4fe3-9385-cdc5fda9e26b",
+        "title": "Vue stores are multiple shapes"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/d55a00cd-1089-452a-a717-e9ebb7841fa9",
+        "title": "Wording is low salience"
+      },
+      {
+        "iri": "https://moosedev.dev/kg/Lesson/9d8bbf36-699a-4493-b391-c5e615e0f3b1",
+        "title": "claimsReference pre-filter hook"
+      }
+    ],
+    "expected_size": 58
+  }
+}

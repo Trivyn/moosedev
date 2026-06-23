@@ -1,0 +1,19 @@
+{
+  "id": "rel_value_ref_edges",
+  "type": "context_qa",
+  "capability_class": "relevance",
+  "materialize_tree": false,
+  "prompt": "Why does codegraph emit value-reference edges — what problem do they solve, and how does it keep them precise? Answer in 2-3 sentences.",
+  "memory_topic": "codegraph value-reference edges motivation impact analysis constants readers precision",
+  "ground_truth": {
+    "must_include_any": [
+      ["impact", "impact-radius", "impact radius", "impact analysis", "what depends on", "depends on"],
+      ["constant", "const", "config object", "lookup table", "shared constant"],
+      ["reader", "readers", "consumers", "symbols that read", "consume"],
+      ["same-file", "same file"],
+      ["distinctive", "shadow", "generated file", "precision", "false positive", "false-positive"]
+    ],
+    "decision_title": ""
+  },
+  "_note": "Relevance / single-fact recall — mem0's turf. Answer in docs/design/value-reference-edges.md + the graph's value-ref ADs/constraints. Coverage-graded. Expect mem0 ~= B2."
+}
