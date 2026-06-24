@@ -282,7 +282,7 @@ def codex_mcp_overrides(arm: str, corpus: str, mode: str) -> list:
 
 def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "tooluse",
              agent: str = None, variant: str = None, prompt_prefix: str = "",
-             backend: str = "opencode") -> dict:
+             backend: str = "opencode", month: str = None) -> dict:
     task = load_task(corpus, task_id)
     is_code = task["type"] in CODE_TASK_TYPES
     run_id = f"{corpus}_{task_id}_{arm}_{mode}_{(agent or 'build')}_{uuid.uuid4().hex[:8]}"
@@ -375,6 +375,9 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
     row = {
         "run_id": run_id, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0)),  # UTC cell start
         "corpus": corpus, "task_id": task_id, "task_type": task["type"],
+        # longitudinal trial dimension: the checkpoint month (override) or the run's own month.
+        # `corpus` already identifies the project (trivyn-trial / moose-trial), so no separate field.
+        "month": month or time.strftime("%Y-%m", time.gmtime(t0)),
         "capability_class": task.get("capability_class"),  # grouping key for capability_qa rows
         "hop_count": task.get("hop_count"), "arm": arm, "mode": mode, "agent_model": model,
         "backend": backend,
@@ -409,6 +412,7 @@ def main():
     ap.add_argument("--agent", default=None, help="opencode agent/mode: build|plan|general|explore")
     ap.add_argument("--variant", default=None, help="reasoning effort, e.g. high|max (opencode) | low|medium (codex)")
     ap.add_argument("--prompt-prefix", default="", help="diagnostic: text prepended to the task prompt")
+    ap.add_argument("--month", default=None, help="trial month label YYYY-MM (default: the run's month)")
     args = ap.parse_args()
 
     model = args.model or ("gpt-5.5" if args.backend == "codex" else config.AGENT_MODEL)
@@ -418,7 +422,7 @@ def main():
         print(f"\n=== running {arm} ({args.mode}, backend={args.backend}, model={model}) ===", flush=True)
         try:
             row = run_cell(args.corpus, args.task, arm, model, args.mode, args.agent,
-                           args.variant, args.prompt_prefix, args.backend)
+                           args.variant, args.prompt_prefix, args.backend, args.month)
         except Exception as e:  # one arm's failure must not abort the rest of the matrix
             print(f"  ARM FAILED: {type(e).__name__}: {e}", flush=True)
             continue

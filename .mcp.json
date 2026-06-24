@@ -4,7 +4,8 @@
       "command": "./target/release/moosedev",
       "args": ["--connect"],
       "env": {
-        "MOOSEDEV_DATA_DIR": "./.moosedev"
+        "MOOSEDEV_DATA_DIR": "./.moosedev",
+        "MOOSEDEV_HTTP_ADDR": "127.0.0.1:7474"
       }
     }
   }

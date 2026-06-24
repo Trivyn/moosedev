@@ -37,7 +37,7 @@ MOOSEDEV_BIN = _bin_env if (_bin_env and os.path.exists(_bin_env)) else str(REPO
 ONTOLOGY_DIR = os.environ.get("MOOSEDEV_ONTOLOGY_DIR", str(REPO / "ontologies"))  # shared shapes
 LLM_BASE_URL = os.environ.get("MOOSEDEV_LLM_BASE_URL", "http://endor:1234/v1")
 LLM_API_KEY = os.environ.get("MOOSEDEV_LLM_API_KEY", "lmstudio")
-NLQ_MODEL = os.environ.get("MOOSEDEV_LLM_MODEL", "gemma-4-26b-a4b-it-mlx")   # MOOSEDev internal NLQ
+NLQ_MODEL = os.environ.get("MOOSEDEV_LLM_MODEL", "google/gemma-4-26b-a4b-qat")   # MOOSEDev internal NLQ
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "lmstudio/qwen3.6-35b-a3b-mlx")   # opencode provider/model
 
 VENV_PY = BENCH / ".venv" / "bin" / "python"
@@ -137,6 +137,27 @@ CORPORA = {
         # identical source mem0 ingests (Lesson 440abc78: a competitor captures raw source its own way,
         # never the flattened B2 graph). Same source as B2 → only capture+representation differ.
         "notes_paths": ["docs/design/*.md", "docs/plans/*.md", "CHANGELOG.md"],
+    },
+    "trivyn-trial": {
+        # LIVE in-anger trial store (AD 07415633): the caught-up trivyn-temporal graph, kept current by
+        # real-work capture. repo = the LIVE trivyn checkout (NO pinned sha) so B0 materializes CURRENT
+        # HEAD and the cold-arm tree EVOLVES month over month (the longitudinal signal). Rationale-bearing
+        # docs excluded so B0 cannot recover the 'why' from the tree (comprehension-debt premise).
+        "data_dir": str(Path.home() / ".moosedev-stores" / "trivyn-trial"),
+        "repo": str(Path.home() / "code" / "trivyn"),
+        "private": True,
+        "agent_exclude": ["docs-dev", "spec", "doc", "doc-dist", "tasks", "CONVENTIONS.md",
+                          "README.md", "CLAUDE.md", "AGENTS.md", "agents.md", ".grok", ".claude"],
+    },
+    "moose-trial": {
+        # LIVE in-anger trial store (AD 07415633): moose bootstrapped from scratch, kept current by
+        # real-work capture. repo = the LIVE moose checkout (NO pinned sha) -> B0 sees current HEAD.
+        # agent_exclude refined at probe-authoring time (strip moose's rationale docs so B0 can't cheat).
+        "data_dir": str(Path.home() / ".moosedev-stores" / "moose-trial"),
+        "repo": str(Path.home() / "code" / "moose"),
+        "private": True,
+        "agent_exclude": ["README.md", "CLAUDE.md", "AGENTS.md", "agents.md", "CONVENTIONS.md",
+                          "docs", "spec", "notes"],
     },
 }
 
