@@ -64,7 +64,9 @@ tokio = { version = "1", features = ["process"] }
 axum-test = "17"
 
 [features]
-embedded-frontend = ["include_dir", "mime_guess"]
+default = ["embedded-frontend"]
+embedded-frontend = ["dep:include_dir", "dep:mime_guess"]
+headless = []
 
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.

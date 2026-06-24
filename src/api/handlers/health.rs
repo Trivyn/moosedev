@@ -21,6 +21,8 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         data_dir: state.data_dir.display().to_string(),
         project_name,
         project_root: project_root.display().to_string(),
+        llm_configured: state.llm_configured,
+        llm_assist_level: format!("{:?}", state.engine_config.llm_assist_level),
     })
 }
 

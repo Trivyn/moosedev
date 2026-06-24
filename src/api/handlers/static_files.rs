@@ -1,17 +1,17 @@
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 
-#[cfg(feature = "embedded-frontend")]
+#[cfg(all(feature = "embedded-frontend", not(feature = "headless")))]
 use axum::http::header;
-#[cfg(feature = "embedded-frontend")]
+#[cfg(all(feature = "embedded-frontend", not(feature = "headless")))]
 use axum::response::{Html, Response};
-#[cfg(feature = "embedded-frontend")]
+#[cfg(all(feature = "embedded-frontend", not(feature = "headless")))]
 use include_dir::{include_dir, Dir};
 
-#[cfg(feature = "embedded-frontend")]
+#[cfg(all(feature = "embedded-frontend", not(feature = "headless")))]
 static STATIC_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
-#[cfg(feature = "embedded-frontend")]
+#[cfg(all(feature = "embedded-frontend", not(feature = "headless")))]
 pub async fn serve_static(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -34,7 +34,7 @@ pub async fn serve_static(uri: Uri) -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-#[cfg(not(feature = "embedded-frontend"))]
+#[cfg(any(not(feature = "embedded-frontend"), feature = "headless"))]
 pub async fn serve_static(_uri: Uri) -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,

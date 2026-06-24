@@ -11,6 +11,7 @@ use axum_test::TestServer;
 use chrono::Utc;
 use moosedev::api::routes::build_routes;
 use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
+use moosedev::llm::LlmConfig;
 use oxigraph::model::{GraphName, Literal, NamedNode, Quad, Term};
 use serde_json::{json, Value};
 
@@ -34,10 +35,20 @@ fn test_server(state: AppState) -> TestServer {
     TestServer::new(build_routes(Arc::new(state))).expect("build test server")
 }
 
+fn unconfigured_llm() -> LlmConfig {
+    LlmConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        api_key: "test".to_string(),
+        model: "fake-model".to_string(),
+        configured: false,
+    }
+}
+
 #[tokio::test]
 async fn health_reports_project_graph_and_data_dir() {
     let dir = temp_dir("health");
-    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let state = AppState::bootstrap_with_llm_config(&dir, &ontology_dir(), unconfigured_llm())
+        .expect("bootstrap app state");
     let server = test_server(state);
 
     let response = server.get("/api/v1/health").await;
@@ -58,6 +69,8 @@ async fn health_reports_project_graph_and_data_dir() {
             .to_string_lossy()
             .as_ref()
     );
+    assert_eq!(body["llm_configured"], false);
+    assert_eq!(body["llm_assist_level"], "PureSymbolic");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -254,7 +267,32 @@ async fn chat_session_routes_report_unavailable_without_session_db() {
 }
 
 #[tokio::test]
-#[cfg(not(feature = "embedded-frontend"))]
+async fn chat_reports_unavailable_without_llm_provider() {
+    let dir = temp_dir("chat-no-llm");
+    let state = AppState::bootstrap_with_llm_config(&dir, &ontology_dir(), unconfigured_llm())
+        .expect("bootstrap app state");
+    let server = test_server(state);
+
+    let response = server
+        .post("/api/v1/chat")
+        .json(&json!({
+            "messages": [{ "role": "user", "content": "What is recorded?" }]
+        }))
+        .await;
+
+    response.assert_status_service_unavailable();
+    assert!(
+        response
+            .text()
+            .contains("MOOSE chat requires an explicit LLM provider"),
+        "chat should explain how to enable the LLM-backed surface"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[cfg(any(not(feature = "embedded-frontend"), feature = "headless"))]
 async fn static_fallback_explains_missing_embedded_frontend() {
     let dir = temp_dir("static-fallback");
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");

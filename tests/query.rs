@@ -10,6 +10,7 @@ use chrono::Utc;
 use moose::traits::LlmClient;
 use moose::types::{EngineError, LlmAssistLevel, LlmParams};
 use moosedev::graph::{self, AppState, RecordInput};
+use moosedev::llm::LlmConfig;
 
 struct MetaIntentLlm;
 
@@ -41,9 +42,17 @@ async fn query_runs_pure_symbolic_over_recorded_decisions() {
     let _ = std::fs::remove_dir_all(&dir);
     let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
 
-    let mut state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
-    // Force pure-symbolic so the test never reaches out to an LLM endpoint.
-    state.engine_config.llm_assist_level = LlmAssistLevel::PureSymbolic;
+    let state = AppState::bootstrap_with_llm_config(
+        &dir,
+        &ontology_dir,
+        LlmConfig {
+            base_url: "http://localhost:1234/v1".to_string(),
+            api_key: "test".to_string(),
+            model: "fake-model".to_string(),
+            configured: false,
+        },
+    )
+    .expect("bootstrap app state");
 
     let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
     for title in [

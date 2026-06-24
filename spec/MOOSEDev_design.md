@@ -41,9 +41,9 @@ domain ontology (handled by shipping precomputed vectors). Eventual core moves: 
    layer. The spec's `search_session_graph` runs over the durable KG (MOOSE's internal `session_graph`
    is `pub(crate)`/unreachable — name honored, semantics = "query the project KG").
 2. **Vertical slice first** — prove the MOOSE seam end-to-end early, then widen.
-3. **Local-first, OpenAI-compatible `LlmClient`** — env-configured (base_url/api_key/model), default
-   to a local endpoint; `llm_assist_level` low by default for determinism (invariants #1, #9); cloud
-   opt-in.
+3. **Optional, local-first OpenAI-compatible `LlmClient`** — `MOOSEDEV_LLM_BASE_URL` explicitly
+   opts into assisted LLM sensors; without it, MOOSEDev pins assistance to `PureSymbolic` so core
+   memory tools stay local and symbolic by default (invariants #1, #9); cloud remains opt-in.
 4. **Bundle `candle-cpu` + `arctic-s`; ship precomputed ontology vectors** — alignment runs L1+L2+L3
    out of the box. The runtime backbone is still required to embed dynamic query/leaf text.
 5. **Prototype the write primitive in MOOSEDev, promote to core later** — v1 writes via `store.insert`

@@ -4,18 +4,15 @@
 #
 # WHY THIS SCRIPT EXISTS
 # ----------------------
-# The web UI is embedded via the `embedded-frontend` cargo feature, which uses a
-# compile-time `include_dir!("$CARGO_MANIFEST_DIR/ui/dist")` (see
-# src/api/handlers/static_files.rs). That feature is intentionally NOT a default:
-# a fresh checkout has no `ui/dist`, and the macro would fail to compile.
+# The default build embeds the web UI via the `embedded-frontend` cargo feature,
+# which uses a compile-time `include_dir!("$CARGO_MANIFEST_DIR/ui/dist")` (see
+# src/api/handlers/static_files.rs). A fresh checkout has no `ui/dist`, so the
+# macro fails to compile until the frontend has been built.
 #
-# The consequence is a footgun. A plain `cargo build --release` (no feature)
-# compiles the `#[cfg(not(feature = "embedded-frontend"))]` fallback, which serves
-# `"MOOSEDev UI is not embedded in this build"` and 404s the whole web UI — with no
-# build-time error. You only notice when the UI is blank at runtime.
-#
-# This script does the two steps in the required order (build the UI, THEN build
-# the binary with the feature) so you always get a working, UI-embedded binary.
+# This script does the two required steps in order (build the UI, THEN build the
+# default binary) so you always get a working, UI-embedded release binary. For a
+# backend-only binary that does not require frontend assets, build with the
+# `headless` feature.
 #
 # Usage: scripts/build-release.sh
 set -euo pipefail
@@ -30,7 +27,7 @@ if [ ! -d ui/node_modules ]; then
 fi
 npm --prefix ui run build
 
-echo "==> Building release binary with the embedded-frontend feature …"
-cargo build --release --features embedded-frontend
+echo "==> Building release binary with the default embedded frontend …"
+cargo build --release
 
 echo "==> Done: ./target/release/moosedev (web UI embedded)."

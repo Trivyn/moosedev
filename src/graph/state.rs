@@ -94,6 +94,8 @@ pub struct AppState {
     pub vector_store: Option<Arc<VecStore>>,
     pub engine_config: EngineConfig,
     pub llm: OpenAiCompatClient,
+    /// True only when `MOOSEDEV_LLM_BASE_URL` explicitly opts into an LLM provider.
+    pub llm_configured: bool,
     pub ontology_resolver: MooseDevOntologyResolver,
     pub model: String,
     /// Durable multi-turn MOOSE chat sessions, enabled by the shared backend for
@@ -116,6 +118,17 @@ impl AppState {
     /// assemble the query engine configuration (LLM endpoint + assist level read
     /// from the environment).
     pub fn bootstrap(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<Self> {
+        Self::bootstrap_with_llm_config(data_dir, ontology_dir, LlmConfig::from_env())
+    }
+
+    /// Variant of [`bootstrap`](Self::bootstrap) for tests and embedded hosts
+    /// that already resolved LLM configuration.
+    #[doc(hidden)]
+    pub fn bootstrap_with_llm_config(
+        data_dir: &Path,
+        ontology_dir: &Path,
+        llm_cfg: LlmConfig,
+    ) -> anyhow::Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
         let store = open_store(data_dir)?;
@@ -126,7 +139,7 @@ impl AppState {
         let catalogue = build_relation_catalogue(&store);
         let entity_index = Arc::new(EntityIndexCache::new(64));
 
-        let llm_cfg = LlmConfig::from_env();
+        let llm_configured = llm_cfg.configured;
         let llm = OpenAiCompatClient::new(llm_cfg.base_url, llm_cfg.api_key);
         let ontology_resolver = MooseDevOntologyResolver::new();
 
@@ -140,7 +153,7 @@ impl AppState {
             label_shape: Default::default(),
             chat: None,
             moose_cache: moose_cache.clone(),
-            llm_assist_level: assist_level_from_env(),
+            llm_assist_level: assist_level_from_env(llm_configured),
             response_cache: None,
             embedding_store: None,
             category_mappings: Default::default(),
@@ -162,6 +175,7 @@ impl AppState {
             catalogue,
             engine_config,
             llm,
+            llm_configured,
             ontology_resolver,
             model: llm_cfg.model,
             session_db: None,
@@ -440,17 +454,58 @@ impl AppState {
     }
 }
 
-/// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–5); defaults to Standard.
-fn assist_level_from_env() -> LlmAssistLevel {
-    match std::env::var("MOOSEDEV_LLM_ASSIST_LEVEL")
-        .ok()
-        .and_then(|s| s.trim().parse::<u8>().ok())
-    {
+/// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–5). Without an explicit
+/// provider config, assistance is pinned to pure symbolic regardless of env.
+fn assist_level_from_env(llm_configured: bool) -> LlmAssistLevel {
+    assist_level_from_raw(
+        std::env::var("MOOSEDEV_LLM_ASSIST_LEVEL").ok().as_deref(),
+        llm_configured,
+    )
+}
+
+fn assist_level_from_raw(raw: Option<&str>, llm_configured: bool) -> LlmAssistLevel {
+    if !llm_configured {
+        return LlmAssistLevel::PureSymbolic;
+    }
+    match raw.and_then(|s| s.trim().parse::<u8>().ok()) {
         Some(0) => LlmAssistLevel::PureSymbolic,
         Some(2) => LlmAssistLevel::RelaxedExtraction,
         Some(3) => LlmAssistLevel::AssistedPlanning,
         Some(4) => LlmAssistLevel::AssistedValidation,
         Some(5) => LlmAssistLevel::FallbackExecutor,
         _ => LlmAssistLevel::Standard,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assist_level_is_pure_symbolic_without_provider() {
+        assert!(matches!(
+            assist_level_from_raw(None, false),
+            LlmAssistLevel::PureSymbolic
+        ));
+        assert!(matches!(
+            assist_level_from_raw(Some("5"), false),
+            LlmAssistLevel::PureSymbolic
+        ));
+    }
+
+    #[test]
+    fn assist_level_defaults_to_standard_when_provider_is_configured() {
+        assert!(matches!(
+            assist_level_from_raw(None, true),
+            LlmAssistLevel::Standard
+        ));
+        assert!(matches!(
+            assist_level_from_raw(Some("0"), true),
+            LlmAssistLevel::PureSymbolic
+        ));
+        assert!(matches!(
+            assist_level_from_raw(Some("5"), true),
+            LlmAssistLevel::FallbackExecutor
+        ));
     }
 }

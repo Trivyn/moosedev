@@ -15,6 +15,8 @@ pub struct HealthResponse {
     pub data_dir: String,
     pub project_name: String,
     pub project_root: String,
+    pub llm_configured: bool,
+    pub llm_assist_level: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

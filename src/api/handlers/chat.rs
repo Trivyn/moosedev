@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -14,6 +14,9 @@ use crate::api::models::{
 };
 use crate::graph::AppState;
 
+const RDFS_LABEL: &str = moose::RDFS_LABEL;
+const RDF_TYPE: &str = moose::RDF_TYPE;
+
 /// Run one real MOOSE chat turn over the project knowledge graph.
 ///
 /// This is intentionally not a thin wrapper around MOOSEDev's MCP `query`
@@ -26,6 +29,11 @@ pub async fn chat(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if payload.messages.is_empty() {
         return Err(ApiError::bad_request("messages must not be empty"));
+    }
+    if !state.llm_configured {
+        return Err(ApiError::unavailable(
+            "MOOSE chat requires an explicit LLM provider; set MOOSEDEV_LLM_BASE_URL to enable chat",
+        ));
     }
     let session_db = chat_session_db(&state)?;
     let clarification_reply = match payload.clarification_reply {
@@ -201,20 +209,22 @@ fn session_subgraph(state: &AppState, session_id: &str) -> QueryResponse {
         return empty_query_response();
     };
     let mut bindings = Vec::new();
+    let mut seen = HashSet::new();
+    let mut uri_terms = HashSet::new();
     for quad in state
         .store
         .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(graph)))
         .flatten()
     {
-        let mut row = HashMap::new();
-        row.insert("subject".to_string(), named_or_blank_value(&quad.subject));
-        row.insert(
-            "predicate".to_string(),
-            named_value(quad.predicate.as_str()),
-        );
-        row.insert("object".to_string(), term_value(&quad.object));
-        bindings.push(QueryBinding { bindings: row });
+        let subject = named_or_blank_value(&quad.subject);
+        let predicate = named_value(quad.predicate.as_str());
+        let object = term_value(&quad.object);
+        collect_uri(&mut uri_terms, &subject);
+        collect_uri(&mut uri_terms, &predicate);
+        collect_uri(&mut uri_terms, &object);
+        push_binding(&mut bindings, &mut seen, subject, predicate, object);
     }
+    enrich_session_terms(state, &mut bindings, &mut seen, &uri_terms);
     QueryResponse {
         query_type: "SELECT".to_string(),
         head: Some(QueryHead {
@@ -228,6 +238,86 @@ fn session_subgraph(state: &AppState, session_id: &str) -> QueryResponse {
         boolean: None,
         triples: None,
     }
+}
+
+fn enrich_session_terms(
+    state: &AppState,
+    bindings: &mut Vec<QueryBinding>,
+    seen: &mut HashSet<String>,
+    uri_terms: &HashSet<String>,
+) {
+    for iri in uri_terms {
+        let Ok(subject) = NamedNodeRef::new(iri) else {
+            continue;
+        };
+        for predicate_iri in session_display_predicates(state) {
+            let Ok(predicate) = NamedNodeRef::new(predicate_iri) else {
+                continue;
+            };
+            for quad in state
+                .store
+                .quads_for_pattern(Some(subject.into()), Some(predicate), None, None)
+                .flatten()
+            {
+                push_binding(
+                    bindings,
+                    seen,
+                    named_value(iri),
+                    named_value(predicate_iri),
+                    term_value(&quad.object),
+                );
+            }
+        }
+    }
+}
+
+fn session_display_predicates(state: &AppState) -> [&str; 7] {
+    [
+        RDFS_LABEL,
+        RDF_TYPE,
+        state.capture.title.as_str(),
+        state.capture.description.as_str(),
+        state.capture.status.as_str(),
+        state.capture.author.as_str(),
+        state.capture.timestamp.as_str(),
+    ]
+}
+
+fn collect_uri(out: &mut HashSet<String>, value: &QueryValue) {
+    if value.value_type == "uri" {
+        out.insert(value.value.clone());
+    }
+}
+
+fn push_binding(
+    bindings: &mut Vec<QueryBinding>,
+    seen: &mut HashSet<String>,
+    subject: QueryValue,
+    predicate: QueryValue,
+    object: QueryValue,
+) {
+    let key = binding_key(&subject, &predicate, &object);
+    if !seen.insert(key) {
+        return;
+    }
+    let mut row = HashMap::new();
+    row.insert("subject".to_string(), subject);
+    row.insert("predicate".to_string(), predicate);
+    row.insert("object".to_string(), object);
+    bindings.push(QueryBinding { bindings: row });
+}
+
+fn binding_key(subject: &QueryValue, predicate: &QueryValue, object: &QueryValue) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        subject.value_type,
+        subject.value,
+        predicate.value,
+        object.value_type,
+        object.value,
+        object.datatype.as_deref().unwrap_or(""),
+        object.lang.as_deref().unwrap_or("")
+    )
 }
 
 fn empty_query_response() -> QueryResponse {
@@ -266,5 +356,173 @@ fn term_value(value: &Term) -> QueryValue {
         ),
         #[allow(unreachable_patterns)]
         _ => QueryValue::unknown(value.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
+
+    use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
+
+    const SESSION_ID: &str = "session-enrichment-test";
+    const SESSION_GRAPH: &str = "urn:moose:session:session-enrichment-test";
+    const MOOSE_NS: &str = "https://trivyn.io/ontologies/moose#";
+
+    fn ontology_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "moosedev-chat-{name}-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn insert_uri(state: &AppState, subject: &str, predicate: &str, object: &str, graph: &str) {
+        state
+            .store
+            .insert(&Quad::new(
+                NamedNode::new(subject).unwrap(),
+                NamedNode::new(predicate).unwrap(),
+                NamedNode::new(object).unwrap(),
+                GraphName::NamedNode(NamedNode::new(graph).unwrap()),
+            ))
+            .expect("insert uri quad");
+    }
+
+    fn insert_literal(state: &AppState, subject: &str, predicate: &str, value: &str, graph: &str) {
+        state
+            .store
+            .insert(&Quad::new(
+                NamedNode::new(subject).unwrap(),
+                NamedNode::new(predicate).unwrap(),
+                Literal::new_simple_literal(value),
+                GraphName::NamedNode(NamedNode::new(graph).unwrap()),
+            ))
+            .expect("insert literal quad");
+    }
+
+    fn response_has_literal(
+        response: &QueryResponse,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+    ) -> bool {
+        response
+            .results
+            .as_ref()
+            .expect("results")
+            .bindings
+            .iter()
+            .any(|binding| {
+                let row = &binding.bindings;
+                row.get("subject").map(|v| v.value.as_str()) == Some(subject)
+                    && row.get("predicate").map(|v| v.value.as_str()) == Some(predicate)
+                    && row.get("object").map(|v| v.value.as_str()) == Some(value)
+            })
+    }
+
+    #[test]
+    fn session_subgraph_enriches_referenced_project_record_display_fields() {
+        let dir = temp_dir("project-labels");
+        let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+        let record = "https://moosedev.dev/kg/ArchitecturalDecision/session-ui-label-test";
+        let answer = format!("{SESSION_GRAPH}/answer/1");
+
+        insert_uri(
+            &state,
+            &answer,
+            &format!("{MOOSE_NS}resultEntity"),
+            record,
+            SESSION_GRAPH,
+        );
+        insert_literal(
+            &state,
+            record,
+            RDFS_LABEL,
+            "Readable project label",
+            PROJECT_KG_GRAPH_IRI,
+        );
+        insert_literal(
+            &state,
+            record,
+            &state.capture.description,
+            "Readable project description",
+            PROJECT_KG_GRAPH_IRI,
+        );
+        insert_literal(
+            &state,
+            record,
+            &state.capture.status,
+            "accepted",
+            PROJECT_KG_GRAPH_IRI,
+        );
+        insert_literal(
+            &state,
+            "https://moosedev.dev/kg/ArchitecturalDecision/unrelated",
+            RDFS_LABEL,
+            "Unrelated label",
+            PROJECT_KG_GRAPH_IRI,
+        );
+
+        let response = session_subgraph(&state, SESSION_ID);
+
+        assert!(response_has_literal(
+            &response,
+            record,
+            RDFS_LABEL,
+            "Readable project label"
+        ));
+        assert!(response_has_literal(
+            &response,
+            record,
+            &state.capture.description,
+            "Readable project description"
+        ));
+        assert!(response_has_literal(
+            &response,
+            record,
+            &state.capture.status,
+            "accepted"
+        ));
+        assert!(
+            !response_has_literal(
+                &response,
+                "https://moosedev.dev/kg/ArchitecturalDecision/unrelated",
+                RDFS_LABEL,
+                "Unrelated label"
+            ),
+            "enrichment should not expand to records absent from the session graph"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_subgraph_enriches_referenced_moose_ontology_labels() {
+        let dir = temp_dir("moose-labels");
+        let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+        let run = format!("{SESSION_GRAPH}/execution/1/stage-run/0");
+        let stage_run_class = format!("{MOOSE_NS}StageRun");
+
+        insert_uri(&state, &run, RDF_TYPE, &stage_run_class, SESSION_GRAPH);
+
+        let response = session_subgraph(&state, SESSION_ID);
+
+        assert!(response_has_literal(
+            &response,
+            &stage_run_class,
+            RDFS_LABEL,
+            "Stage Run"
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
