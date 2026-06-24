@@ -3,6 +3,7 @@ import {
   ChatResponse,
   ChatSessionDetail,
   ChatSessionListResponse,
+  GraphImportResponse,
   HealthResponse,
   QueryResponse,
 } from './types';
@@ -33,6 +34,17 @@ async function download(path: string): Promise<Blob> {
   return response.blob();
 }
 
+function graphTransferPath(basePath: string, params: { format?: string; graph?: string; mode?: string }) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value) {
+      search.set(key, value);
+    }
+  }
+  const suffix = search.toString();
+  return `${basePath}${suffix ? `?${suffix}` : ''}`;
+}
+
 export const api = {
   health: () => request<HealthResponse>('/health'),
   chat: (payload: {
@@ -58,15 +70,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query }),
     }),
-  exportGraph: (params: { format?: string; graph?: string } = {}) => {
-    const search = new URLSearchParams();
-    if (params.format) {
-      search.set('format', params.format);
-    }
-    if (params.graph) {
-      search.set('graph', params.graph);
-    }
-    const suffix = search.toString();
-    return download(`/graph/export${suffix ? `?${suffix}` : ''}`);
-  },
+  exportGraph: (params: { format?: string; graph?: string } = {}) =>
+    download(graphTransferPath('/graph/export', params)),
+  importGraph: (params: { format?: string; graph?: string; mode?: string }, text: string) =>
+    request<GraphImportResponse>(graphTransferPath('/graph/import', params), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: text,
+    }),
 };

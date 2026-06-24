@@ -248,6 +248,63 @@ async fn graph_export_rejects_unknown_format() {
 }
 
 #[tokio::test]
+async fn graph_import_patches_project_turtle() {
+    let dir = temp_dir("graph-import");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+    let ttl = r#"
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+<https://example.test/api-imported> rdfs:label "API imported" .
+"#;
+
+    let response = server
+        .post("/api/v1/graph/import?format=ttl&graph=project&mode=patch")
+        .text(ttl)
+        .await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["inserted_quad_count"], 1);
+    assert_eq!(body["skipped_existing_count"], 0);
+
+    let query = server
+        .post("/api/v1/sparql/query")
+        .json(&json!({
+            "query": "SELECT ?s WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> \"API imported\" }"
+        }))
+        .await;
+    query.assert_status_ok();
+    assert!(
+        query.text().contains("https://example.test/api-imported"),
+        "imported project triple should be queryable"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn graph_import_rejects_out_of_scope_nquads() {
+    let dir = temp_dir("graph-import-bad-scope");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+    let nq = format!(
+        "<https://example.test/s> <{}> \"bad\" <{}> .\n",
+        moose::RDFS_LABEL,
+        PROVENANCE_GRAPH_IRI
+    );
+
+    let response = server
+        .post("/api/v1/graph/import?format=nq&graph=project&mode=patch")
+        .text(nq)
+        .await;
+
+    response.assert_status_bad_request();
+    assert!(response.text().contains("outside the selected scope"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn chat_session_routes_report_unavailable_without_session_db() {
     let dir = temp_dir("chat-unavailable");
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");

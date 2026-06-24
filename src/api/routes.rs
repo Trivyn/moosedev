@@ -17,7 +17,8 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
             get(handlers::get_session).delete(handlers::delete_session),
         )
         .route("/sparql/query", post(handlers::query))
-        .route("/graph/export", get(handlers::export_graph));
+        .route("/graph/export", get(handlers::export_graph))
+        .route("/graph/import", post(handlers::import_graph));
 
     Router::new()
         .nest("/api/v1", api)

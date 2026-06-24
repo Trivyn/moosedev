@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use moosedev::export::{export_graph, ExportFormat, ExportScope};
 use moosedev::graph;
+use moosedev::graph_import::{import_graph as import_rdf_graph, ImportFormat, ImportMode};
 use moosedev::runtime;
 
 /// Selected transport mode plus its optional explicit socket path.
@@ -45,12 +46,20 @@ enum Mode {
     /// Open the running backend's web UI in a browser (auto-spawning if needed).
     Ui(Option<PathBuf>),
     Export(ExportArgs),
+    Import(ImportArgs),
 }
 
 struct ExportArgs {
     path: Option<PathBuf>,
     format: ExportFormat,
     scope: ExportScope,
+}
+
+struct ImportArgs {
+    path: PathBuf,
+    format: ImportFormat,
+    scope: ExportScope,
+    mode: ImportMode,
 }
 
 const USAGE: &str = "\
@@ -65,6 +74,7 @@ USAGE:
     moosedev --status [SOCK]  Report backend + web UI status (no store lock)
     moosedev ui [SOCK]        Open the backend's web UI in a browser (auto-spawn)
     moosedev export [PATH]    Export the graph; no running backend required
+    moosedev import PATH      Import RDF into the graph; no running backend required
     moosedev --help           Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
@@ -83,6 +93,13 @@ EXPORT OPTIONS:
     --graph project|provenance|all
                               Named graph scope (default: project)
 
+IMPORT OPTIONS:
+    --format ttl|nt|nq        Input format (default: ttl)
+    --graph project|provenance|all
+                              Target graph/scope (default: project)
+    --mode patch|replace      Patch inserts missing quads; replace fully restores
+                              the selected scope (default: patch)
+
 N-Quads is the canonical version-control format. N-Triples is deterministic
 after graph names are dropped. Turtle is human-readable, not byte-canonical.";
 
@@ -97,12 +114,13 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("--status") => Ok(Mode::Status(parse_optional_path(&mut iter, "--status")?)),
         Some("ui") => Ok(Mode::Ui(parse_optional_path(&mut iter, "ui")?)),
         Some("export") => parse_export(iter).map(Mode::Export),
+        Some("import") => parse_import(iter).map(Mode::Import),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
 }
@@ -175,6 +193,55 @@ fn parse_export<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Ex
         path,
         format,
         scope,
+    })
+}
+
+fn parse_import<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<ImportArgs> {
+    let mut path = None;
+    let mut format = ImportFormat::default();
+    let mut scope = ExportScope::default();
+    let mut mode = ImportMode::default();
+    let mut args = iter.peekable();
+
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--format=") {
+            format = ImportFormat::parse(value)?;
+        } else if arg == "--format" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--format requires ttl, nt, or nq"))?;
+            format = ImportFormat::parse(value)?;
+        } else if let Some(value) = arg.strip_prefix("--graph=") {
+            scope = ExportScope::parse(value)?;
+        } else if arg == "--graph" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--graph requires project, provenance, or all"))?;
+            scope = ExportScope::parse(value)?;
+        } else if let Some(value) = arg.strip_prefix("--mode=") {
+            mode = ImportMode::parse(value)?;
+        } else if arg == "--mode" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--mode requires patch or replace"))?;
+            mode = ImportMode::parse(value)?;
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown import option {arg:?}");
+        } else if path.is_none() {
+            path = Some(PathBuf::from(arg.as_str()));
+        } else {
+            anyhow::bail!(
+                "import accepts exactly one input path; unexpected extra argument {arg:?}"
+            );
+        }
+    }
+
+    let path = path.ok_or_else(|| anyhow::anyhow!("import requires an input path"))?;
+    Ok(ImportArgs {
+        path,
+        format,
+        scope,
+        mode,
     })
 }
 
@@ -310,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
             ui_mode(&data_dir, &socket).await
         }
         Mode::Export(args) => export_mode(&data_dir, args),
+        Mode::Import(args) => import_mode(&data_dir, args),
         Mode::Stdio => {
             let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
             runtime::serve_stdio(server).await
@@ -352,6 +420,32 @@ fn export_mode(data_dir: &Path, args: ExportArgs) -> anyhow::Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn import_mode(data_dir: &Path, args: ImportArgs) -> anyhow::Result<()> {
+    let store_dir = data_dir.join("kg");
+    if !store_dir.exists() {
+        anyhow::bail!(
+            "no MOOSEDev graph store found at {}; start/capture project memory before importing",
+            store_dir.display()
+        );
+    }
+    let text = std::fs::read_to_string(&args.path)
+        .map_err(|e| anyhow::anyhow!("read import {}: {e}", args.path.display()))?;
+    let store = graph::open_store(data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}\nHint: if a MOOSEDev backend is running for this data dir, use the web UI or POST /api/v1/graph/import instead."
+        )
+    })?;
+    let outcome = import_rdf_graph(&store, args.scope, args.format, args.mode, &text)?;
+    println!(
+        "imported {} quad(s), skipped {} existing, removed {} from {}",
+        outcome.inserted_quad_count,
+        outcome.skipped_existing_count,
+        outcome.removed_quad_count,
+        outcome.graphs.join(", ")
+    );
     Ok(())
 }
 
@@ -507,6 +601,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_import_requires_path_and_accepts_options() {
+        assert!(parse_mode(&argv(&["import"])).is_err());
+
+        match parse_mode(&argv(&[
+            "import",
+            "backup.nq",
+            "--format",
+            "nq",
+            "--graph=all",
+            "--mode",
+            "replace",
+        ]))
+        .unwrap()
+        {
+            Mode::Import(args) => {
+                assert_eq!(args.path, PathBuf::from("backup.nq"));
+                assert_eq!(args.format, ImportFormat::NQuads);
+                assert_eq!(args.scope, ExportScope::All);
+                assert_eq!(args.mode, ImportMode::Replace);
+            }
+            _ => panic!("expected import mode"),
+        }
+    }
+
+    #[test]
     fn dotenv_loads_missing_values_without_overriding_existing_env() {
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         let dir = std::env::temp_dir().join(format!("moosedev-dotenv-test-{}", std::process::id()));
@@ -562,5 +681,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_mode_rejects_missing_store_without_creating_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "moosedev-import-missing-store-test-{}",
+            std::process::id()
+        ));
+        let input = dir.with_extension("ttl");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&input);
+        std::fs::write(
+            &input,
+            r#"<https://example.test/s> <http://www.w3.org/2000/01/rdf-schema#label> "x" ."#,
+        )
+        .expect("write import fixture");
+
+        let err = import_mode(
+            &dir,
+            ImportArgs {
+                path: input.clone(),
+                format: ImportFormat::Turtle,
+                scope: ExportScope::Project,
+                mode: ImportMode::Patch,
+            },
+        )
+        .expect_err("missing store should reject import");
+
+        assert!(
+            err.to_string().contains("no MOOSEDev graph store found"),
+            "error should explain the missing store: {err}"
+        );
+        assert!(
+            !dir.join("kg").exists(),
+            "import must not create a new empty store"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&input);
     }
 }

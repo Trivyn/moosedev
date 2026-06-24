@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Alert, Box, CircularProgress, Typography } from '@mui/material';
 import ChatIcon from '@mui/icons-material/Forum';
+import ImportExportIcon from '@mui/icons-material/ImportExport';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import AppShell, { PageKey } from './components/layout/AppShell';
 import ChatPage from './pages/ChatPage';
+import GraphTransferPage from './pages/GraphTransferPage';
 import SparqlPage from './pages/SparqlPage';
 import { api } from './api/client';
 import { HealthResponse } from './api/types';
@@ -29,6 +31,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   const nav = [
     { key: 'chat' as const, label: 'Chat', icon: <ChatIcon fontSize="small" /> },
     { key: 'sparql' as const, label: 'SPARQL', icon: <QueryStatsIcon fontSize="small" /> },
+    { key: 'transfer' as const, label: 'Import / Export', icon: <ImportExportIcon fontSize="small" /> },
   ];
 
   return (
@@ -56,8 +59,10 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
         </Box>
       ) : page === 'chat' ? (
         <ChatPage />
-      ) : (
+      ) : page === 'sparql' ? (
         <SparqlPage />
+      ) : (
+        <GraphTransferPage />
       )}
     </AppShell>
   );

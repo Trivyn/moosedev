@@ -37,6 +37,17 @@ export interface QueryResponse {
   }>;
 }
 
+export interface GraphImportResponse {
+  format: 'turtle' | 'ntriples' | 'nquads';
+  mode: 'patch' | 'replace';
+  graphs: string[];
+  parsed_quad_count: number;
+  duplicate_input_count: number;
+  inserted_quad_count: number;
+  skipped_existing_count: number;
+  removed_quad_count: number;
+}
+
 export interface FocusEntry {
   iri: string;
   class_iri: string;

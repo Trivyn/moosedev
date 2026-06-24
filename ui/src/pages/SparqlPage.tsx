@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Alert, Box, Button, CircularProgress, MenuItem, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
-import DownloadIcon from '@mui/icons-material/Download';
+import { Alert, Box, Button, CircularProgress, Stack, Tab, Tabs, Typography } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import { api } from '../api/client';
 import { QueryResponse } from '../api/types';
@@ -47,8 +46,6 @@ export default function SparqlPage() {
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [tab, setTab] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [exportLoading, setExportLoading] = useState(false);
-  const [exportFormat, setExportFormat] = useState('nq');
   const [error, setError] = useState<string | null>(null);
   const graph = useMemo(() => queryToGraph(result), [result]);
 
@@ -62,26 +59,6 @@ export default function SparqlPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
-    }
-  };
-
-  const downloadGraph = async () => {
-    setExportLoading(true);
-    setError(null);
-    try {
-      const blob = await api.exportGraph({ format: exportFormat, graph: 'project' });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `moosedev-project.${exportFormat}`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setExportLoading(false);
     }
   };
 
@@ -117,26 +94,6 @@ export default function SparqlPage() {
             onClick={execute}
           >
             Execute
-          </Button>
-          <TextField
-            select
-            size="small"
-            label="Format"
-            value={exportFormat}
-            onChange={(event) => setExportFormat(event.target.value)}
-            sx={{ width: 110 }}
-          >
-            <MenuItem value="nq">N-Quads</MenuItem>
-            <MenuItem value="ttl">Turtle</MenuItem>
-            <MenuItem value="nt">N-Triples</MenuItem>
-          </TextField>
-          <Button
-            variant="outlined"
-            startIcon={exportLoading ? <CircularProgress color="inherit" size={16} /> : <DownloadIcon />}
-            disabled={exportLoading}
-            onClick={downloadGraph}
-          >
-            Download
           </Button>
         </Stack>
       </Box>

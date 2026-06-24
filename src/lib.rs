@@ -9,6 +9,7 @@ pub mod alignment;
 pub mod api;
 pub mod export;
 pub mod graph;
+pub mod graph_import;
 pub mod llm;
 pub mod mcp;
 pub mod ontology;
