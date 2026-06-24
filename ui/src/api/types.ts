@@ -5,6 +5,8 @@ export interface HealthResponse {
   data_dir: string;
   project_name: string;
   project_root: string;
+  llm_configured: boolean;
+  llm_assist_level: string;
 }
 
 export interface ChatMessage {

@@ -97,6 +97,34 @@ describe('queryToGraph', () => {
     expect(queryToGraph(result).edges).toHaveLength(1);
   });
 
+  it('uses rdfs:label for nodes and edge predicates regardless of triple order', () => {
+    const result: QueryResponse = {
+      query_type: 'CONSTRUCT',
+      triples: [
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/A' },
+          predicate: { type: 'uri', value: 'https://example.test/predicate/relatedTo' },
+          object: { type: 'uri', value: 'https://moosedev.dev/kg/B' },
+        },
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/B' },
+          predicate: { type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+          object: { type: 'literal', value: 'B label' },
+        },
+        {
+          subject: { type: 'uri', value: 'https://example.test/predicate/relatedTo' },
+          predicate: { type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+          object: { type: 'literal', value: 'related to' },
+        },
+      ],
+    };
+
+    const graph = queryToGraph(result);
+
+    expect(graph.nodes.find((node) => node.id === 'https://moosedev.dev/kg/B')?.label).toBe('B label');
+    expect(graph.edges[0].label).toBe('related to');
+  });
+
   it('classifies MOOSE execution and stage-run resources as trace nodes', () => {
     const result: QueryResponse = {
       query_type: 'CONSTRUCT',
@@ -139,5 +167,63 @@ describe('queryToGraph', () => {
     expect(graph.nodes.map((node) => node.id)).toEqual(['https://moosedev.dev/kg/A', 'https://moosedev.dev/kg/B']);
     expect(graph.edges).toHaveLength(1);
     expect(graph.edges[0].label).toBe('kg:relatesTo');
+  });
+
+  it('hides MOOSE pipeline ontology support nodes with trace nodes', () => {
+    const moose = 'https://trivyn.io/ontologies/moose#';
+    const result: QueryResponse = {
+      query_type: 'CONSTRUCT',
+      triples: [
+        {
+          subject: { type: 'uri', value: 'https://moosedev.dev/kg/A' },
+          predicate: { type: 'uri', value: 'https://moosedev.dev/kg/relatesTo' },
+          object: { type: 'uri', value: 'https://moosedev.dev/kg/B' },
+        },
+        {
+          subject: { type: 'uri', value: 'urn:moose:session/answer/1' },
+          predicate: { type: 'uri', value: `${moose}answers` },
+          object: { type: 'uri', value: 'urn:moose:session/query/1' },
+        },
+        {
+          subject: { type: 'uri', value: 'urn:moose:session/execution/1' },
+          predicate: { type: 'uri', value: `${moose}executes` },
+          object: { type: 'uri', value: `${moose}MOOSE-Pipeline` },
+        },
+        {
+          subject: { type: 'uri', value: 'urn:moose:session/execution/1' },
+          predicate: { type: 'uri', value: `${moose}usedStage` },
+          object: { type: 'uri', value: 'urn:moose:session/execution/1/stage-run/0' },
+        },
+        {
+          subject: { type: 'uri', value: 'urn:moose:session/execution/1/stage-run/0' },
+          predicate: { type: 'uri', value: `${moose}stageInstanceOf` },
+          object: { type: 'uri', value: `${moose}Stage1-MinimalExtraction` },
+        },
+        {
+          subject: { type: 'uri', value: `${moose}Stage1-MinimalExtraction` },
+          predicate: { type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+          object: { type: 'literal', value: 'Minimal Extraction' },
+        },
+        {
+          subject: { type: 'uri', value: `${moose}executes` },
+          predicate: { type: 'uri', value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+          object: { type: 'literal', value: 'executes pipeline' },
+        },
+      ],
+    };
+
+    const graph = queryToGraph(result, { showMooseTraces: false });
+    const ids = graph.nodes.map((node) => node.id);
+
+    expect(ids).toContain('https://moosedev.dev/kg/A');
+    expect(ids).toContain('https://moosedev.dev/kg/B');
+    expect(ids).toContain('urn:moose:session/answer/1');
+    expect(ids).toContain('urn:moose:session/query/1');
+    expect(ids).not.toContain('urn:moose:session/execution/1');
+    expect(ids).not.toContain('urn:moose:session/execution/1/stage-run/0');
+    expect(ids).not.toContain(`${moose}MOOSE-Pipeline`);
+    expect(ids).not.toContain(`${moose}Stage1-MinimalExtraction`);
+    expect(ids).not.toContain(`${moose}executes`);
+    expect(graph.edges.map((edge) => edge.label)).toEqual(['kg:relatesTo', 'answers']);
   });
 });

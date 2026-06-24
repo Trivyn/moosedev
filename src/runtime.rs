@@ -35,6 +35,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 
 use crate::api;
 use crate::graph::AppState;
+use crate::llm::LlmConfig;
 use crate::mcp::MooseDevServer;
 
 /// Filename of the per-project rendezvous socket, co-located in the data dir.
@@ -74,7 +75,18 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
         "MOOSEDev: bootstrapping state (data dir: {})…",
         data_dir.display()
     );
-    let mut state = AppState::bootstrap(data_dir, ontology_dir)?;
+    let llm_cfg = LlmConfig::from_env();
+    let llm_base_url = llm_cfg.base_url.clone();
+    let llm_configured = llm_cfg.configured;
+    let mut state = AppState::bootstrap_with_llm_config(data_dir, ontology_dir, llm_cfg)?;
+    if llm_configured {
+        tracing::info!(
+            "MOOSEDev: LLM assistance enabled at {llm_base_url} / level {:?}",
+            state.engine_config.llm_assist_level
+        );
+    } else {
+        tracing::info!("MOOSEDev: LLM assistance disabled; pinned to PureSymbolic");
+    }
     state.enable_chat_sessions().await?;
     // Build the alignment index (loads the embedding model). Non-fatal by design:
     // if the model can't load (e.g. offline with no bundled weights), the

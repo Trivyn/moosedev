@@ -4,9 +4,8 @@ A session-long, multi-instrument evaluation of one question: **does structured (
 memory beat good free-text / vector memory for a coding agent?** Every instrument is reuse-first,
 pre-registers a strict verdict, grades against primary or source-derived ground truth, and is
 reproducible from immutable transcripts. The **source of truth is the project knowledge graph** (typed
-Lessons, linked by IRI); this file is the human-readable mirror (CLAUDE.md invariant #2). It supersedes
-the earlier `EVALUATION.md` + `EVALUATION_MEM0.md`. Private-corpus note: `trivyn` is private — only
-aggregate numbers appear; `rust-rfcs` and `codegraph` are public.
+Lessons, linked by IRI); this file is the human-readable mirror (CLAUDE.md invariant #2).
+Private-corpus note: `trivyn` is private, only aggregate numbers appear; `rust-rfcs` and `codegraph` are public.
 
 ---
 
@@ -16,7 +15,7 @@ aggregate numbers appear; `rust-rfcs` and `codegraph` are public.
 > a *real* competitor (mem0) on a neutral public corpus, structured memory answers **completeness, negation,
 > and traversal** questions that vector/free-text memory **structurally cannot** (B2 1.00 vs mem0 ~0.15), while
 > **tying** mem0 on its home turf (relevance recall, currency). It is a **superset**, not a sidegrade. The
-> longitudinal "fights comprehension debt over months" thesis — the project's actual purpose — remains
+> longitudinal "fights comprehension debt over months" thesis, the project's actual purpose, remains
 > **unmeasured**.
 
 | dimension | instrument | result | status |
@@ -28,7 +27,7 @@ aggregate numbers appear; `rust-rfcs` and `codegraph` are public.
 | Longitudinal (comprehension debt / months) | — | the actual thesis | **untested** |
 
 **Verdict (see §9): don't kill it — *earn the thesis.*** The evidence rules out the kill signal ("structured
-≈ vector memory but costlier → redundant") and earns the expensive in-anger trial; it does not conclude it.
+≈ vector memory but costlier → redundant") and earns the expensive trial.
 
 ---
 

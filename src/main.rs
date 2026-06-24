@@ -74,6 +74,9 @@ or MOOSEDEV_NO_HTTP=1 to disable it.
 Configuration: repo-root .env plus environment variables. Explicit environment
 values win. Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
 MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_AUTOSPAWN.
+LLM assistance is disabled unless MOOSEDEV_LLM_BASE_URL is explicitly set;
+then MOOSEDEV_LLM_API_KEY, MOOSEDEV_LLM_MODEL, and MOOSEDEV_LLM_ASSIST_LEVEL
+configure the provider and assist level.
 
 EXPORT OPTIONS:
     --format nq|nt|ttl        Output format (default: nq)

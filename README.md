@@ -93,22 +93,28 @@ Requires a recent Rust toolchain and a checkout of the MOOSE engine at `../moose
 ```sh
 git clone <moosedev>            # this repo
 # ensure the MOOSE engine is checked out at ../moose
-cargo build --release           # add --offline if the oxigraph fork is already cached
+scripts/build-release.sh
 ```
 
 The default build bundles a CPU embedding backend (`candle-cpu`) and the Arctic-Embed-S model used by the alignment engine.
 
-To embed the human-facing web UI in the Rust binary, build the generated frontend assets first:
+The human-facing web UI is embedded in the Rust binary by default, so generated frontend assets must exist before a normal Cargo build:
 
 ```sh
 cd ui
 npm install
 npm run build
 cd ..
-cargo build --release --features embedded-frontend
+cargo build --release
 ```
 
 `ui/dist/` is generated output from Vite and is intentionally not tracked in Git.
+
+For a backend-only build that does not require `ui/dist/`, use the explicit headless feature:
+
+```sh
+cargo build --release --no-default-features --features headless
+```
 
 ### Run as an MCP server
 
@@ -186,7 +192,7 @@ At startup, `moosedev` also reads a repo-root `.env` when present; explicit envi
 from the shell or MCP client config take precedence. This applies to `--connect` too, so an
 auto-spawned backend inherits the resolved configuration.
 
-- **LLM endpoint** (for natural-language `query`): an OpenAI-compatible `base_url` / `api_key` / `model` — point it at a local runtime (e.g. Ollama, LM Studio) or a hosted provider. *Local-first by default; cloud is opt-in.*
+- **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL`. When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.

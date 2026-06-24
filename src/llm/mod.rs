@@ -1,9 +1,9 @@
 //! OpenAI-compatible LLM client implementing MOOSE's `LlmClient` sensor trait.
 //!
-//! Local-first: points at any OpenAI-compatible endpoint (LM Studio, Ollama, …)
-//! configured via environment variables. In MOOSE the LLM is a *sensor*, not the
-//! controller — the default assist level is kept low for determinism, and many
-//! queries never call it at all.
+//! Local-first: points at an OpenAI-compatible endpoint (LM Studio, Ollama, …)
+//! only when explicitly configured via environment variables. In MOOSE the LLM
+//! is a *sensor*, not the controller; without provider config the server pins
+//! assistance to pure symbolic mode.
 
 use async_trait::async_trait;
 use moose::traits::LlmClient;
@@ -12,28 +12,52 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Endpoint + model selection, read from the environment with local-first defaults.
+const DEFAULT_LLM_BASE_URL: &str = "http://localhost:1234/v1";
+const DEFAULT_LLM_API_KEY: &str = "lm-studio";
+const DEFAULT_LLM_MODEL: &str = "gemma-4-31b-it";
+
+/// Endpoint + model selection, read from the environment. A base URL is the
+/// explicit opt-in for LLM assistance; without it the server stays symbolic.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub configured: bool,
 }
 
 impl LlmConfig {
     /// `MOOSEDEV_LLM_BASE_URL` / `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL`.
-    /// Defaults target a local OpenAI-compatible server (LM Studio's port).
+    /// `MOOSEDEV_LLM_BASE_URL` is required to enable LLM-assisted sensors.
     pub fn from_env() -> Self {
+        Self::from_values(
+            std::env::var("MOOSEDEV_LLM_BASE_URL").ok(),
+            std::env::var("MOOSEDEV_LLM_API_KEY").ok(),
+            std::env::var("MOOSEDEV_LLM_MODEL").ok(),
+        )
+    }
+
+    fn from_values(
+        base_url: Option<String>,
+        api_key: Option<String>,
+        model: Option<String>,
+    ) -> Self {
+        let configured = base_url
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
         Self {
-            base_url: env_or("MOOSEDEV_LLM_BASE_URL", "http://localhost:1234/v1"),
-            api_key: env_or("MOOSEDEV_LLM_API_KEY", "lm-studio"),
-            model: env_or("MOOSEDEV_LLM_MODEL", "gemma-4-31b-it"),
+            base_url: base_url
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string()),
+            api_key: api_key
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_LLM_API_KEY.to_string()),
+            model: model
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
+            configured,
         }
     }
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 /// Cumulative token usage observed on a client's chat-completions responses.
@@ -162,6 +186,28 @@ mod tests {
 
     fn client() -> OpenAiCompatClient {
         OpenAiCompatClient::new("http://localhost:1234/v1", "test")
+    }
+
+    #[test]
+    fn config_requires_explicit_base_url_to_enable_llm() {
+        let cfg = LlmConfig::from_values(None, None, None);
+        assert!(!cfg.configured);
+        assert_eq!(cfg.base_url, DEFAULT_LLM_BASE_URL);
+        assert_eq!(cfg.api_key, DEFAULT_LLM_API_KEY);
+        assert_eq!(cfg.model, DEFAULT_LLM_MODEL);
+    }
+
+    #[test]
+    fn config_treats_nonempty_base_url_as_provider_opt_in() {
+        let cfg = LlmConfig::from_values(
+            Some("http://localhost:9999/v1".to_string()),
+            Some("secret".to_string()),
+            Some("model-a".to_string()),
+        );
+        assert!(cfg.configured);
+        assert_eq!(cfg.base_url, "http://localhost:9999/v1");
+        assert_eq!(cfg.api_key, "secret");
+        assert_eq!(cfg.model, "model-a");
     }
 
     #[test]

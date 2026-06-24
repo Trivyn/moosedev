@@ -22,6 +22,33 @@ const PREFIXES: Record<string, string> = {
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
+const MOOSE_NS = 'https://trivyn.io/ontologies/moose#';
+const INCOMING_PREDICATE = 'urn:moosedev:incomingPredicate';
+const EDGE_PREDICATE = 'urn:moosedev:predicate';
+const MOOSE_TRACE_SUPPORT_LOCALS = new Set([
+  'QueryExecution',
+  'StageRun',
+  'Pipeline',
+  'Stage',
+  'WalkStrategy',
+  'LLMSensorPoint',
+  'SchemaIntentKind',
+  'MOOSE-Pipeline',
+  'executes',
+  'usedStage',
+  'stageInstanceOf',
+  'durationMs',
+  'usedWalkStrategy',
+  'llmSensorInvocations',
+  'stageDetail',
+  'usedSchemaKind',
+]);
+
+interface GraphTriple {
+  subject: QueryValue;
+  predicate: QueryValue;
+  object: QueryValue;
+}
 
 export function shortName(value: string): string {
   for (const [prefix, replacement] of Object.entries(PREFIXES)) {
@@ -44,6 +71,15 @@ function graphNodeType(term: QueryValue, rdfTypes: QueryValue[] = []): string {
   return term.type;
 }
 
+function isResourceValue(value: QueryValue): boolean {
+  return value.type === 'uri' || value.type === 'bnode';
+}
+
+function localName(value: string): string {
+  const parts = value.split(/[\/#]/).filter(Boolean);
+  return parts[parts.length - 1] || value;
+}
+
 function setProperty(properties: Map<string, QueryValue[]>, predicate: string, value: QueryValue) {
   const values = properties.get(predicate) ?? [];
   values.push(value);
@@ -59,10 +95,77 @@ function mapProperties(properties: Map<string, QueryValue[]>): GraphProperty[] {
 function filterGraph(graph: GraphData, options: GraphOptions = {}): GraphData {
   if (options.showMooseTraces !== false) return graph;
 
-  const nodes = graph.nodes.filter((node) => node.type !== 'mooseTrace');
+  const hidden = traceHiddenNodeIds(graph);
+  const nodes = graph.nodes.filter((node) => !hidden.has(node.id));
   const visibleNodeIds = new Set(nodes.map((node) => node.id));
   const edges = graph.edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target));
   return { nodes, edges };
+}
+
+function traceHiddenNodeIds(graph: GraphData): Set<string> {
+  const hidden = new Set<string>();
+  const worklist: string[] = [];
+
+  const hide = (id: string) => {
+    if (hidden.has(id)) return;
+    hidden.add(id);
+    worklist.push(id);
+  };
+
+  graph.nodes.forEach((node) => {
+    if (node.type === 'mooseTrace' || isMooseTraceSupportTerm(node.id)) hide(node.id);
+  });
+
+  for (let index = 0; index < worklist.length; index += 1) {
+    const id = worklist[index];
+    graph.edges.forEach((edge) => {
+      if (edge.source === id) hideMooseEndpoint(edge.target, hide);
+      if (edge.target === id) hideMooseEndpoint(edge.source, hide);
+    });
+  }
+
+  return hidden;
+}
+
+function hideMooseEndpoint(id: string, hide: (id: string) => void) {
+  if (id.startsWith(MOOSE_NS)) hide(id);
+}
+
+function isMooseTraceSupportTerm(value: string): boolean {
+  if (!value.startsWith(MOOSE_NS)) return false;
+  const local = localName(value);
+  return (
+    MOOSE_TRACE_SUPPORT_LOCALS.has(local) ||
+    local.startsWith('Stage') ||
+    local.startsWith('WalkStrategy') ||
+    local.startsWith('LLMSensor-')
+  );
+}
+
+function resultTriples(result: QueryResponse): GraphTriple[] {
+  const triples: GraphTriple[] = [...(result.triples ?? [])];
+  const bindingTriple = (binding: Record<string, QueryValue>) => ({
+    subject: binding.subject ?? binding.s,
+    predicate: binding.predicate ?? binding.p,
+    object: binding.object ?? binding.o,
+  });
+
+  result.results?.bindings.forEach((binding) => {
+    const { subject, predicate, object } = bindingTriple(binding);
+    if (subject && predicate && object) triples.push({ subject, predicate, object });
+  });
+
+  return triples;
+}
+
+function labelMap(triples: GraphTriple[]): Map<string, string> {
+  const labels = new Map<string, string>();
+  triples.forEach(({ subject, predicate, object }) => {
+    if (isResourceValue(subject) && predicate.value === RDFS_LABEL && object.type === 'literal') {
+      labels.set(subject.value, object.value);
+    }
+  });
+  return labels;
 }
 
 /**
@@ -76,6 +179,8 @@ function filterGraph(graph: GraphData, options: GraphOptions = {}): GraphData {
  */
 export function queryToGraph(result?: QueryResponse | null, options: GraphOptions = {}): GraphData {
   if (!result) return { nodes: [], edges: [] };
+  const triples = resultTriples(result);
+  const labels = labelMap(triples);
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
   const nodeProperties = new Map<string, Map<string, QueryValue[]>>();
@@ -91,7 +196,7 @@ export function queryToGraph(result?: QueryResponse | null, options: GraphOption
   };
 
   const addNode = (term: QueryValue) => {
-    if (term.type !== 'uri' && term.type !== 'bnode') return;
+    if (!isResourceValue(term)) return;
     nodeTerms.set(term.value, term);
     const properties = propertiesFor(term.value);
     const labelValue = properties.get(RDFS_LABEL)?.find((value) => value.type === 'literal')?.value;
@@ -99,7 +204,7 @@ export function queryToGraph(result?: QueryResponse | null, options: GraphOption
     const existing = nodes.get(term.value);
     const next = {
       id: term.value,
-      label: labelValue ?? existing?.label ?? shortName(term.value),
+      label: labelValue ?? labels.get(term.value) ?? existing?.label ?? shortName(term.value),
       type: graphNodeType(term, rdfTypes),
       properties: mapProperties(properties),
     };
@@ -107,7 +212,7 @@ export function queryToGraph(result?: QueryResponse | null, options: GraphOption
   };
 
   const attachProperty = (subject: QueryValue, predicate: QueryValue, object: QueryValue) => {
-    if (subject.type !== 'uri' && subject.type !== 'bnode') return;
+    if (!isResourceValue(subject)) return;
     setProperty(propertiesFor(subject.value), predicate.value, object);
     const subjectTerm = nodeTerms.get(subject.value) ?? subject;
     addNode(subjectTerm);
@@ -115,14 +220,14 @@ export function queryToGraph(result?: QueryResponse | null, options: GraphOption
 
   const addTriple = (subject: QueryValue, predicate: QueryValue, object: QueryValue, index: number) => {
     attachProperty(subject, predicate, object);
-    if (object.type === 'uri' || object.type === 'bnode') {
-      attachProperty(object, { type: 'uri', value: 'urn:moosedev:incomingPredicate' }, predicate);
+    if (isResourceValue(object)) {
+      attachProperty(object, { type: 'uri', value: INCOMING_PREDICATE }, predicate);
       addEdge(subject, predicate, object, index);
     }
   };
 
   const addEdge = (subject: QueryValue, predicate: QueryValue, object: QueryValue, index: number) => {
-    if ((subject.type !== 'uri' && subject.type !== 'bnode') || (object.type !== 'uri' && object.type !== 'bnode')) {
+    if (!isResourceValue(subject) || !isResourceValue(object)) {
       return;
     }
     addNode(subject);
@@ -132,27 +237,14 @@ export function queryToGraph(result?: QueryResponse | null, options: GraphOption
       id,
       source: subject.value,
       target: object.value,
-      label: shortName(predicate.value),
+      label: labels.get(predicate.value) ?? shortName(predicate.value),
       type: shortName(predicate.value),
       predicate: predicate.value,
-      properties: [{ predicate: 'urn:moosedev:predicate', values: [predicate] }],
+      properties: [{ predicate: EDGE_PREDICATE, values: [predicate] }],
     });
   };
 
-  if (result.triples) {
-    result.triples.forEach((triple, index) => addTriple(triple.subject, triple.predicate, triple.object, index));
-  }
-
-  const bindingTriple = (binding: Record<string, QueryValue>) => ({
-    subject: binding.subject ?? binding.s,
-    predicate: binding.predicate ?? binding.p,
-    object: binding.object ?? binding.o,
-  });
-
-  result.results?.bindings.forEach((binding, index) => {
-    const { subject, predicate, object } = bindingTriple(binding);
-    if (subject && predicate && object) addTriple(subject, predicate, object, index);
-  });
+  triples.forEach((triple, index) => addTriple(triple.subject, triple.predicate, triple.object, index));
 
   return filterGraph({ nodes: [...nodes.values()], edges: [...edges.values()] }, options);
 }
