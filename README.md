@@ -10,9 +10,9 @@
 
 MOOSEDev is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sidecar that gives coding agents — and eventually humans — a reliable, **structured, queryable, long-term understanding** of a software project.
 
-Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph** — architectural decisions, lessons, constraints, anti-patterns — that an agent can record into and reason over symbolically.
+Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph**:  architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
 
-MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed for now.
+MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed (for now, plans to open source when it's ready).
 
 ## Why it's different
 
@@ -86,8 +86,6 @@ This is an active build with a working v1 surface. **Live today and exercised by
 - A **stdio MCP server** (rmcp 1.7, latest negotiated protocol) verified end-to-end (`initialize` → `tools/list` → `tools/call`), and persistence across restarts (on-disk oxigraph).
 
 Against the roadmap in [`tasks/todo.md`](./tasks/todo.md): M0–M3 are complete, M4 is partial (the bootstrap workflow shipped; the `get_focus_stack` tool is deferred), and the M5 shared-backend core is complete.
-
-**Honest gaps.** This is young software. The central thesis — that an external, symbolic project memory *measurably* reduces comprehension debt over months of real use — is **not yet proven**; it is under test in an ongoing in-anger trial. The `get_focus_stack` tool is deliberately not shipped (see above). The design of record is [`spec/MOOSEDev_design.md`](./spec/MOOSEDev_design.md).
 
 ## Getting started
 
@@ -173,14 +171,14 @@ MOOSEDEV_DATA_DIR=/path/to/project/.moosedev moosedev --serve
 The backend listens on a Unix socket derived **per data dir**
 (`<MOOSEDEV_DATA_DIR>/moosedev.sock` by default, or `MOOSEDEV_SOCKET`), so
 separate projects each get their own backend with no cross-talk. `--connect`
-clients are lightweight proxies — they never open the store or load the model.
+clients are lightweight proxies; they never open the store or load the model.
 When no backend is listening, `--connect` auto-spawns a detached `--serve`
 backend for the same resolved socket unless `MOOSEDEV_NO_AUTOSPAWN=1` is set.
 
 ### Web UI
 
 A `--serve` backend also exposes the human-facing web UI on a **loopback-only,
-ephemeral port** by default — the OS picks a free port, so per-project backends
+ephemeral port** by default, the OS picks a free port, so per-project backends
 never collide. The backend writes the resolved address to
 `<MOOSEDEV_DATA_DIR>/http.addr`; discover or open it with:
 
