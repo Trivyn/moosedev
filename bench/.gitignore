@@ -4,3 +4,8 @@ corpus/
 scale/
 __pycache__/
 *.pyc
+
+# Throwaway harness working dirs, temporal-bootstrap snapshots, and run logs (all regenerable).
+_work/
+_temporal_snapshots/
+*.log

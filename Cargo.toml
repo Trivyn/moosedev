@@ -17,8 +17,7 @@ oxigraph = { version = "0.5.6", features = ["rdf-12"] }
 # GROWL — Trivyn's OWL 2 RL reasoner (its own term model, no oxigraph dep → no [patch]
 # conflict). App-layer enrichment: materializes inferred A-box edges (inverses,
 # subproperty, domain/range, subclass) from the declared ontology axioms. Wired in at the
-# moosedev layer exactly as trivyn/src/rdf/reasoning.rs does — NOT in the moose engine
-# (invariant #11). See tasks/growl-integration.md.
+# moosedev app layer — NOT in the moose engine (invariant #11).
 growl = "0.5.1"
 
 # MCP server over stdio — the official Rust SDK. `schemars` enables tool input
@@ -67,6 +66,14 @@ axum-test = "17"
 default = ["embedded-frontend"]
 embedded-frontend = ["dep:include_dir", "dep:mime_guess"]
 headless = []
+
+# Build the engine's embedding backbone (Arctic-Embed-S) on the Apple GPU via
+# candle's Metal backend. candle-cpu (declared on the `moose` dep above) stays the
+# default for all normal/headless builds; enabling `metal` additionally compiles the
+# Metal device, which moose's loader prefers at runtime (see moose embeddings loader).
+# Used by the macOS release build; also works locally: `cargo run --features metal`.
+# (`cuda = ["moose/candle-cuda"]` is the NVIDIA analogue if ever needed.)
+metal = ["moose/candle-metal"]
 
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.

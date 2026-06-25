@@ -1,6 +1,6 @@
 //! GROWL OWL 2 RL enrichment (app layer).
 //!
-//! Mirrors `trivyn/src/rdf/reasoning.rs`: marshals oxigraph quads into GROWL's term
+//! Marshals oxigraph quads into GROWL's term
 //! model, runs the reasoner in **enrich** mode (`ReasonerConfig::enrich(true)` — property
 //! and subclass propagation: prp-inv inverses, prp-spo subproperty, prp-dom/rng,
 //! cax-sco; skips sameAs and class expressions), and returns the genuinely-inferred
@@ -20,8 +20,7 @@ use oxigraph::model::{
 use oxigraph::store::Store;
 use std::collections::{HashMap, HashSet};
 
-// Reasoner arena: 32 MB floor, 1 KB per input triple — generous for enrich mode
-// (trivyn/src/rdf/reasoning.rs).
+// Reasoner arena: 32 MB floor, 1 KB per input triple — generous for enrich mode.
 const ARENA_MIN_BYTES: usize = 32 * 1024 * 1024;
 const ARENA_BYTES_PER_TRIPLE: usize = 1024;
 

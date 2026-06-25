@@ -530,14 +530,24 @@ fn open_browser(url: &str) {
     }
 }
 
-/// Where the shipped ontologies live. Defaults to the crate's `ontologies/` dir
-/// (dev/`cargo run`); override with `MOOSEDEV_ONTOLOGY_DIR` for a deployed binary
-/// that ships them elsewhere.
+/// Where the shipped ontologies live, resolved in priority order:
+///   1. `MOOSEDEV_ONTOLOGY_DIR` — explicit override (deployments that ship them elsewhere).
+///   2. `ontologies/` next to the running binary — the released tarball layout, so a
+///      downloaded build works with zero configuration.
+///   3. The crate's own `ontologies/` dir — dev / `cargo run`, where the binary lives
+///      under `target/` and (2) does not apply.
 fn ontology_dir() -> PathBuf {
-    match std::env::var("MOOSEDEV_ONTOLOGY_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies"),
+    if let Ok(dir) = std::env::var("MOOSEDEV_ONTOLOGY_DIR") {
+        return PathBuf::from(dir);
     }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("ontologies")))
+        .filter(|p| p.is_dir())
+    {
+        return dir;
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
 }
 
 #[cfg(test)]
@@ -651,6 +661,39 @@ mod tests {
         std::env::remove_var(missing_key);
         std::env::remove_var(existing_key);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ontology_dir_resolves_override_then_exe_relative_then_crate() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let key = "MOOSEDEV_ONTOLOGY_DIR";
+
+        // 1. Explicit override wins.
+        std::env::set_var(key, "/custom/onto");
+        assert_eq!(ontology_dir(), PathBuf::from("/custom/onto"));
+        std::env::remove_var(key);
+
+        // 2. With no override, an `ontologies/` dir next to the binary is used.
+        let exe_dir = std::env::current_exe()
+            .expect("current_exe")
+            .parent()
+            .expect("exe has parent")
+            .to_path_buf();
+        let marker = exe_dir.join("ontologies");
+        let created = !marker.exists();
+        if created {
+            std::fs::create_dir(&marker).expect("create exe-relative ontologies marker");
+        }
+        assert_eq!(ontology_dir(), marker);
+
+        // 3. Without an exe-relative dir, fall back to the crate's own `ontologies/`.
+        if created {
+            std::fs::remove_dir(&marker).expect("remove marker");
+            assert_eq!(
+                ontology_dir(),
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
+            );
+        }
     }
 
     #[test]

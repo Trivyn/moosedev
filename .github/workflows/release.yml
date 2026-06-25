@@ -30,8 +30,10 @@ jobs:
         include:
           - os: macos-14                       # Apple Silicon runner (arm64)
             target: aarch64-apple-darwin
+            cargo_flags: "--features metal"   # GPU embeddings (Arctic-Embed-S) via candle Metal backend
           - os: ubuntu-22.04                   # pinned: build against older glibc for portability
             target: x86_64-unknown-linux-gnu
+            cargo_flags: ""
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout MOOSEDev
@@ -86,7 +88,7 @@ jobs:
 
       - name: Build release binary
         working-directory: moosedev
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Package
         working-directory: moosedev
@@ -96,6 +98,10 @@ jobs:
           mkdir -p "$DIST"
           cp "target/${{ matrix.target }}/release/moosedev" "$DIST/"
           cp LICENSE README.md "$DIST/"
+          # Runtime + companion resources the binary expects alongside it:
+          #   ontologies/ — REQUIRED; loaded from disk at startup (resolved next to the binary)
+          #   skills/, templates/ — agent-facing workflows + the CLAUDE.md adoption template
+          cp -R ontologies skills templates "$DIST/"
           tar -czf "$DIST.tar.gz" "$DIST"
           shasum -a 256 "$DIST.tar.gz" > "$DIST.tar.gz.sha256"
 

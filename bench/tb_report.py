@@ -3,7 +3,7 @@ chains, timeline span, and look-back correctness (new.hasTimestamp >= old.hasTim
 temporal_bootstrap serve/query helpers; namespace-decoupled (matches predicates/types by local name
 per the decouple-from-ontology-TTL discipline).
 
-Usage:  python tb_report.py --data-dir ~/.moosedev-stores/burrow-temporal
+Usage:  python tb_report.py --data-dir ~/.moosedev-stores/moosedev-temporal
 """
 import argparse
 import json

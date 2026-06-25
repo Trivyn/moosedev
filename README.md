@@ -224,7 +224,7 @@ auto-spawned backend inherits the resolved configuration.
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.
-- **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live (defaults to the crate's `ontologies/`).
+- **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live. By default MOOSEDev looks for an `ontologies/` directory next to the running binary (the layout of the released tarball), then falls back to the crate's `ontologies/` for `cargo run`. Set this only to load ontologies from a custom location. *Keep the unpacked release bundle together so the binary can find its `ontologies/`.*
 
 ## Project layout
 

@@ -1,6 +1,6 @@
 """Benchmark configuration — paths, arms, models, endpoints.
 
-Defaults mirror the repo-root .env (LM Studio at endor:1234); override via env vars.
+Defaults mirror the repo-root .env (LM Studio at localhost:1234); override via env vars.
 The harness code lives in this open `bench/` dir; large/private artifacts (corpus chunks,
 run outputs, throwaway working dirs) live under BENCH_HOME, outside the repo.
 """
@@ -35,7 +35,7 @@ _load_dotenv(REPO / ".env")
 _bin_env = os.environ.get("MOOSEDEV_BIN")  # defensive: a bad/unexpanded env path must not break the MCP
 MOOSEDEV_BIN = _bin_env if (_bin_env and os.path.exists(_bin_env)) else str(REPO / "target" / "release" / "moosedev")
 ONTOLOGY_DIR = os.environ.get("MOOSEDEV_ONTOLOGY_DIR", str(REPO / "ontologies"))  # shared shapes
-LLM_BASE_URL = os.environ.get("MOOSEDEV_LLM_BASE_URL", "http://endor:1234/v1")
+LLM_BASE_URL = os.environ.get("MOOSEDEV_LLM_BASE_URL", "http://localhost:1234/v1")
 LLM_API_KEY = os.environ.get("MOOSEDEV_LLM_API_KEY", "lmstudio")
 NLQ_MODEL = os.environ.get("MOOSEDEV_LLM_MODEL", "google/gemma-4-26b-a4b-qat")   # MOOSEDev internal NLQ
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "lmstudio/qwen3.6-35b-a3b-mlx")   # opencode provider/model
@@ -89,15 +89,6 @@ CORPORA = {
         "agent_exclude": ["docs-dev", "spec", "doc", "doc-dist", "tasks", "CONVENTIONS.md",
                           "README.md", "CLAUDE.md", "agents.md", ".grok", ".claude"],
     },
-    "burrow": {
-        "data_dir": str(Path.home() / ".moosedev-stores" / "burrow"),
-        "repo": str(Path.home() / "code" / "burrow"),
-        "sha": "d641966",
-        # Public repo (rhinoman/burrow), bootstrapped into its own store via the linked-graph skill.
-        # Strip the human-facing WHY docs so captured memory is the only rationale source
-        # (comprehension-debt premise). The Go code stays.
-        "agent_exclude": ["README.md", "MANIFESTO.md", "CLAUDE.md", "spec", "LICENSE"],
-    },
     "moosedev-temporal": {
         # The temporally-bootstrapped moosedev graph (real supersession chains + a real timeline).
         # Currency A/B corpus: B2 reads this graph (get_relevant_context serves CURRENT only); B1 is
@@ -105,13 +96,6 @@ CORPORA = {
         # faithful append-only baseline. Q&A-only (materialize_tree:false on its tasks).
         "data_dir": str(Path.home() / ".moosedev-stores" / "moosedev-temporal"),
         "repo": str(REPO),
-    },
-    "burrow-temporal": {
-        # The temporally-bootstrapped burrow graph (gpt-5.4-mini/codex capture; real 2026-02 timeline
-        # + 4 supersede chains). Second-corpus currency A/B, same shape as moosedev-temporal: B2 serves
-        # CURRENT only; B1 is the currency-blind free-text export (--no-status). Q&A-only.
-        "data_dir": str(Path.home() / ".moosedev-stores" / "burrow-temporal"),
-        "repo": str(Path.home() / "code" / "burrow"),
     },
     "trivyn-temporal": {
         # The temporally-bootstrapped trivyn graph (gpt-5.4-mini/codex; real 2025-07..2026-06 timeline,

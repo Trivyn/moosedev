@@ -8,7 +8,7 @@ appends to runs_judged.jsonl (one row per judged answer), never mutates the orig
 GROUND TRUTH is the task's frozen ground_truth.gold — authored from PRIMARY sources (git/PRs/maintainer
 knowledge), NEVER the in-graph record (no circularity — AD 47f3f038, Lesson 440abc78).
 
-JUDGE MODEL defaults to the LOCAL qat model at endor (free, available, keeps the trial fully local —
+JUDGE MODEL defaults to the LOCAL qat model at localhost (free, available, keeps the trial fully local —
 invariant #9). Override JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL for a frontier judge.
 
 VALIDATE THE JUDGE (Lesson a6529240): before trusting a B2-B0 delta, eyeball that a known-good answer
@@ -28,7 +28,7 @@ import time
 import config
 
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "google/gemma-4-26b-a4b-qat")
-JUDGE_BASE_URL = os.environ.get("JUDGE_BASE_URL", "http://endor:1234/v1")
+JUDGE_BASE_URL = os.environ.get("JUDGE_BASE_URL", "http://localhost:1234/v1")
 JUDGE_API_KEY = os.environ.get("JUDGE_API_KEY", "lmstudio")
 
 RUBRIC = (
