@@ -46,6 +46,19 @@ jobs:
           path: moose
           ssh-key: ${{ secrets.MOOSE_DEPLOY_KEY }}
 
+      - name: Resolve & verify version
+        working-directory: moosedev
+        shell: bash
+        run: |
+          crate=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "VERSION=$crate" >> "$GITHUB_ENV"
+          echo "building moosedev $crate"
+          # On a tag build the tag must match Cargo.toml — no version drift in a release.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            [ "$tag" = "$crate" ] || { echo "::error::tag v$tag does not match Cargo.toml version $crate"; exit 1; }
+          fi
+
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -79,7 +92,7 @@ jobs:
         working-directory: moosedev
         shell: bash
         run: |
-          DIST="moosedev-${{ matrix.target }}"
+          DIST="moosedev-v${VERSION}-${{ matrix.target }}"
           mkdir -p "$DIST"
           cp "target/${{ matrix.target }}/release/moosedev" "$DIST/"
           cp LICENSE README.md "$DIST/"
@@ -91,8 +104,8 @@ jobs:
         with:
           name: moosedev-${{ matrix.target }}
           path: |
-            moosedev/moosedev-${{ matrix.target }}.tar.gz
-            moosedev/moosedev-${{ matrix.target }}.tar.gz.sha256
+            moosedev/moosedev-v*-${{ matrix.target }}.tar.gz
+            moosedev/moosedev-v*-${{ matrix.target }}.tar.gz.sha256
 
   release:
     name: publish release
