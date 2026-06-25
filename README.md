@@ -2,7 +2,7 @@
 
 **Structured, long-term project memory for coding agents — a neurosymbolic MCP server that fights comprehension debt.**
 
-> Status: **active development.** The full v1 capture → query → align → validate surface is live over MCP stdio, alongside a shared multi-client backend and a web UI. The longer-term thesis — that this *measurably* reduces comprehension debt over months of real use — is being tested in an ongoing in-anger trial, not yet proven. See [Status](#status).
+> Status: **active development.** See [Status](#status).
 
 ---
 
@@ -12,7 +12,7 @@ MOOSEDev is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) si
 
 Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph** — architectural decisions, lessons, constraints, anti-patterns — that an agent can record into and reason over symbolically.
 
-MOOSEDev is built on the **MOOSE** neurosymbolic engine, and is the first host application in a planned family of MOOSE-based tools. MOOSEDev itself is open source; the MOOSE engine is closed for now.
+MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed for now.
 
 ## Why it's different
 
