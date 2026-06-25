@@ -1,0 +1,115 @@
+name: release
+
+# Builds release binaries for macOS (Apple Silicon) and Linux (x86-64) and
+# publishes them to GitHub Releases on a version tag.
+#
+# MOOSEDev depends on the PRIVATE MOOSE engine (Cargo path dep `../moose`,
+# repo Trivyn/moose). CI clones it as a sibling using a read-only deploy key.
+#   Setup (one time):
+#     1. Generate a key:  ssh-keygen -t ed25519 -f moose_deploy -N ""
+#     2. Add moose_deploy.pub as a *read-only* Deploy Key on github.com/Trivyn/moose
+#     3. Add the private key (moose_deploy) as the secret MOOSE_DEPLOY_KEY on this repo
+# The MOOSE source is only ever present ephemerally on the runner; released
+# artifacts are compiled binaries only, so the closed-engine boundary holds.
+# Secrets are not exposed to fork PRs (this workflow runs on tags / dispatch only).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # create the GitHub Release
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14                       # Apple Silicon runner (arm64)
+            target: aarch64-apple-darwin
+          - os: ubuntu-22.04                   # pinned: build against older glibc for portability
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout MOOSEDev
+        uses: actions/checkout@v4
+        with:
+          path: moosedev
+
+      - name: Checkout private MOOSE engine (sibling ../moose)
+        uses: actions/checkout@v4
+        with:
+          repository: Trivyn/moose
+          path: moose
+          ssh-key: ${{ secrets.MOOSE_DEPLOY_KEY }}
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: moosedev
+
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build web UI (embedded-frontend)
+        working-directory: moosedev/ui
+        run: |
+          npm install
+          npm run build
+
+      - name: Build release binary
+        working-directory: moosedev
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        working-directory: moosedev
+        shell: bash
+        run: |
+          DIST="moosedev-${{ matrix.target }}"
+          mkdir -p "$DIST"
+          cp "target/${{ matrix.target }}/release/moosedev" "$DIST/"
+          cp LICENSE README.md "$DIST/"
+          tar -czf "$DIST.tar.gz" "$DIST"
+          shasum -a 256 "$DIST.tar.gz" > "$DIST.tar.gz.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moosedev-${{ matrix.target }}
+          path: |
+            moosedev/moosedev-${{ matrix.target }}.tar.gz
+            moosedev/moosedev-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

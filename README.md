@@ -2,7 +2,7 @@
 
 **Structured, long-term project memory for coding agents — a neurosymbolic MCP server that fights comprehension debt.**
 
-> Status: **early development.** The MCP server skeleton is working today (build, run, `ping` over stdio); the knowledge-capture and query tools are landing milestone by milestone. See [Status](#status).
+> Status: **active development.** The full v1 capture → query → align → validate surface is live over MCP stdio, alongside a shared multi-client backend and a web UI. The longer-term thesis — that this *measurably* reduces comprehension debt over months of real use — is being tested in an ongoing in-anger trial, not yet proven. See [Status](#status).
 
 ---
 
@@ -53,45 +53,55 @@ MOOSE provides the read/reason side — natural-language query, the alignment en
 
 ## v1 tool surface
 
-| Tool | Purpose | Status |
-|------|---------|--------|
-| `ping` | Health check (transport smoke test) | ✅ working |
-| `record_important_decision` | Capture typed decisions, lessons, constraints, anti-patterns | 🚧 M1 |
-| `query` | Natural-language query with reasoning traces | 🚧 M1 |
-| `get_relevant_context` | Retrieve knowledge relevant to the current focus | 🚧 M1 |
-| `search_session_graph` | Search recorded decisions, lessons, and knowledge | 🚧 M1 / M3 |
-| `align_concepts` | Align new concepts to the loaded ontologies | ⏳ M2 |
-| `suggest_mappings` | Propose ontology mappings for new concepts | ⏳ M2 |
-| `validate_against_architecture` | Lightweight consistency validation of recorded knowledge | ⏳ M3 |
-| `get_focus_stack` | Return the current symbolic focus stack | ⏸ M4 — deferred¹ |
+All of the tools below are live. They speak MCP over stdio; the LLM acts only as a sensor — the symbolic layer does the load-bearing work.
 
-¹ `get_focus_stack` is deferred: MOOSE's focus stack is conversational state populated by the
-chat pipeline, but a coding agent issues discrete, self-contained queries (it is its own
-multi-turn layer), so an ephemeral within-session focus stack is low value. The M4 effort
-went to the bootstrap workflow instead. See `tasks/todo.md` (M4).
+| Tool | Purpose |
+|------|---------|
+| `ping` | Health check (transport smoke test) |
+| `record_important_decision` | Capture a typed decision / lesson / constraint / pattern / anti-pattern / requirement into the durable graph |
+| `supersede_decision` | Record a type-preserving replacement that supersedes a prior item: links `supersedes`, captures *why*, marks the old one superseded (never deleted) |
+| `retract_decision` | Deprecate a recorded item that no longer applies (no replacement); captures *why* and preserves it as history |
+| `relate` | Link two recorded items with a typed, ontology-legal relationship so memory can be *traversed*, not just searched |
+| `suggest_links` | Suggest ranked, ontology-legal links between records (suggest-only; confirm with `relate`); can scan for under-linked records |
+| `query` | Natural-language query over the graph, with a symbolic reasoning trace |
+| `get_relevant_context` | Retrieve recorded knowledge relevant to a topic (symbolic, no LLM; superseded entries excluded); omit the topic to list everything |
+| `get_provenance` | Edit provenance for an item — which agent recorded it, and when — by IRI |
+| `align_concepts` | Align a new concept to the best-matching ontology class (keyword + embedding sensors), with rationale or ranked candidates |
+| `suggest_mappings` | Propose ranked ontology-class mappings for a new concept, for human review |
+| `sparql` | Read-only SPARQL over the local store (SELECT/ASK → JSON; CONSTRUCT/DESCRIBE → N-Triples) |
+| `export_graph` | Export the knowledge graph as RDF text (canonical N-Quads by default; `nq`/`nt`/`ttl`, scope `project`/`provenance`/`all`) |
+| `validate_against_architecture` | Validate recorded knowledge against the loaded architecture SHACL shapes (symbolic, on-demand) |
 
 ## Status
 
-This is an active, early-stage build. **M0 (foundation) is complete and verified:**
+This is an active build with a working v1 surface. **Live today and exercised by integration tests:**
 
-- `moosedev` links and runs against the MOOSE engine and its RDF store.
-- The durable knowledge graph persists across restarts (on-disk oxigraph).
-- A working **stdio MCP server** (rmcp 1.7) negotiates protocol `2025-06-18` and serves a `ping` tool — verified end-to-end (`initialize` → `tools/list` → `tools/call`).
+- **Typed knowledge capture** into a durable, on-disk graph that persists across restarts — decisions, lessons, constraints, patterns, anti-patterns, requirements (`record_important_decision`) — plus the full edit-and-link lifecycle: `supersede_decision`, `retract_decision`, `relate`, `suggest_links`.
+- **Natural-language query** with a symbolic reasoning trace (`query`); symbolic, no-LLM **context recall** (`get_relevant_context`); and edit **provenance** (`get_provenance`).
+- **Concept alignment** to the project ontology (`align_concepts`, `suggest_mappings`).
+- **SPARQL** reads (`sparql`) and **SHACL validation** of recorded knowledge against the architecture shapes (`validate_against_architecture`).
+- **Graph export / import** for backup and version control (CLI plus the `export_graph` tool).
+- A **shared multi-client backend** (one `--serve` process, thin `--connect` proxies) so several agents share one live graph concurrently, and a **loopback web UI** for humans.
+- The **history-walking bootstrap workflow** for recovering knowledge from an existing codebase (`skills/bootstrap-existing-codebase.md`).
+- A **stdio MCP server** (rmcp 1.7, latest negotiated protocol) verified end-to-end (`initialize` → `tools/list` → `tools/call`), and persistence across restarts (on-disk oxigraph).
 
-**In progress:** M1 — the capture → query vertical slice (`record_important_decision`, `query`, `get_relevant_context`). Roadmap and progress are tracked in [`tasks/todo.md`](./tasks/todo.md); the design of record is [`spec/MOOSEDev_design.md`](./spec/MOOSEDev_design.md).
+Against the roadmap in [`tasks/todo.md`](./tasks/todo.md): M0–M3 are complete, M4 is partial (the bootstrap workflow shipped; the `get_focus_stack` tool is deferred), and the M5 shared-backend core is complete.
+
+**Honest gaps.** This is young software. The central thesis — that an external, symbolic project memory *measurably* reduces comprehension debt over months of real use — is **not yet proven**; it is under test in an ongoing in-anger trial. The `get_focus_stack` tool is deliberately not shipped (see above). The design of record is [`spec/MOOSEDev_design.md`](./spec/MOOSEDev_design.md).
 
 ## Getting started
 
 ### Use a release binary (recommended)
 
-Pre-built binaries will be published on GitHub Releases. Building from source requires access to the private MOOSE engine (see [Open source & the MOOSE boundary](#open-source--the-moose-boundary)).
+Pre-built binaries are published on [GitHub Releases](https://github.com/Trivyn/moosedev/releases) for macOS (Apple Silicon) and Linux (x86-64). This is the supported path for everyone: building from source requires access to the private MOOSE engine (see [Open source & the MOOSE boundary](#open-source--the-moose-boundary)).
 
 ### Build from source
 
 Requires a recent Rust toolchain and a checkout of the MOOSE engine at `../moose` (MOOSEDev depends on it via a path dependency, and on its patched `oxigraph` fork).
 
 ```sh
-git clone <moosedev>            # this repo
+git clone https://github.com/Trivyn/moosedev.git
+cd moosedev
 # ensure the MOOSE engine is checked out at ../moose
 scripts/build-release.sh
 ```
@@ -131,7 +141,7 @@ MOOSEDev speaks MCP over **stdio**. Point an MCP client at the binary. For examp
 }
 ```
 
-Today the server exposes `ping`; the knowledge tools above come online as M1+ land.
+All tools in the [v1 tool surface](#v1-tool-surface) are available over this transport.
 
 ### Shared mode (multiple clients / agents)
 
@@ -185,6 +195,26 @@ moosedev --serve --open   # start the backend and open the UI once it is up
 interface (e.g. `0.0.0.0:7474`), or `MOOSEDEV_NO_HTTP=1` to disable it. A UI bind
 failure never takes down the MCP backend.
 
+### Export / import the graph
+
+A project's memory is just an RDF graph, so it can be backed up, restored, and version-controlled
+as text. These subcommands run directly against the on-disk store and need **no running backend**:
+
+```bash
+# Back up the project graph as canonical N-Quads …
+moosedev export backup.nq
+
+# … and restore it (N-Quads is not the import default, so name the format).
+moosedev import backup.nq --format nq
+```
+
+`export` takes `--format nq|nt|ttl` (default `nq`) and `--graph project|provenance|all` (default
+`project`). `import` takes `--format ttl|nt|nq` (default `ttl`), the same `--graph` scopes, and
+`--mode patch|replace` (default `patch` — `patch` inserts only missing quads; `replace` fully
+restores the selected scope). **N-Quads is the canonical version-control format** (deterministic);
+Turtle is human-readable but not byte-canonical. While a backend is running, use the `export_graph`
+MCP tool or the web UI instead, so the operation goes through the live store.
+
 ### Configuration
 
 MOOSEDev is configured via environment variables (this surface is filling in as features land).
@@ -192,7 +222,7 @@ At startup, `moosedev` also reads a repo-root `.env` when present; explicit envi
 from the shell or MCP client config take precedence. This applies to `--connect` too, so an
 auto-spawned backend inherits the resolved configuration.
 
-- **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL`. When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
+- **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL` / `MOOSEDEV_LLM_ASSIST_LEVEL` (how aggressively the LLM sensor assists). When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.
@@ -201,8 +231,9 @@ auto-spawned backend inherits the resolved configuration.
 ## Project layout
 
 ```
-src/            # the MCP server (Rust): mcp/, graph/, ontology/, llm/
-ontologies/     # software-engineering + architecture ontologies (.ttl) [forthcoming]
+src/            # the MCP server (Rust): mcp/, graph/, ontology/, alignment/, llm/, api/, …
+ui/             # the human-facing web UI (Vite/React); built to ui/dist/ and embedded in the binary
+ontologies/     # software-engineering + architecture ontologies + SHACL shapes (.ttl)
 skills/         # bootstrap-existing-codebase workflow
 templates/      # CLAUDE.md template for projects adopting MOOSEDev as memory
 spec/           # specification + design of record + upstream engine asks
