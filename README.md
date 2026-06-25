@@ -253,6 +253,10 @@ Contributions to the open parts of MOOSEDev are welcome. Deep changes to MOOSE b
 - [`spec/core-moose-asks.md`](./spec/core-moose-asks.md) — capabilities to upstream into core MOOSE
 - [`CLAUDE.md`](./CLAUDE.md) — design invariants and development practices
 
+## How this was built
+
+MOOSEDev has been written iteratively with AI coding agents under human architectural direction and review. 
+
 ## License
 
 MOOSEDev is licensed under the **Apache License 2.0**. The MOOSE engine is proprietary and separately licensed.
