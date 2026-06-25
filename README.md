@@ -16,9 +16,9 @@ MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open
 
 ## Why it's different
 
-Most agent "memory" tools store free text and retrieve it with embeddings — they optimize for *sounding* relevant. MOOSEDev optimizes for *being* correct:
+Most agent "memory" tools store free text and retrieve it with embeddings; they optimize for *sounding* relevant. MOOSEDev optimizes for *being* correct:
 
-- **Symbolic layer is primary.** The LLM is a sensor, not the controller. Deterministic mechanisms — typed capture, concept alignment, graph queries, validation — do the load-bearing work.
+- **Symbolic layer is primary.** The LLM is a sensor, not the controller. Deterministic mechanisms: typed capture, concept alignment, graph queries, validation — do the load-bearing work.
 - **Structured knowledge over free text.** Decisions and lessons are typed instances in an RDF graph (`ArchitecturalDecision`, `Lesson`, `Constraint`, `AntiPattern`, …), not markdown blobs.
 - **Alignment prevents drift.** New concepts are aligned to the project's ontology rather than accumulating as inconsistent one-offs.
 - **Auditability.** Queries carry execution traces, so reasoning is inspectable rather than opaque.
@@ -33,23 +33,23 @@ The full set of design invariants lives in [`CLAUDE.md`](./CLAUDE.md).
         │  MCP — JSON-RPC over stdio
         ▼
   ┌────────────────────────────────────┐
-  │ MOOSEDev  (this repo · open source) │
-  │   • MCP server (rmcp)               │
-  │   • typed knowledge capture + write │
-  │   • durable project knowledge graph │──▶ oxigraph (RDF, on-disk)
-  │   • SPARQL · architectural validation│
+  │ MOOSEDev  (this repo)              │
+  │   • MCP server (rmcp)              │
+  │   • typed knowledge capture        │
+  │   • durable knowledge graph        │──▶ oxigraph (RDF, on-disk)
+  │   • SPARQL · arch validation       │
   └─────────────────┬──────────────────┘
                     │ composes
                     ▼
   ┌────────────────────────────────────┐
-  │ MOOSE engine  (closed)              │
-  │   • NLQ query + execution traces    │
-  │   • alignment (3-tier sensor sieve)  │
-  │   • focus stack · local embeddings   │
+  │ MOOSE engine  (closed)             │
+  │   • NLQ query + execution traces   │
+  │   • alignment                      │
+  │   • focus stack · local embeddings │
   └────────────────────────────────────┘
 ```
 
-MOOSE provides the read/reason side — natural-language query, the alignment engine, conversational focus, execution traces, and local embeddings (Snowflake Arctic-Embed-S via Candle). MOOSEDev provides the host side — the MCP server, the durable knowledge graph and its typed **write** path, a SPARQL endpoint, lightweight validation, and the bootstrap workflow.
+MOOSE provides the read/reason side: natural-language query, the alignment engine, conversational focus, execution traces, and local embeddings (Snowflake Arctic-Embed-S via Candle). MOOSEDev provides the host side: the MCP server, the durable knowledge graph and its typed **write** path, a SPARQL endpoint, lightweight validation, and the bootstrap workflow.
 
 ## v1 tool surface
 
