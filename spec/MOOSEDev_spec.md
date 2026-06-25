@@ -45,7 +45,7 @@ MOOSEDev is built on the closed-source MOOSE neurosymbolic engine. The MOOSEDev 
 - **Execution Traces**: Provides auditability for all reasoning steps.
 
 ## 4. Directory Structure
-
+```
 moosedev/
 ├── src/                          # MCP server implementation (Rust)
 │   ├── main.rs
@@ -70,7 +70,7 @@ moosedev/
 ├── Cargo.toml
 ├── README.md
 └── LICENSE
-
+```
 ## 5. Core MCP Tools (v1)
 
 | Category     | Tool Name                        | Purpose                                              | Priority |
