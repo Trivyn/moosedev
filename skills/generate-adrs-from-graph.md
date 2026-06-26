@@ -21,7 +21,7 @@ linked to each, and nothing else.
 logic:
 
 ```bash
-scripts/generate-adrs-from-graph.py --check
+scripts/generate-adrs-from-graph.py
 ```
 
 The script implements this skill's COUNT → enumerate → batched cluster SPARQL workflow against
@@ -146,9 +146,12 @@ Source: graph record `<AD IRI>`. Generated view — regenerate from the graph; d
 1. Confirm the MOOSEDev backend is running and has published `.moosedev/http.addr`.
 2. Run:
    ```bash
-   scripts/generate-adrs-from-graph.py --check
+   scripts/generate-adrs-from-graph.py
    ```
+   Coverage/lifecycle verification runs by default and aborts (non-zero, *without*
+   touching `docs/adr`) if the graph count, ADR files, or supersede chains disagree.
    Optional flags:
+   - `--no-check` skips that verification (not recommended).
    - `--json` prints the coverage/lifecycle summary as JSON.
    - `--batch-size K` changes the bounded cluster query size.
    - `--addr HOST:PORT` targets a specific backend if `http.addr` is unavailable.

@@ -58,3 +58,6 @@ ui/dist/
 # output (seed-recall JSONs) is not.
 bench/seed_recall/
 
+# --- Python ------
+__pycache__/
+

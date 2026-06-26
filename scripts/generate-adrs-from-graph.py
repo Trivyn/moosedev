@@ -96,10 +96,13 @@ def parse_args() -> argparse.Namespace:
         help="number of decisions to fetch per cluster query (default: 20)",
     )
     parser.add_argument(
-        "--check",
+        "--no-check",
         action="store_true",
-        help="verify the generated ADR set after writing",
+        help="skip the post-generation coverage/lifecycle check (it runs by default)",
     )
+    # Deprecated: verification now runs by default. Accepted as a no-op so existing
+    # callers (the skill, CI) keep working; use --no-check to opt out.
+    parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--json",
         action="store_true",
@@ -130,10 +133,28 @@ def query(endpoint: str, sparql: str) -> list[Binding]:
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
-            body = json.loads(response.read().decode("utf-8"))
+            raw = response.read().decode("utf-8")
     except urllib.error.URLError as exc:
         raise SystemExit(f"SPARQL request failed at {endpoint}: {exc}") from exc
-    return body.get("results", {}).get("bindings", [])
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"SPARQL endpoint {endpoint} returned a non-JSON response "
+            f"(is --addr pointing at the MOOSEDev backend?): {exc}"
+        ) from exc
+    # A 200 that is not a SPARQL SELECT result (e.g. a stale server, a proxy, or
+    # the wrong endpoint) must not be silently read as "zero rows" — that would
+    # let a misrouted --addr empty docs/adr. Require the SELECT result shape.
+    results = body.get("results") if isinstance(body, dict) else None
+    bindings = results.get("bindings") if isinstance(results, dict) else None
+    if not isinstance(bindings, list):
+        raise SystemExit(
+            f"SPARQL endpoint {endpoint} returned a 200 response with no "
+            "results.bindings; refusing to treat a non-SELECT response as an empty "
+            "graph (check that --addr points at the MOOSEDev backend)."
+        )
+    return bindings
 
 
 def value(row: Binding, key: str, default: str = "") -> str:
@@ -343,37 +364,44 @@ def fetch_clusters(
     return clusters
 
 
-def write_files(
-    out_dir: Path,
+def render_all(
     records: list[Meta],
     clusters: dict[str, dict[str, list[Binding]]],
     by_iri: dict[str, Meta],
-) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for stale in out_dir.glob("[0-9][0-9][0-9][0-9]-*.md"):
-        stale.unlink()
+) -> dict[str, str]:
+    """Render every output file to an in-memory {filename: content} map.
 
+    Rendering happens before any filesystem mutation, so a render error aborts
+    the run without leaving docs/adr half-written.
+    """
     if not records:
-        (out_dir / "0000-index.md").write_text(
-            "# Architecture Decision Records\n\nNo architectural decisions recorded yet.\n",
-            encoding="utf-8",
-        )
-        return
-
-    for meta in records:
-        (out_dir / filename(meta)).write_text(render_adr(meta, clusters, by_iri), encoding="utf-8")
-    (out_dir / "0000-index.md").write_text(
-        render_index(records, clusters, by_iri),
-        encoding="utf-8",
-    )
+        return {
+            "0000-index.md": "# Architecture Decision Records\n\n"
+            "No architectural decisions recorded yet.\n"
+        }
+    rendered = {filename(meta): render_adr(meta, clusters, by_iri) for meta in records}
+    rendered["0000-index.md"] = render_index(records, clusters, by_iri)
+    return rendered
 
 
-def decision_files(out_dir: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in out_dir.glob("[0-9][0-9][0-9][0-9]-*.md")
-        if path.name != "0000-index.md"
-    )
+def write_files(out_dir: Path, rendered: dict[str, str]) -> None:
+    """Materialize the rendered ADR set into out_dir without a destructive window.
+
+    Each file is written to a temp sibling and atomically renamed into place, so
+    an interrupted write never corrupts an existing file. Stale ADR files that
+    were not regenerated are pruned only after the new set is in place, so a
+    failure leaves extra files behind, never a gap or an emptied directory.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, content in rendered.items():
+        target = out_dir / name
+        tmp = target.with_name(f".{name}.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(target)
+    keep = set(rendered)
+    for stale in out_dir.glob("[0-9][0-9][0-9][0-9]-*.md"):
+        if stale.name not in keep:
+            stale.unlink()
 
 
 def summarize(
@@ -405,10 +433,12 @@ def summarize(
         if meta["status"].lower() == "superseded" and not rows["isSupersededBy"]:
             missing_successor.append(meta["num"])
 
+    # adr_files is the count we are about to write (one per record); computed in
+    # memory so verification can run BEFORE docs/adr is touched.
     return {
         "graph_decisions": count,
         "enumerated": len(records),
-        "adr_files": len(decision_files(out_dir)),
+        "adr_files": len(records),
         "index_rows": len(records),
         "index": str(out_dir / "0000-index.md"),
         "supersede_chains": supersede_chains,
@@ -454,10 +484,15 @@ def main() -> None:
     count, records = enumerate_records(endpoint)
     by_iri = {record["iri"]: record for record in records}
     clusters = fetch_clusters(endpoint, records, args.batch_size) if records else {}
-    write_files(out_dir, records, clusters, by_iri)
+
+    # Render and verify BEFORE touching docs/adr, so a failed check or a render
+    # error leaves the previous good output in place. Verification is the default;
+    # pass --no-check to skip it.
+    rendered = render_all(records, clusters, by_iri)
     summary = summarize(out_dir, count, records, clusters, by_iri)
-    if args.check:
+    if not args.no_check:
         verify(summary)
+    write_files(out_dir, rendered)
 
     if args.json:
         print(json.dumps(summary, indent=2))
