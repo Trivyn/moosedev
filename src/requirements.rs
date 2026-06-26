@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::io::{Cursor, Write};
 
 use chrono::{SecondsFormat, Utc};
-use oxigraph::store::Store;
 use serde::Serialize;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -15,45 +14,9 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::artifacts::{
     capitalize, date_only, md_cell, nonempty, not_recorded, required_value, select_rows,
 };
+use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
 
 pub const REQUIREMENTS_INDEX_FILENAME: &str = "0000-index.md";
-
-const COUNT_QUERY: &str = r#"
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
-SELECT (COUNT(?req) AS ?n) WHERE {
-  GRAPH <https://moosedev.dev/kg/project> { ?req a :Requirement . }
-}
-"#;
-
-const ENUM_QUERY: &str = r#"
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-SELECT ?req ?title ?status ?ts ?author ?desc WHERE {
-  GRAPH <https://moosedev.dev/kg/project> {
-    ?req a :Requirement ;
-         rdfs:label ?title ;
-         :hasLifecycleStatus ?status ;
-         :hasTimestamp ?ts .
-    OPTIONAL { ?req :hasAuthor ?author }
-    OPTIONAL { ?req :hasDescription ?desc }
-  }
-} ORDER BY ?ts ?req
-"#;
-
-const RELATED_ADRS_QUERY_TEMPLATE: &str = r#"
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-SELECT ?req ?ad ?title ?status ?ts WHERE {
-  GRAPH <https://moosedev.dev/kg/project> {
-    VALUES ?req { __VALUES__ }
-    ?ad a :ArchitecturalDecision ;
-        :isMotivatedBy ?req ;
-        rdfs:label ?title ;
-        :hasLifecycleStatus ?status ;
-        :hasTimestamp ?ts .
-  }
-} ORDER BY ?req ?ts ?ad
-"#;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RequirementGenerationOptions {
@@ -176,16 +139,16 @@ struct RelatedAdr {
 }
 
 pub fn generate_requirement_set(
-    store: &Store,
+    state: &AppState,
     options: RequirementGenerationOptions,
 ) -> anyhow::Result<RequirementSet> {
     if options.batch_size == 0 {
         anyhow::bail!("Requirement generation batch size must be >= 1");
     }
 
-    let count = count_requirements(store)?;
-    let records = enumerate_requirements(store)?;
-    let related = fetch_related_adrs(store, &records, options.batch_size)?;
+    let count = count_requirements(state)?;
+    let records = enumerate_requirements(state)?;
+    let related = fetch_related_adrs(state, &records, options.batch_size)?;
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if records.is_empty() {
@@ -218,8 +181,16 @@ pub fn generate_requirement_set(
     })
 }
 
-fn count_requirements(store: &Store) -> anyhow::Result<usize> {
-    let rows = select_rows(store, COUNT_QUERY)?;
+fn count_requirements(state: &AppState) -> anyhow::Result<usize> {
+    let requirement_class = state.resolve_class("Requirement")?;
+    let query = format!(
+        r#"
+SELECT (COUNT(?req) AS ?n) WHERE {{
+  GRAPH <{PROJECT_KG_GRAPH_IRI}> {{ ?req a <{requirement_class}> . }}
+}}
+"#
+    );
+    let rows = select_rows(&state.store, &query)?;
     rows.first()
         .and_then(|row| row.get("n"))
         .unwrap_or(&"0".to_string())
@@ -227,9 +198,29 @@ fn count_requirements(store: &Store) -> anyhow::Result<usize> {
         .map_err(|e| anyhow::anyhow!("parse requirement count: {e}"))
 }
 
-fn enumerate_requirements(store: &Store) -> anyhow::Result<Vec<RequirementMeta>> {
+fn enumerate_requirements(state: &AppState) -> anyhow::Result<Vec<RequirementMeta>> {
+    let requirement_class = state.resolve_class("Requirement")?;
+    let query = format!(
+        r#"
+SELECT ?req ?title ?status ?ts ?author ?desc WHERE {{
+  GRAPH <{PROJECT_KG_GRAPH_IRI}> {{
+    ?req a <{requirement_class}> .
+    OPTIONAL {{ ?req <{}> ?title }}
+    OPTIONAL {{ ?req <{}> ?status }}
+    OPTIONAL {{ ?req <{}> ?ts }}
+    OPTIONAL {{ ?req <{}> ?author }}
+    OPTIONAL {{ ?req <{}> ?desc }}
+  }}
+}} ORDER BY ?ts ?req
+"#,
+        moose::RDFS_LABEL,
+        state.capture.status,
+        state.capture.timestamp,
+        state.capture.author,
+        state.capture.description,
+    );
     let mut seen_slugs: HashMap<String, usize> = HashMap::new();
-    select_rows(store, ENUM_QUERY)?
+    select_rows(&state.store, &query)?
         .into_iter()
         .enumerate()
         .map(|(idx, row)| {
@@ -257,7 +248,7 @@ fn enumerate_requirements(store: &Store) -> anyhow::Result<Vec<RequirementMeta>>
 }
 
 fn fetch_related_adrs(
-    store: &Store,
+    state: &AppState,
     records: &[RequirementMeta],
     batch_size: usize,
 ) -> anyhow::Result<HashMap<String, Vec<RelatedAdr>>> {
@@ -272,8 +263,8 @@ fn fetch_related_adrs(
             .map(|record| format!("<{}>", record.iri))
             .collect::<Vec<_>>()
             .join(" ");
-        let query = RELATED_ADRS_QUERY_TEMPLATE.replace("__VALUES__", &values);
-        for row in select_rows(store, &query)? {
+        let query = related_adrs_query(state, &values)?;
+        for row in select_rows(&state.store, &query)? {
             let req = required_value(&row, "req")?;
             related.entry(req).or_default().push(RelatedAdr {
                 iri: required_value(&row, "ad")?,
@@ -285,6 +276,28 @@ fn fetch_related_adrs(
     }
 
     Ok(related)
+}
+
+fn related_adrs_query(state: &AppState, values: &str) -> anyhow::Result<String> {
+    let decision_class = state.resolve_class("ArchitecturalDecision")?;
+    let motivated_by = state.resolve_object_property("isMotivatedBy")?;
+    Ok(format!(
+        r#"
+SELECT ?req ?ad ?title ?status ?ts WHERE {{
+  GRAPH <{PROJECT_KG_GRAPH_IRI}> {{
+    VALUES ?req {{ {values} }}
+    ?ad a <{decision_class}> ;
+        <{motivated_by}> ?req .
+    OPTIONAL {{ ?ad <{}> ?title }}
+    OPTIONAL {{ ?ad <{}> ?status }}
+    OPTIONAL {{ ?ad <{}> ?ts }}
+  }}
+}} ORDER BY ?req ?ts ?ad
+"#,
+        moose::RDFS_LABEL,
+        state.capture.status,
+        state.capture.timestamp,
+    ))
 }
 
 fn render_requirement_document(

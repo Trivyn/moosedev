@@ -7,6 +7,7 @@ use std::path::Path;
 use chrono::Utc;
 use moosedev::graph::{self, AppState, ClusterSlot, RecordInput};
 use moosedev::sparql;
+use oxigraph::model::{GraphNameRef, NamedNodeRef};
 use serde_json::Value;
 
 fn ask(state: &AppState, query: &str) -> bool {
@@ -14,6 +15,21 @@ fn ask(state: &AppState, query: &str) -> bool {
         serde_json::from_str(&sparql::run_query(&state.store, query).expect("run ASK"))
             .expect("SPARQL JSON");
     json["boolean"].as_bool().unwrap_or(false)
+}
+
+fn count_class(state: &AppState, kind: &str) -> usize {
+    let class = state.resolve_class(kind).unwrap();
+    let graph = NamedNodeRef::new(graph::PROJECT_KG_GRAPH_IRI).unwrap();
+    state
+        .store
+        .quads_for_pattern(
+            None,
+            Some(NamedNodeRef::new(moose::RDF_TYPE).unwrap()),
+            Some(NamedNodeRef::new(&class).unwrap().into()),
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .count()
 }
 
 #[test]
@@ -141,6 +157,50 @@ fn empty_cluster_fields_mint_nothing() {
         ),
         "no Alternative node should exist (no coercion)"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn illegal_cluster_slot_fails_without_orphan_records() {
+    let dir = std::env::temp_dir().join(format!("moosedev-cluster-illegal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    let input = RecordInput {
+        class_iri,
+        class_local: "ArchitecturalDecision".to_string(),
+        properties: vec![
+            (moose::RDFS_LABEL.to_string(), "Bad cluster".to_string()),
+            (state.capture.title.clone(), "Bad cluster".to_string()),
+        ],
+    };
+    let labels = vec!["This must not be minted".to_string()];
+    let cluster = [ClusterSlot {
+        predicate_local: "violates",
+        range_class_local: "Alternative",
+        labels: &labels,
+    }];
+    let before_decisions = count_class(&state, "ArchitecturalDecision");
+    let before_alternatives = count_class(&state, "Alternative");
+
+    let err = graph::record_decision_with_cluster(
+        &state,
+        &input,
+        &[],
+        &cluster,
+        "test-agent",
+        Utc::now(),
+    )
+    .expect_err("illegal cluster relation must reject");
+    assert!(err.to_string().contains("not a legal"), "{err}");
+    assert_eq!(
+        count_class(&state, "ArchitecturalDecision"),
+        before_decisions
+    );
+    assert_eq!(count_class(&state, "Alternative"), before_alternatives);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

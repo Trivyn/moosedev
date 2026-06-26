@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Write};
 
 use chrono::{SecondsFormat, Utc};
-use oxigraph::store::Store;
 use serde::Serialize;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -16,56 +15,9 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::artifacts::{
     capitalize, date_only, md_cell, nonempty, not_recorded, required_value, select_rows,
 };
+use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
 
 pub const INDEX_FILENAME: &str = "0000-index.md";
-
-const COUNT_QUERY: &str = r#"
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
-SELECT (COUNT(?ad) AS ?n) WHERE {
-  GRAPH <https://moosedev.dev/kg/project> { ?ad a :ArchitecturalDecision . }
-}
-"#;
-
-const ENUM_QUERY: &str = r#"
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-SELECT ?ad ?title ?status ?ts ?author WHERE {
-  GRAPH <https://moosedev.dev/kg/project> {
-    ?ad a :ArchitecturalDecision ;
-        rdfs:label ?title ;
-        :hasLifecycleStatus ?status ;
-        :hasTimestamp ?ts .
-    OPTIONAL { ?ad :hasAuthor ?author }
-  }
-} ORDER BY ?ts ?ad
-"#;
-
-const CLUSTER_QUERY_TEMPLATE: &str = r#"
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-SELECT ?ad ?dir ?rel ?node ?nlabel ?ndesc WHERE {
-  GRAPH <https://moosedev.dev/kg/project> {
-    VALUES ?ad { __VALUES__ }
-    {
-      ?ad ?p ?node . FILTER(isIRI(?node))
-      BIND("out" AS ?dir)
-      BIND(REPLACE(STR(?p), "^.*[/#]", "") AS ?rel)
-      FILTER(?rel IN ("isMotivatedBy","weighs","resultsIn","concerns",
-                      "hasRationale","supersedes","isSupersededBy"))
-      OPTIONAL { ?node rdfs:label ?nlabel }
-      OPTIONAL { ?node :hasDescription ?ndesc }
-    } UNION {
-      ?node :constrains ?ad .
-      BIND("in" AS ?dir) BIND("constrains" AS ?rel)
-      OPTIONAL { ?node rdfs:label ?nlabel }
-      OPTIONAL { ?node :hasDescription ?ndesc }
-    } UNION {
-      ?ad :hasDescription ?ndesc .
-      BIND("self" AS ?dir) BIND("hasDescription" AS ?rel) BIND(?ad AS ?node)
-    }
-  }
-} ORDER BY ?ad ?dir ?rel
-"#;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AdrGenerationOptions {
@@ -198,18 +150,18 @@ struct Row {
     ndesc: String,
 }
 
-pub fn generate_adr_set(store: &Store, options: AdrGenerationOptions) -> anyhow::Result<AdrSet> {
+pub fn generate_adr_set(state: &AppState, options: AdrGenerationOptions) -> anyhow::Result<AdrSet> {
     if options.batch_size == 0 {
         anyhow::bail!("ADR generation batch size must be >= 1");
     }
 
-    let count = count_decisions(store)?;
-    let records = enumerate_records(store)?;
+    let count = count_decisions(state)?;
+    let records = enumerate_records(state)?;
     let by_iri: HashMap<String, Meta> = records
         .iter()
         .map(|record| (record.iri.clone(), record.clone()))
         .collect();
-    let clusters = fetch_clusters(store, &records, options.batch_size)?;
+    let clusters = fetch_clusters(state, &records, options.batch_size)?;
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if records.is_empty() {
@@ -244,8 +196,16 @@ pub fn generate_adr_set(store: &Store, options: AdrGenerationOptions) -> anyhow:
     })
 }
 
-fn count_decisions(store: &Store) -> anyhow::Result<usize> {
-    let rows = select_rows(store, COUNT_QUERY)?;
+fn count_decisions(state: &AppState) -> anyhow::Result<usize> {
+    let decision_class = state.resolve_class("ArchitecturalDecision")?;
+    let query = format!(
+        r#"
+SELECT (COUNT(?ad) AS ?n) WHERE {{
+  GRAPH <{PROJECT_KG_GRAPH_IRI}> {{ ?ad a <{decision_class}> . }}
+}}
+"#
+    );
+    let rows = select_rows(&state.store, &query)?;
     rows.first()
         .and_then(|row| row.get("n"))
         .unwrap_or(&"0".to_string())
@@ -253,9 +213,27 @@ fn count_decisions(store: &Store) -> anyhow::Result<usize> {
         .map_err(|e| anyhow::anyhow!("parse decision count: {e}"))
 }
 
-fn enumerate_records(store: &Store) -> anyhow::Result<Vec<Meta>> {
+fn enumerate_records(state: &AppState) -> anyhow::Result<Vec<Meta>> {
+    let decision_class = state.resolve_class("ArchitecturalDecision")?;
+    let query = format!(
+        r#"
+SELECT ?ad ?title ?status ?ts ?author WHERE {{
+  GRAPH <{PROJECT_KG_GRAPH_IRI}> {{
+    ?ad a <{decision_class}> .
+    OPTIONAL {{ ?ad <{}> ?title }}
+    OPTIONAL {{ ?ad <{}> ?status }}
+    OPTIONAL {{ ?ad <{}> ?ts }}
+    OPTIONAL {{ ?ad <{}> ?author }}
+  }}
+}} ORDER BY ?ts ?ad
+"#,
+        moose::RDFS_LABEL,
+        state.capture.status,
+        state.capture.timestamp,
+        state.capture.author,
+    );
     let mut seen_slugs: HashMap<String, usize> = HashMap::new();
-    select_rows(store, ENUM_QUERY)?
+    select_rows(&state.store, &query)?
         .into_iter()
         .enumerate()
         .map(|(idx, row)| {
@@ -282,7 +260,7 @@ fn enumerate_records(store: &Store) -> anyhow::Result<Vec<Meta>> {
 }
 
 fn fetch_clusters(
-    store: &Store,
+    state: &AppState,
     records: &[Meta],
     batch_size: usize,
 ) -> anyhow::Result<HashMap<String, Cluster>> {
@@ -297,8 +275,8 @@ fn fetch_clusters(
             .map(|record| format!("<{}>", record.iri))
             .collect::<Vec<_>>()
             .join(" ");
-        let query = CLUSTER_QUERY_TEMPLATE.replace("__VALUES__", &values);
-        for row in select_rows(store, &query)? {
+        let query = cluster_query(state, &values)?;
+        for row in select_rows(&state.store, &query)? {
             let ad = required_value(&row, "ad")?;
             let rel = required_value(&row, "rel")?;
             let cluster = clusters.entry(ad.clone()).or_default();
@@ -315,6 +293,56 @@ fn fetch_clusters(
     Ok(clusters)
 }
 
+fn cluster_query(state: &AppState, values: &str) -> anyhow::Result<String> {
+    let edge_values = [
+        "isMotivatedBy",
+        "weighs",
+        "resultsIn",
+        "concerns",
+        "hasRationale",
+        "supersedes",
+        "isSupersededBy",
+    ]
+    .into_iter()
+    .map(|local| {
+        state
+            .resolve_object_property(local)
+            .map(|iri| format!("(<{iri}> \"{local}\")"))
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?
+    .join(" ");
+    let constrains = state.resolve_object_property("constrains")?;
+    Ok(format!(
+        r#"
+SELECT ?ad ?dir ?rel ?node ?nlabel ?ndesc WHERE {{
+  GRAPH <{PROJECT_KG_GRAPH_IRI}> {{
+    VALUES ?ad {{ {values} }}
+    {{
+      VALUES (?p ?rel) {{ {edge_values} }}
+      ?ad ?p ?node . FILTER(isIRI(?node))
+      BIND("out" AS ?dir)
+      OPTIONAL {{ ?node <{}> ?nlabel }}
+      OPTIONAL {{ ?node <{}> ?ndesc }}
+    }} UNION {{
+      ?node <{constrains}> ?ad .
+      BIND("in" AS ?dir) BIND("constrains" AS ?rel)
+      OPTIONAL {{ ?node <{}> ?nlabel }}
+      OPTIONAL {{ ?node <{}> ?ndesc }}
+    }} UNION {{
+      ?ad <{}> ?ndesc .
+      BIND("self" AS ?dir) BIND("hasDescription" AS ?rel) BIND(?ad AS ?node)
+    }}
+  }}
+}} ORDER BY ?ad ?dir ?rel
+"#,
+        moose::RDFS_LABEL,
+        state.capture.description,
+        moose::RDFS_LABEL,
+        state.capture.description,
+        state.capture.description,
+    ))
+}
+
 fn render_adr_document(
     meta: &Meta,
     clusters: &HashMap<String, Cluster>,
@@ -324,7 +352,7 @@ fn render_adr_document(
     AdrDocument {
         num: meta.num.clone(),
         title: meta.title.clone(),
-        status: render_status(meta, clusters, by_iri),
+        status: render_status_label(meta, clusters, by_iri),
         date: date_only(&meta.ts),
         author: not_recorded(&meta.author),
         iri: meta.iri.clone(),
@@ -447,14 +475,7 @@ fn render_index(
     ];
 
     for meta in records {
-        let status = render_status(meta, clusters, by_iri);
-        let status = status
-            .split("](")
-            .next()
-            .map(|prefix| prefix.trim_start_matches("Superseded by [").to_string())
-            .filter(|prefix| prefix.starts_with("ADR-"))
-            .map(|adr| format!("Superseded by {adr}"))
-            .unwrap_or(status);
+        let status = render_status_label(meta, clusters, by_iri);
         lines.push(format!(
             "| {} | [{}]({}) | {} | {} |",
             meta.num,
@@ -512,16 +533,38 @@ fn render_status(
     clusters: &HashMap<String, Cluster>,
     by_iri: &HashMap<String, Meta>,
 ) -> String {
-    match meta.status.to_ascii_lowercase().as_str() {
-        "accepted" => "Accepted".to_string(),
-        "proposed" => "Proposed".to_string(),
-        "deprecated" => "Deprecated".to_string(),
-        "superseded" => cluster_for(clusters, meta)
+    if meta.status.eq_ignore_ascii_case("superseded") {
+        return cluster_for(clusters, meta)
             .get("isSupersededBy")
             .iter()
             .find_map(|row| by_iri.get(&row.node))
             .map(|successor| format!("Superseded by {}", adr_link(successor)))
-            .unwrap_or_else(|| "Superseded (successor not recorded)".to_string()),
+            .unwrap_or_else(|| "Superseded (successor not recorded)".to_string());
+    }
+    render_plain_status(&meta.status)
+}
+
+fn render_status_label(
+    meta: &Meta,
+    clusters: &HashMap<String, Cluster>,
+    by_iri: &HashMap<String, Meta>,
+) -> String {
+    if meta.status.eq_ignore_ascii_case("superseded") {
+        return cluster_for(clusters, meta)
+            .get("isSupersededBy")
+            .iter()
+            .find_map(|row| by_iri.get(&row.node))
+            .map(|successor| format!("Superseded by ADR-{}", successor.num))
+            .unwrap_or_else(|| "Superseded (successor not recorded)".to_string());
+    }
+    render_plain_status(&meta.status)
+}
+
+fn render_plain_status(status: &str) -> String {
+    match status.to_ascii_lowercase().as_str() {
+        "accepted" => "Accepted".to_string(),
+        "proposed" => "Proposed".to_string(),
+        "deprecated" => "Deprecated".to_string(),
         "" => "not recorded".to_string(),
         other => capitalize(other),
     }

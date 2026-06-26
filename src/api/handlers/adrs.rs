@@ -12,7 +12,7 @@ use crate::graph::AppState;
 pub async fn list_adrs(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AdrListResponse>, ApiError> {
-    let set = generate_adr_set(&state.store, AdrGenerationOptions::default())?;
+    let set = generate_adr_set(&state, AdrGenerationOptions::default())?;
     let adrs = set.summaries();
     Ok(Json(AdrListResponse {
         generated_at: set.generated_at,
@@ -28,7 +28,7 @@ pub async fn get_adr(
     State(state): State<Arc<AppState>>,
     Path(num): Path<String>,
 ) -> Result<Json<AdrDetailResponse>, ApiError> {
-    let set = generate_adr_set(&state.store, AdrGenerationOptions::default())?;
+    let set = generate_adr_set(&state, AdrGenerationOptions::default())?;
     let adr = set
         .find_by_num(&num)
         .ok_or_else(|| ApiError::not_found(format!("ADR {num:?} not found")))?;
@@ -41,7 +41,7 @@ pub async fn get_adr(
 pub async fn download_adr_archive(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse, ApiError> {
-    let set = generate_adr_set(&state.store, AdrGenerationOptions::default())?;
+    let set = generate_adr_set(&state, AdrGenerationOptions::default())?;
     let archive = set.zip_archive()?;
     let headers = [
         (CONTENT_TYPE, "application/zip".to_string()),

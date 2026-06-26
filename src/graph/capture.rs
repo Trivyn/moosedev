@@ -136,6 +136,16 @@ pub fn record_instance_with_relation_args(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<RecordOutcome> {
+    let (object_props, applied_edges) = plan_relation_args(state, input, relations)?;
+    let iri = record_instance_with_relations(state, input, &object_props, author, when)?;
+    Ok(RecordOutcome { iri, applied_edges })
+}
+
+fn plan_relation_args(
+    state: &AppState,
+    input: &RecordInput,
+    relations: &[(String, String)],
+) -> anyhow::Result<(Vec<(String, String)>, Vec<AppliedEdge>)> {
     let subject_types = std::slice::from_ref(&input.class_iri);
     let mut object_props: Vec<(String, String)> = Vec::new();
     let mut applied_edges: Vec<AppliedEdge> = Vec::new();
@@ -169,8 +179,7 @@ pub fn record_instance_with_relation_args(
         object_props.push((predicate_iri, object_iri));
     }
 
-    let iri = record_instance_with_relations(state, input, &object_props, author, when)?;
-    Ok(RecordOutcome { iri, applied_edges })
+    Ok((object_props, applied_edges))
 }
 
 /// One inline cluster slot for [`record_decision_with_cluster`]: the `predicate_local`
@@ -213,7 +222,7 @@ pub fn record_decision_with_cluster(
 ) -> anyhow::Result<(RecordOutcome, Vec<MintedClusterNode>)> {
     // Up-front: resolve + legality-check every non-empty slot before recording
     // anything, so an illegal field/class mapping writes no record at all.
-    let mut planned: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut planned: Vec<(String, String, String, Vec<String>)> = Vec::new();
     for slot in cluster {
         let labels: Vec<String> = slot
             .labels
@@ -240,17 +249,38 @@ pub fn record_decision_with_cluster(
                 slot.range_class_local
             );
         }
-        planned.push((slot.predicate_local.to_string(), range_class_iri, labels));
+        let predicate_iri = state.resolve_object_property(slot.predicate_local)?;
+        planned.push((
+            slot.predicate_local.to_string(),
+            predicate_iri,
+            range_class_iri,
+            labels,
+        ));
     }
 
-    // Record the decision + its inline relations (atomic, unchanged path).
-    let outcome = record_instance_with_relation_args(state, input, relations, author, when)?;
+    let (decision_edges, applied_edges) = plan_relation_args(state, input, relations)?;
+    let decision_iri = mint_instance_iri(&input.class_local);
+    let timestamp = when.to_rfc3339();
+    let stamp = CaptureStamp {
+        capture: &state.capture,
+        author,
+        timestamp: &timestamp,
+        status: DEFAULT_LIFECYCLE_STATUS,
+    };
 
-    // Mint each cluster node and link it from the decision via the slot predicate.
+    let mut quads = capture_instance_quads(
+        &state.store,
+        &decision_iri,
+        &input.class_iri,
+        &input.properties,
+        &decision_edges,
+        &stamp,
+    )?;
     let mut minted: Vec<MintedClusterNode> = Vec::new();
-    for (predicate_local, range_class_iri, labels) in &planned {
+    for (predicate_local, predicate_iri, range_class_iri, labels) in &planned {
         let range_class_local = local_name(range_class_iri).to_string();
         for label in labels {
+            let aux_iri = mint_instance_iri(&range_class_local);
             let aux_input = RecordInput {
                 class_iri: range_class_iri.clone(),
                 class_local: range_class_local.clone(),
@@ -259,15 +289,43 @@ pub fn record_decision_with_cluster(
                     (state.capture.title.clone(), label.clone()),
                 ],
             };
-            let aux_iri = record_instance(state, &aux_input, author, when)?;
-            super::lifecycle::relate(state, &outcome.iri, predicate_local, &aux_iri)?;
+            quads.extend(capture_instance_quads(
+                &state.store,
+                &aux_iri,
+                range_class_iri,
+                &aux_input.properties,
+                &[],
+                &stamp,
+            )?);
+            quads.push(Quad::new(
+                NamedNode::new(&decision_iri)?,
+                NamedNode::new(predicate_iri)?,
+                NamedNode::new(&aux_iri)?,
+                GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+            ));
             minted.push(MintedClusterNode {
                 predicate_local: predicate_local.clone(),
                 iri: aux_iri,
             });
         }
     }
-    Ok((outcome, minted))
+
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("cluster capture transaction: {e}"))?;
+    txn.extend(quads.iter().map(Quad::as_ref));
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("cluster capture commit: {e}"))?;
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+
+    Ok((
+        RecordOutcome {
+            iri: decision_iri,
+            applied_edges,
+        },
+        minted,
+    ))
 }
 
 /// Resolve an inline-relation target to an existing record IRI. Accepts an exact

@@ -3,6 +3,7 @@ use moosedev::graph::{self, AppState, RecordInput};
 use moosedev::requirements::{
     generate_requirement_set, RequirementGenerationOptions, REQUIREMENTS_INDEX_FILENAME,
 };
+use oxigraph::model::{GraphName, NamedNode, Quad};
 
 fn ontology_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
@@ -41,6 +42,20 @@ fn record_item(state: &AppState, class_local: &str, title: &str, timestamp: &str
     .expect("record item")
 }
 
+fn insert_incomplete_requirement(state: &AppState, iri: &str) {
+    let class = state.resolve_class("Requirement").unwrap();
+    let quad = Quad::new(
+        NamedNode::new(iri).unwrap(),
+        NamedNode::new(moose::RDF_TYPE).unwrap(),
+        NamedNode::new(class).unwrap(),
+        GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
+    );
+    state
+        .store
+        .insert(quad.as_ref())
+        .expect("insert incomplete requirement");
+}
+
 #[test]
 fn requirement_set_renders_related_adrs_from_project_graph() {
     let dir = temp_dir("render");
@@ -59,7 +74,7 @@ fn requirement_set_renders_related_adrs_from_project_graph() {
     );
     graph::relate(&state, &adr, "isMotivatedBy", &req).expect("relate decision to requirement");
 
-    let set = generate_requirement_set(&state.store, RequirementGenerationOptions::default())
+    let set = generate_requirement_set(&state, RequirementGenerationOptions::default())
         .expect("generate requirements");
 
     assert_eq!(set.graph_requirements, 1);
@@ -91,13 +106,38 @@ fn requirement_set_reports_duplicate_slugs_and_unlinked_requirements() {
     record_item(&state, "Requirement", "Repeated", "2026-06-25T00:00:00Z");
     record_item(&state, "Requirement", "Repeated", "2026-06-26T00:00:00Z");
 
-    let set = generate_requirement_set(&state.store, RequirementGenerationOptions::default())
+    let set = generate_requirement_set(&state, RequirementGenerationOptions::default())
         .expect("generate requirements");
 
     assert_eq!(set.requirements[0].filename, "0001-repeated.md");
     assert_eq!(set.requirements[1].filename, "0002-repeated-2.md");
     assert_eq!(set.warnings.unlinked_requirements, vec!["0001", "0002"]);
     assert!(set.warnings.missing_description.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn requirement_set_renders_incomplete_records_instead_of_dropping_them() {
+    let dir = temp_dir("incomplete");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    insert_incomplete_requirement(&state, "https://moosedev.dev/kg/Requirement/incomplete");
+
+    let set = generate_requirement_set(&state, RequirementGenerationOptions::default())
+        .expect("generate requirements");
+
+    assert_eq!(set.graph_requirements, 1);
+    assert_eq!(
+        set.requirement_files, 1,
+        "typed requirements must not be silently dropped"
+    );
+    assert_eq!(set.requirements[0].title, "");
+    assert_eq!(set.requirements[0].status, "not recorded");
+    assert_eq!(set.requirements[0].filename, "0001-requirement.md");
+    assert!(set
+        .warnings
+        .missing_description
+        .contains(&"0001".to_string()));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
