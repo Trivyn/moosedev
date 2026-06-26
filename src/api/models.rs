@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::adrs::{AdrSummary, AdrWarnings};
+use crate::requirements::{RequirementSummary, RequirementWarnings};
+
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -17,6 +20,38 @@ pub struct HealthResponse {
     pub project_root: String,
     pub llm_configured: bool,
     pub llm_assist_level: String,
+}
+
+#[derive(Serialize)]
+pub struct AdrListResponse {
+    pub generated_at: String,
+    pub graph_decisions: usize,
+    pub adr_files: usize,
+    pub index_filename: String,
+    pub warnings: AdrWarnings,
+    pub adrs: Vec<AdrSummary>,
+}
+
+#[derive(Serialize)]
+pub struct AdrDetailResponse {
+    pub summary: AdrSummary,
+    pub markdown: String,
+}
+
+#[derive(Serialize)]
+pub struct RequirementListResponse {
+    pub generated_at: String,
+    pub graph_requirements: usize,
+    pub requirement_files: usize,
+    pub index_filename: String,
+    pub warnings: RequirementWarnings,
+    pub requirements: Vec<RequirementSummary>,
+}
+
+#[derive(Serialize)]
+pub struct RequirementDetailResponse {
+    pub summary: RequirementSummary,
+    pub markdown: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

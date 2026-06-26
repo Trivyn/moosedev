@@ -1,14 +1,19 @@
 import { useEffect, useState } from 'react';
 import { Alert, Box, CircularProgress, Typography } from '@mui/material';
+import ArticleIcon from '@mui/icons-material/Article';
+import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
 import ChatIcon from '@mui/icons-material/Forum';
 import ImportExportIcon from '@mui/icons-material/ImportExport';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import AppShell, { PageKey } from './components/layout/AppShell';
+import AdrsPage from './pages/AdrsPage';
 import ChatPage from './pages/ChatPage';
 import GraphTransferPage from './pages/GraphTransferPage';
+import RequirementsPage from './pages/RequirementsPage';
 import SparqlPage from './pages/SparqlPage';
 import { api } from './api/client';
 import { HealthResponse } from './api/types';
+import { ArtifactTarget } from './components/artifacts/LinkedMarkdown';
 import { MooseThemeMode } from './styles/theme';
 
 interface AppProps {
@@ -20,6 +25,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   const [page, setPage] = useState<PageKey>('chat');
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [artifactTargets, setArtifactTargets] = useState<Partial<Record<PageKey, string>>>({});
 
   useEffect(() => {
     api
@@ -30,9 +36,20 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
 
   const nav = [
     { key: 'chat' as const, label: 'Chat', icon: <ChatIcon fontSize="small" /> },
+    { key: 'adrs' as const, label: 'ADRs', icon: <ArticleIcon fontSize="small" /> },
+    {
+      key: 'requirements' as const,
+      label: 'Requirements',
+      icon: <AssignmentTurnedInIcon fontSize="small" />,
+    },
     { key: 'sparql' as const, label: 'SPARQL', icon: <QueryStatsIcon fontSize="small" /> },
     { key: 'transfer' as const, label: 'Import / Export', icon: <ImportExportIcon fontSize="small" /> },
   ];
+
+  const navigateArtifact = (target: ArtifactTarget) => {
+    setArtifactTargets((current) => ({ ...current, [target.kind]: target.iri }));
+    setPage(target.kind);
+  };
 
   return (
     <AppShell
@@ -59,6 +76,13 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
         </Box>
       ) : page === 'chat' ? (
         <ChatPage />
+      ) : page === 'adrs' ? (
+        <AdrsPage targetIri={artifactTargets.adrs} onNavigateArtifact={navigateArtifact} />
+      ) : page === 'requirements' ? (
+        <RequirementsPage
+          targetIri={artifactTargets.requirements}
+          onNavigateArtifact={navigateArtifact}
+        />
       ) : page === 'sparql' ? (
         <SparqlPage />
       ) : (

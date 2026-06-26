@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::http::header::CONTENT_DISPOSITION;
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum_test::TestServer;
 use chrono::Utc;
 use moosedev::api::routes::build_routes;
@@ -42,6 +42,50 @@ fn unconfigured_llm() -> LlmConfig {
         model: "fake-model".to_string(),
         configured: false,
     }
+}
+
+fn record_api_decision(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (
+                    state.capture.description.clone(),
+                    format!("Decision description for {title}"),
+                ),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record project decision")
+}
+
+fn record_api_requirement(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("Requirement").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "Requirement".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (
+                    state.capture.description.clone(),
+                    format!("Requirement description for {title}"),
+                ),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record project requirement")
 }
 
 #[tokio::test]
@@ -243,6 +287,180 @@ async fn graph_export_rejects_unknown_format() {
 
     response.assert_status_bad_request();
     assert!(response.text().contains("unknown export format"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn adrs_list_renders_project_decisions() {
+    let dir = temp_dir("adrs-list");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let iri = record_api_decision(&state, "API ADR visible");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/adrs").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["graph_decisions"], 1);
+    assert_eq!(body["adr_files"], 1);
+    assert_eq!(body["adrs"][0]["num"], "0001");
+    assert_eq!(body["adrs"][0]["title"], "API ADR visible");
+    assert_eq!(body["adrs"][0]["filename"], "0001-api-adr-visible.md");
+    assert_eq!(body["adrs"][0]["iri"], iri);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn adrs_detail_returns_generated_markdown() {
+    let dir = temp_dir("adrs-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_decision(&state, "Detailed ADR");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/adrs/0001").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["summary"]["filename"], "0001-detailed-adr.md");
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains("Decision description for Detailed ADR"));
+
+    let missing = server.get("/api/v1/adrs/9999").await;
+    missing.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn adrs_archive_downloads_zip_with_generated_files() {
+    let dir = temp_dir("adrs-archive");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_decision(&state, "Archive ADR");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/adrs/archive.zip").await;
+
+    response.assert_status_ok();
+    assert_eq!(response.content_type(), "application/zip");
+    assert!(response
+        .header(CONTENT_DISPOSITION)
+        .to_str()
+        .expect("content-disposition is text")
+        .contains("attachment; filename=\"moosedev-adrs.zip\""));
+    assert_eq!(
+        response
+            .header(CONTENT_TYPE)
+            .to_str()
+            .expect("content-type is text"),
+        "application/zip"
+    );
+
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(response.as_bytes().as_ref())).expect("zip");
+    assert!(archive.by_name("0000-index.md").is_ok());
+    let mut adr = archive
+        .by_name("0001-archive-adr.md")
+        .expect("generated ADR file");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut adr, &mut text).expect("read ADR");
+    assert!(text.contains("Decision description for Archive ADR"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn requirements_list_renders_project_requirements() {
+    let dir = temp_dir("requirements-list");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let req = record_api_requirement(&state, "API Requirement visible");
+    let ad = record_api_decision(&state, "Requirement ADR");
+    graph::relate(&state, &ad, "isMotivatedBy", &req).expect("link requirement");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/requirements").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["graph_requirements"], 1);
+    assert_eq!(body["requirement_files"], 1);
+    assert_eq!(body["requirements"][0]["num"], "0001");
+    assert_eq!(body["requirements"][0]["title"], "API Requirement visible");
+    assert_eq!(
+        body["requirements"][0]["filename"],
+        "0001-api-requirement-visible.md"
+    );
+    assert_eq!(body["requirements"][0]["iri"], req);
+    assert_eq!(body["requirements"][0]["related_adrs"], 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn requirements_detail_returns_generated_markdown() {
+    let dir = temp_dir("requirements-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let req = record_api_requirement(&state, "Detailed Requirement");
+    let ad = record_api_decision(&state, "Detailed Requirement ADR");
+    graph::relate(&state, &ad, "isMotivatedBy", &req).expect("link requirement");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/requirements/0001").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["summary"]["filename"], "0001-detailed-requirement.md");
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains("Requirement description for Detailed Requirement"));
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains(&ad));
+
+    let missing = server.get("/api/v1/requirements/9999").await;
+    missing.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn requirements_archive_downloads_zip_with_generated_files() {
+    let dir = temp_dir("requirements-archive");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_requirement(&state, "Archive Requirement");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/requirements/archive.zip").await;
+
+    response.assert_status_ok();
+    assert_eq!(response.content_type(), "application/zip");
+    assert!(response
+        .header(CONTENT_DISPOSITION)
+        .to_str()
+        .expect("content-disposition is text")
+        .contains("attachment; filename=\"moosedev-requirements.zip\""));
+    assert_eq!(
+        response
+            .header(CONTENT_TYPE)
+            .to_str()
+            .expect("content-type is text"),
+        "application/zip"
+    );
+
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(response.as_bytes().as_ref())).expect("zip");
+    assert!(archive.by_name("0000-index.md").is_ok());
+    let mut requirement = archive
+        .by_name("0001-archive-requirement.md")
+        .expect("generated requirement file");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut requirement, &mut text).expect("read requirement");
+    assert!(text.contains("Requirement description for Archive Requirement"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
