@@ -1,4 +1,6 @@
 import {
+  AdrDetailResponse,
+  AdrListResponse,
   ChatMessage,
   ChatResponse,
   ChatSessionDetail,
@@ -6,6 +8,8 @@ import {
   GraphImportResponse,
   HealthResponse,
   QueryResponse,
+  RequirementDetailResponse,
+  RequirementListResponse,
 } from './types';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -47,6 +51,13 @@ function graphTransferPath(basePath: string, params: { format?: string; graph?: 
 
 export const api = {
   health: () => request<HealthResponse>('/health'),
+  listAdrs: () => request<AdrListResponse>('/adrs'),
+  getAdr: (num: string) => request<AdrDetailResponse>(`/adrs/${encodeURIComponent(num)}`),
+  downloadAdrArchive: () => download('/adrs/archive.zip'),
+  listRequirements: () => request<RequirementListResponse>('/requirements'),
+  getRequirement: (num: string) =>
+    request<RequirementDetailResponse>(`/requirements/${encodeURIComponent(num)}`),
+  downloadRequirementArchive: () => download('/requirements/archive.zip'),
   chat: (payload: {
     session_id?: string;
     messages: ChatMessage[];

@@ -18,7 +18,16 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         )
         .route("/sparql/query", post(handlers::query))
         .route("/graph/export", get(handlers::export_graph))
-        .route("/graph/import", post(handlers::import_graph));
+        .route("/graph/import", post(handlers::import_graph))
+        .route("/adrs", get(handlers::list_adrs))
+        .route("/adrs/archive.zip", get(handlers::download_adr_archive))
+        .route("/adrs/{num}", get(handlers::get_adr))
+        .route("/requirements", get(handlers::list_requirements))
+        .route(
+            "/requirements/archive.zip",
+            get(handlers::download_requirement_archive),
+        )
+        .route("/requirements/{num}", get(handlers::get_requirement));
 
     Router::new()
         .nest("/api/v1", api)

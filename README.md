@@ -83,6 +83,7 @@ This is an active build with a working v1 surface. **Live today and exercised by
 - **Graph export / import** for backup and version control (CLI plus the `export_graph` tool).
 - A **shared multi-client backend** (one `--serve` process, thin `--connect` proxies) so several agents share one live graph concurrently, and a **loopback web UI** for humans.
 - The **history-walking bootstrap workflow** for recovering knowledge from an existing codebase (`skills/bootstrap-existing-codebase.md`).
+- A **graph→docs workflow** that renders captured decisions as a standard ADR set (`skills/generate-adrs-from-graph.md`).
 - A **stdio MCP server** (rmcp 1.7, latest negotiated protocol) verified end-to-end (`initialize` → `tools/list` → `tools/call`), and persistence across restarts (on-disk oxigraph).
 
 Against the roadmap in [`tasks/todo.md`](./tasks/todo.md): M0–M3 are complete, M4 is partial (the bootstrap workflow shipped; the `get_focus_stack` tool is deferred), and the M5 shared-backend core is complete.
@@ -232,7 +233,7 @@ auto-spawned backend inherits the resolved configuration.
 src/            # the MCP server (Rust): mcp/, graph/, ontology/, alignment/, llm/, api/, …
 ui/             # the human-facing web UI (Vite/React); built to ui/dist/ and embedded in the binary
 ontologies/     # software-engineering + architecture ontologies + SHACL shapes (.ttl)
-skills/         # bootstrap-existing-codebase workflow
+skills/         # workflow docs: bootstrap, temporal capture, ADR generation
 templates/      # CLAUDE.md template for projects adopting MOOSEDev as memory
 spec/           # specification + design of record + upstream engine asks
 tasks/          # build checklist / roadmap

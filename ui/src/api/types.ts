@@ -9,6 +9,67 @@ export interface HealthResponse {
   llm_assist_level: string;
 }
 
+export interface AdrWarnings {
+  missing_context: string[];
+  missing_decision: string[];
+  missing_successor: string[];
+  missing_reciprocal: string[];
+}
+
+export interface AdrSummary {
+  num: string;
+  title: string;
+  status: string;
+  date: string;
+  author: string;
+  iri: string;
+  filename: string;
+}
+
+export interface AdrListResponse {
+  generated_at: string;
+  graph_decisions: number;
+  adr_files: number;
+  index_filename: string;
+  warnings: AdrWarnings;
+  adrs: AdrSummary[];
+}
+
+export interface AdrDetailResponse {
+  summary: AdrSummary;
+  markdown: string;
+}
+
+export interface RequirementWarnings {
+  missing_description: string[];
+  unlinked_requirements: string[];
+}
+
+export interface RequirementSummary {
+  num: string;
+  title: string;
+  status: string;
+  date: string;
+  author: string;
+  iri: string;
+  filename: string;
+  related_adrs: number;
+}
+
+export interface RequirementListResponse {
+  generated_at: string;
+  graph_requirements: number;
+  requirement_files: number;
+  index_filename: string;
+  warnings: RequirementWarnings;
+  requirements: RequirementSummary[];
+}
+
+export interface RequirementDetailResponse {
+  summary: RequirementSummary;
+  markdown: string;
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;

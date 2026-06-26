@@ -9,7 +9,7 @@ use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef,
 use oxigraph::store::Store;
 
 use super::context::resolve_record_exact_all;
-use super::relations::validate_relation_for_subject_types;
+use super::relations::{validate_relation_for_subject_types, EdgeDirection};
 use super::state::{
     AppState, CapturePredicates, DEFAULT_LIFECYCLE_STATUS, LABEL_PROPERTY_LOCAL, XSD_DATETIME,
 };
@@ -171,6 +171,103 @@ pub fn record_instance_with_relation_args(
 
     let iri = record_instance_with_relations(state, input, &object_props, author, when)?;
     Ok(RecordOutcome { iri, applied_edges })
+}
+
+/// One inline cluster slot for [`record_decision_with_cluster`]: the `predicate_local`
+/// that links the decision to a freshly-minted node of `range_class_local`, plus the
+/// caller-supplied `labels` (one minted node per non-empty label).
+pub struct ClusterSlot<'a> {
+    pub predicate_local: &'a str,
+    pub range_class_local: &'a str,
+    pub labels: &'a [String],
+}
+
+/// A node minted-and-linked as part of a decision's cluster (surfaced in the response).
+#[derive(Debug, Clone)]
+pub struct MintedClusterNode {
+    pub predicate_local: String,
+    pub iri: String,
+}
+
+/// Record a decision (with its inline `relations`, atomically as in
+/// [`record_instance_with_relation_args`]), then mint each cluster slot's labels as
+/// typed nodes linked from the decision via the slot predicate — e.g.
+/// `weighs`→`Alternative`, `resultsIn`→`Consequence`. This lets a decision carry its
+/// decision-specific cluster in ONE capture call instead of the mint-then-`relate`
+/// dance that left `weighs`/`resultsIn` empty in practice (small models don't do the
+/// multi-call follow-up).
+///
+/// Each slot's `predicate_local`→`range_class_local` legality is checked against the
+/// SHACL catalogue BEFORE anything is written, so a bad mapping (or cluster fields on a
+/// class the shape doesn't allow that edge from) fails the whole call with no record
+/// left behind. Minted nodes reuse [`record_instance`] + the SHACL-validated
+/// [`relate`](super::lifecycle::relate); each label is written as both `rdfs:label` and
+/// the class title property, and the node defaults to status "proposed" (auditable).
+pub fn record_decision_with_cluster(
+    state: &AppState,
+    input: &RecordInput,
+    relations: &[(String, String)],
+    cluster: &[ClusterSlot<'_>],
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<(RecordOutcome, Vec<MintedClusterNode>)> {
+    // Up-front: resolve + legality-check every non-empty slot before recording
+    // anything, so an illegal field/class mapping writes no record at all.
+    let mut planned: Vec<(String, String, Vec<String>)> = Vec::new();
+    for slot in cluster {
+        let labels: Vec<String> = slot
+            .labels
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if labels.is_empty() {
+            continue;
+        }
+        let range_class_iri = state.resolve_class(slot.range_class_local)?;
+        let legal =
+            state
+                .catalogue
+                .legal_predicates(&state.store, &input.class_iri, &range_class_iri);
+        if !legal.iter().any(|e| {
+            e.predicate_local == slot.predicate_local && e.direction == EdgeDirection::Forward
+        }) {
+            anyhow::bail!(
+                "{} cannot carry {}: not a legal {}->{} edge in the architecture ontology",
+                input.class_local,
+                slot.predicate_local,
+                input.class_local,
+                slot.range_class_local
+            );
+        }
+        planned.push((slot.predicate_local.to_string(), range_class_iri, labels));
+    }
+
+    // Record the decision + its inline relations (atomic, unchanged path).
+    let outcome = record_instance_with_relation_args(state, input, relations, author, when)?;
+
+    // Mint each cluster node and link it from the decision via the slot predicate.
+    let mut minted: Vec<MintedClusterNode> = Vec::new();
+    for (predicate_local, range_class_iri, labels) in &planned {
+        let range_class_local = local_name(range_class_iri).to_string();
+        for label in labels {
+            let aux_input = RecordInput {
+                class_iri: range_class_iri.clone(),
+                class_local: range_class_local.clone(),
+                properties: vec![
+                    (moose::RDFS_LABEL.to_string(), label.clone()),
+                    (state.capture.title.clone(), label.clone()),
+                ],
+            };
+            let aux_iri = record_instance(state, &aux_input, author, when)?;
+            super::lifecycle::relate(state, &outcome.iri, predicate_local, &aux_iri)?;
+            minted.push(MintedClusterNode {
+                predicate_local: predicate_local.clone(),
+                iri: aux_iri,
+            });
+        }
+    }
+    Ok((outcome, minted))
 }
 
 /// Resolve an inline-relation target to an existing record IRI. Accepts an exact

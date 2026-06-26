@@ -170,6 +170,15 @@ pub struct RecordDecisionArgs {
     /// capture. (Targets must already be recorded items; to link an auxiliary node
     /// whose range isn't a record — e.g. concerns→SystemComponent — use `relate`.)
     pub relations: Option<Vec<RelationArg>>,
+    /// Alternatives you ACTUALLY weighed and rejected for this decision (the road not
+    /// taken). One string per alternative — each mints an `Alternative` node linked via
+    /// `weighs`, in this same call. OMIT if you did not genuinely consider one; do NOT
+    /// invent an alternative to fill this field.
+    pub alternatives_considered: Option<Vec<String>>,
+    /// Consequences / accepted trade-offs that RESULT from this decision. One string
+    /// each — mints a `Consequence` node linked via `resultsIn`, in this same call.
+    /// OMIT if none is known yet; do not pad.
+    pub consequences: Option<Vec<String>>,
 }
 
 /// One inline relation for `record_important_decision`: an object property plus its
@@ -333,7 +342,7 @@ impl MooseDevServer {
 
     /// Record a typed knowledge item into the durable project knowledge graph.
     #[tool(
-        description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph."
+        description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph. For an ArchitecturalDecision, capture its cluster in the SAME call: `alternatives_considered` (options you weighed and rejected) and `consequences` (trade-offs that result) are each minted as a typed node and linked — record what you actually weighed; omit when there is none (do not invent)."
     )]
     async fn record_important_decision(
         &self,
@@ -388,14 +397,33 @@ impl MooseDevServer {
             .into_iter()
             .map(|r| (r.predicate, r.target))
             .collect();
-        match graph::record_instance_with_relation_args(
+        // Inline decision cluster: mint Alternatives/Consequences and link them in the
+        // SAME call (weighs/resultsIn), so a decision's cluster is captured without a
+        // mint-then-relate dance. isMotivatedBy stays link-to-existing (via `relations`)
+        // — Requirements are reusable hubs, not minted per decision.
+        let alternatives = args.alternatives_considered.unwrap_or_default();
+        let consequences = args.consequences.unwrap_or_default();
+        let cluster = [
+            graph::ClusterSlot {
+                predicate_local: "weighs",
+                range_class_local: "Alternative",
+                labels: &alternatives,
+            },
+            graph::ClusterSlot {
+                predicate_local: "resultsIn",
+                range_class_local: "Consequence",
+                labels: &consequences,
+            },
+        ];
+        match graph::record_decision_with_cluster(
             &self.state,
             &input,
             &relations,
+            &cluster,
             &agent,
             now,
         ) {
-            Ok(outcome) => {
+            Ok((outcome, minted)) => {
                 let iri = outcome.iri;
                 // Best-effort edit provenance: who (the MCP client) asserted this,
                 // and when. Post-write — a provenance failure must not fail the
@@ -418,16 +446,20 @@ impl MooseDevServer {
                 }
                 // A new record (+ any edges) invalidates the materialized inverse edges.
                 self.state.mark_inferred_stale();
-                let edge_note = if outcome.applied_edges.is_empty() {
+                let mut links: Vec<String> = outcome
+                    .applied_edges
+                    .iter()
+                    .map(|e| format!("{} → {}", e.predicate_local, e.object_iri))
+                    .collect();
+                links.extend(
+                    minted
+                        .iter()
+                        .map(|m| format!("{} → {}", m.predicate_local, m.iri)),
+                );
+                let edge_note = if links.is_empty() {
                     String::new()
                 } else {
-                    let edges = outcome
-                        .applied_edges
-                        .iter()
-                        .map(|e| format!("{} → {}", e.predicate_local, e.object_iri))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("\nLinked: {edges}")
+                    format!("\nLinked: {}", links.join(", "))
                 };
                 let suggestion_note = capture_suggestion_note(&self.state, &iri).await;
                 Ok(tool_ok(format!(
@@ -834,9 +866,10 @@ impl MooseDevServer {
         }
     }
 
-    /// Export the project knowledge graph as RDF text.
+    /// Serialize the project knowledge graph to RDF text for backup / version
+    /// control / transfer — NOT a read or search path.
     #[tool(
-        description = "Export the project knowledge graph as RDF text. Defaults to canonical N-Quads for the project graph. N-Triples is deterministic after graph names are dropped; Turtle is human-readable, not byte-canonical. Optional args: format nq|nt|ttl, graph project|provenance|all, path for writing to a file instead of returning inline text (absolute paths recommended)."
+        description = "Serialize the project knowledge graph to RDF text for BACKUP, version control, or transfer — this is NOT a read or search path. To read, search, or traverse knowledge — to answer a question, render a document, or inspect records — use `sparql`, `get_relevant_context`, or `query` instead; do NOT dump the whole graph into context (that defeats the point of structured, queryable memory). Defaults to canonical N-Quads for the project graph. N-Triples is deterministic after graph names are dropped; Turtle is human-readable, not byte-canonical. Optional args: format nq|nt|ttl, graph project|provenance|all, path for writing to a file instead of returning inline text (absolute paths recommended)."
     )]
     async fn export_graph(
         &self,
