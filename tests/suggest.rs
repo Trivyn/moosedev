@@ -1,7 +1,7 @@
 //! Link suggester: symbolic-first candidate generation (hybrid retrieval) gated by
 //! SHACL legality, suggest-only. A suggestion's `confirm()` args create exactly the
 //! edge via the validated `relate` path, and a confirmed pair is not re-suggested
-//! (idempotency). `under_linked_records` is driven by the shapes' `sh:or` branches.
+//! (idempotency). `under_linked_records` is driven by SHACL Warning results.
 
 use std::path::Path;
 

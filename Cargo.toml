@@ -8,7 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 # The closed-source MOOSE engine, consumed as a path dependency.
 # candle-cpu + arctic-s: local embedding backbone (Arctic-Embed-S, 384-dim) for alignment.
-moose = { path = "../moose", features = ["candle-cpu", "arctic-s"] }
+moose = { path = "../moose", features = ["candle-cpu", "arctic-s", "shacl-validation"] }
 
 # Same oxigraph (Trivyn fork, via [patch] below) MOOSE exposes across its public API.
 # `Store` crosses the moose API boundary, so moosedev must resolve the identical crate.

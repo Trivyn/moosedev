@@ -1,57 +1,39 @@
-//! Lightweight, shape-graph-driven validation for recorded project knowledge.
+//! SHACL validation for recorded project knowledge.
 //!
-//! This is an intentional SHACL subset for M3: required literal presence
-//! (`sh:minCount 1`) and literal datatype checks (`sh:datatype`). Other declared
-//! constraints are counted as skipped so the report stays honest.
+//! Validation is delegated to MOOSE's SNARL-backed SHACL Core validator. Warning
+//! severity results are used for non-blocking graph-density advisories; violation
+//! severity results are the only findings that affect conformance.
 
-use oxigraph::model::Term;
-use oxigraph::sparql::{QueryResults, SparqlEvaluator};
+use std::collections::HashSet;
 
-use crate::graph::AppState;
-use crate::ontology::{ARCH_SHAPES_GRAPH_IRI, SE_SHAPES_GRAPH_IRI};
+use moose::shacl::{ShaclReport, ShaclSeverity, ShaclViolation};
+use oxigraph::model::{GraphNameRef, NamedNodeRef, TermRef};
 
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
+use crate::ontology::{
+    ARCH_DOMAIN_GRAPH_IRI, ARCH_SHAPES_GRAPH_IRI, SE_DOMAIN_GRAPH_IRI, SE_SHAPES_GRAPH_IRI,
+};
+
 const SH_NODE_SHAPE: &str = "http://www.w3.org/ns/shacl#NodeShape";
-const SH_TARGET_CLASS: &str = "http://www.w3.org/ns/shacl#targetClass";
-const SH_PROPERTY: &str = "http://www.w3.org/ns/shacl#property";
-const SH_PATH: &str = "http://www.w3.org/ns/shacl#path";
-const SH_MIN_COUNT: &str = "http://www.w3.org/ns/shacl#minCount";
-const SH_DATATYPE: &str = "http://www.w3.org/ns/shacl#datatype";
-const SH_CLASS: &str = "http://www.w3.org/ns/shacl#class";
-const SH_NODE: &str = "http://www.w3.org/ns/shacl#node";
-const SH_IN: &str = "http://www.w3.org/ns/shacl#in";
-const SH_MAX_COUNT: &str = "http://www.w3.org/ns/shacl#maxCount";
-const SH_QUALIFIED_VALUE_SHAPE: &str = "http://www.w3.org/ns/shacl#qualifiedValueShape";
-const SH_OR: &str = "http://www.w3.org/ns/shacl#or";
-
-#[derive(Debug, Clone)]
-struct PropertyConstraint {
-    target_class: String,
-    path: String,
-    min_count: Option<u32>,
-    datatype: Option<String>,
-    skipped: usize,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolationKind {
     MissingRequired,
     DatatypeMismatch,
+    Other(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct Violation {
     pub node: String,
-    pub target_class: String,
+    pub source_shape: String,
     pub path: String,
     pub kind: ViolationKind,
     pub detail: String,
 }
 
-/// A non-blocking "SHOULD carry a link" finding: a record whose shape declares an
-/// `sh:or` link requirement (e.g. ArchitecturalDecision → isMotivatedBy) that the
-/// record does not yet satisfy. Advisory only — it never affects conformance.
+/// A non-blocking "SHOULD carry a link" finding, sourced from SHACL Warning
+/// results declared in the shape graph.
 #[derive(Debug, Clone)]
 pub struct Advisory {
     pub node: String,
@@ -62,13 +44,10 @@ pub struct Advisory {
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
     pub violations: Vec<Violation>,
-    /// Non-blocking under-linked findings (the shapes' `sh:or` branches). These do
-    /// NOT affect `conforms()` — a flat graph still validates — they nudge the agent
-    /// to densify the graph via `suggest_links` / `relate`. MOOSE's M3 validator has
-    /// no `sh:severity`, so this advisory is computed in Rust from the same shapes.
+    /// Non-blocking under-linked findings. These do NOT affect `conforms()`;
+    /// they nudge the agent to densify the graph via `suggest_links` / `relate`.
     pub advisories: Vec<Advisory>,
     pub shapes_checked: usize,
-    pub skipped: usize,
 }
 
 impl ValidationReport {
@@ -79,29 +58,33 @@ impl ValidationReport {
     }
 }
 
+/// Run SNARL over the project graph plus the loaded ontology T-boxes.
+pub(crate) fn run_project_shacl(state: &AppState) -> anyhow::Result<ShaclReport> {
+    moose::shacl::validate_graphs(
+        &state.store,
+        &[PROJECT_KG_GRAPH_IRI.to_string()],
+        &[
+            SE_DOMAIN_GRAPH_IRI.to_string(),
+            ARCH_DOMAIN_GRAPH_IRI.to_string(),
+        ],
+        &[
+            SE_SHAPES_GRAPH_IRI.to_string(),
+            ARCH_SHAPES_GRAPH_IRI.to_string(),
+        ],
+    )
+    .map_err(|e| anyhow::anyhow!("SHACL validation failed: {e}"))
+}
+
 /// Validate recorded project knowledge against the loaded architecture shapes.
 pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
-    let constraints = load_property_constraints(state)?;
-    let shapes_checked = constraints.len();
-    let mut skipped = count_node_level_skips(state)?;
-    let mut violations = Vec::new();
-
-    for constraint in constraints {
-        skipped += constraint.skipped;
-        if constraint.min_count == Some(1) {
-            violations.extend(missing_required_violations(state, &constraint)?);
-        } else if constraint.min_count.is_some() {
-            skipped += 1;
-        }
-        if constraint.datatype.is_some() {
-            violations.extend(datatype_violations(state, &constraint)?);
-        }
-    }
-
-    // Non-blocking advisory: records the shapes say SHOULD carry a link (an `sh:or`
-    // branch predicate) but don't. Computed from the same shapes; excluded from
-    // `conforms()`. Source of truth: graph::under_linked_records.
-    let advisories = crate::graph::under_linked_records(state, usize::MAX)
+    let report = run_project_shacl(state)?;
+    let violations = report
+        .violations
+        .iter()
+        .filter(|v| v.severity == ShaclSeverity::Violation)
+        .map(map_violation)
+        .collect();
+    let advisories = crate::graph::under_linked_from_report(state, &report, usize::MAX)
         .into_iter()
         .map(|u| Advisory {
             node: u.iri,
@@ -113,8 +96,7 @@ pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
     Ok(ValidationReport {
         violations,
         advisories,
-        shapes_checked,
-        skipped,
+        shapes_checked: count_target_shapes(state)?,
     })
 }
 
@@ -126,24 +108,23 @@ pub fn format_report(report: &ValidationReport) -> String {
         "Conforms: false".to_string()
     };
     out.push_str(&format!(
-        "\nShapes checked: {}\nUnsupported constraints skipped: {}\nViolations: {}",
+        "\nShapes checked: {}\nViolations: {}",
         report.shapes_checked,
-        report.skipped,
         report.violations.len()
     ));
     for violation in &report.violations {
         out.push_str(&format!(
-            "\n\n- {:?}: {}\n  node: {}\n  target: {}\n  path: {}",
+            "\n\n- {:?}: {}\n  node: {}\n  shape: {}\n  path: {}",
             violation.kind,
             violation.detail,
             violation.node,
-            local_name(&violation.target_class),
+            local_name(&violation.source_shape),
             local_name(&violation.path)
         ));
     }
     if !report.advisories.is_empty() {
-        // Show the count plus a bounded sample — on a large graph there can be
-        // hundreds; the full set is the `suggest_links` scan's job, not validate's.
+        // Show the count plus a bounded sample; the full set is the `suggest_links`
+        // scan's job, not validate's.
         const ADVISORY_SAMPLE: usize = 10;
         out.push_str(&format!(
             "\n\nAdvisories (SHOULD, non-blocking): {} — run `suggest_links` for candidates",
@@ -163,199 +144,52 @@ pub fn format_report(report: &ValidationReport) -> String {
     out
 }
 
-/// Read every property shape from the loaded shape graphs and keep only the
-/// fields this validator knows how to enforce.
-fn load_property_constraints(state: &AppState) -> anyhow::Result<Vec<PropertyConstraint>> {
-    let sparql = format!(
-        r#"
-SELECT ?target ?path ?minCount ?datatype ?class ?node ?in ?maxCount ?qualified
-WHERE {{
-  VALUES ?shapeGraph {{ <{SE_SHAPES_GRAPH_IRI}> <{ARCH_SHAPES_GRAPH_IRI}> }}
-  GRAPH ?shapeGraph {{
-    ?shape a <{SH_NODE_SHAPE}> ;
-           <{SH_TARGET_CLASS}> ?target ;
-           <{SH_PROPERTY}> ?property .
-    ?property <{SH_PATH}> ?path .
-    OPTIONAL {{ ?property <{SH_MIN_COUNT}> ?minCount }}
-    OPTIONAL {{ ?property <{SH_DATATYPE}> ?datatype }}
-    OPTIONAL {{ ?property <{SH_CLASS}> ?class }}
-    OPTIONAL {{ ?property <{SH_NODE}> ?node }}
-    OPTIONAL {{ ?property <{SH_IN}> ?in }}
-    OPTIONAL {{ ?property <{SH_MAX_COUNT}> ?maxCount }}
-    OPTIONAL {{ ?property <{SH_QUALIFIED_VALUE_SHAPE}> ?qualified }}
-  }}
-}}"#
-    );
-
-    let QueryResults::Solutions(solutions) = query(&state.store, &sparql)? else {
-        anyhow::bail!("constraint query did not return solutions");
-    };
-
-    let mut constraints = Vec::new();
-    for solution in solutions {
-        let solution = solution?;
-        let Some(target_class) = iri_value(solution.get("target")) else {
-            continue;
-        };
-        let Some(path) = iri_value(solution.get("path")) else {
-            continue;
-        };
-        let skipped = ["class", "node", "in", "maxCount", "qualified"]
-            .iter()
-            .filter(|name| solution.get(**name).is_some())
-            .count();
-        constraints.push(PropertyConstraint {
-            target_class,
-            path,
-            min_count: integer_value(solution.get("minCount")),
-            datatype: iri_value(solution.get("datatype")),
-            skipped,
-        });
+fn map_violation(v: &ShaclViolation) -> Violation {
+    Violation {
+        node: v.focus_node.clone(),
+        source_shape: v.source_shape.clone(),
+        path: v.result_path.clone().unwrap_or_default(),
+        kind: classify(&v.source_constraint_component),
+        detail: v.message.clone().unwrap_or_else(|| {
+            let mut detail = local_name(&v.source_constraint_component).to_string();
+            if let Some(value) = &v.value {
+                detail.push_str(&format!(" (value: {value})"));
+            }
+            detail
+        }),
     }
-    Ok(constraints)
 }
 
-/// Count declared node-level constraints outside the M3 subset so validation
-/// reports do not imply full SHACL coverage.
-fn count_node_level_skips(state: &AppState) -> anyhow::Result<usize> {
-    let sparql = format!(
-        r#"
-SELECT ?shape ?or
-WHERE {{
-  VALUES ?shapeGraph {{ <{SE_SHAPES_GRAPH_IRI}> <{ARCH_SHAPES_GRAPH_IRI}> }}
-  GRAPH ?shapeGraph {{
-    ?shape a <{SH_NODE_SHAPE}> ;
-           <{SH_OR}> ?or .
-  }}
-}}"#
-    );
-    let QueryResults::Solutions(solutions) = query(&state.store, &sparql)? else {
-        return Ok(0);
-    };
-    let mut count = 0;
-    for solution in solutions {
-        solution?;
-        count += 1;
+fn classify(component: &str) -> ViolationKind {
+    let lowered = component.to_ascii_lowercase();
+    if lowered.contains("mincount") {
+        ViolationKind::MissingRequired
+    } else if lowered.contains("datatype") {
+        ViolationKind::DatatypeMismatch
+    } else {
+        // Match case-insensitively, but preserve the original casing in the report
+        // (e.g. `Other("OrConstraintComponent")`, not lowercased).
+        ViolationKind::Other(local_name(component).to_string())
     }
-    Ok(count)
 }
 
-/// Find instances of the target class hierarchy that do not have the required
-/// predicate at all.
-fn missing_required_violations(
-    state: &AppState,
-    constraint: &PropertyConstraint,
-) -> anyhow::Result<Vec<Violation>> {
-    // RDFS subclass traversal happens in the query because the store does not
-    // perform inference; project instances and ontology classes live in
-    // different named graphs, so validation queries use the union graph.
-    let sparql = format!(
-        r#"
-SELECT DISTINCT ?node
-WHERE {{
-  ?node <{RDF_TYPE}>/<{RDFS_SUBCLASS_OF}>* <{}> .
-  FILTER NOT EXISTS {{ ?node <{}> ?value }}
-}}"#,
-        constraint.target_class, constraint.path
-    );
-    let QueryResults::Solutions(solutions) = query(&state.store, &sparql)? else {
-        return Ok(Vec::new());
-    };
-
-    let mut violations = Vec::new();
-    for solution in solutions {
-        let solution = solution?;
-        if let Some(node) = iri_or_blank_value(solution.get("node")) {
-            violations.push(Violation {
-                node,
-                target_class: constraint.target_class.clone(),
-                path: constraint.path.clone(),
-                kind: ViolationKind::MissingRequired,
-                detail: format!("missing required {}", local_name(&constraint.path)),
-            });
+fn count_target_shapes(state: &AppState) -> anyhow::Result<usize> {
+    let rdf_type = NamedNodeRef::new(moose::RDF_TYPE)?;
+    let node_shape = NamedNodeRef::new(SH_NODE_SHAPE)?;
+    let mut shapes = HashSet::new();
+    for graph_iri in [SE_SHAPES_GRAPH_IRI, ARCH_SHAPES_GRAPH_IRI] {
+        let graph = NamedNodeRef::new(graph_iri)?;
+        for quad in state.store.quads_for_pattern(
+            None,
+            Some(rdf_type),
+            Some(TermRef::NamedNode(node_shape)),
+            Some(GraphNameRef::NamedNode(graph)),
+        ) {
+            let quad = quad.map_err(|e| anyhow::anyhow!("count SHACL shapes: {e}"))?;
+            shapes.insert(quad.subject.to_string());
         }
     }
-    Ok(violations)
-}
-
-/// Find values that exist for a constrained predicate but are not literals with
-/// the shape-declared datatype.
-fn datatype_violations(
-    state: &AppState,
-    constraint: &PropertyConstraint,
-) -> anyhow::Result<Vec<Violation>> {
-    let Some(datatype) = &constraint.datatype else {
-        return Ok(Vec::new());
-    };
-    let sparql = format!(
-        r#"
-SELECT DISTINCT ?node ?value
-WHERE {{
-  ?node <{RDF_TYPE}>/<{RDFS_SUBCLASS_OF}>* <{}> .
-  ?node <{}> ?value .
-  FILTER (!isLiteral(?value) || datatype(?value) != <{}>)
-}}"#,
-        constraint.target_class, constraint.path, datatype
-    );
-    let QueryResults::Solutions(solutions) = query(&state.store, &sparql)? else {
-        return Ok(Vec::new());
-    };
-
-    let mut violations = Vec::new();
-    for solution in solutions {
-        let solution = solution?;
-        if let Some(node) = iri_or_blank_value(solution.get("node")) {
-            violations.push(Violation {
-                node,
-                target_class: constraint.target_class.clone(),
-                path: constraint.path.clone(),
-                kind: ViolationKind::DatatypeMismatch,
-                detail: format!(
-                    "{} must have datatype {datatype}",
-                    local_name(&constraint.path)
-                ),
-            });
-        }
-    }
-    Ok(violations)
-}
-
-/// Run validator-owned SPARQL against the union graph; these queries are built
-/// from constants and loaded IRIs, so parse failures indicate a template bug.
-fn query<'a>(store: &'a oxigraph::store::Store, sparql: &str) -> anyhow::Result<QueryResults<'a>> {
-    let mut prepared = SparqlEvaluator::new()
-        .parse_query(sparql)
-        .map_err(|e| anyhow::anyhow!("validation query parse failed: {e}\n{sparql}"))?;
-    prepared.dataset_mut().set_default_graph_as_union();
-    prepared
-        .on_store(store)
-        .execute()
-        .map_err(|e| anyhow::anyhow!("validation query failed: {e}"))
-}
-
-/// Extract an IRI binding from a SPARQL solution.
-fn iri_value(term: Option<&Term>) -> Option<String> {
-    match term {
-        Some(Term::NamedNode(node)) => Some(node.as_str().to_string()),
-        _ => None,
-    }
-}
-
-/// Extract a subject binding for violation reports.
-fn iri_or_blank_value(term: Option<&Term>) -> Option<String> {
-    match term {
-        Some(Term::NamedNode(node)) => Some(node.as_str().to_string()),
-        Some(Term::BlankNode(node)) => Some(node.as_str().to_string()),
-        _ => None,
-    }
-}
-
-/// Parse an integer-valued SHACL literal such as `sh:minCount`.
-fn integer_value(term: Option<&Term>) -> Option<u32> {
-    match term {
-        Some(Term::Literal(literal)) => literal.value().parse().ok(),
-        _ => None,
-    }
+    Ok(shapes.len())
 }
 
 /// Render the final IRI segment in reports.
@@ -366,6 +200,65 @@ fn local_name(iri: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxigraph::model::{BlankNode, GraphName, Literal, NamedNode, Quad};
+
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const SH_TARGET_CLASS: &str = "http://www.w3.org/ns/shacl#targetClass";
+    const SH_PROPERTY: &str = "http://www.w3.org/ns/shacl#property";
+    const SH_PATH: &str = "http://www.w3.org/ns/shacl#path";
+    const SH_MIN_COUNT: &str = "http://www.w3.org/ns/shacl#minCount";
+    const SH_SEVERITY: &str = "http://www.w3.org/ns/shacl#severity";
+    const SH_WARNING: &str = "http://www.w3.org/ns/shacl#Warning";
+    const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    const PERSON: &str = "http://example.org/Person";
+    const PERSON_SHAPE: &str = "http://example.org/PersonShape";
+    const NAME: &str = "http://example.org/name";
+    const ALICE: &str = "http://example.org/alice";
+
+    fn nn(iri: &str) -> NamedNode {
+        NamedNode::new(iri).unwrap()
+    }
+
+    fn triple(
+        subject: impl Into<oxigraph::model::NamedOrBlankNode>,
+        predicate: &str,
+        object: impl Into<oxigraph::model::Term>,
+    ) -> Quad {
+        Quad::new(subject, nn(predicate), object, GraphName::DefaultGraph)
+    }
+
+    #[test]
+    fn snarl_min_count_warning_carries_warning_severity_and_path() {
+        let property_shape = BlankNode::new("name-warning").unwrap();
+        let shapes = vec![
+            triple(nn(PERSON_SHAPE), RDF_TYPE, nn(SH_NODE_SHAPE)),
+            triple(nn(PERSON_SHAPE), SH_TARGET_CLASS, nn(PERSON)),
+            triple(nn(PERSON_SHAPE), SH_PROPERTY, property_shape.clone()),
+            triple(property_shape.clone(), SH_PATH, nn(NAME)),
+            triple(
+                property_shape.clone(),
+                SH_MIN_COUNT,
+                Literal::new_typed_literal("1", nn(XSD_INTEGER)),
+            ),
+            triple(property_shape, SH_SEVERITY, nn(SH_WARNING)),
+        ];
+        let data = vec![triple(nn(ALICE), RDF_TYPE, nn(PERSON))];
+
+        let report = moose::shacl::validate_graph(&data, &shapes).expect("validation runs");
+        assert!(
+            !report.conforms,
+            "SNARL's raw report treats any validation result as non-conforming; MOOSEDev filters by severity: {report:?}"
+        );
+        assert!(
+            report.violations.iter().any(|v| {
+                v.severity == ShaclSeverity::Warning
+                    && v.focus_node == ALICE
+                    && v.result_path.as_deref() == Some(NAME)
+            }),
+            "expected a Warning result on {ALICE} for {NAME}; got {:?}",
+            report.violations
+        );
+    }
 
     #[test]
     fn format_report_caps_advisory_listing_and_conforms() {
@@ -380,12 +273,12 @@ mod tests {
             violations: Vec::new(),
             advisories,
             shapes_checked: 0,
-            skipped: 0,
         };
         // Advisories are non-blocking: an all-advisory report still conforms.
         assert!(report.conforms());
         let out = format_report(&report);
         assert!(out.contains("Advisories (SHOULD, non-blocking): 15"));
+        assert!(!out.contains("Unsupported constraints skipped"));
         assert!(out.contains("… and 5 more"));
         assert!(out.contains("urn:node:0")); // first sample shown
         assert!(!out.contains("urn:node:14")); // beyond the sample, elided

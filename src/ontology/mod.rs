@@ -49,6 +49,15 @@ pub const ARCH_SHAPES_TTL: &str = "software-architecture_shapes.ttl";
 pub fn load_turtle(store: &Store, path: &Path, graph_iri: &str) -> anyhow::Result<()> {
     let graph = NamedNodeRef::new(graph_iri)
         .map_err(|e| anyhow::anyhow!("invalid graph IRI {graph_iri}: {e}"))?;
+    let existing: Vec<_> = store
+        .quads_for_pattern(None, None, None, Some(graph.into()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("clear ontology graph {graph_iri}: {e}"))?;
+    for quad in existing {
+        store
+            .remove(&quad)
+            .map_err(|e| anyhow::anyhow!("clear ontology graph {graph_iri}: {e}"))?;
+    }
     let bytes = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("read ontology {}: {e}", path.display()))?;
     let parser = RdfParser::from_format(RdfFormat::Turtle).with_default_graph(graph);

@@ -2316,6 +2316,7 @@ dependencies = [
  "rust-stemmers",
  "serde",
  "serde_json",
+ "snarl-shacl",
  "spargebra",
  "sqlx",
  "strsim",
@@ -3806,6 +3807,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "snarl-shacl"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a28a5c479c077a6fd2ace777ccd3ddfddb53ae51360f116aa8c82eecaf740af"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

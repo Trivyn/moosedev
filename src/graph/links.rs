@@ -3,18 +3,13 @@
 
 use moose::traits::LlmClient;
 use moose::types::LlmAssistLevel;
-use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef};
-use oxigraph::sparql::QueryResults;
-
-use crate::ontology;
+use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
 
 use super::capture::require_information_record;
 use super::context::{edge_priority, first_literal};
 use super::relations::{EdgeDirection, LegalEdge};
 use super::state::AppState;
-use super::util::{
-    iri_value, local_name, run_sparql, RDF_FIRST, RDF_REST, SH_OR, SH_PATH, SH_TARGET_CLASS,
-};
+use super::util::local_name;
 use super::PROJECT_KG_GRAPH_IRI;
 
 // ============================================================================
@@ -73,7 +68,8 @@ impl LinkSuggestion {
     }
 }
 
-/// A record that the shapes say SHOULD carry a link it currently lacks.
+/// A record that the warning-severity shapes say SHOULD carry a link it currently
+/// lacks.
 #[derive(Debug, Clone)]
 pub struct UnderLinked {
     pub iri: String,
@@ -309,89 +305,90 @@ pub async fn suggest_links_for_record(
     suggestions
 }
 
-/// The `sh:or` "should-have-a-link" requirements: each NodeShape with an `sh:or`
-/// maps its `sh:targetClass` to the branch predicates a conforming record SHOULD
-/// carry at least one of. The declarative source of truth for the link advisory.
-fn shacl_or_link_requirements(state: &AppState) -> Vec<(String, Vec<String>)> {
-    let sparql = format!(
-        r#"
-SELECT DISTINCT ?targetClass ?predicate
-WHERE {{
-  VALUES ?shapeGraph {{ <{}> <{}> }}
-  GRAPH ?shapeGraph {{
-    ?shape <{}> ?targetClass ;
-           <{}>/<{}>*/<{}> ?branch .
-    ?branch <{}> ?predicate .
-  }}
-}}"#,
-        ontology::SE_SHAPES_GRAPH_IRI,
-        ontology::ARCH_SHAPES_GRAPH_IRI,
-        SH_TARGET_CLASS,
-        SH_OR,
-        RDF_REST,
-        RDF_FIRST,
-        SH_PATH,
-    );
-    let Ok(QueryResults::Solutions(solutions)) = run_sparql(&state.store, &sparql) else {
-        return Vec::new();
-    };
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for sol in solutions.flatten() {
-        let (Some(target_class), Some(predicate)) = (
-            iri_value(sol.get("targetClass")),
-            iri_value(sol.get("predicate")),
-        ) else {
-            continue;
-        };
-        if let Some((_, preds)) = groups.iter_mut().find(|(c, _)| c == &target_class) {
-            if !preds.contains(&predicate) {
-                preds.push(predicate);
-            }
-        } else {
-            groups.push((target_class, vec![predicate]));
-        }
-    }
-    groups
-}
-
-/// Records the shapes say SHOULD carry a link (an `sh:or` branch predicate) but
-/// currently lack every one of those predicates. Drives the non-blocking validate
-/// advisory and the `suggest_links` scan. Bounded by `max_records`.
-pub fn under_linked_records(state: &AppState, max_records: usize) -> Vec<UnderLinked> {
+/// Records that emitted SHACL Warning results for declarative SHOULD-link
+/// constraints. Drives both the non-blocking validate advisory and the
+/// `suggest_links` scan. Bounded by `max_records`.
+pub fn under_linked_from_report(
+    state: &AppState,
+    report: &moose::shacl::ShaclReport,
+    max_records: usize,
+) -> Vec<UnderLinked> {
     let mut out: Vec<UnderLinked> = Vec::new();
-    for (target_class, predicates) in shacl_or_link_requirements(state) {
-        let not_exists: String = predicates
-            .iter()
-            .enumerate()
-            .map(|(i, p)| format!("    FILTER NOT EXISTS {{ ?node <{p}> ?v{i} }}\n"))
-            .collect();
-        // Records are typed directly as these leaf classes, so an exact `rdf:type`
-        // match in the project graph suffices (no cross-graph subclass path).
-        // Exclude superseded/deprecated records: like every other read, the advisory
-        // concerns the current working set, not history.
-        let sparql = format!(
-            "SELECT DISTINCT ?node\nWHERE {{\n  GRAPH <{}> {{\n    ?node <{}> <{}> .\n{}    FILTER NOT EXISTS {{ ?node <{}> ?st . FILTER(STR(?st) = \"superseded\" || STR(?st) = \"deprecated\") }}\n  }}\n}}",
-            PROJECT_KG_GRAPH_IRI,
-            moose::RDF_TYPE,
-            target_class,
-            not_exists,
-            state.capture.status
-        );
-        let Ok(QueryResults::Solutions(solutions)) = run_sparql(&state.store, &sparql) else {
+    for warning in &report.violations {
+        if warning.severity != moose::shacl::ShaclSeverity::Warning {
+            continue;
+        }
+        let Some(path) = &warning.result_path else {
             continue;
         };
-        for sol in solutions.flatten() {
-            if let Some(node) = iri_value(sol.get("node")) {
-                out.push(UnderLinked {
-                    iri: node,
-                    class_local: local_name(&target_class).to_string(),
-                    missing_predicate: local_name(&predicates[0]).to_string(),
-                });
-                if out.len() >= max_records {
-                    return out;
-                }
-            }
+        if is_superseded_or_deprecated(state, &warning.focus_node) {
+            continue;
+        }
+        let Some(class_local) = focus_node_class_local(state, &warning.focus_node) else {
+            continue;
+        };
+        out.push(UnderLinked {
+            iri: warning.focus_node.clone(),
+            class_local,
+            missing_predicate: local_name(path).to_string(),
+        });
+        if out.len() >= max_records {
+            return out;
         }
     }
     out
+}
+
+/// Records the warning-severity shapes say SHOULD carry a link. This path runs
+/// SNARL for the `suggest_links` scan; validate reuses its already-built report.
+pub fn under_linked_records(state: &AppState, max_records: usize) -> Vec<UnderLinked> {
+    match crate::validation::run_project_shacl(state) {
+        Ok(report) => under_linked_from_report(state, &report, max_records),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn is_superseded_or_deprecated(state: &AppState, iri: &str) -> bool {
+    let (Ok(subject), Ok(status)) = (
+        NamedNodeRef::new(iri),
+        NamedNodeRef::new(&state.capture.status),
+    ) else {
+        return false;
+    };
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    state
+        .store
+        .quads_for_pattern(
+            Some(subject.into()),
+            Some(status),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .any(|quad| match quad.object {
+            Term::Literal(literal) => {
+                let status = literal.value();
+                status == "superseded" || status == "deprecated"
+            }
+            _ => false,
+        })
+}
+
+fn focus_node_class_local(state: &AppState, iri: &str) -> Option<String> {
+    let subject = NamedNodeRef::new(iri).ok()?;
+    let rdf_type = NamedNodeRef::new(moose::RDF_TYPE).ok()?;
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    state
+        .store
+        .quads_for_pattern(
+            Some(subject.into()),
+            Some(rdf_type),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .find_map(|quad| match quad.object {
+            Term::NamedNode(class) => Some(local_name(class.as_str()).to_string()),
+            _ => None,
+        })
 }

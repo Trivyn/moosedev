@@ -31,10 +31,18 @@ shape:AntiPatternShape a sh:NodeShape ;
 
 shape:ArchitecturalDecisionShape a sh:NodeShape ;
     sh:targetClass domain:ArchitecturalDecision ;
-    sh:or (
-        [ sh:path domain:isMotivatedBy ; sh:class domain:Constraint ]
-        [ sh:path domain:isMotivatedBy ; sh:class domain:Requirement ]
-    ) ;
+    sh:property [
+        sh:path domain:isMotivatedBy ;
+        sh:or (
+            [ sh:class domain:Constraint ]
+            [ sh:class domain:Requirement ]
+        )
+    ] ;
+    sh:property [
+        sh:path domain:isMotivatedBy ;
+        sh:minCount 1 ;
+        sh:severity sh:Warning
+    ] ;
     sh:property [
         sh:path domain:concerns ;
         sh:class domain:SystemComponent
@@ -57,10 +65,18 @@ shape:ConsequenceShape a sh:NodeShape ;
 
 shape:ConstraintShape a sh:NodeShape ;
     sh:targetClass domain:Constraint ;
-    sh:or (
-        [ sh:path domain:constrains ; sh:class domain:ArchitecturalDecision ]
-        [ sh:path domain:constrains ; sh:class domain:SystemComponent ]
-    ) ;
+    sh:property [
+        sh:path domain:constrains ;
+        sh:or (
+            [ sh:class domain:ArchitecturalDecision ]
+            [ sh:class domain:SystemComponent ]
+        )
+    ] ;
+    sh:property [
+        sh:path domain:constrains ;
+        sh:minCount 1 ;
+        sh:severity sh:Warning
+    ] ;
     sh:property [
         sh:path domain:isViolatedBy ;
         sh:class domain:AntiPattern
@@ -106,10 +122,18 @@ shape:InformationRecordShape a sh:NodeShape ;
 
 shape:LessonShape a sh:NodeShape ;
     sh:targetClass domain:Lesson ;
-    sh:or (
-        [ sh:path domain:learnedFrom ; sh:class domain:AntiPattern ]
-        [ sh:path domain:learnedFrom ; sh:class domain:ArchitecturalDecision ]
-    ) .
+    sh:property [
+        sh:path domain:learnedFrom ;
+        sh:or (
+            [ sh:class domain:AntiPattern ]
+            [ sh:class domain:ArchitecturalDecision ]
+        )
+    ] ;
+    sh:property [
+        sh:path domain:learnedFrom ;
+        sh:minCount 1 ;
+        sh:severity sh:Warning
+    ] .
 
 shape:PatternShape a sh:NodeShape ;
     sh:targetClass domain:Pattern ;
@@ -137,4 +161,3 @@ shape:SystemComponentShape a sh:NodeShape ;
         sh:path domain:isConcernedBy ;
         sh:class domain:ArchitecturalDecision
     ] .
-
