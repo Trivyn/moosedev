@@ -39,10 +39,6 @@ fn normal_capture_conforms_to_required_information_record_fields() {
         "normal capture should conform:\n{}",
         validation::format_report(&report)
     );
-    assert!(
-        report.skipped > 0,
-        "the report should disclose unsupported SHACL constraints from the shipped shapes"
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -69,6 +65,69 @@ fn malformed_raw_instance_reports_missing_required_fields() {
     assert!(report.violations.iter().any(|v| {
         v.kind == ViolationKind::MissingRequired && v.path == state.capture.timestamp
     }));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mistyped_or_relationship_now_blocks_conformance() {
+    let dir = std::env::temp_dir().join(format!("moosedev-validation-or-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let ad_class = state.resolve_class("ArchitecturalDecision").unwrap();
+    let component_class = state.resolve_class("SystemComponent").unwrap();
+    let decision = graph::record_instance(
+        &state,
+        &RecordInput {
+            class_iri: ad_class,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), "Adopt a cache".to_string()),
+                (state.capture.title.clone(), "Adopt a cache".to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record decision");
+    let component = graph::record_instance(
+        &state,
+        &RecordInput {
+            class_iri: component_class,
+            class_local: "SystemComponent".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), "Cache worker".to_string()),
+                (state.capture.title.clone(), "Cache worker".to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record component");
+
+    insert_iri(
+        &state,
+        &decision,
+        &state.resolve_object_property("isMotivatedBy").unwrap(),
+        &component,
+    );
+
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        !report.conforms(),
+        "isMotivatedBy -> SystemComponent should violate the sh:or range:\n{}",
+        validation::format_report(&report)
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|v| matches!(v.kind, ViolationKind::Other(_))),
+        "expected a non-M3 SHACL Core violation; got {:?}",
+        report.violations
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -184,6 +243,18 @@ fn insert_literal(state: &AppState, subject_iri: &str, predicate_iri: &str, valu
             NamedNode::new(subject_iri).unwrap(),
             NamedNode::new(predicate_iri).unwrap(),
             Literal::new_simple_literal(value),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+}
+
+fn insert_iri(state: &AppState, subject_iri: &str, predicate_iri: &str, object_iri: &str) {
+    state
+        .store
+        .insert(&Quad::new(
+            NamedNode::new(subject_iri).unwrap(),
+            NamedNode::new(predicate_iri).unwrap(),
+            NamedNode::new(object_iri).unwrap(),
             GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
         ))
         .unwrap();

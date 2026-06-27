@@ -4,6 +4,8 @@
 
 > Status: **active development.** See [Status](#status).
 
+*NOTE*: MOOSEDev is in **very** early development, and is not to be considered production ready.
+
 ---
 
 ## What is MOOSEDev?

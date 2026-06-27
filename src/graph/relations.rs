@@ -120,7 +120,9 @@ impl RelationCatalogue {
 /// `?predicate` instead of fixing one, and keeps only property branches declaring
 /// an `sh:class` (range) — `sh:datatype` branches drop out — so the table is
 /// exactly the record→record object-property vocabulary, including `sh:or` union
-/// ranges (e.g. `isMotivatedBy` → Constraint|Requirement).
+/// ranges (e.g. `isMotivatedBy` → Constraint|Requirement). Union ranges may be
+/// declared either by the legacy node-level `sh:or` branch shape or by a proper
+/// property-level `sh:or`.
 pub(crate) fn build_relation_catalogue(store: &Store) -> RelationCatalogue {
     let sparql = format!(
         r#"
@@ -131,21 +133,36 @@ WHERE {{
     ?shape <{}> ?subjectClass .
     {{
       ?shape <{}> ?propertyShape .
+      ?propertyShape <{}> ?predicate ;
+                     <{}> ?objectClass .
     }} UNION {{
       ?shape <{}>/<{}>*/<{}> ?propertyShape .
+      ?propertyShape <{}> ?predicate ;
+                     <{}> ?objectClass .
+    }} UNION {{
+      ?shape <{}> ?propertyShape .
+      ?propertyShape <{}> ?predicate ;
+                     <{}>/<{}>*/<{}> ?branch .
+      ?branch <{}> ?objectClass .
     }}
-    ?propertyShape <{}> ?predicate ;
-                   <{}> ?objectClass .
   }}
 }}"#,
         ontology::SE_SHAPES_GRAPH_IRI,
         ontology::ARCH_SHAPES_GRAPH_IRI,
         SH_TARGET_CLASS,
         SH_PROPERTY,
+        SH_PATH,
+        SH_CLASS,
         SH_OR,
         RDF_REST,
         RDF_FIRST,
         SH_PATH,
+        SH_CLASS,
+        SH_PROPERTY,
+        SH_PATH,
+        SH_OR,
+        RDF_REST,
+        RDF_FIRST,
         SH_CLASS
     );
 

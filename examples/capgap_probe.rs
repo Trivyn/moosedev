@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut state = AppState::bootstrap(Path::new(&data_dir), Path::new(&onto_dir))?;
 
-    // (1) Under-linked advisory — pure SPARQL over the shapes' sh:or branches.
+    // (1) Under-linked advisory — SNARL Warning results from the shape graph.
     let under = graph::under_linked_records(&state, usize::MAX);
     println!("== under-linked records (shapes say each SHOULD carry a link) ==");
     println!("total under-linked: {}", under.len());
