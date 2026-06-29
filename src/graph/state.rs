@@ -36,7 +36,7 @@ const CAPTURE_STATUS_LOCAL: &str = "hasLifecycleStatus";
 const CAPTURE_AUTHOR_LOCAL: &str = "hasAuthor";
 const CAPTURE_TIMESTAMP_LOCAL: &str = "hasTimestamp";
 pub(crate) const LABEL_PROPERTY_LOCAL: &str = "labelProperty";
-pub(crate) const DEFAULT_LIFECYCLE_STATUS: &str = "proposed";
+pub(crate) const DEFAULT_LIFECYCLE_STATUS: &str = "accepted";
 pub(crate) const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
 /// Open the persistent Oxigraph store under a MOOSEDev data directory.

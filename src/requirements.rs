@@ -14,7 +14,7 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::artifacts::{
     capitalize, date_only, md_cell, nonempty, not_recorded, required_value, select_rows,
 };
-use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
+use crate::graph::{is_retired, AppState, PROJECT_KG_GRAPH_IRI};
 
 pub const REQUIREMENTS_INDEX_FILENAME: &str = "0000-index.md";
 
@@ -77,6 +77,7 @@ pub struct RequirementSummary {
     pub num: String,
     pub title: String,
     pub status: String,
+    pub addressed: bool,
     pub date: String,
     pub author: String,
     pub iri: String,
@@ -89,6 +90,7 @@ pub struct RequirementDocument {
     pub num: String,
     pub title: String,
     pub status: String,
+    pub addressed: bool,
     pub date: String,
     pub author: String,
     pub iri: String,
@@ -103,6 +105,7 @@ impl RequirementDocument {
             num: self.num.clone(),
             title: self.title.clone(),
             status: self.status.clone(),
+            addressed: self.addressed,
             date: self.date.clone(),
             author: self.author.clone(),
             iri: self.iri.clone(),
@@ -306,10 +309,12 @@ fn render_requirement_document(
 ) -> RequirementDocument {
     let adrs = related_for(related, meta);
     let markdown = render_requirement(meta, adrs);
+    let addressed = requirement_addressed(adrs);
     RequirementDocument {
         num: meta.num.clone(),
         title: meta.title.clone(),
         status: render_status(&meta.status),
+        addressed,
         date: date_only(&meta.ts),
         author: not_recorded(&meta.author),
         iri: meta.iri.clone(),
@@ -324,6 +329,7 @@ fn render_requirement(meta: &RequirementMeta, related_adrs: &[RelatedAdr]) -> St
         format!("# REQ-{}. {}", meta.num, meta.title),
         String::new(),
         format!("- Status: {}", render_status(&meta.status)),
+        format!("- Addressed: {}", render_addressed(related_adrs)),
         format!("- Date: {}", date_only(&meta.ts)),
         format!("- Author: {}", not_recorded(&meta.author)),
         String::new(),
@@ -375,19 +381,21 @@ fn render_index(
         format!("> **Generated view.** Rendered from the MOOSEDev knowledge graph on {date}."),
         "> The graph is the source of truth - **regenerate, do not hand-edit.**".to_string(),
         String::new(),
-        "| # | Title | Status | Date | ADRs |".to_string(),
-        "|---|-------|--------|------|------|".to_string(),
+        "| # | Title | Status | Addressed | Date | ADRs |".to_string(),
+        "|---|-------|--------|-----------|------|------|".to_string(),
     ];
 
     for meta in records {
+        let adrs = related_for(related, meta);
         lines.push(format!(
-            "| REQ-{} | [{}]({}) | {} | {} | {} |",
+            "| REQ-{} | [{}]({}) | {} | {} | {} | {} |",
             meta.num,
             md_cell(&meta.title),
             filename(meta),
             md_cell(&render_status(&meta.status)),
+            md_cell(render_addressed(adrs)),
             date_only(&meta.ts),
-            related_for(related, meta).len()
+            adrs.len()
         ));
     }
     lines.push(String::new());
@@ -415,6 +423,18 @@ fn related_for<'a>(
     meta: &RequirementMeta,
 ) -> &'a [RelatedAdr] {
     related.get(&meta.iri).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn requirement_addressed(related_adrs: &[RelatedAdr]) -> bool {
+    related_adrs.iter().any(|adr| !is_retired(&adr.status))
+}
+
+fn render_addressed(related_adrs: &[RelatedAdr]) -> &'static str {
+    if requirement_addressed(related_adrs) {
+        "Yes"
+    } else {
+        "No"
+    }
 }
 
 fn filename(meta: &RequirementMeta) -> String {

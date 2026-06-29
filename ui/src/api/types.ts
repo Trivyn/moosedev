@@ -49,6 +49,7 @@ export interface RequirementSummary {
   num: string;
   title: string;
   status: string;
+  addressed: boolean;
   date: string;
   author: string;
   iri: string;

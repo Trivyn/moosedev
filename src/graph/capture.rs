@@ -115,6 +115,9 @@ pub struct AppliedEdge {
     pub object_iri: String,
 }
 
+type PlannedObjectProps = Vec<(String, String)>;
+type PlannedEdges = Vec<AppliedEdge>;
+
 /// Result of a capture that may also assert inline relations.
 #[derive(Debug, Clone)]
 pub struct RecordOutcome {
@@ -145,7 +148,7 @@ fn plan_relation_args(
     state: &AppState,
     input: &RecordInput,
     relations: &[(String, String)],
-) -> anyhow::Result<(Vec<(String, String)>, Vec<AppliedEdge>)> {
+) -> anyhow::Result<(PlannedObjectProps, PlannedEdges)> {
     let subject_types = std::slice::from_ref(&input.class_iri);
     let mut object_props: Vec<(String, String)> = Vec::new();
     let mut applied_edges: Vec<AppliedEdge> = Vec::new();
@@ -211,7 +214,7 @@ pub struct MintedClusterNode {
 /// class the shape doesn't allow that edge from) fails the whole call with no record
 /// left behind. Minted nodes reuse [`record_instance`] + the SHACL-validated
 /// [`relate`](super::lifecycle::relate); each label is written as both `rdfs:label` and
-/// the class title property, and the node defaults to status "proposed" (auditable).
+/// the class title property, and the node uses the default lifecycle status.
 pub fn record_decision_with_cluster(
     state: &AppState,
     input: &RecordInput,

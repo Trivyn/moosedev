@@ -13,6 +13,15 @@ use super::state::AppState;
 use super::util::{local_name, mint_instance_iri};
 use super::PROJECT_KG_GRAPH_IRI;
 
+/// Lifecycle statuses retired from the current working set.
+pub const RETIRED_STATUSES: &[&str] = &["superseded", "deprecated"];
+
+pub fn is_retired(status: &str) -> bool {
+    RETIRED_STATUSES
+        .iter()
+        .any(|retired| status.eq_ignore_ascii_case(retired))
+}
+
 /// A decision change: the replacement to record, the decision it supersedes, and
 /// the rationale (the *why*) for the change.
 pub struct SupersedeInput {

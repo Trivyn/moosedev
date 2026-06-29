@@ -154,7 +154,7 @@ pub struct RecordDecisionArgs {
     pub title: String,
     /// Optional longer description / body. LEAD with the one-line claim, then the why + evidence.
     pub description: Option<String>,
-    /// Optional lifecycle status (e.g. "proposed", "accepted", "superseded").
+    /// Optional lifecycle status (defaults to "accepted"; e.g. "accepted", "superseded").
     pub status: Option<String>,
     /// Optional RFC3339 timestamp to stamp the record with (defaults to now).
     /// Used by the temporal bootstrap to replay historical commit dates.

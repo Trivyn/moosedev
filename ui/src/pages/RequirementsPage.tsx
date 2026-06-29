@@ -1,4 +1,4 @@
-import { Alert, Typography } from '@mui/material';
+import { Alert, Chip, Stack, Typography } from '@mui/material';
 import { api } from '../api/client';
 import { RequirementSummary, RequirementWarnings } from '../api/types';
 import GeneratedArtifactPage from '../components/artifacts/GeneratedArtifactPage';
@@ -24,9 +24,17 @@ function WarningSummary({ warnings }: { warnings: RequirementWarnings }) {
 
 function RequirementListMeta(requirement: RequirementSummary) {
   return (
-    <Typography variant="caption" color="text.secondary">
-      {requirement.related_adrs} ADR{requirement.related_adrs === 1 ? '' : 's'}
-    </Typography>
+    <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+      <Chip
+        size="small"
+        label={requirement.addressed ? 'Addressed' : 'Open'}
+        color={requirement.addressed ? 'success' : 'default'}
+        variant={requirement.addressed ? 'filled' : 'outlined'}
+      />
+      <Typography variant="caption" color="text.secondary">
+        {requirement.related_adrs} ADR{requirement.related_adrs === 1 ? '' : 's'}
+      </Typography>
+    </Stack>
   );
 }
 
