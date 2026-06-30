@@ -1,6 +1,6 @@
 [package]
 name = "moosedev"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
 license = "Apache-2.0"
