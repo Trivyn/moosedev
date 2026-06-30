@@ -7,6 +7,7 @@ use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
 use super::capture::require_information_record;
+use super::lifecycle::is_retired;
 use super::state::AppState;
 use super::util::local_name;
 use super::PROJECT_KG_GRAPH_IRI;
@@ -21,11 +22,11 @@ pub struct ContextItem {
 
 impl ContextItem {
     /// True when this record has been retired from the current working set
-    /// (lifecycle status `superseded` or `deprecated`).
+    /// (for example lifecycle status `superseded` or `deprecated`).
     pub fn is_historical(&self) -> bool {
-        self.properties.iter().any(|(k, v)| {
-            k == "hasLifecycleStatus" && matches!(v.as_str(), "superseded" | "deprecated")
-        })
+        self.properties
+            .iter()
+            .any(|(k, v)| k == "hasLifecycleStatus" && is_retired(v))
     }
 }
 
@@ -482,9 +483,9 @@ fn build_context_item(state: &AppState, iri: String, class_iri: String) -> Conte
     }
 
     // For a retired record, surface what replaced it (inverse `supersedes`).
-    let is_historical = properties.iter().any(|(k, v)| {
-        k == "hasLifecycleStatus" && matches!(v.as_str(), "superseded" | "deprecated")
-    });
+    let is_historical = properties
+        .iter()
+        .any(|(k, v)| k == "hasLifecycleStatus" && is_retired(v));
     if is_historical {
         if let (Ok(subject), Ok(pred)) = (
             NamedNodeRef::new(&iri),

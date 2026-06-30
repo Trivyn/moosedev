@@ -7,6 +7,7 @@ use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
 
 use super::capture::require_information_record;
 use super::context::{edge_priority, first_literal};
+use super::lifecycle::is_retired;
 use super::relations::{EdgeDirection, LegalEdge};
 use super::state::AppState;
 use super::util::local_name;
@@ -366,10 +367,7 @@ fn is_superseded_or_deprecated(state: &AppState, iri: &str) -> bool {
         )
         .flatten()
         .any(|quad| match quad.object {
-            Term::Literal(literal) => {
-                let status = literal.value();
-                status == "superseded" || status == "deprecated"
-            }
+            Term::Literal(literal) => is_retired(literal.value()),
             _ => false,
         })
 }
