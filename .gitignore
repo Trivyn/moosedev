@@ -16,7 +16,12 @@
 moose_sessions.db
 
 # Live dogfood store — MOOSEDEV_DATA_DIR for the self-hosted MCP server.
-/.moosedev/
+# The RocksDB store + vector DBs are a DERIVED local cache; the committed
+# canonical text (kg.nq) is the version-controlled source of truth and is
+# re-exported on every project-graph write. The `/*` form is required: git
+# cannot re-include a file beneath an excluded directory.
+/.moosedev/*
+!/.moosedev/kg.nq
 
 # Transient SQLite sidecars — safe to ignore even when a .db is intentionally
 # committed (e.g. the precomputed ontology-vector store used by alignment).

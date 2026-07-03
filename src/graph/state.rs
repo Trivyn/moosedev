@@ -132,6 +132,17 @@ impl AppState {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
         let store = open_store(data_dir)?;
+        // Reconcile the committed canonical text (kg.nq) with the freshly opened
+        // store before anything downstream reads it — the text is the committed
+        // source of truth and this store a derived cache (Requirement d459cac2).
+        // Fatal when the file exists but cannot be loaded (e.g. unresolved merge
+        // conflict markers): continuing would let the next write-through clobber it.
+        let sync = crate::canonical::sync_on_startup(&store, data_dir)?;
+        tracing::info!(
+            "[canonical] startup sync: {:?} ({} quad(s))",
+            sync.action,
+            sync.quad_count
+        );
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
         let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
@@ -192,6 +203,18 @@ impl AppState {
     pub fn mark_inferred_stale(&self) {
         self.inferred_stale
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Post-write hook for every project-graph mutation: invalidate the lazily
+    /// materialized inferred edges AND write the committed canonical text
+    /// (`kg.nq`) through. The text export is best-effort — a file-write failure
+    /// must never fail the symbolic write (invariant #1); it warns and the next
+    /// write retries.
+    pub fn note_project_write(&self) {
+        self.mark_inferred_stale();
+        if let Err(e) = crate::canonical::write_through(&self.store, &self.data_dir) {
+            tracing::warn!("canonical kg.nq write-through failed (retried on next write): {e}");
+        }
     }
 
     /// Lazily re-run GROWL enrichment when a prior write invalidated the materialized

@@ -9,6 +9,7 @@ pub mod adrs;
 pub mod alignment;
 pub mod api;
 mod artifacts;
+pub mod canonical;
 pub mod export;
 pub mod graph;
 pub mod graph_import;

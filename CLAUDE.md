@@ -136,5 +136,8 @@ project knowledge graph. When its tools are available, prefer them over re-deriv
 - **Verify** with `validate_against_architecture` after capturing; use `sparql` for precise,
   deterministic reads of the graph.
 
-The graph persists in a local, gitignored store and grows more valuable over time (invariant #10).
+The graph's committed source of truth is `.moosedev/kg.nq` — canonical N-Quads, re-exported
+automatically on every write and reconciled at startup (a fresh clone hydrates from it). The
+RocksDB store and vector DBs under `.moosedev/` are a derived, gitignored local cache. The graph
+is version-controlled with the code and grows more valuable over time (invariant #10).
 ~

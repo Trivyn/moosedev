@@ -266,17 +266,17 @@ After any hydration: `entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI)` +
 `mark_inferred_stale()` (mirrors the HTTP import handler). Instance-vector reconcile
 happens in the existing `build_instance_index` pass, which runs after bootstrap.
 
-### Items
-- [ ] `provenance::reasoner_inferred_data_quads` helper; `clear_reasoner_inferences` reuses it
-- [ ] `export::export_canonical_project(store)` — canonical N-Quads dump minus inferred quads + blank-node warn
-- [ ] new `src/canonical.rs`: stamp IO, pure decision-table fn (unit-testable), `sync_on_startup`, `write_through`
-- [ ] `AppState::note_project_write()`; replace the 5 write-site calls (4 MCP tools in `src/mcp/mod.rs:448,541,593,627` + HTTP import `src/api/handlers/export.rs:76`)
-- [ ] CLI `moosedev import` syncs kg.nq post-import (`src/main.rs`)
-- [ ] `.gitignore`: `/.moosedev/` → `/.moosedev/*` + `!/.moosedev/kg.nq` (git cannot re-include a file under an excluded directory)
-- [ ] tests: decision table; inferred-quad exclusion (enrich → export → assert absent); write-through on capture; fresh-clone hydration; git-pull replace; divergence patch+warn; full suite + clippy green
-- [ ] docs: README version-control section; CLAUDE.md dogfooding note (revises the "gitignored store" stance per `d459cac2`); templates/ adoption snippet gitignore guidance
-- [ ] dogfood: commit this repo's own kg.nq; live-verify a capture + retract shows a clean `git diff`
-- [ ] graph capture: AD (isMotivatedBy `d459cac2`) recording this design + answers to the requirement's open sub-questions (provenance local-only; content-hash staleness; canonical scope excludes inferred quads); `validate_against_architecture`
+### Items — ✅ complete (2026-07-02)
+- [x] `provenance::reasoner_inferred_data_quads` helper; `clear_reasoner_inferences` reuses it
+- [x] `export::export_canonical_project(store)` — canonical N-Quads dump minus inferred quads + blank-node warn
+- [x] new `src/canonical.rs`: stamp IO, pure decision-table fn (unit-testable), `sync_on_startup`, `write_through`
+- [x] `AppState::note_project_write()`; replace the 5 write-site calls (4 MCP tools in `src/mcp/mod.rs` + HTTP import `src/api/handlers/export.rs`)
+- [x] CLI `moosedev import` syncs kg.nq post-import (`src/main.rs`)
+- [x] `.gitignore`: `/.moosedev/` → `/.moosedev/*` + `!/.moosedev/kg.nq` (git cannot re-include a file under an excluded directory)
+- [x] tests: decision table; inferred-quad exclusion (enrich → export → assert absent); write-through; fresh-clone hydration; git-pull replace; divergence patch+warn (`tests/canonical_text.rs`); full suite + clippy green
+- [x] docs: README version-control section; CLAUDE.md dogfooding note (revises the "gitignored store" stance per `d459cac2`); templates/ adoption snippet gitignore guidance
+- [x] dogfood: backend restart adopted the live store (`ExportText`, 1918 quads — 176 reasoner-materialized quads excluded vs the 2094-quad raw export); idempotent live `relate` re-exported kg.nq byte-identically; repo kg.nq committed
+- [x] graph capture: AD `013a9706` (isMotivatedBy `d459cac2`, 3 alternatives weighed, 3 consequences) answers the requirement's open sub-questions (provenance local-only; content-hash staleness; canonical scope excludes inferred quads); `validate_against_architecture` → 0 violations
 
 ### Deferred (explicitly out of scope here)
 - Instance-level dedup on merge (Requirement `5565038e`) + status-aware merge tooling — become live once two stores actually exchange kg.nq

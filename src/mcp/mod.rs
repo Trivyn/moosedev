@@ -445,7 +445,7 @@ impl MooseDevServer {
                     tracing::warn!("dense index failed for {iri}: {e}");
                 }
                 // A new record (+ any edges) invalidates the materialized inverse edges.
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 let mut links: Vec<String> = outcome
                     .applied_edges
                     .iter()
@@ -538,7 +538,7 @@ impl MooseDevServer {
                         tracing::warn!("dense index failed for {iri}: {e}");
                     }
                 }
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 Ok(tool_ok(format!(
                     "Superseded {} → {} (rationale {}){title_note}",
                     out.superseded_iri, out.new_iri, out.rationale_iri
@@ -590,7 +590,7 @@ impl MooseDevServer {
                 if let Err(e) = self.state.index_record(&out.rationale_iri).await {
                     tracing::warn!("dense index failed for {}: {e}", out.rationale_iri);
                 }
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 Ok(tool_ok(format!(
                     "Retracted {} (deprecated; rationale {})",
                     out.retracted_iri, out.rationale_iri
@@ -624,7 +624,7 @@ impl MooseDevServer {
         match graph::relate(&self.state, &subject_iri, &predicate, &object_iri) {
             Ok(out) => {
                 // A new edge changes what inverse-materialization yields.
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 Ok(tool_ok(format!(
                     "Related {} -{}-> {}",
                     out.subject_iri, predicate, out.object_iri

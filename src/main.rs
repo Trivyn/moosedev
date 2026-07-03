@@ -439,6 +439,11 @@ fn import_mode(data_dir: &Path, args: ImportArgs) -> anyhow::Result<()> {
         )
     })?;
     let outcome = import_rdf_graph(&store, args.scope, args.format, args.mode, &text)?;
+    if outcome.project_changed() {
+        // Keep the committed canonical text in step with the store, like every
+        // project-graph mutation (Requirement d459cac2).
+        moosedev::canonical::write_through(&store, data_dir)?;
+    }
     println!(
         "imported {} quad(s), skipped {} existing, removed {} from {}",
         outcome.inserted_quad_count,

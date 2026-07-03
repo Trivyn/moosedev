@@ -49,6 +49,10 @@ async-trait = "0.1"
 # Timestamps for PROV-O edit provenance.
 chrono = "0.4"
 
+# Content hash for the committed canonical kg.nq staleness stamp (already in the
+# dependency tree via sqlx; same 0.10 line).
+sha2 = "0.10"
+
 # Writes the `ontology_vectors` SQLite store that MOOSE's `VecStore::open` reads
 # (MOOSE exposes no public vector-write path). Same sqlite crate + version MOOSE
 # uses, so it resolves to a single build.

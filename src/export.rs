@@ -101,16 +101,7 @@ pub fn export_graph(
     let mut quads = Vec::new();
 
     for graph_iri in &graph_iris {
-        let graph = NamedNode::new(*graph_iri)
-            .map_err(|e| anyhow::anyhow!("invalid export graph IRI {graph_iri:?}: {e}"))?;
-        for quad in store.quads_for_pattern(
-            None,
-            None,
-            None,
-            Some(GraphNameRef::NamedNode(graph.as_ref())),
-        ) {
-            quads.push(quad?);
-        }
+        quads.extend(graph_quads(store, graph_iri)?);
     }
 
     quads.sort_by_cached_key(canonical_quad_key);
@@ -121,6 +112,73 @@ pub fn export_graph(
         quad_count: quads.len(),
         graphs: graph_iris.into_iter().map(str::to_string).collect(),
     })
+}
+
+/// Canonical dump of the project graph for the committed `.moosedev/kg.nq`:
+/// sorted N-Quads MINUS reasoner-materialized quads. Inferred edges are tagged
+/// only by reification in the (local, uncommitted) provenance graph, so shipping
+/// them in the text would strand them untagged — and un-droppable — on the
+/// importing machine; they are always re-derived locally by lazy enrichment.
+pub fn export_canonical_project(store: &Store) -> anyhow::Result<GraphDump> {
+    export_canonical(store, PROJECT_KG_GRAPH_IRI)
+}
+
+/// [`export_canonical_project`] generalized over the data graph, so tests can
+/// exercise the inferred-quad exclusion on scratch graphs.
+pub(crate) fn export_canonical(store: &Store, data_graph_iri: &str) -> anyhow::Result<GraphDump> {
+    let inferred: BTreeSet<(String, String, String, String)> =
+        crate::provenance::reasoner_inferred_data_quads(store, data_graph_iri)?
+            .iter()
+            .map(canonical_quad_key)
+            .collect();
+
+    let mut quads: Vec<Quad> = Vec::new();
+    let mut blank_node_count = 0usize;
+    for quad in graph_quads(store, data_graph_iri)? {
+        if inferred.contains(&canonical_quad_key(&quad)) {
+            continue;
+        }
+        if quad_has_blank_node(&quad) {
+            blank_node_count += 1;
+        }
+        quads.push(quad);
+    }
+    if blank_node_count > 0 {
+        // Blank nodes re-mint on every parse, so a patch import of this text
+        // would never be idempotent. Records use named UUID IRIs by design.
+        tracing::warn!(
+            "canonical export: {blank_node_count} quad(s) in {data_graph_iri} carry blank nodes; \
+             patch imports of this text will duplicate them"
+        );
+    }
+
+    quads.sort_by_cached_key(canonical_quad_key);
+    let text = serialize_quads(&quads, ExportFormat::NQuads)?;
+    Ok(GraphDump {
+        text,
+        quad_count: quads.len(),
+        graphs: vec![data_graph_iri.to_string()],
+    })
+}
+
+fn graph_quads(store: &Store, graph_iri: &str) -> anyhow::Result<Vec<Quad>> {
+    let graph = NamedNode::new(graph_iri)
+        .map_err(|e| anyhow::anyhow!("invalid export graph IRI {graph_iri:?}: {e}"))?;
+    store
+        .quads_for_pattern(
+            None,
+            None,
+            None,
+            Some(GraphNameRef::NamedNode(graph.as_ref())),
+        )
+        .map(|q| q.map_err(anyhow::Error::from))
+        .collect()
+}
+
+fn quad_has_blank_node(quad: &Quad) -> bool {
+    use oxigraph::model::{NamedOrBlankNode, Term};
+    matches!(quad.subject, NamedOrBlankNode::BlankNode(_))
+        || matches!(quad.object, Term::BlankNode(_))
 }
 
 fn canonical_quad_key(quad: &Quad) -> (String, String, String, String) {
@@ -162,4 +220,85 @@ fn canonical_triple_key(quad: &Quad) -> (String, String, String) {
         quad.predicate.to_string(),
         quad.object.to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use oxigraph::model::Literal;
+
+    /// The committed canonical dump must carry only asserted knowledge: after
+    /// GROWL materializes an inferred inverse edge into the data graph, the
+    /// plain graph read sees it but the canonical export filters it out (its
+    /// reification tag lives in the local provenance graph and is not shipped).
+    #[test]
+    fn canonical_export_excludes_reasoner_materialized_quads() -> anyhow::Result<()> {
+        let store = Store::new()?;
+        let data = NamedNode::new("urn:test:data")?;
+        let onto = NamedNode::new("urn:test:onto")?;
+
+        let a = NamedNode::new("urn:test:a")?;
+        let b = NamedNode::new("urn:test:b")?;
+        let concerns = NamedNode::new("urn:test:concerns")?;
+        let is_concerned_by = NamedNode::new("urn:test:isConcernedBy")?;
+        let inverse_of = NamedNode::new("http://www.w3.org/2002/07/owl#inverseOf")?;
+        let rdf_type = NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")?;
+        let object_property = NamedNode::new("http://www.w3.org/2002/07/owl#ObjectProperty")?;
+        let label = NamedNode::new("http://www.w3.org/2000/01/rdf-schema#label")?;
+
+        // A-box: a concerns b, both labeled (labels keep them in the reasoner's
+        // asserted-subject scope, as every real record is).
+        store.insert(&Quad::new(
+            a.clone(),
+            concerns.clone(),
+            b.clone(),
+            data.clone(),
+        ))?;
+        store.insert(&Quad::new(
+            a.clone(),
+            label.clone(),
+            Literal::new_simple_literal("a"),
+            data.clone(),
+        ))?;
+        store.insert(&Quad::new(
+            b.clone(),
+            label,
+            Literal::new_simple_literal("b"),
+            data.clone(),
+        ))?;
+        // T-box: concerns owl:inverseOf isConcernedBy.
+        store.insert(&Quad::new(
+            concerns.clone(),
+            inverse_of,
+            is_concerned_by.clone(),
+            onto.clone(),
+        ))?;
+        store.insert(&Quad::new(
+            concerns,
+            rdf_type.clone(),
+            object_property.clone(),
+            onto.clone(),
+        ))?;
+        store.insert(&Quad::new(
+            is_concerned_by,
+            rdf_type,
+            object_property,
+            onto.clone(),
+        ))?;
+
+        let materialized =
+            crate::reasoning::enrich(&store, "urn:test:data", &["urn:test:onto"], Utc::now())?;
+        assert_eq!(materialized, 1, "the inverse edge is materialized");
+
+        // The inferred edge sits in the data graph alongside the asserted quads…
+        assert_eq!(graph_quads(&store, "urn:test:data")?.len(), 4);
+
+        // …but the canonical dump excludes it.
+        let dump = export_canonical(&store, "urn:test:data")?;
+        assert_eq!(dump.quad_count, 3, "only the asserted quads are exported");
+        assert!(!dump.text.contains("isConcernedBy"));
+        assert!(dump.text.contains("urn:test:concerns"));
+        Ok(())
+    }
 }

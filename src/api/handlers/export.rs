@@ -71,9 +71,10 @@ pub async fn import_graph(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     if outcome.project_changed() {
         // Import bypasses the typed capture path, so refresh the read-side caches
-        // the capture path normally invalidates for project-graph writes.
+        // the capture path normally invalidates for project-graph writes (and
+        // write the canonical kg.nq through, like every project-graph mutation).
         state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
-        state.mark_inferred_stale();
+        state.note_project_write();
     }
 
     Ok(axum::Json(outcome))
