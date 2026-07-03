@@ -37,9 +37,12 @@ pub async fn chat(
     }
     let session_db = chat_session_db(&state)?;
     let clarification_reply = match payload.clarification_reply {
-        Some(value) => Some(serde_json::from_value(value).map_err(|e| {
-            ApiError::bad_request(format!("invalid clarification_reply payload: {e}"))
-        })?),
+        Some(value) => {
+            let reply = serde_json::from_value(value).map_err(|e| {
+                ApiError::bad_request(format!("invalid clarification_reply payload: {e}"))
+            })?;
+            Some(normalize_clarification_reply(reply))
+        }
         None => None,
     };
 
@@ -187,6 +190,28 @@ fn from_moose_message(message: ChatMessage) -> ChatMessagePayload {
         role: role.to_string(),
         content: message.content,
     }
+}
+
+/// Normalise an anonymous `Human { user_id: None }` reply to a stable
+/// `"default"` user id.
+///
+/// MOOSE rejects a `remember_for_user` pick from an anonymous human outright
+/// (rule `anonymous_cannot_remember`) rather than falling back to session
+/// scope, which would silently drop the user's intent. MOOSEDev is single-user
+/// and local, so a fixed `"default"` id lets learned surface forms accumulate
+/// in the user overlay (`urn:moose:overlay:user:default`) across sessions
+/// without per-user authentication. Overlays live in a separate named graph
+/// from the shipped ontologies and survive version updates; nothing here writes
+/// to the canonical ontology.
+fn normalize_clarification_reply(
+    mut reply: moose::clarification::ClarificationReply,
+) -> moose::clarification::ClarificationReply {
+    if let moose::clarification::AgentRef::Human { user_id } = &mut reply.agent {
+        if user_id.is_none() {
+            *user_id = Some("default".to_string());
+        }
+    }
+    reply
 }
 
 fn assist_level(value: u8) -> LlmAssistLevel {
@@ -366,6 +391,44 @@ mod tests {
     use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
 
     use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
+
+    #[test]
+    fn normalize_clarification_reply_fills_anonymous_human() {
+        // agent.data omits user_id → deserializes to Human { user_id: None }.
+        let value = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "user_text": "Pick: Foo",
+            "action": { "kind": "PickCandidate", "data": { "iri": "https://example.org/Foo" } },
+            "remember_for_user": true,
+            "agent": { "kind": "Human", "data": {} }
+        });
+        let reply = serde_json::from_value(value).expect("deserialize reply");
+        let normalized = normalize_clarification_reply(reply);
+        match normalized.agent {
+            moose::clarification::AgentRef::Human { user_id } => {
+                assert_eq!(user_id.as_deref(), Some("default"));
+            }
+            other => panic!("expected Human, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_clarification_reply_preserves_explicit_identity() {
+        let explicit = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "user_text": "",
+            "action": { "kind": "Decline" },
+            "remember_for_user": false,
+            "agent": { "kind": "Human", "data": { "user_id": "alice" } }
+        });
+        let reply = serde_json::from_value(explicit).expect("deserialize reply");
+        match normalize_clarification_reply(reply).agent {
+            moose::clarification::AgentRef::Human { user_id } => {
+                assert_eq!(user_id.as_deref(), Some("alice"));
+            }
+            other => panic!("expected Human, got {other:?}"),
+        }
+    }
 
     const SESSION_ID: &str = "session-enrichment-test";
     const SESSION_GRAPH: &str = "urn:moose:session:session-enrichment-test";

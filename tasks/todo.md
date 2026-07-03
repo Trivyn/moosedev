@@ -219,6 +219,70 @@ load-bearing `.process_group(0)` isolation. Verification passed: `cargo fmt`,
 `cargo test --test autospawn`, `cargo check`, `cargo clippy --all-targets --all-features`, and
 full `cargo test`.
 
+## Canonical committed KG text (`.moosedev/kg.nq`) — finish Requirement `d459cac2`
+
+> Goal: make the project KG shareable via git. Committed source of truth = canonical
+> N-Quads at `.moosedev/kg.nq`; the RocksDB store (+ vector DBs) stays a derived,
+> gitignored local cache. Graph: Requirement `d459cac2` motivates ADs `1a4983b8`
+> (export core) and `3d091a06` (import core) — both shipped; this closes their
+> explicitly deferred half (committed kg.nq, cache rebuild, gitignore change).
+
+### Design
+- **Scope: project graph only.** Provenance stays local-only for now (author names →
+  privacy once repos are public; merges worst). Session graphs (`urn:moose:session:*`)
+  and ontology graphs were never in export scope.
+- **Exclude reasoner-inferred quads (correctness, not just noise).** GROWL enrichment
+  materializes inferred edges INTO the project graph (`reasoning::enrich`), tagged only
+  by reification in the *local* provenance graph. If committed, a fresh clone imports
+  them untagged → `clear_reasoner_inferences` can never drop them → un-droppable
+  pseudo-asserted edges. Canonical export = project graph MINUS inferred quads.
+  Refactor the activity→reifier→triple enumeration out of
+  `provenance::clear_reasoner_inferences` into a shared
+  `reasoner_inferred_data_quads(store, graph_iri)` helper.
+- **Write-through, synchronous, best-effort.** After every successful project-graph
+  write, re-export kg.nq + update stamp (~2k quads → milliseconds). Failure warns and
+  never fails the write (matches the provenance/index post-write contract); retried on
+  the next write. New `AppState::note_project_write()` = `mark_inferred_stale()` +
+  canonical sync, replacing the 5 existing `mark_inferred_stale` call sites.
+- **Stamp = SHA-256 of kg.nq at last sync**, at `.moosedev/kg.nq.stamp` (gitignored).
+  Startup three-way compare: T = hash(kg.nq file), S = hash(canonical export of current
+  store), P = stamp.
+- **Blank-node guard:** canonical export warns if the project graph contains blank
+  nodes (verified 0 today) — they would break patch-import idempotency.
+
+### Startup decision table (in `AppState::bootstrap`, after `load_ontologies`)
+| kg.nq | store project graph | condition | action |
+|---|---|---|---|
+| absent | empty | — | nothing (file appears on first capture) |
+| absent | non-empty | — | adoption: export kg.nq + stamp |
+| present | empty | — | fresh clone: replace-import from text; stamp=T |
+| present | non-empty | T==P and S==P | in sync: nothing |
+| present | non-empty | T≠P, S==P | git pull/checkout: replace-import from text; stamp=T |
+| present | non-empty | T==P, S≠P | missed export (crash window): re-export; stamp |
+| present | non-empty | S==T (stamp missing/any) | write stamp only |
+| present | non-empty | T≠P and S≠P (or no stamp) | diverged: patch-import text (loses nothing), re-export union, stamp; WARN loudly (stale duplicate status literals possible — future merge tooling) |
+
+After any hydration: `entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI)` +
+`mark_inferred_stale()` (mirrors the HTTP import handler). Instance-vector reconcile
+happens in the existing `build_instance_index` pass, which runs after bootstrap.
+
+### Items
+- [ ] `provenance::reasoner_inferred_data_quads` helper; `clear_reasoner_inferences` reuses it
+- [ ] `export::export_canonical_project(store)` — canonical N-Quads dump minus inferred quads + blank-node warn
+- [ ] new `src/canonical.rs`: stamp IO, pure decision-table fn (unit-testable), `sync_on_startup`, `write_through`
+- [ ] `AppState::note_project_write()`; replace the 5 write-site calls (4 MCP tools in `src/mcp/mod.rs:448,541,593,627` + HTTP import `src/api/handlers/export.rs:76`)
+- [ ] CLI `moosedev import` syncs kg.nq post-import (`src/main.rs`)
+- [ ] `.gitignore`: `/.moosedev/` → `/.moosedev/*` + `!/.moosedev/kg.nq` (git cannot re-include a file under an excluded directory)
+- [ ] tests: decision table; inferred-quad exclusion (enrich → export → assert absent); write-through on capture; fresh-clone hydration; git-pull replace; divergence patch+warn; full suite + clippy green
+- [ ] docs: README version-control section; CLAUDE.md dogfooding note (revises the "gitignored store" stance per `d459cac2`); templates/ adoption snippet gitignore guidance
+- [ ] dogfood: commit this repo's own kg.nq; live-verify a capture + retract shows a clean `git diff`
+- [ ] graph capture: AD (isMotivatedBy `d459cac2`) recording this design + answers to the requirement's open sub-questions (provenance local-only; content-hash staleness; canonical scope excludes inferred quads); `validate_against_architecture`
+
+### Deferred (explicitly out of scope here)
+- Instance-level dedup on merge (Requirement `5565038e`) + status-aware merge tooling — become live once two stores actually exchange kg.nq
+- Committing the provenance graph (privacy/merge questions open)
+- Orphan instance-vectors after replace-hydration (same as today's replace-import; benign — dense hits for absent IRIs drop out at store read)
+
 ## Known limitations / deferred
 - **Ontology-regeneration orphans existing records** (P1): instances carry the full class IRI as `rdf:type`; if a regenerated ontology changes class IRIs/namespace, prior durable records stop being listed/searched (`relevant_context`/`query` candidate sets come from the current `arch_vocab`). **Zero impact today** (no persistent data), but needs a deliberate **migration story** (re-type on ontology change via a mapping — *not* hardcoded old namespaces) before real data accrues. Lighter partial step: make list-all enumerate by actual `rdf:type` in the project graph rather than the current vocab.
 - **Per-class title predicate**: capture binds the title to `hasTitle` (the `InformationRecord` label property every capture class inherits). The class-generic form (read each class's `trivyn:labelProperty`) is blocked until MOOSE surfaces that annotation (`VocabularyEntry.label_property`).
