@@ -107,6 +107,10 @@ pub struct AppState {
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
     pub inferred_stale: std::sync::atomic::AtomicBool,
+    /// Keeps the committed canonical text (`kg.nq`) in step with project-graph
+    /// writes: isolated captures export synchronously, bulk bursts coalesce to
+    /// a single trailing export once the burst goes quiet.
+    canonical_throttle: crate::canonical::WriteThrottle,
     /// Serializes enrichment so concurrent reads enrich at most once.
     enrich_lock: std::sync::Mutex<()>,
 }
@@ -194,6 +198,7 @@ impl AppState {
             data_dir: data_dir.to_path_buf(),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
+            canonical_throttle: crate::canonical::WriteThrottle::default(),
             enrich_lock: std::sync::Mutex::new(()),
         })
     }
@@ -206,15 +211,15 @@ impl AppState {
     }
 
     /// Post-write hook for every project-graph mutation: invalidate the lazily
-    /// materialized inferred edges AND write the committed canonical text
-    /// (`kg.nq`) through. The text export is best-effort — a file-write failure
-    /// must never fail the symbolic write (invariant #1); it warns and the next
-    /// write retries.
+    /// materialized inferred edges AND keep the committed canonical text
+    /// (`kg.nq`) in step — synchronously for an isolated capture, coalesced to
+    /// one trailing export for a bulk burst (see
+    /// [`crate::canonical::WriteThrottle`]). Best-effort: a text-export failure
+    /// must never fail the symbolic write (invariant #1).
     pub fn note_project_write(&self) {
         self.mark_inferred_stale();
-        if let Err(e) = crate::canonical::write_through(&self.store, &self.data_dir) {
-            tracing::warn!("canonical kg.nq write-through failed (retried on next write): {e}");
-        }
+        self.canonical_throttle
+            .note_write(&self.store, &self.data_dir);
     }
 
     /// Lazily re-run GROWL enrichment when a prior write invalidated the materialized

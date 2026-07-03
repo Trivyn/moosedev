@@ -203,7 +203,9 @@ The committed source of truth for a project's memory is a canonical text seriali
 excluded and re-derived locally). MOOSEDev maintains it automatically:
 
 - **every write** to the project graph re-exports `kg.nq`, so it is always ready to commit —
-  `git diff` shows new records as added lines, reviewable in a PR like any other change;
+  `git diff` shows new records as added lines, reviewable in a PR like any other change. Rapid
+  successive writes (bulk imports, bootstrap replays) are coalesced: the burst skips per-write
+  exports and a single export lands once it goes quiet;
 - **on startup** the file and the local store are reconciled: a fresh clone (or a `git pull` that
   changed `kg.nq`) hydrates the local store from the text; an existing store with no `kg.nq` yet
   exports one (adoption);

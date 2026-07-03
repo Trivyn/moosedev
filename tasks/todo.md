@@ -277,6 +277,7 @@ happens in the existing `build_instance_index` pass, which runs after bootstrap.
 - [x] docs: README version-control section; CLAUDE.md dogfooding note (revises the "gitignored store" stance per `d459cac2`); templates/ adoption snippet gitignore guidance
 - [x] dogfood: backend restart adopted the live store (`ExportText`, 1918 quads — 176 reasoner-materialized quads excluded vs the 2094-quad raw export); idempotent live `relate` re-exported kg.nq byte-identically; repo kg.nq committed
 - [x] graph capture: AD `013a9706` (isMotivatedBy `d459cac2`, 3 alternatives weighed, 3 consequences) answers the requirement's open sub-questions (provenance local-only; content-hash staleness; canonical scope excludes inferred quads); `validate_against_architecture` → 0 violations
+- [x] burst throttle (user-directed follow-up): `canonical::WriteThrottle` — an isolated capture still exports synchronously (kg.nq stays commit-ready), but writes within a 2s quiescence window form a burst that skips per-write exports entirely; one trailing flush lands when the burst ends (O(1) exports per bootstrap replay instead of O(N)). No-runtime contexts fall back to synchronous export; a crash mid-burst self-heals via the missed-export startup branch.
 
 ### Deferred (explicitly out of scope here)
 - Instance-level dedup on merge (Requirement `5565038e`) + status-aware merge tooling — become live once two stores actually exchange kg.nq

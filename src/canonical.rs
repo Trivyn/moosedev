@@ -12,6 +12,9 @@
 //! knowledge; inferred edges re-derive locally via lazy enrichment.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use oxigraph::store::Store;
 use sha2::{Digest, Sha256};
@@ -187,6 +190,116 @@ pub fn write_through(store: &Store, data_dir: &Path) -> anyhow::Result<()> {
     write_canonical(data_dir, &dump.text, &hash)
 }
 
+/// Quiescence window separating an interactive capture from a bulk burst.
+const QUIESCENCE_WINDOW: Duration = Duration::from_secs(2);
+
+/// Leading+trailing throttle for the canonical write-through.
+///
+/// An isolated write exports synchronously, so an interactive capture leaves
+/// `kg.nq` commit-ready the moment the tool returns. Writes landing within the
+/// quiescence window of the previous one form a burst (bootstrap replays, bulk
+/// captures): they skip the export, and one trailing task flushes after the
+/// burst goes quiet — O(1) exports per burst instead of O(N), with no export
+/// until the very end of the burst.
+///
+/// The trailing flush needs a tokio runtime; without one (CLI paths, sync
+/// tests) every write falls back to the synchronous export. All failures are
+/// best-effort warnings: a missed flush (crash, error) is repaired by the
+/// missed-export branch of [`sync_on_startup`] at the next boot.
+pub struct WriteThrottle {
+    inner: Arc<ThrottleInner>,
+}
+
+struct ThrottleInner {
+    window: Duration,
+    /// When the most recent project-graph write happened.
+    last_write: Mutex<Option<Instant>>,
+    /// True while a trailing flush task is pending, so a burst schedules one.
+    trailing_scheduled: AtomicBool,
+}
+
+impl Default for WriteThrottle {
+    fn default() -> Self {
+        Self::new(QUIESCENCE_WINDOW)
+    }
+}
+
+impl WriteThrottle {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            inner: Arc::new(ThrottleInner {
+                window,
+                last_write: Mutex::new(None),
+                trailing_scheduled: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Note one successful project-graph write and keep `kg.nq` in step:
+    /// leading edge exports now, a burst defers to one trailing flush.
+    pub fn note_write(&self, store: &Store, data_dir: &Path) {
+        let now = Instant::now();
+        let in_burst = {
+            let mut last = self
+                .inner
+                .last_write
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let in_burst =
+                last.is_some_and(|previous| now.duration_since(previous) < self.inner.window);
+            *last = Some(now);
+            in_burst
+        };
+
+        if !in_burst {
+            export_best_effort(store, data_dir);
+            return;
+        }
+        if self.inner.trailing_scheduled.swap(true, Ordering::AcqRel) {
+            return; // a trailing flush is already pending for this burst
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // No runtime to defer on — behave like plain write-through.
+            self.inner
+                .trailing_scheduled
+                .store(false, Ordering::Release);
+            export_best_effort(store, data_dir);
+            return;
+        };
+
+        let inner = self.inner.clone();
+        let store = store.clone();
+        let data_dir = data_dir.to_path_buf();
+        handle.spawn(async move {
+            loop {
+                tokio::time::sleep(inner.window).await;
+                let quiet = {
+                    let last = inner
+                        .last_write
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    last.is_none_or(|previous| previous.elapsed() >= inner.window)
+                };
+                if quiet {
+                    break;
+                }
+            }
+            // Clear BEFORE exporting so a write racing the export schedules a
+            // fresh trailing flush rather than being silently absorbed.
+            inner.trailing_scheduled.store(false, Ordering::Release);
+            export_best_effort(&store, &data_dir);
+        });
+    }
+}
+
+fn export_best_effort(store: &Store, data_dir: &Path) {
+    if let Err(e) = write_through(store, data_dir) {
+        tracing::warn!(
+            "canonical kg.nq write-through failed (self-heals on next write or startup): {e}"
+        );
+    }
+}
+
 fn hydrate(store: &Store, text: &str, mode: ImportMode) -> anyhow::Result<GraphImport> {
     import_graph(
         store,
@@ -304,5 +417,74 @@ mod tests {
         assert_eq!(sha256_hex(""), sha256_hex(""));
         assert_ne!(sha256_hex("a"), sha256_hex("b"));
         assert_eq!(sha256_hex("abc").len(), 64);
+    }
+
+    use oxigraph::model::{Literal, NamedNode, Quad};
+
+    fn throttle_fixture(tag: &str) -> (Store, PathBuf) {
+        let data_dir =
+            std::env::temp_dir().join(format!("moosedev-throttle-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        (Store::new().unwrap(), data_dir)
+    }
+
+    fn insert_record(store: &Store, n: usize) {
+        let quad = Quad::new(
+            NamedNode::new_unchecked(format!("urn:test:rec{n}")),
+            NamedNode::new_unchecked("http://www.w3.org/2000/01/rdf-schema#label"),
+            Literal::new_simple_literal(format!("rec{n}")),
+            NamedNode::new_unchecked(crate::graph::PROJECT_KG_GRAPH_IRI),
+        );
+        store.insert(&quad).unwrap();
+    }
+
+    fn canonical_text(data_dir: &Path) -> String {
+        std::fs::read_to_string(canonical_path(data_dir)).unwrap_or_default()
+    }
+
+    /// Without a tokio runtime there is nothing to defer on: every write —
+    /// burst or not — falls back to the synchronous export.
+    #[test]
+    fn throttle_exports_synchronously_without_a_runtime() {
+        let (store, data_dir) = throttle_fixture("sync");
+        let throttle = WriteThrottle::new(Duration::from_secs(60));
+
+        insert_record(&store, 1);
+        throttle.note_write(&store, &data_dir);
+        assert!(canonical_text(&data_dir).contains("rec1"));
+
+        // Well within the window — a burst, but with no runtime it still lands.
+        insert_record(&store, 2);
+        throttle.note_write(&store, &data_dir);
+        assert!(canonical_text(&data_dir).contains("rec2"));
+    }
+
+    /// The leading write exports immediately; writes inside the window skip the
+    /// export until one trailing flush fires after the burst goes quiet.
+    #[tokio::test]
+    async fn throttle_coalesces_a_burst_into_one_trailing_export() {
+        let (store, data_dir) = throttle_fixture("burst");
+        let window = Duration::from_millis(150);
+        let throttle = WriteThrottle::new(window);
+
+        // Leading edge: exported synchronously.
+        insert_record(&store, 1);
+        throttle.note_write(&store, &data_dir);
+        assert!(canonical_text(&data_dir).contains("rec1"));
+
+        // Burst: no export until the very end.
+        insert_record(&store, 2);
+        throttle.note_write(&store, &data_dir);
+        insert_record(&store, 3);
+        throttle.note_write(&store, &data_dir);
+        let mid_burst = canonical_text(&data_dir);
+        assert!(!mid_burst.contains("rec2"), "burst writes must defer");
+        assert!(!mid_burst.contains("rec3"), "burst writes must defer");
+
+        // After quiescence the single trailing flush lands everything.
+        tokio::time::sleep(window * 4).await;
+        let settled = canonical_text(&data_dir);
+        assert!(settled.contains("rec2") && settled.contains("rec3"));
     }
 }
