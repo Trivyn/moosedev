@@ -131,6 +131,9 @@ project knowledge graph. When its tools are available, prefer them over re-deriv
 - **Capture as you go** — record durable knowledge with `record_important_decision` (`kind`:
   `ArchitecturalDecision`, `Lesson`, `Constraint`, `Pattern`, `AntiPattern`, `Requirement`); capture the
   decision and its rationale, not transient chatter.
+- **Anchor code-touching records** — link records to their `SystemComponent` with
+  `relations: [{predicate: "concerns", target: "<component name>"}]`; list components with `sparql`
+  if unsure.
 - **Align new concepts** with `align_concepts` before introducing a new term, so the model graph does
   not drift (invariant #4).
 - **Verify** with `validate_against_architecture` after capturing; use `sparql` for precise,

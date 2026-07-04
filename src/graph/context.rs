@@ -6,10 +6,12 @@ use moose::entity_index::DEFAULT_DENSE_FLOOR;
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
-use super::capture::require_information_record;
+use super::capture::{
+    asserted_project_types, class_label_mirror_property_iri, require_information_record,
+};
 use super::lifecycle::is_retired;
 use super::state::AppState;
-use super::util::local_name;
+use super::util::{any_subclass_of, local_name};
 use super::PROJECT_KG_GRAPH_IRI;
 
 /// A recorded knowledge item returned as structured context.
@@ -320,6 +322,71 @@ pub(crate) fn resolve_record_exact_all(state: &AppState, target: &str) -> Vec<(S
                 }
                 if let Ok(class) = require_information_record(state, s) {
                     out.push((iri, class));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a free-text target to existing typed project instances by exact
+/// normalized match on `rdfs:label` or the label-mirror property for any expected
+/// class. Unlike [`resolve_record_exact_all`], this accepts non-InformationRecord
+/// instances when the caller's predicate shape expects them, e.g. `SystemComponent`
+/// for `concerns`.
+pub(crate) fn resolve_instance_exact_all(
+    state: &AppState,
+    target: &str,
+    expected_classes: &[String],
+) -> Vec<(String, String)> {
+    let needle = normalize_match(target);
+    if needle.is_empty() || expected_classes.is_empty() {
+        return Vec::new();
+    }
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut predicates = vec![moose::RDFS_LABEL.to_string()];
+    for class_iri in expected_classes {
+        let label_pred = class_label_mirror_property_iri(&state.store, &state.capture, class_iri);
+        if !predicates.iter().any(|p| p == &label_pred) {
+            predicates.push(label_pred);
+        }
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    for pred_iri in predicates {
+        let Ok(pred) = NamedNodeRef::new(&pred_iri) else {
+            continue;
+        };
+        for q in state
+            .store
+            .quads_for_pattern(None, Some(pred), None, Some(GraphNameRef::NamedNode(graph)))
+            .flatten()
+        {
+            let Term::Literal(lit) = &q.object else {
+                continue;
+            };
+            if normalize_match(lit.value()) != needle {
+                continue;
+            }
+            if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
+                let iri = s.as_str().to_string();
+                if out.iter().any(|(existing, _)| existing == &iri) {
+                    continue;
+                }
+                let asserted = asserted_project_types(state, s);
+                if any_subclass_of(&state.store, &asserted, expected_classes) {
+                    let matched_class = asserted
+                        .iter()
+                        .find(|class| {
+                            any_subclass_of(
+                                &state.store,
+                                std::slice::from_ref(*class),
+                                expected_classes,
+                            )
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| asserted.first().cloned().unwrap_or_default());
+                    out.push((iri, matched_class));
                 }
             }
         }

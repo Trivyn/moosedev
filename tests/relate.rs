@@ -97,6 +97,26 @@ fn relate_accepts_component_edges_from_direct_and_or_shapes() {
 }
 
 #[test]
+fn lesson_concerns_component_enriches_inverse_and_validates() {
+    let state = bootstrap("lesson-concerns-component");
+    let lesson = record(&state, "Lesson", "Inline concerns can target components");
+    let component = record(&state, "SystemComponent", "graph/store layer");
+
+    let concerns = state.resolve_object_property("concerns").unwrap();
+    let inverse = state.resolve_object_property("isConcernedBy").unwrap();
+    graph::relate(&state, &lesson, "concerns", &component).expect("lesson concerns component");
+
+    assert!(has_edge(&state, &lesson, &concerns, &component));
+    state.ensure_enriched();
+    assert!(
+        has_edge(&state, &component, &inverse, &lesson),
+        "GROWL should materialize isConcernedBy inverse for InformationRecord subjects"
+    );
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(report.conforms(), "{}", validation::format_report(&report));
+}
+
+#[test]
 fn relate_rejects_out_of_range_edge_and_writes_nothing() {
     let state = bootstrap("reject");
     let anti_pattern = record(&state, "AntiPattern", "Hardcoded namespace");

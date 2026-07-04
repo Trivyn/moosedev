@@ -80,6 +80,16 @@ headless = []
 # (`cuda = ["moose/candle-cuda"]` is the NVIDIA analogue if ever needed.)
 metal = ["moose/candle-metal"]
 
+[[example]]
+name = "backfill_concerns"
+path = "examples/backfill_concerns.rs"
+test = true
+
+[[example]]
+name = "migrate_namespace"
+path = "examples/migrate_namespace.rs"
+test = true
+
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.
 # Required because oxigraph types (Store, NamedNode, …) cross MOOSE's public API and

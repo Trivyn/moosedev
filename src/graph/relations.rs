@@ -74,6 +74,18 @@ impl RelationCatalogue {
             .collect()
     }
 
+    /// Object classes expected for a predicate's object endpoint, as declared by
+    /// SHACL. Used by inline capture to decide when a target may be a typed
+    /// non-record instance such as `SystemComponent`.
+    pub(crate) fn expected_object_classes(&self, predicate_iri: &str) -> Vec<String> {
+        unique_classes(
+            self.entries
+                .iter()
+                .filter(|e| e.predicate_iri == predicate_iri)
+                .map(|e| e.object_class.clone()),
+        )
+    }
+
     /// Object properties legal between two record classes, in either direction,
     /// subclass-aware (so `InformationRecord`-level constraints apply to every
     /// pair). `Forward` ⇒ the edge is `a --pred--> b`; `Inverse` ⇒ `b --pred--> a`.
@@ -282,7 +294,7 @@ mod tests {
     use super::*;
 
     /// Architecture-domain class namespace (matches the shipped ontologies).
-    const ARCH: &str = "https://trivyn.io/ontologies/software/architecture/domain/";
+    const ARCH: &str = "https://trivyn.io/ontologies/software/architecture#";
 
     /// In-memory store with just the shipped domain + SHACL shape graphs loaded —
     /// enough to build and exercise the relation catalogue.
@@ -369,6 +381,26 @@ mod tests {
                 .iter()
                 .any(|e| e.predicate_local == "isMotivatedBy"
                     && e.direction == EdgeDirection::Inverse)
+        );
+    }
+
+    #[test]
+    fn concerns_domain_broadened_to_information_record() {
+        let store = shapes_store();
+        let cat = build_relation_catalogue(&store);
+        for subject in ["Lesson", "Constraint", "ArchitecturalDecision"] {
+            let legal = cat.legal_predicates(&store, &cls(subject), &cls("SystemComponent"));
+            assert!(
+                legal.iter().any(|e| {
+                    e.predicate_local == "concerns" && e.direction == EdgeDirection::Forward
+                }),
+                "{subject} should be allowed to concern a SystemComponent"
+            );
+        }
+        let concerns = format!("{ARCH}concerns");
+        assert_eq!(
+            cat.expected_object_classes(&concerns),
+            vec![cls("SystemComponent")]
         );
     }
 

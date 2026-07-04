@@ -16,7 +16,7 @@ from typing import Any
 
 
 COUNT_QUERY = """\
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
+PREFIX : <https://trivyn.io/ontologies/software/architecture#>
 SELECT (COUNT(?ad) AS ?n) WHERE {
   GRAPH <https://moosedev.dev/kg/project> { ?ad a :ArchitecturalDecision . }
 }
@@ -24,7 +24,7 @@ SELECT (COUNT(?ad) AS ?n) WHERE {
 
 
 ENUM_QUERY = """\
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
+PREFIX : <https://trivyn.io/ontologies/software/architecture#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?ad ?title ?status ?ts ?author WHERE {
   GRAPH <https://moosedev.dev/kg/project> {
@@ -39,7 +39,7 @@ SELECT ?ad ?title ?status ?ts ?author WHERE {
 
 
 CLUSTER_QUERY = """\
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
+PREFIX : <https://trivyn.io/ontologies/software/architecture#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?ad ?dir ?rel ?node ?nlabel ?ndesc WHERE {{
   GRAPH <https://moosedev.dev/kg/project> {{
