@@ -132,3 +132,63 @@ jobs:
           files: artifacts/**/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  homebrew:
+    name: update homebrew tap
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      # Optional: only runs once the tap repo + token exist (see docs/install.md).
+      # A missing token skips the job cleanly so it never blocks a release.
+      - name: Gate on tap token
+        id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::HOMEBREW_TAP_TOKEN not set; skipping Homebrew tap update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout MOOSEDev
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Render formula and push to tap
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Read the checksums the build job already computed (shipped as artifacts).
+          macos_sha=$(awk '{print $1}' artifacts/*/moosedev-v"${VERSION}"-aarch64-apple-darwin.tar.gz.sha256 2>/dev/null || true)
+          linux_sha=$(awk '{print $1}' artifacts/*/moosedev-v"${VERSION}"-x86_64-unknown-linux-gnu.tar.gz.sha256 2>/dev/null || true)
+          if [ -z "$macos_sha" ] || [ -z "$linux_sha" ]; then
+            echo "::error::could not read release checksums for v${VERSION}"; exit 1
+          fi
+          sh packaging/homebrew/render-formula.sh "$VERSION" "$macos_sha" "$linux_sha" > moosedev.rb
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Trivyn/homebrew-moosedev.git" tap
+          mkdir -p tap/Formula
+          cp moosedev.rb tap/Formula/moosedev.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/moosedev.rb; then
+            echo "formula already up to date for v${VERSION}"
+          else
+            git add Formula/moosedev.rb
+            git commit -m "moosedev ${VERSION}"
+            git push
+          fi

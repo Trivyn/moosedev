@@ -94,7 +94,17 @@ Against the roadmap in [`tasks/todo.md`](./tasks/todo.md): M0–M3 are complete,
 
 ### Use a release binary (recommended)
 
-Pre-built binaries are published on [GitHub Releases](https://github.com/Trivyn/moosedev/releases) for macOS (Apple Silicon) and Linux (x86-64). This is the supported path for everyone: building from source requires access to the private MOOSE engine (see [Open source & the MOOSE boundary](#open-source--the-moose-boundary)).
+Pre-built, self-contained binaries are the supported path for everyone (building from source requires access to the private MOOSE engine — see [Open source & the MOOSE boundary](#open-source--the-moose-boundary)). Install with the script or Homebrew:
+
+```sh
+# macOS (Apple Silicon) / Linux (x86-64)
+curl -fsSL https://raw.githubusercontent.com/Trivyn/moosedev/main/scripts/install.sh | sh
+
+# or Homebrew
+brew install Trivyn/moosedev/moosedev
+```
+
+Each downloads a binary bundled with its `ontologies/`, `skills/`, and `templates/` — no toolchain needed. See **[docs/install.md](docs/install.md)** for platforms, checksums, upgrades, and the macOS signing note; binaries are also on [GitHub Releases](https://github.com/Trivyn/moosedev/releases).
 
 ### Build from source
 
@@ -129,18 +139,33 @@ cargo build --release --no-default-features --features headless
 
 ### Run as an MCP server
 
-MOOSEDev speaks MCP over **stdio**. Point an MCP client at the binary. For example, in an `.mcp.json` (or your Claude Desktop config):
+The quickest way to wire MOOSEDev into a project is:
+
+```sh
+cd /path/to/your/project
+moosedev init
+```
+
+This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, and a `CLAUDE.md` template — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--stdio`, `--force`).
+
+<details>
+<summary>Manual configuration</summary>
+
+MOOSEDev speaks MCP over **stdio**; `init` just generates this for you. To configure a client by hand, point it at the binary:
 
 ```json
 {
   "mcpServers": {
     "moosedev": {
-      "command": "/absolute/path/to/moosedev",
+      "command": "moosedev",
       "args": []
     }
   }
 }
 ```
+
+Use an absolute path to the binary if `moosedev` isn't on the client's `PATH`. To share one graph across several clients, use `"args": ["--connect"]` — see [Shared mode](#shared-mode-multiple-clients--agents) below.
+</details>
 
 All tools in the [v1 tool surface](#v1-tool-surface) are available over this transport.
 

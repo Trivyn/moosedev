@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use moosedev::export::{export_graph, ExportFormat, ExportScope};
 use moosedev::graph;
 use moosedev::graph_import::{import_graph as import_rdf_graph, ImportFormat, ImportMode};
+use moosedev::init;
 use moosedev::runtime;
 
 /// Selected transport mode plus its optional explicit socket path.
@@ -47,6 +48,9 @@ enum Mode {
     Ui(Option<PathBuf>),
     Export(ExportArgs),
     Import(ImportArgs),
+    /// Configure a project to use MOOSEDev as memory (`.mcp.json`, `.gitignore`,
+    /// `CLAUDE.md`); no store, no backend.
+    Init(InitArgs),
 }
 
 struct ExportArgs {
@@ -62,6 +66,15 @@ struct ImportArgs {
     mode: ImportMode,
 }
 
+struct InitArgs {
+    target_dir: Option<PathBuf>,
+    force: bool,
+    codex: bool,
+    stdio: bool,
+    binary: Option<PathBuf>,
+    data_dir: Option<String>,
+}
+
 const USAGE: &str = "\
 moosedev — neurosymbolic MCP memory server
 
@@ -75,6 +88,7 @@ USAGE:
     moosedev ui [SOCK]        Open the backend's web UI in a browser (auto-spawn)
     moosedev export [PATH]    Export the graph; no running backend required
     moosedev import PATH      Import RDF into the graph; no running backend required
+    moosedev init [DIR]       Configure DIR (default .) to use MOOSEDev as memory
     moosedev --help           Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
@@ -100,6 +114,16 @@ IMPORT OPTIONS:
     --mode patch|replace      Patch inserts missing quads; replace fully restores
                               the selected scope (default: patch)
 
+INIT OPTIONS:
+    --stdio                   Generate a bare-stdio MCP config (single client)
+                              instead of the default shared --connect config
+    --codex                   Also write .codex/config.toml for the Codex CLI
+    --binary PATH             Force this binary path in the config instead of
+                              the auto-resolved command (bare `moosedev` on PATH,
+                              else this executable's absolute path)
+    --data-dir DIR            Data dir written into the config (default .moosedev)
+    --force                   Overwrite existing files / server entries
+
 N-Quads is the canonical version-control format. N-Triples is deterministic
 after graph names are dropped. Turtle is human-readable, not byte-canonical.";
 
@@ -115,12 +139,13 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("ui") => Ok(Mode::Ui(parse_optional_path(&mut iter, "ui")?)),
         Some("export") => parse_export(iter).map(Mode::Export),
         Some("import") => parse_import(iter).map(Mode::Import),
+        Some("init") => parse_init(iter).map(Mode::Init),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
 }
@@ -242,6 +267,57 @@ fn parse_import<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Im
         format,
         scope,
         mode,
+    })
+}
+
+/// Parse `init`'s arguments: an optional target dir plus flags. Mirrors the
+/// long/`=` option style of [`parse_export`]/[`parse_import`].
+fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<InitArgs> {
+    let mut target_dir = None;
+    let mut force = false;
+    let mut codex = false;
+    let mut stdio = false;
+    let mut binary = None;
+    let mut data_dir = None;
+    let mut args = iter.peekable();
+
+    while let Some(arg) = args.next() {
+        if arg == "--force" {
+            force = true;
+        } else if arg == "--codex" {
+            codex = true;
+        } else if arg == "--stdio" {
+            stdio = true;
+        } else if let Some(value) = arg.strip_prefix("--binary=") {
+            binary = Some(PathBuf::from(value));
+        } else if arg == "--binary" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--binary requires a path"))?;
+            binary = Some(PathBuf::from(value.as_str()));
+        } else if let Some(value) = arg.strip_prefix("--data-dir=") {
+            data_dir = Some(value.to_string());
+        } else if arg == "--data-dir" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--data-dir requires a value"))?;
+            data_dir = Some(value.clone());
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown init option {arg:?}");
+        } else if target_dir.is_none() {
+            target_dir = Some(PathBuf::from(arg.as_str()));
+        } else {
+            anyhow::bail!("init accepts at most one target directory; unexpected {arg:?}");
+        }
+    }
+
+    Ok(InitArgs {
+        target_dir,
+        force,
+        codex,
+        stdio,
+        binary,
+        data_dir,
     })
 }
 
@@ -378,6 +454,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Mode::Export(args) => export_mode(&data_dir, args),
         Mode::Import(args) => import_mode(&data_dir, args),
+        Mode::Init(args) => init_mode(args),
         Mode::Stdio => {
             let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
             runtime::serve_stdio(server).await
@@ -553,6 +630,115 @@ fn ontology_dir() -> PathBuf {
         return dir;
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
+}
+
+/// Locate the shipped `templates/` dir (holds the CLAUDE.md adoption template),
+/// mirroring [`ontology_dir`]'s resolution: explicit override, then next to the
+/// binary (released-tarball layout), then the crate dir (dev). `None` when none
+/// exist, so `init` skips the CLAUDE.md step with a clear message.
+fn templates_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("MOOSEDEV_TEMPLATES_DIR") {
+        let dir = PathBuf::from(dir);
+        return dir.is_dir().then_some(dir);
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("templates")))
+        .filter(|p| p.is_dir())
+    {
+        return Some(dir);
+    }
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    crate_dir.is_dir().then_some(crate_dir)
+}
+
+/// Is `bin` reachable on `PATH`?
+fn is_on_path(bin: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())
+}
+
+/// Resolve the command MCP clients should spawn for the `moosedev` server, plus
+/// an optional PATH advisory. Prefer a bare `moosedev` on `PATH` (upgrade-stable
+/// — the install channels put it there) so a version bump does not strand a
+/// stale absolute path in the generated config; otherwise fall back to this
+/// executable's absolute path and warn. `--binary` forces an explicit path.
+fn resolve_init_command(binary: Option<PathBuf>) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(path) = binary {
+        let abs = std::fs::canonicalize(&path).unwrap_or(path);
+        return Ok((abs.to_string_lossy().into_owned(), None));
+    }
+    if is_on_path("moosedev") {
+        return Ok(("moosedev".to_string(), None));
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("resolve current executable for the MCP command: {e}"))?;
+    let bindir = exe
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let note = format!(
+        "`moosedev` is not on your PATH, so .mcp.json uses an absolute path. Add {bindir} to PATH so the config survives upgrades (or re-run `moosedev init` with it on PATH)."
+    );
+    Ok((exe.to_string_lossy().into_owned(), Some(note)))
+}
+
+fn init_mode(args: InitArgs) -> anyhow::Result<()> {
+    let target_dir = args.target_dir.unwrap_or_else(|| PathBuf::from("."));
+    let data_dir = args.data_dir.unwrap_or_else(|| ".moosedev".to_string());
+    let server_mode = if args.stdio {
+        init::ServerMode::Stdio
+    } else {
+        init::ServerMode::Connect
+    };
+    let (command, path_note) = resolve_init_command(args.binary)?;
+
+    let opts = init::InitOptions {
+        target_dir,
+        command,
+        templates_dir: templates_dir(),
+        data_dir,
+        server_mode,
+        force: args.force,
+        codex: args.codex,
+    };
+    let report = init::init_project(&opts)?;
+    print_init_report(&opts, &report, path_note.as_deref());
+    Ok(())
+}
+
+/// Print the human-facing summary of an `init` run. `init` is a one-shot terminal
+/// command (never the MCP stdio channel), so stdout is the right sink here.
+fn print_init_report(opts: &init::InitOptions, report: &init::InitReport, path_note: Option<&str>) {
+    println!(
+        "Initialized MOOSEDev memory in {}",
+        opts.target_dir.display()
+    );
+    for entry in &report.entries {
+        let verb = match entry.outcome {
+            init::Outcome::Created => "create",
+            init::Outcome::Merged => "update",
+            init::Outcome::Skipped => "keep  ",
+        };
+        println!("  {verb}  {}", entry.path.display());
+    }
+    if let Some(note) = path_note {
+        println!("\nnote: {note}");
+    }
+    for note in &report.notes {
+        println!("note: {note}");
+    }
+    println!("\nNext steps:");
+    println!("  1. Reload MCP servers in your client (restart Claude Code, or /mcp reconnect).");
+    println!(
+        "  2. Seed project memory: run MOOSEDev's bootstrap skill (skills/bootstrap-existing-codebase.md)."
+    );
+    println!(
+        "  3. Commit {}/kg.nq to version your project's memory with the code.",
+        opts.data_dir.trim_end_matches('/')
+    );
 }
 
 #[cfg(test)]
