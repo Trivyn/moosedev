@@ -167,7 +167,6 @@ impl AppState {
             // BM25F boost). Matches the ≤80-char handle convention used for capture.
             label_shape: Default::default(),
             chat: None,
-            discourse: None,
             moose_cache: moose_cache.clone(),
             llm_assist_level: assist_level_from_env(llm_configured),
             response_cache: None,
