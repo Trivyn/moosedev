@@ -90,7 +90,10 @@ The loop:
 ## Setup (MOOSEDev memory)
 <!-- How this project wires the moosedev MCP server. See MOOSEDev's README "Shared mode".
      Typically a repo-local .mcp.json (Claude) / .codex/config.toml (Codex) pointing at
-     `moosedev --connect`, with MOOSEDEV_DATA_DIR set to a gitignored local store. -->
+     `moosedev --connect`, with MOOSEDEV_DATA_DIR set to a local store dir. Commit the
+     store's kg.nq (the canonical project-graph text, maintained automatically) and
+     gitignore the rest: `/.moosedev/*` + `!/.moosedev/kg.nq` — teammates who clone get
+     the project's memory hydrated on first boot. -->
 <SETUP NOTES>
 
 ## Project specifics

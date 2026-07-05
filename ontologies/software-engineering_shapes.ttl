@@ -3,12 +3,12 @@
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix moose: <https://trivyn.io/ontologies/moose#> .
-@prefix shape: <https://trivyn.io/ontologies/software/engineering/SoftwareEngineering/shapes#> .
-@prefix domain: <https://trivyn.io/ontologies/software/engineering/domain/> .
+@prefix shape: <https://trivyn.io/ontologies/software/engineering/shapes#> .
+@prefix domain: <https://trivyn.io/ontologies/software/engineering#> .
 
-<https://trivyn.io/ontologies/software/engineering/SoftwareEngineering/shapes> a owl:Ontology ;
+<https://trivyn.io/ontologies/software/engineering/shapes> a owl:Ontology ;
     rdfs:label "SHACL Shapes" ;
-    owl:imports <https://trivyn.io/ontologies/software/engineering/SoftwareEngineering> .
+    owl:imports <https://trivyn.io/ontologies/software/engineering#> .
 
 # =============================================================================
 # Mechanically generated SHACL shapes

@@ -2331,7 +2331,7 @@ dependencies = [
 
 [[package]]
 name = "moosedev"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2348,6 +2348,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tokio",
  "tower-http",
@@ -3810,9 +3811,9 @@ dependencies = [
 
 [[package]]
 name = "snarl-shacl"
-version = "0.3.1"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a5dde6a25cc121134894aea0639064fb33c404683581d8a2b86078fb0b0941f"
+checksum = "c3788902332067a491138219d17b176f2b14de8f76dfab6bcb9f1e7d3d157b8a"
 dependencies = [
  "cc",
 ]

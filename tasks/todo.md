@@ -219,6 +219,89 @@ load-bearing `.process_group(0)` isolation. Verification passed: `cargo fmt`,
 `cargo test --test autospawn`, `cargo check`, `cargo clippy --all-targets --all-features`, and
 full `cargo test`.
 
+## Canonical committed KG text (`.moosedev/kg.nq`) — finish Requirement `d459cac2`
+
+> Goal: make the project KG shareable via git. Committed source of truth = canonical
+> N-Quads at `.moosedev/kg.nq`; the RocksDB store (+ vector DBs) stays a derived,
+> gitignored local cache. Graph: Requirement `d459cac2` motivates ADs `1a4983b8`
+> (export core) and `3d091a06` (import core) — both shipped; this closes their
+> explicitly deferred half (committed kg.nq, cache rebuild, gitignore change).
+
+### Design
+- **Scope: project graph only.** Provenance stays local-only for now (author names →
+  privacy once repos are public; merges worst). Session graphs (`urn:moose:session:*`)
+  and ontology graphs were never in export scope.
+- **Exclude reasoner-inferred quads (correctness, not just noise).** GROWL enrichment
+  materializes inferred edges INTO the project graph (`reasoning::enrich`), tagged only
+  by reification in the *local* provenance graph. If committed, a fresh clone imports
+  them untagged → `clear_reasoner_inferences` can never drop them → un-droppable
+  pseudo-asserted edges. Canonical export = project graph MINUS inferred quads.
+  Refactor the activity→reifier→triple enumeration out of
+  `provenance::clear_reasoner_inferences` into a shared
+  `reasoner_inferred_data_quads(store, graph_iri)` helper.
+- **Write-through, synchronous, best-effort.** After every successful project-graph
+  write, re-export kg.nq + update stamp (~2k quads → milliseconds). Failure warns and
+  never fails the write (matches the provenance/index post-write contract); retried on
+  the next write. New `AppState::note_project_write()` = `mark_inferred_stale()` +
+  canonical sync, replacing the 5 existing `mark_inferred_stale` call sites.
+- **Stamp = SHA-256 of kg.nq at last sync**, at `.moosedev/kg.nq.stamp` (gitignored).
+  Startup three-way compare: T = hash(kg.nq file), S = hash(canonical export of current
+  store), P = stamp.
+- **Blank-node guard:** canonical export warns if the project graph contains blank
+  nodes (verified 0 today) — they would break patch-import idempotency.
+
+### Startup decision table (in `AppState::bootstrap`, after `load_ontologies`)
+| kg.nq | store project graph | condition | action |
+|---|---|---|---|
+| absent | empty | — | nothing (file appears on first capture) |
+| absent | non-empty | — | adoption: export kg.nq + stamp |
+| present | empty | — | fresh clone: replace-import from text; stamp=T |
+| present | non-empty | T==P and S==P | in sync: nothing |
+| present | non-empty | T≠P, S==P | git pull/checkout: replace-import from text; stamp=T |
+| present | non-empty | T==P, S≠P | missed export (crash window): re-export; stamp |
+| present | non-empty | S==T (stamp missing/any) | write stamp only |
+| present | non-empty | T≠P and S≠P (or no stamp) | diverged: patch-import text (loses nothing), re-export union, stamp; WARN loudly (stale duplicate status literals possible — future merge tooling) |
+
+After any hydration: `entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI)` +
+`mark_inferred_stale()` (mirrors the HTTP import handler). Instance-vector reconcile
+happens in the existing `build_instance_index` pass, which runs after bootstrap.
+
+### Items — ✅ complete (2026-07-02)
+- [x] `provenance::reasoner_inferred_data_quads` helper; `clear_reasoner_inferences` reuses it
+- [x] `export::export_canonical_project(store)` — canonical N-Quads dump minus inferred quads + blank-node warn
+- [x] new `src/canonical.rs`: stamp IO, pure decision-table fn (unit-testable), `sync_on_startup`, `write_through`
+- [x] `AppState::note_project_write()`; replace the 5 write-site calls (4 MCP tools in `src/mcp/mod.rs` + HTTP import `src/api/handlers/export.rs`)
+- [x] CLI `moosedev import` syncs kg.nq post-import (`src/main.rs`)
+- [x] `.gitignore`: `/.moosedev/` → `/.moosedev/*` + `!/.moosedev/kg.nq` (git cannot re-include a file under an excluded directory)
+- [x] tests: decision table; inferred-quad exclusion (enrich → export → assert absent); write-through; fresh-clone hydration; git-pull replace; divergence patch+warn (`tests/canonical_text.rs`); full suite + clippy green
+- [x] docs: README version-control section; CLAUDE.md dogfooding note (revises the "gitignored store" stance per `d459cac2`); templates/ adoption snippet gitignore guidance
+- [x] dogfood: backend restart adopted the live store (`ExportText`, 1918 quads — 176 reasoner-materialized quads excluded vs the 2094-quad raw export); idempotent live `relate` re-exported kg.nq byte-identically; repo kg.nq committed
+- [x] graph capture: AD `013a9706` (isMotivatedBy `d459cac2`, 3 alternatives weighed, 3 consequences) answers the requirement's open sub-questions (provenance local-only; content-hash staleness; canonical scope excludes inferred quads); `validate_against_architecture` → 0 violations
+- [x] burst throttle (user-directed follow-up): `canonical::WriteThrottle` — an isolated capture still exports synchronously (kg.nq stays commit-ready), but writes within a 2s quiescence window form a burst that skips per-write exports entirely; one trailing flush lands when the burst ends (O(1) exports per bootstrap replay instead of O(N)). No-runtime contexts fall back to synchronous export; a crash mid-burst self-heals via the missed-export startup branch.
+
+### Deferred (explicitly out of scope here)
+- Instance-level dedup on merge (Requirement `5565038e`) + status-aware merge tooling — become live once two stores actually exchange kg.nq
+- Committing the provenance graph (privacy/merge questions open)
+- Orphan instance-vectors after replace-hydration (same as today's replace-import; benign — dense hits for absent IRIs drop out at store read)
+
+## Onboarding & install (productization #3) — `moosedev init` + install channels
+
+> Goal (Requirement `08b807a4`): someone other than the author can install and use MOOSEDev
+> easily, without source access to the closed MOOSE engine. Binary-first distribution
+> (invariant #11 funnel); un-gated by the in-anger trial.
+
+- [x] `moosedev init [DIR]` — new CLI `Mode` (`src/main.rs`) + testable `src/init.rs`; non-clobbering + idempotent. Writes `.mcp.json` (MERGED — preserves other servers; shared `--connect` default, `--stdio` flag), the `.gitignore` memory rule, CLAUDE.md template (never overwrites an existing one), optional `.codex/config.toml` (`--codex`), and `.moosedev/`. MCP `command` = bare `moosedev` on PATH (upgrade-stable) else absolute `current_exe` + PATH warning (`--binary` override). 9 unit tests.
+- [x] `scripts/install.sh` (curl|sh) — os/arch detect → download release tarball → SHA-256 verify → install to `~/.local/share/moosedev/<ver>` + PATH symlink. shellcheck clean; **live-tested against the real v0.3.0 release**.
+- [x] Homebrew — `packaging/homebrew/moosedev.rb` binary formula (custom tap `Trivyn/homebrew-moosedev`, not core; formula not Cask, `on_macos`/`on_linux`) generated by `render-formula.sh`; token-gated `release.yml` job (`HOMEBREW_TAP_TOKEN`) pushes it per release. `brew style`/`audit` clean in a real local tap; `actionlint` clean.
+- [x] macOS: **no Developer ID signing/notarization needed** — curl/brew don't set `com.apple.quarantine` so Gatekeeper's gate never fires; the arm64 binary is already ad-hoc signed by the Rust toolchain (verified: v0.3.0 curl-install runs, `Signature=adhoc`, not quarantined).
+- [x] Docs — `docs/quickstart.md`, `docs/install.md` (both channels + one-time tap setup + upgrade/uninstall), `.env.example`; README reconciled (install one-liners + `moosedev init` as the documented path, manual config collapsed as fallback).
+- [x] graph capture: Requirement `08b807a4` + AD `ca1e5be2` (`isMotivatedBy` `08b807a4`; `concerns` the runtime `6baa075c` + docs `402e5c0b`; constrained-by `ea2a00f5` re: shared `MOOSEDEV_DATA_DIR`); `validate_against_architecture` → Conforms, 0 violations. Full `cargo test` (165) + `clippy -D warnings` green.
+
+### Deferred (separate tracks)
+- Cross-machine merge dedup (Requirement `5565038e`) + status-aware import — the two-person case; trial-gated.
+- Extra release targets (Windows, Linux-arm64, macOS-x86_64) — installer errors cleanly today.
+- Hygiene: untrack `ui/dist/index.html`; bump `ui/package.json` to match the crate.
+
 ## Known limitations / deferred
 - **Ontology-regeneration orphans existing records** (P1): instances carry the full class IRI as `rdf:type`; if a regenerated ontology changes class IRIs/namespace, prior durable records stop being listed/searched (`relevant_context`/`query` candidate sets come from the current `arch_vocab`). **Zero impact today** (no persistent data), but needs a deliberate **migration story** (re-type on ontology change via a mapping — *not* hardcoded old namespaces) before real data accrues. Lighter partial step: make list-all enumerate by actual `rdf:type` in the project graph rather than the current vocab.
 - **Per-class title predicate**: capture binds the title to `hasTitle` (the `InformationRecord` label property every capture class inherits). The class-generic form (read each class's `trivyn:labelProperty`) is blocked until MOOSE surfaces that annotation (`VocabularyEntry.label_property`).

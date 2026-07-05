@@ -163,12 +163,11 @@ pub struct RecordDecisionArgs {
     pub author: Option<String>,
     /// Optional forward relations to assert from the new record, linking it into
     /// the graph at capture time (invariant #2 — typed links, not prose). Each is a
-    /// `{predicate, target}`: `predicate` is a record→record object-property local
-    /// name (e.g. "isMotivatedBy", "violates", "learnedFrom", "dependsOn"); `target`
-    /// is an existing recorded item's IRI or its exact title. Validated against the
-    /// SHACL domain/range — an illegal or unresolvable relation fails the whole
-    /// capture. (Targets must already be recorded items; to link an auxiliary node
-    /// whose range isn't a record — e.g. concerns→SystemComponent — use `relate`.)
+    /// `{predicate, target}`: `predicate` is an object-property local name (e.g.
+    /// "isMotivatedBy", "violates", "learnedFrom", "concerns", "dependsOn");
+    /// `target` is an existing typed node's IRI or exact label/title. Validated
+    /// against the SHACL domain/range — an illegal or unresolvable relation fails
+    /// the whole capture.
     pub relations: Option<Vec<RelationArg>>,
     /// Alternatives you ACTUALLY weighed and rejected for this decision (the road not
     /// taken). One string per alternative — each mints an `Alternative` node linked via
@@ -182,12 +181,12 @@ pub struct RecordDecisionArgs {
 }
 
 /// One inline relation for `record_important_decision`: an object property plus its
-/// target record (by IRI or exact title).
+/// target typed node (by IRI or exact label/title).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RelationArg {
     /// Object-property local name from the architecture ontology (as in `relate`).
     pub predicate: String,
-    /// The relation's target: an existing record IRI, or its exact title.
+    /// The relation's target: an existing typed node IRI, or its exact label/title.
     pub target: String,
 }
 
@@ -342,7 +341,7 @@ impl MooseDevServer {
 
     /// Record a typed knowledge item into the durable project knowledge graph.
     #[tool(
-        description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph. For an ArchitecturalDecision, capture its cluster in the SAME call: `alternatives_considered` (options you weighed and rejected) and `consequences` (trade-offs that result) are each minted as a typed node and linked — record what you actually weighed; omit when there is none (do not invent)."
+        description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph. Inline `relations` can link the new record to existing typed graph nodes, including `concerns` edges to SystemComponent records. For an ArchitecturalDecision, capture its cluster in the SAME call: `alternatives_considered` (options you weighed and rejected) and `consequences` (trade-offs that result) are each minted as a typed node and linked — record what you actually weighed; omit when there is none (do not invent)."
     )]
     async fn record_important_decision(
         &self,
@@ -445,7 +444,7 @@ impl MooseDevServer {
                     tracing::warn!("dense index failed for {iri}: {e}");
                 }
                 // A new record (+ any edges) invalidates the materialized inverse edges.
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 let mut links: Vec<String> = outcome
                     .applied_edges
                     .iter()
@@ -538,7 +537,7 @@ impl MooseDevServer {
                         tracing::warn!("dense index failed for {iri}: {e}");
                     }
                 }
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 Ok(tool_ok(format!(
                     "Superseded {} → {} (rationale {}){title_note}",
                     out.superseded_iri, out.new_iri, out.rationale_iri
@@ -590,7 +589,7 @@ impl MooseDevServer {
                 if let Err(e) = self.state.index_record(&out.rationale_iri).await {
                     tracing::warn!("dense index failed for {}: {e}", out.rationale_iri);
                 }
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 Ok(tool_ok(format!(
                     "Retracted {} (deprecated; rationale {})",
                     out.retracted_iri, out.rationale_iri
@@ -602,7 +601,7 @@ impl MooseDevServer {
 
     /// Link two recorded knowledge items with a typed relationship edge.
     #[tool(
-        description = "Link two recorded knowledge items with a typed relationship, building the project knowledge GRAPH (not just a list). The relationship is an object property from the architecture ontology, given by its local name — e.g. an AntiPattern `violates` a Constraint, an ArchitecturalDecision `isMotivatedBy` a Requirement or `concerns` a component, one Component `dependsOn` another. Both endpoints must already be recorded items (record them first); the edge is added idempotently. Use this to connect related decisions, constraints, lessons, and patterns so memory can be TRAVERSED, not only searched."
+        description = "Link two typed graph nodes with a typed relationship, building the project knowledge GRAPH (not just a list). The relationship is an object property from the architecture ontology, given by its local name — e.g. an AntiPattern `violates` a Constraint, an ArchitecturalDecision `isMotivatedBy` a Requirement, any record `concerns` a SystemComponent, one Component `dependsOn` another. Both endpoints must already exist; the edge is added idempotently. Use this to connect related decisions, constraints, lessons, and patterns so memory can be TRAVERSED, not only searched."
     )]
     async fn relate(
         &self,
@@ -624,7 +623,7 @@ impl MooseDevServer {
         match graph::relate(&self.state, &subject_iri, &predicate, &object_iri) {
             Ok(out) => {
                 // A new edge changes what inverse-materialization yields.
-                self.state.mark_inferred_stale();
+                self.state.note_project_write();
                 Ok(tool_ok(format!(
                     "Related {} -{}-> {}",
                     out.subject_iri, predicate, out.object_iri

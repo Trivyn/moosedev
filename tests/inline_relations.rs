@@ -121,9 +121,69 @@ fn inline_relation_target_by_iri_also_works() {
 }
 
 #[test]
+fn inline_concerns_component_by_exact_name_and_iri() {
+    let state = bootstrap("concerns-component");
+    let component = record(&state, "SystemComponent", "web UI");
+
+    let by_name = record_with_relations(
+        &state,
+        "Lesson",
+        "Path citations should anchor",
+        &[("concerns", "web UI")],
+    )
+    .expect("inline concerns by component label");
+    assert!(has_edge(&state, &by_name.iri, "concerns", &component));
+
+    let by_iri = record_with_relations(
+        &state,
+        "Constraint",
+        "UI state stays local",
+        &[("concerns", component.as_str())],
+    )
+    .expect("inline concerns by component IRI");
+    assert!(has_edge(&state, &by_iri.iri, "concerns", &component));
+
+    let report = validation::validate_project(&state).expect("validate");
+    assert!(report.conforms(), "{}", validation::format_report(&report));
+}
+
+#[test]
+fn unknown_component_fails_inline_concerns_atomically() {
+    let state = bootstrap("concerns-missing");
+    let before = count_class(&state, "Lesson");
+    let err = record_with_relations(
+        &state,
+        "Lesson",
+        "Missing target",
+        &[("concerns", "not a component")],
+    )
+    .expect_err("unknown component should fail capture");
+
+    assert!(err.to_string().contains("matches no typed target"), "{err}");
+    assert_eq!(count_class(&state, "Lesson"), before);
+}
+
+#[test]
+fn ambiguous_component_name_rejected() {
+    let state = bootstrap("concerns-ambiguous");
+    record(&state, "SystemComponent", "shared component");
+    record(&state, "SystemComponent", "shared component");
+
+    let err = record_with_relations(
+        &state,
+        "Lesson",
+        "Ambiguous target",
+        &[("concerns", "shared component")],
+    )
+    .expect_err("ambiguous component label should fail capture");
+
+    assert!(err.to_string().contains("ambiguous"), "{err}");
+}
+
+#[test]
 fn illegal_relation_fails_capture_atomically() {
     let state = bootstrap("atomic");
-    record(&state, "Requirement", "Resolve terms by local name");
+    let requirement = record(&state, "Requirement", "Resolve terms by local name");
     let before = count_class(&state, "AntiPattern");
 
     // `violates` ranges over Constraint, not Requirement — must reject.
@@ -131,7 +191,7 @@ fn illegal_relation_fails_capture_atomically() {
         &state,
         "AntiPattern",
         "Hardcoded namespace",
-        &[("violates", "Resolve terms by local name")],
+        &[("violates", requirement.as_str())],
     )
     .expect_err("illegal relation must fail the capture");
     let msg = err.to_string();
@@ -169,7 +229,7 @@ fn distinct_errors_for_unknown_predicate_and_missing_and_ambiguous_targets() {
         &[("isMotivatedBy", "No such requirement")],
     )
     .expect_err("missing target");
-    assert!(e.to_string().contains("matches no recorded item"), "{e}");
+    assert!(e.to_string().contains("matches no"), "{e}");
 
     // Two requirements sharing a title make the target ambiguous.
     record(&state, "Requirement", "Shared title");

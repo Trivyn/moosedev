@@ -94,7 +94,17 @@ Against the roadmap in [`tasks/todo.md`](./tasks/todo.md): M0–M3 are complete,
 
 ### Use a release binary (recommended)
 
-Pre-built binaries are published on [GitHub Releases](https://github.com/Trivyn/moosedev/releases) for macOS (Apple Silicon) and Linux (x86-64). This is the supported path for everyone: building from source requires access to the private MOOSE engine (see [Open source & the MOOSE boundary](#open-source--the-moose-boundary)).
+Pre-built, self-contained binaries are the supported path for everyone (building from source requires access to the private MOOSE engine — see [Open source & the MOOSE boundary](#open-source--the-moose-boundary)). Install with the script or Homebrew:
+
+```sh
+# macOS (Apple Silicon) / Linux (x86-64)
+curl -fsSL https://raw.githubusercontent.com/Trivyn/moosedev/main/scripts/install.sh | sh
+
+# or Homebrew
+brew install Trivyn/moosedev/moosedev
+```
+
+Each downloads a binary bundled with its `ontologies/`, `skills/`, and `templates/` — no toolchain needed. See **[docs/install.md](docs/install.md)** for platforms, checksums, upgrades, and the macOS signing note; binaries are also on [GitHub Releases](https://github.com/Trivyn/moosedev/releases).
 
 ### Build from source
 
@@ -129,18 +139,33 @@ cargo build --release --no-default-features --features headless
 
 ### Run as an MCP server
 
-MOOSEDev speaks MCP over **stdio**. Point an MCP client at the binary. For example, in an `.mcp.json` (or your Claude Desktop config):
+The quickest way to wire MOOSEDev into a project is:
+
+```sh
+cd /path/to/your/project
+moosedev init
+```
+
+This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, and a `CLAUDE.md` template — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--stdio`, `--force`).
+
+<details>
+<summary>Manual configuration</summary>
+
+MOOSEDev speaks MCP over **stdio**; `init` just generates this for you. To configure a client by hand, point it at the binary:
 
 ```json
 {
   "mcpServers": {
     "moosedev": {
-      "command": "/absolute/path/to/moosedev",
+      "command": "moosedev",
       "args": []
     }
   }
 }
 ```
+
+Use an absolute path to the binary if `moosedev` isn't on the client's `PATH`. To share one graph across several clients, use `"args": ["--connect"]` — see [Shared mode](#shared-mode-multiple-clients--agents) below.
+</details>
 
 All tools in the [v1 tool surface](#v1-tool-surface) are available over this transport.
 
@@ -196,10 +221,37 @@ moosedev --serve --open   # start the backend and open the UI once it is up
 interface (e.g. `0.0.0.0:7474`), or `MOOSEDEV_NO_HTTP=1` to disable it. A UI bind
 failure never takes down the MCP backend.
 
+### Version-controlled memory (`kg.nq`)
+
+The committed source of truth for a project's memory is a canonical text serialization:
+`<MOOSEDEV_DATA_DIR>/kg.nq` (sorted N-Quads, asserted knowledge only — reasoner-inferred edges are
+excluded and re-derived locally). MOOSEDev maintains it automatically:
+
+- **every write** to the project graph re-exports `kg.nq`, so it is always ready to commit —
+  `git diff` shows new records as added lines, reviewable in a PR like any other change. Rapid
+  successive writes (bulk imports, bootstrap replays) are coalesced: the burst skips per-write
+  exports and a single export lands once it goes quiet;
+- **on startup** the file and the local store are reconciled: a fresh clone (or a `git pull` that
+  changed `kg.nq`) hydrates the local store from the text; an existing store with no `kg.nq` yet
+  exports one (adoption);
+- the RocksDB store and the vector DBs are a **derived, gitignored local cache** — never commit
+  them, only `kg.nq`:
+
+```gitignore
+/.moosedev/*
+!/.moosedev/kg.nq
+```
+
+If both the text and the store changed since the last sync (e.g. a hand-edited `kg.nq` beside
+unsynced local writes), MOOSEDev merges them as a union and warns. If `kg.nq` cannot be parsed
+(e.g. leftover merge-conflict markers), the backend refuses to start rather than risk clobbering
+the file — resolve it and restart. The provenance graph (who recorded what, when) stays local and
+is not committed.
+
 ### Export / import the graph
 
-A project's memory is just an RDF graph, so it can be backed up, restored, and version-controlled
-as text. These subcommands run directly against the on-disk store and need **no running backend**:
+A project's memory is just an RDF graph, so it can also be backed up and restored explicitly as
+text. These subcommands run directly against the on-disk store and need **no running backend**:
 
 ```bash
 # Back up the project graph as canonical N-Quads …
@@ -224,7 +276,7 @@ from the shell or MCP client config take precedence. This applies to `--connect`
 auto-spawned backend inherits the resolved configuration.
 
 - **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL` / `MOOSEDEV_LLM_ASSIST_LEVEL` (how aggressively the LLM sensor assists). When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
-- **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live (runtime state, kept out of version control under `data/`).
+- **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live. Runtime state is kept out of version control except `kg.nq`, the committed canonical serialization of the project graph (see "Version-controlled memory").
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.
 - **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live. By default MOOSEDev looks for an `ontologies/` directory next to the running binary (the layout of the released tarball), then falls back to the crate's `ontologies/` for `cargo run`. Set this only to load ontologies from a custom location. *Keep the unpacked release bundle together so the binary can find its `ontologies/`.*

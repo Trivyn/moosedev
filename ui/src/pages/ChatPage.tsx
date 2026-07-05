@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Box, CircularProgress, Divider, FormControlLabel, Switch, Tab, Tabs, Typography } from '@mui/material';
 import { api } from '../api/client';
-import { ChatMessage, ChatSessionSummary, FocusEntry, QueryResponse } from '../api/types';
+import {
+  ChatMessage,
+  ChatResponse,
+  ChatSessionSummary,
+  ClarificationReply,
+  FocusEntry,
+  QueryResponse,
+} from '../api/types';
 import ChatInput from '../components/chat/ChatInput';
-import ChatMessageBubble from '../components/chat/ChatMessage';
+import ChatMessageBubble, { UIChatMessage } from '../components/chat/ChatMessage';
+import { describeReply } from '../components/chat/clarification';
 import FocusStack from '../components/chat/FocusStack';
 import SessionList from '../components/chat/SessionList';
 import CytoscapeGraph from '../components/graph/CytoscapeGraph';
@@ -13,7 +21,7 @@ import RawResults from '../components/sparql/RawResults';
 export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<UIChatMessage[]>([]);
   const [focus, setFocus] = useState<FocusEntry[]>([]);
   const [subgraph, setSubgraph] = useState<QueryResponse | null>(null);
   const [metrics, setMetrics] = useState<unknown>(null);
@@ -65,28 +73,61 @@ export default function ChatPage() {
     await loadSessions();
   };
 
+  // Send the visible transcript, not just the last message. MOOSE's session DB
+  // is authoritative for state, but the OpenAI-compatible request shape still
+  // expects a message list for the current turn. Strip UI-only clarification
+  // fields — the wire type is just { role, content }.
+  const toWireMessages = (msgs: UIChatMessage[]): ChatMessage[] =>
+    msgs.map(({ role, content }) => ({ role, content }));
+
+  // Mark the most-recent assistant clarification (if any) as answered, so its
+  // card renders disabled once the reply is in flight.
+  const closeOpenClarification = (msgs: UIChatMessage[]): UIChatMessage[] => {
+    const lastIdx = [...msgs]
+      .map((m, i) => ({ m, i }))
+      .reverse()
+      .find(({ m }) => m.role === 'assistant' && !!m.clarification)?.i;
+    if (lastIdx === undefined) return msgs;
+    return msgs.map((m, i) => (i === lastIdx ? { ...m, clarificationAnswered: true } : m));
+  };
+
+  // Append the assistant turn — a clarification card when MOOSE paused for
+  // clarification, otherwise a normal markdown answer.
+  const appendAssistantTurn = (response: ChatResponse) => {
+    const choice = response.choices[0];
+    if (!choice?.message) return;
+    const clarification =
+      choice.finish_reason === 'clarification' ? response.moose?.clarification : undefined;
+    const msg: UIChatMessage = clarification
+      ? { role: 'assistant', content: choice.message.content, clarification }
+      : { role: 'assistant', content: choice.message.content };
+    setMessages((prev) => [...prev, msg]);
+  };
+
+  // Shared post-response side effects (session id, focus stack, subgraph,
+  // metrics, session list). Used by both the free-text and reply paths.
+  const applyResponseSideEffects = async (response: ChatResponse) => {
+    if (response.moose?.session_id) setSessionId(response.moose.session_id);
+    setFocus(response.moose?.session_map ?? []);
+    setSubgraph(response.moose?.session_subgraph ?? null);
+    setMetrics(response.moose?.metrics ?? response.usage);
+    await loadSessions();
+  };
+
   const send = async (content: string) => {
-    const nextMessages: ChatMessage[] = [...messages, { role: 'user', content }];
+    const nextMessages: UIChatMessage[] = [...messages, { role: 'user', content }];
     setMessages(nextMessages);
     setLoading(true);
     setError(null);
     try {
       const response = await api.chat({
         session_id: sessionId,
-        // Send the visible transcript, not just the last message. MOOSE's
-        // session DB is authoritative for state, but the OpenAI-compatible
-        // request shape still expects a message list for the current turn.
-        messages: nextMessages,
+        messages: toWireMessages(nextMessages),
         include_session_map: true,
         include_metrics: true,
       });
-      const assistant = response.choices[0]?.message;
-      if (assistant) setMessages([...nextMessages, assistant]);
-      if (response.moose?.session_id) setSessionId(response.moose.session_id);
-      setFocus(response.moose?.session_map ?? []);
-      setSubgraph(response.moose?.session_subgraph ?? null);
-      setMetrics(response.moose?.metrics ?? response.usage);
-      await loadSessions();
+      appendAssistantTurn(response);
+      await applyResponseSideEffects(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setMessages(nextMessages);
@@ -94,6 +135,43 @@ export default function ChatPage() {
       setLoading(false);
     }
   };
+
+  // Submit a structured reply to a pending clarification. Appends a synthetic
+  // user transcript line so the conversation reads naturally, then POSTs the
+  // next turn on the same session with `clarification_reply` set.
+  const handleClarificationReply = async (reply: ClarificationReply) => {
+    if (loading) return;
+    const nextMessages: UIChatMessage[] = [
+      ...closeOpenClarification(messages),
+      { role: 'user', content: describeReply(reply) },
+    ];
+    setMessages(nextMessages);
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api.chat({
+        session_id: sessionId,
+        messages: toWireMessages(nextMessages),
+        include_session_map: true,
+        include_metrics: true,
+        clarification_reply: reply,
+      });
+      appendAssistantTurn(response);
+      await applyResponseSideEffects(response);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setMessages(nextMessages);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // While a clarification card is open, lock free-text input so the user
+  // answers through the card (the reply must be keyed to the pending request).
+  const lastMessageIsClarification = useMemo(() => {
+    const last = messages[messages.length - 1];
+    return !!(last && last.role === 'assistant' && last.clarification && !last.clarificationAnswered);
+  }, [messages]);
 
   return (
     <Box sx={{ height: '100%', display: 'flex', overflow: 'hidden' }}>
@@ -123,7 +201,11 @@ export default function ChatPage() {
             </Box>
           )}
           {messages.map((message, index) => (
-            <ChatMessageBubble key={index} message={message} />
+            <ChatMessageBubble
+              key={index}
+              message={message}
+              onClarificationReply={handleClarificationReply}
+            />
           ))}
           {loading && (
             <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', p: 2 }}>
@@ -134,7 +216,7 @@ export default function ChatPage() {
             </Box>
           )}
         </Box>
-        <ChatInput disabled={loading} onSend={send} />
+        <ChatInput disabled={loading || lastMessageIsClarification} onSend={send} />
       </Box>
       <Divider orientation="vertical" flexItem />
       <Box sx={{ width: '42%', minWidth: 420, display: 'flex', flexDirection: 'column' }}>

@@ -16,8 +16,8 @@ const PREFIXES: Record<string, string> = {
   'http://www.w3.org/ns/prov#': 'prov:',
   'http://www.w3.org/ns/shacl#': 'sh:',
   'https://moosedev.dev/kg/': 'kg:',
-  'https://trivyn.io/ontologies/software/architecture/domain/': 'arch:',
-  'https://trivyn.io/ontologies/software/engineering/domain/': 'se:',
+  'https://trivyn.io/ontologies/software/architecture#': 'arch:',
+  'https://trivyn.io/ontologies/software/engineering#': 'se:',
 };
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';

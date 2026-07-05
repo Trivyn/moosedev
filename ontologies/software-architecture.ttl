@@ -1,6 +1,6 @@
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix sh: <http://www.w3.org/ns/shacl#> .
-@prefix : <https://trivyn.io/ontologies/software/architecture/domain/> .
+@prefix : <https://trivyn.io/ontologies/software/architecture#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -12,9 +12,9 @@
 @prefix trivyn: <http://trivyn.io/ontology#> .
 @prefix obo: <http://purl.obolibrary.org/obo/> .
 @prefix cco: <https://www.commoncoreontologies.org/> .
-@base <https://trivyn.io/ontologies/software/architecture/domain/> .
+@base <https://trivyn.io/ontologies/software/architecture#> .
 
-<https://trivyn.io/ontologies/software/architecture/domain/> a owl:Ontology ;
+<https://trivyn.io/ontologies/software/architecture#> a owl:Ontology ;
     rdfs:label "Domain Ontology (Clean Model)" ;
     rdfs:comment "Clean, publishable domain model with proper naming and domain ontology alignments" ;
     dcterms:created "2026-06-17T15:27:51Z"^^xsd:dateTime ;
@@ -36,8 +36,7 @@ from decisions and anti-patterns. Every artifact is an information record about 
 (proposed / accepted / superseded / deprecated). Rich in relationships, shallow in taxonomy. It refers to the software-engineering ontology for the system
 elements that decisions and constraints are about..
 Core fallback: yes.
-Mid-level clustering disabled.""" ;
-    owl:imports <https://trivyn.io/ontologies/software/architecture/mapping/> .
+Mid-level clustering disabled.""" .
 
 # =============================================================================
 # Annotation Property Definitions
@@ -185,6 +184,13 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:definition "Records the name of a system component.";
     skos:altLabel "has component name".
 
+:coversPath a owl:DatatypeProperty ;
+    rdfs:label "covers path" ;
+    rdfs:domain :SystemComponent ;
+    rdfs:range xsd:string ;
+    skos:definition "Repo-relative path prefix covered by a system component; a trailing slash denotes a directory prefix, and the property may be multi-valued.";
+    skos:altLabel "covers path".
+
 :hasLifecycleStatus a owl:DatatypeProperty ;
     rdfs:label "has lifecycle status" ;
     rdfs:domain :InformationRecord ;
@@ -237,9 +243,9 @@ trivyn:confidence a owl:AnnotationProperty ;
 # Domain relations (synthesis taxonomy).
 :concerns a owl:ObjectProperty ;
     rdfs:label "concerns" ;
-    rdfs:domain :ArchitecturalDecision ;
+    rdfs:domain :InformationRecord ;
     rdfs:range :SystemComponent ;
-    skos:definition "Relates an architectural decision to the system component it affects.".
+    skos:definition "Relates an information record to the system component it affects or describes.".
 :isMotivatedBy a owl:ObjectProperty ;
     rdfs:label "isMotivatedBy" ;
     rdfs:domain :ArchitecturalDecision ;
@@ -298,8 +304,8 @@ trivyn:confidence a owl:AnnotationProperty ;
       rdfs:label "is concerned by" ;
       owl:inverseOf :concerns ;
       rdfs:domain :SystemComponent ;
-      rdfs:range :ArchitecturalDecision ;
-      skos:definition "Relates a system component to an architectural decision that affects it." ;
+      rdfs:range :InformationRecord ;
+      skos:definition "Relates a system component to an information record that affects or describes it." ;
       skos:altLabel "is affected by" .
 
 :isRationaleFor a owl:ObjectProperty ;
@@ -356,7 +362,7 @@ trivyn:confidence a owl:AnnotationProperty ;
       skos:definition "Relates a constraint to an anti-pattern that fails to satisfy it." .
 
 # Competency questions this ontology was built to answer (synthesis).
-<https://trivyn.io/ontologies/software/architecture/domain/>
+<https://trivyn.io/ontologies/software/architecture#>
     <https://trivyn.io/ontologies/toekg#satisfiesCompetencyQuestion> "Which architectural decision supersedes a previous one?",
         "What constraints are currently being violated by an anti-pattern?",
         "Which requirements motivated a specific architectural decision?",
@@ -365,22 +371,22 @@ trivyn:confidence a owl:AnnotationProperty ;
         "What lessons were learned from previous architectural decisions or anti-patterns?" .
 
 # Design patterns that grounded this synthesis (TOEKG Tier-1 retrieval).
-<https://trivyn.io/ontologies/software/architecture/domain/>
+<https://trivyn.io/ontologies/software/architecture#>
     <https://trivyn.io/ontologies/toekg#derivedFromPattern> <https://trivyn.io/ontologies/toekg#P-information-artifact>,
         <https://trivyn.io/ontologies/toekg#G-determined-attribute-belongs-to-determinant>,
         <https://trivyn.io/ontologies/toekg#G-information-content-entity>,
         <https://trivyn.io/ontologies/toekg#G-metadata-and-annotation-not-entity> .
 
 # Synthesis provenance (spec §7.1).
-<https://trivyn.io/ontologies/software/architecture/domain/> <http://www.w3.org/ns/prov#wasGeneratedBy> <https://trivyn.io/ontologies/software/architecture/domain/synthesis-activity> .
-<https://trivyn.io/ontologies/software/architecture/domain/synthesis-activity> a <http://www.w3.org/ns/prov#Activity> ;
+<https://trivyn.io/ontologies/software/architecture#> <http://www.w3.org/ns/prov#wasGeneratedBy> <https://trivyn.io/ontologies/software/architecture#synthesis-activity> .
+<https://trivyn.io/ontologies/software/architecture#synthesis-activity> a <http://www.w3.org/ns/prov#Activity> ;
     <https://trivyn.io/ontologies/toekg#generatedWithModel> "gemma-4-26b-a4b-it-mlx" ;
     <https://trivyn.io/ontologies/toekg#descriptionHash> "sha256:d6463dacb859ba1411bd2cf249f0caa88de203a1d3647362896f2e422a7f5553" ;
     <https://trivyn.io/ontologies/toekg#baseIri> "https://trivyn.io/ontologies/software/architecture/" .
 
 # Referenceable ontology bridges (MOOSE).
-:SystemComponent rdfs:subClassOf <https://trivyn.io/ontologies/software/engineering/domain/Component> {| trivyn:confidence "0.70"^^xsd:decimal ; skos:historyNote "Specialized under https://trivyn.io/ontologies/software/engineering/SoftwareEngineering via MOOSE (subclass)" ; trivyn:rrfRank "2"^^xsd:integer |} .
-:hasComponentName owl:equivalentProperty <https://trivyn.io/ontologies/software/engineering/domain/hasComponentName> {| trivyn:confidence "0.95"^^xsd:decimal ; skos:historyNote "Reused from https://trivyn.io/ontologies/software/engineering/SoftwareEngineering via MOOSE (equivalent property)" |} .
+:SystemComponent rdfs:subClassOf <https://trivyn.io/ontologies/software/engineering#Component> {| trivyn:confidence "0.70"^^xsd:decimal ; skos:historyNote "Specialized under https://trivyn.io/ontologies/software/engineering via MOOSE (subclass)" ; trivyn:rrfRank "2"^^xsd:integer |} .
+:hasComponentName owl:equivalentProperty <https://trivyn.io/ontologies/software/engineering#hasComponentName> {| trivyn:confidence "0.95"^^xsd:decimal ; skos:historyNote "Reused from https://trivyn.io/ontologies/software/engineering via MOOSE (equivalent property)" |} .
 
 # Imported ontologies used by referenceable bridges.
-<https://trivyn.io/ontologies/software/architecture/domain/> owl:imports <https://trivyn.io/ontologies/software/engineering/SoftwareEngineering> .
+<https://trivyn.io/ontologies/software/architecture#> owl:imports <https://trivyn.io/ontologies/software/engineering#> .

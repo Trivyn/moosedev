@@ -1,4 +1,4 @@
-@prefix : <https://trivyn.io/ontologies/software/engineering/domain/> .
+@prefix : <https://trivyn.io/ontologies/software/engineering#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -9,9 +9,9 @@
 @prefix trivyn: <http://trivyn.io/ontology#> .
 @prefix obo: <http://purl.obolibrary.org/obo/> .
 @prefix cco: <https://www.commoncoreontologies.org/> .
-@base <https://trivyn.io/ontologies/software/engineering/domain/> .
+@base <https://trivyn.io/ontologies/software/engineering#> .
 
-<https://trivyn.io/ontologies/software/engineering/domain/> a owl:Ontology ;
+<https://trivyn.io/ontologies/software/engineering#> a owl:Ontology ;
     rdfs:label "Domain Ontology (Clean Model)" ;
     rdfs:comment "Clean, publishable domain model with proper naming and domain ontology alignments" ;
     dcterms:created "2026-06-16T19:35:00Z"^^xsd:dateTime ;
@@ -27,8 +27,7 @@ Core concepts: software system, subsystem, component, service, module/package, i
 components, is part of a system or subsystem, and exposes and/or implements interfaces. A reusable, general backbone intended to be extended later by
 language-specific ontologies (e.g. a Rust module or Python class as kinds of module/component). Deliberately thin and general..
 Core fallback: yes.
-Mid-level clustering disabled.""" ;
-    owl:imports <https://trivyn.io/ontologies/software/engineering/mapping/> .
+Mid-level clustering disabled.""" .
 
 # =============================================================================
 # Annotation Property Definitions
@@ -288,7 +287,7 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:definition "Relates an interface to the service that exposes it." .
 
 # Competency questions this ontology was built to answer (synthesis).
-<https://trivyn.io/ontologies/software/engineering/domain/>
+<https://trivyn.io/ontologies/software/engineering#>
     <https://trivyn.io/ontologies/toekg#satisfiesCompetencyQuestion> "Which components depend on a specific component?",
         "What interfaces are exposed by a given service?",
         "Which data stores are accessed by a specific component?",
@@ -296,15 +295,15 @@ trivyn:confidence a owl:AnnotationProperty ;
         "Which components implement a particular interface?" .
 
 # Design patterns that grounded this synthesis (TOEKG Tier-1 retrieval).
-<https://trivyn.io/ontologies/software/engineering/domain/>
+<https://trivyn.io/ontologies/software/engineering#>
     <https://trivyn.io/ontologies/toekg#derivedFromPattern> <https://trivyn.io/ontologies/toekg#G-agent>,
         <https://trivyn.io/ontologies/toekg#P-temporal-interval>,
         <https://trivyn.io/ontologies/toekg#G-information-content-entity>,
         <https://trivyn.io/ontologies/toekg#P-artifact-as-object> .
 
 # Synthesis provenance (spec §7.1).
-<https://trivyn.io/ontologies/software/engineering/domain/> <http://www.w3.org/ns/prov#wasGeneratedBy> <https://trivyn.io/ontologies/software/engineering/domain/synthesis-activity> .
-<https://trivyn.io/ontologies/software/engineering/domain/synthesis-activity> a <http://www.w3.org/ns/prov#Activity> ;
+<https://trivyn.io/ontologies/software/engineering#> <http://www.w3.org/ns/prov#wasGeneratedBy> <https://trivyn.io/ontologies/software/engineering#synthesis-activity> .
+<https://trivyn.io/ontologies/software/engineering#synthesis-activity> a <http://www.w3.org/ns/prov#Activity> ;
     <https://trivyn.io/ontologies/toekg#generatedWithModel> "gemma-4-31b-it" ;
     <https://trivyn.io/ontologies/toekg#descriptionHash> "sha256:2e3595555f92978688e5f5a6703f444523e239e41eb9c3d2d4d964fec088e753" ;
     <https://trivyn.io/ontologies/toekg#baseIri> "https://trivyn.io/ontologies/software/engineering/" .

@@ -5,6 +5,7 @@ import {
   ChatResponse,
   ChatSessionDetail,
   ChatSessionListResponse,
+  ClarificationReply,
   GraphImportResponse,
   HealthResponse,
   QueryResponse,
@@ -64,6 +65,11 @@ export const api = {
     include_structured?: boolean;
     include_session_map?: boolean;
     include_metrics?: boolean;
+    llm_assist_level?: number;
+    // Reply to a previously-issued ClarificationRequest. When set, MOOSE
+    // accepts the pick into its overlay graph and replays the original
+    // question on this turn (backend: src/api/handlers/chat.rs).
+    clarification_reply?: ClarificationReply;
   }) =>
     request<ChatResponse>('/chat', {
       method: 'POST',

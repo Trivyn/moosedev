@@ -119,6 +119,70 @@ export interface FocusEntry {
   last_mentioned: number;
 }
 
+// ── Clarification round-trip ──────────────────────────────────────────────
+// Mirrors moose::clarification types. Tagged-enum shapes match Rust serde
+// `#[serde(tag = "kind", content = "data")]`.
+
+export type SlotKind =
+  | { kind: 'UnknownTerm'; data: { noun: string } }
+  | { kind: 'UnknownEntity' }
+  | { kind: 'LowConfidenceTerm'; data: { noun: string } }
+  | { kind: 'UnresolvedEntity'; data: { surface: string } }
+  | {
+      kind: 'UnresolvedModifier';
+      data: {
+        raw_text: string;
+        target_class: string | null;
+        sort_dimension?: string | null;
+      };
+    }
+  | { kind: 'PickCandidate' }
+  | { kind: 'DefineClassOrProperty'; data: { iri: string } };
+
+export type ReplyAction =
+  | { kind: 'AltLabel'; data: { surface: string; target_iri: string } }
+  | { kind: 'HiddenLabel'; data: { surface: string; target_iri: string } }
+  | { kind: 'Definition'; data: { target_iri: string; definition: string } }
+  | { kind: 'PickCandidate'; data: { iri: string } }
+  | { kind: 'Decline' };
+
+export type AgentRef =
+  | { kind: 'Human'; data: { user_id?: string | null } }
+  | { kind: 'Jockey'; data: { agent_id: string } };
+
+export type ExpectedKind = 'Class' | 'ObjectProperty' | 'DatatypeProperty' | 'Instance';
+
+export interface ClarificationCandidate {
+  iri: string;
+  local_name: string;
+  label?: string;
+  kind: ExpectedKind;
+  score: number;
+}
+
+export interface ClarificationRequest {
+  id: string;
+  session_id: string;
+  turn_number: number;
+  question: string;
+  original_question: string;
+  slot_kind: SlotKind;
+  missing_field?: string | null;
+  expected_kinds: ExpectedKind[];
+  candidates: ClarificationCandidate[];
+  trigger: string;
+  created_at: string;
+  unresolved_surface?: string | null;
+}
+
+export interface ClarificationReply {
+  id: string;
+  user_text: string;
+  action: ReplyAction;
+  remember_for_user: boolean;
+  agent: AgentRef;
+}
+
 export interface ChatResponse {
   id: string;
   object: string;
@@ -139,7 +203,9 @@ export interface ChatResponse {
     structured?: unknown;
     session_map?: FocusEntry[];
     metrics?: unknown;
-    clarification?: unknown;
+    /** Present when MOOSE paused the turn for clarification. The companion
+     * `choices[0].finish_reason` is `"clarification"` on the same response. */
+    clarification?: ClarificationRequest;
     session_subgraph?: QueryResponse;
   };
 }

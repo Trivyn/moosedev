@@ -1,6 +1,6 @@
 [package]
 name = "moosedev"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
 license = "Apache-2.0"
@@ -49,6 +49,10 @@ async-trait = "0.1"
 # Timestamps for PROV-O edit provenance.
 chrono = "0.4"
 
+# Content hash for the committed canonical kg.nq staleness stamp (already in the
+# dependency tree via sqlx; same 0.10 line).
+sha2 = "0.10"
+
 # Writes the `ontology_vectors` SQLite store that MOOSE's `VecStore::open` reads
 # (MOOSE exposes no public vector-write path). Same sqlite crate + version MOOSE
 # uses, so it resolves to a single build.
@@ -75,6 +79,16 @@ headless = []
 # Used by the macOS release build; also works locally: `cargo run --features metal`.
 # (`cuda = ["moose/candle-cuda"]` is the NVIDIA analogue if ever needed.)
 metal = ["moose/candle-metal"]
+
+[[example]]
+name = "backfill_concerns"
+path = "examples/backfill_concerns.rs"
+test = true
+
+[[example]]
+name = "migrate_namespace"
+path = "examples/migrate_namespace.rs"
+test = true
 
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.

@@ -8,7 +8,7 @@ use moose::kg::{
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 use oxigraph::store::Store;
 
-use super::context::resolve_record_exact_all;
+use super::context::{resolve_instance_exact_all, resolve_record_exact_all};
 use super::relations::{validate_relation_for_subject_types, EdgeDirection};
 use super::state::{
     AppState, CapturePredicates, DEFAULT_LIFECYCLE_STATUS, LABEL_PROPERTY_LOCAL, XSD_DATETIME,
@@ -159,7 +159,7 @@ fn plan_relation_args(
                 "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
             )
         })?;
-        let object_iri = resolve_relation_target(state, target)?;
+        let object_iri = resolve_relation_target(state, target, &predicate_iri)?;
         let object = NamedNode::new(&object_iri)
             .map_err(|e| anyhow::anyhow!("invalid target IRI {object_iri:?}: {e}"))?;
         validate_relation_for_subject_types(
@@ -331,25 +331,53 @@ pub fn record_decision_with_cluster(
     ))
 }
 
-/// Resolve an inline-relation target to an existing record IRI. Accepts an exact
-/// project record IRI, or an exact (normalized) title — rejecting "not found" and
-/// "ambiguous title" so a typo or a duplicate title can't silently mislink.
-fn resolve_relation_target(state: &AppState, target: &str) -> anyhow::Result<String> {
+/// Resolve an inline-relation target to an existing typed node IRI. For predicates
+/// without a SHACL object class, preserve the legacy record-only behavior. For
+/// predicates with an object class, accept an exact IRI of any existing typed node
+/// and let SHACL validation report class legality; title/label lookup is restricted
+/// to instances matching the predicate's expected object classes.
+fn resolve_relation_target(
+    state: &AppState,
+    target: &str,
+    predicate_iri: &str,
+) -> anyhow::Result<String> {
+    let expected_classes = state.catalogue.expected_object_classes(predicate_iri);
     // An exact IRI of an existing record wins (titles with spaces fail IRI parse
     // and fall through to title resolution).
     if let Ok(node) = NamedNode::new(target) {
-        if require_information_record(state, &node).is_ok() {
-            return Ok(target.to_string());
+        if expected_classes.is_empty() {
+            if require_information_record(state, &node).is_ok() {
+                return Ok(target.to_string());
+            }
+        } else {
+            let asserted = asserted_project_types(state, &node);
+            if !asserted.is_empty() {
+                return Ok(target.to_string());
+            }
         }
     }
-    let matches = resolve_record_exact_all(state, target);
+    let matches = if expected_classes.is_empty() {
+        resolve_record_exact_all(state, target)
+    } else {
+        resolve_instance_exact_all(state, target, &expected_classes)
+    };
     match matches.len() {
+        0 if expected_classes.is_empty() => {
+            anyhow::bail!(
+                "relation target {target:?} matches no recorded item (by IRI or exact title)"
+            )
+        }
         0 => anyhow::bail!(
-            "relation target {target:?} matches no recorded item (by IRI or exact title)"
+            "relation target {target:?} matches no typed target accepted by this relationship (by IRI or exact label)"
         ),
         1 => Ok(matches.into_iter().next().unwrap().0),
+        n if expected_classes.is_empty() => {
+            anyhow::bail!(
+                "relation target {target:?} is ambiguous — {n} records share that title; pass the IRI instead"
+            )
+        }
         n => anyhow::bail!(
-            "relation target {target:?} is ambiguous — {n} records share that title; pass the IRI instead"
+            "relation target {target:?} is ambiguous — {n} typed targets share that label; pass the IRI instead"
         ),
     }
 }
@@ -402,7 +430,7 @@ fn normalize_capture_literal_props(
 
 /// Read the datatype property that mirrors `rdfs:label` for a class. If the
 /// class has no direct annotation, preserve the existing `hasTitle` behavior.
-fn class_label_mirror_property_iri(
+pub(crate) fn class_label_mirror_property_iri(
     store: &Store,
     capture: &CapturePredicates,
     class_iri: &str,

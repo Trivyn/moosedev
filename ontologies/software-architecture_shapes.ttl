@@ -3,13 +3,13 @@
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix moose: <https://trivyn.io/ontologies/moose#> .
-@prefix shape: <https://trivyn.io/ontologies/software/architecture/SoftwareArchitectureOntology/shapes#> .
+@prefix shape: <https://trivyn.io/ontologies/software/architecture/shapes#> .
 @prefix dcam: <http://purl.org/dc/dcam/> .
-@prefix domain: <https://trivyn.io/ontologies/software/architecture/domain/> .
+@prefix domain: <https://trivyn.io/ontologies/software/architecture#> .
 
-<https://trivyn.io/ontologies/software/architecture/SoftwareArchitectureOntology/shapes> a owl:Ontology ;
+<https://trivyn.io/ontologies/software/architecture/shapes> a owl:Ontology ;
     rdfs:label "SHACL Shapes" ;
-    owl:imports <https://trivyn.io/ontologies/software/architecture/SoftwareArchitectureOntology> .
+    owl:imports <https://trivyn.io/ontologies/software/architecture#> .
 
 # =============================================================================
 # Mechanically generated SHACL shapes
@@ -42,10 +42,6 @@ shape:ArchitecturalDecisionShape a sh:NodeShape ;
         sh:path domain:isMotivatedBy ;
         sh:minCount 1 ;
         sh:severity sh:Warning
-    ] ;
-    sh:property [
-        sh:path domain:concerns ;
-        sh:class domain:SystemComponent
     ] ;
     sh:property [
         sh:path domain:resultsIn ;
@@ -112,6 +108,10 @@ shape:InformationRecordShape a sh:NodeShape ;
         sh:datatype xsd:string
     ] ;
     sh:property [
+        sh:path domain:concerns ;
+        sh:class domain:SystemComponent
+    ] ;
+    sh:property [
         sh:path domain:isSupersededBy ;
         sh:class domain:InformationRecord
     ] ;
@@ -158,6 +158,10 @@ shape:SystemComponentShape a sh:NodeShape ;
         sh:minCount 1
     ] ;
     sh:property [
+        sh:path domain:coversPath ;
+        sh:datatype xsd:string
+    ] ;
+    sh:property [
         sh:path domain:isConcernedBy ;
-        sh:class domain:ArchitecturalDecision
+        sh:class domain:InformationRecord
     ] .

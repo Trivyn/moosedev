@@ -107,6 +107,10 @@ pub struct AppState {
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
     pub inferred_stale: std::sync::atomic::AtomicBool,
+    /// Keeps the committed canonical text (`kg.nq`) in step with project-graph
+    /// writes: isolated captures export synchronously, bulk bursts coalesce to
+    /// a single trailing export once the burst goes quiet.
+    canonical_throttle: crate::canonical::WriteThrottle,
     /// Serializes enrichment so concurrent reads enrich at most once.
     enrich_lock: std::sync::Mutex<()>,
 }
@@ -132,6 +136,17 @@ impl AppState {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
         let store = open_store(data_dir)?;
+        // Reconcile the committed canonical text (kg.nq) with the freshly opened
+        // store before anything downstream reads it — the text is the committed
+        // source of truth and this store a derived cache (Requirement d459cac2).
+        // Fatal when the file exists but cannot be loaded (e.g. unresolved merge
+        // conflict markers): continuing would let the next write-through clobber it.
+        let sync = crate::canonical::sync_on_startup(&store, data_dir)?;
+        tracing::info!(
+            "[canonical] startup sync: {:?} ({} quad(s))",
+            sync.action,
+            sync.quad_count
+        );
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
         let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
@@ -152,6 +167,7 @@ impl AppState {
             // BM25F boost). Matches the ≤80-char handle convention used for capture.
             label_shape: Default::default(),
             chat: None,
+            discourse: None,
             moose_cache: moose_cache.clone(),
             llm_assist_level: assist_level_from_env(llm_configured),
             response_cache: None,
@@ -183,6 +199,7 @@ impl AppState {
             data_dir: data_dir.to_path_buf(),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
+            canonical_throttle: crate::canonical::WriteThrottle::default(),
             enrich_lock: std::sync::Mutex::new(()),
         })
     }
@@ -192,6 +209,18 @@ impl AppState {
     pub fn mark_inferred_stale(&self) {
         self.inferred_stale
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Post-write hook for every project-graph mutation: invalidate the lazily
+    /// materialized inferred edges AND keep the committed canonical text
+    /// (`kg.nq`) in step — synchronously for an isolated capture, coalesced to
+    /// one trailing export for a bulk burst (see
+    /// [`crate::canonical::WriteThrottle`]). Best-effort: a text-export failure
+    /// must never fail the symbolic write (invariant #1).
+    pub fn note_project_write(&self) {
+        self.mark_inferred_stale();
+        self.canonical_throttle
+            .note_write(&self.store, &self.data_dir);
     }
 
     /// Lazily re-run GROWL enrichment when a prior write invalidated the materialized
