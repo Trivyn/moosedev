@@ -31,9 +31,16 @@ jobs:
           - os: macos-14                       # Apple Silicon runner (arm64)
             target: aarch64-apple-darwin
             cargo_flags: "--features metal"   # GPU embeddings (Arctic-Embed-S) via candle Metal backend
+            rustflags: ""
           - os: ubuntu-22.04                   # pinned: build against older glibc for portability
             target: x86_64-unknown-linux-gnu
             cargo_flags: ""
+            # growl and snarl-shacl (pulled via moose) each vendor the SAME slop-rdf
+            # C runtime, so both define identical rdf_* symbols. GNU ld/lld reject the
+            # duplicates (macOS ld64 tolerates them). Accept them: it is safe because
+            # the overlapping symbols are byte-identical (growl 0.6.1 aligns slop-rdf
+            # with snarl-shacl 0.4.1). Mirrors Trivyn's release RUSTFLAGS.
+            rustflags: "-C link-arg=-Wl,--allow-multiple-definition"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout MOOSEDev
@@ -88,6 +95,8 @@ jobs:
 
       - name: Build release binary
         working-directory: moosedev
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Package

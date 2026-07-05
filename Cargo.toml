@@ -18,7 +18,7 @@ oxigraph = { version = "0.5.6", features = ["rdf-12"] }
 # conflict). App-layer enrichment: materializes inferred A-box edges (inverses,
 # subproperty, domain/range, subclass) from the declared ontology axioms. Wired in at the
 # moosedev app layer — NOT in the moose engine (invariant #11).
-growl = "0.5.1"
+growl = "0.6.1"
 
 # MCP server over stdio — the official Rust SDK. `schemars` enables tool input
 # schemas (re-exported as `rmcp::schemars`, so versions always match).
