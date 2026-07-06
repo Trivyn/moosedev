@@ -111,6 +111,11 @@ jobs:
           #   ontologies/ — REQUIRED; loaded from disk at startup (resolved next to the binary)
           #   skills/, templates/ — agent-facing workflows + the CLAUDE.md adoption template
           cp -R ontologies skills templates "$DIST/"
+          # MOOSE ENGINE ontologies (MOOSE-Pipeline.ttl, …) — required by
+          # moose::initialize at runtime; ship them beside moosedev's own so a
+          # fresh install can actually `--serve`, not just `--help`. (../moose is
+          # the CI sibling checkout.)
+          cp -R ../moose/ontologies/. "$DIST/ontologies/"
           tar -czf "$DIST.tar.gz" "$DIST"
           shasum -a 256 "$DIST.tar.gz" > "$DIST.tar.gz.sha256"
 

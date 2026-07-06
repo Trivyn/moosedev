@@ -630,6 +630,10 @@ fn ontology_dir() -> PathBuf {
     }
     if let Some(dir) = std::env::current_exe()
         .ok()
+        // Resolve symlinks (Homebrew's bin/moosedev → libexec/moosedev; the curl
+        // installer's ~/.local/bin symlink) so `ontologies/` is found next to the
+        // REAL binary, not the symlink's dir.
+        .and_then(|exe| std::fs::canonicalize(exe).ok())
         .and_then(|exe| exe.parent().map(|p| p.join("ontologies")))
         .filter(|p| p.is_dir())
     {

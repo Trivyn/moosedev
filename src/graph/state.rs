@@ -147,6 +147,12 @@ impl AppState {
             sync.action,
             sync.quad_count
         );
+        // MOOSE loads its engine ontologies (MOOSE-Pipeline.ttl, …) via its own
+        // search, which doesn't resolve the brew/curl symlink to the real install
+        // dir. Hand it the dir moosedev already resolves correctly (and where the
+        // tarball bundles MOOSE's ontologies) via an OPT-IN env var — no signature
+        // change, so MOOSE's other consumers are unaffected.
+        std::env::set_var("MOOSE_ONTOLOGY_DIR", ontology_dir);
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
         let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
