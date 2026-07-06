@@ -34,6 +34,8 @@ use moosedev::graph_import::{import_graph as import_rdf_graph, ImportFormat, Imp
 use moosedev::init;
 use moosedev::runtime;
 
+mod temporal;
+
 /// Selected transport mode plus its optional explicit socket path.
 enum Mode {
     Stdio,
@@ -51,6 +53,8 @@ enum Mode {
     /// Configure a project to use MOOSEDev as memory (`.mcp.json`, `.gitignore`,
     /// `CLAUDE.md`); no store, no backend.
     Init(InitArgs),
+    /// Temporal git-walk bootstrap: replay trunk history into the graph.
+    Bootstrap(temporal::BootstrapArgs),
 }
 
 struct ExportArgs {
@@ -90,6 +94,8 @@ USAGE:
     moosedev export [PATH]    Export the graph; no running backend required
     moosedev import PATH      Import RDF into the graph; no running backend required
     moosedev init [DIR]       Configure DIR (default .) to use MOOSEDev as memory
+    moosedev bootstrap --temporal
+                              Replay git history into the graph (per-commit dates)
     moosedev --help           Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
@@ -142,12 +148,13 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("export") => parse_export(iter).map(Mode::Export),
         Some("import") => parse_import(iter).map(Mode::Import),
         Some("init") => parse_init(iter).map(Mode::Init),
+        Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
 }
@@ -327,6 +334,144 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
     })
 }
 
+/// Parse `bootstrap`'s arguments. `--temporal` is required for a real run;
+/// without it, print guidance and exit 0. Remaining flags are all optional.
+fn parse_bootstrap<'a>(
+    iter: impl Iterator<Item = &'a String>,
+) -> anyhow::Result<temporal::BootstrapArgs> {
+    let mut temporal = false;
+    let mut repo = None::<PathBuf>;
+    let mut data_dir = None::<String>;
+    let mut trunk = None::<String>;
+    let mut resume = false;
+    let mut agent = temporal::Agent::Claude;
+    let mut model = None::<String>;
+    let mut limit = None::<usize>;
+    let mut dry_run = false;
+    let mut milestone_every = 10usize;
+    let mut args = iter.peekable();
+
+    while let Some(arg) = args.next() {
+        if arg == "--temporal" {
+            temporal = true;
+        } else if arg == "--resume" {
+            resume = true;
+        } else if arg == "--dry-run" {
+            dry_run = true;
+        } else if let Some(value) = arg.strip_prefix("--repo=") {
+            repo = Some(PathBuf::from(value));
+        } else if arg == "--repo" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--repo requires a path"))?;
+            repo = Some(PathBuf::from(v.as_str()));
+        } else if let Some(value) = arg.strip_prefix("--data-dir=") {
+            data_dir = Some(value.to_string());
+        } else if arg == "--data-dir" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--data-dir requires a value"))?;
+            data_dir = Some(v.clone());
+        } else if let Some(value) = arg.strip_prefix("--trunk=") {
+            trunk = Some(value.to_string());
+        } else if arg == "--trunk" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--trunk requires a branch name"))?;
+            trunk = Some(v.clone());
+        } else if let Some(value) = arg.strip_prefix("--agent=") {
+            agent = parse_agent(value)?;
+        } else if arg == "--agent" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--agent requires claude or codex"))?;
+            agent = parse_agent(v)?;
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_string());
+        } else if arg == "--model" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--model requires a model name"))?;
+            model = Some(v.clone());
+        } else if let Some(value) = arg.strip_prefix("--limit=") {
+            limit = Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|e| anyhow::anyhow!("--limit: {e}"))?,
+            );
+        } else if arg == "--limit" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--limit requires a number"))?;
+            limit = Some(
+                v.parse::<usize>()
+                    .map_err(|e| anyhow::anyhow!("--limit: {e}"))?,
+            );
+        } else if let Some(value) = arg.strip_prefix("--milestone-every=") {
+            milestone_every = value
+                .parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("--milestone-every: {e}"))?;
+        } else if arg == "--milestone-every" {
+            let v = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--milestone-every requires a number"))?;
+            milestone_every = v
+                .parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("--milestone-every: {e}"))?;
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown bootstrap option {arg:?}");
+        } else {
+            anyhow::bail!("bootstrap does not accept positional arguments; unexpected {arg:?}");
+        }
+    }
+
+    if !temporal {
+        // No --temporal: print guidance and exit 0 (snapshot bootstrap is an agent skill).
+        println!(
+            "Snapshot bootstrap is an interactive agent skill — run `moosedev skills` to find it."
+        );
+        println!(
+            "For temporal git-walk bootstrap (replay git history with per-commit dates), use:"
+        );
+        println!(
+            "  moosedev bootstrap --temporal [--repo .] [--data-dir .moosedev] [--dry-run] ..."
+        );
+        std::process::exit(0);
+    }
+
+    let repo =
+        repo.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let data_dir = data_dir.unwrap_or_else(|| ".moosedev".to_string());
+
+    // Resolve the skill path via the same lookup as skills_mode.
+    let skill_path = skills_dir()
+        .map(|d| d.join("temporal-episode-capture.md"))
+        .filter(|p| p.is_file());
+
+    Ok(temporal::BootstrapArgs {
+        temporal,
+        repo,
+        data_dir,
+        trunk,
+        resume,
+        agent,
+        model,
+        limit,
+        dry_run,
+        milestone_every,
+        ontology_dir: ontology_dir(),
+        skill_path,
+    })
+}
+
+fn parse_agent(value: &str) -> anyhow::Result<temporal::Agent> {
+    match value {
+        "claude" => Ok(temporal::Agent::Claude),
+        "codex" => Ok(temporal::Agent::Codex),
+        other => anyhow::bail!("unknown agent {other:?}; expected claude or codex"),
+    }
+}
+
 /// Resolve the socket path: explicit arg wins, then `MOOSEDEV_SOCKET`, then the
 /// per-data-dir derivation (which `--serve` and `--connect` compute identically).
 fn resolve_socket(explicit: Option<PathBuf>, data_dir: &Path) -> PathBuf {
@@ -461,6 +606,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Export(args) => export_mode(&data_dir, args),
         Mode::Import(args) => import_mode(&data_dir, args),
         Mode::Init(args) => init_mode(args),
+        Mode::Bootstrap(args) => temporal::run(args),
         Mode::Stdio => {
             let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
             runtime::serve_stdio(server).await
@@ -640,6 +786,25 @@ fn ontology_dir() -> PathBuf {
         return dir;
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
+}
+
+/// Locate the shipped `skills/` dir (agent workflow docs), mirroring
+/// [`ontology_dir`]'s exe-relative, symlink-resolved lookup.
+fn skills_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("MOOSEDEV_SKILLS_DIR") {
+        let dir = PathBuf::from(dir);
+        return dir.is_dir().then_some(dir);
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::canonicalize(exe).ok())
+        .and_then(|exe| exe.parent().map(|p| p.join("skills")))
+        .filter(|p| p.is_dir())
+    {
+        return Some(dir);
+    }
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+    crate_dir.is_dir().then_some(crate_dir)
 }
 
 /// Is `bin` reachable on `PATH`?

@@ -59,11 +59,11 @@ default.
 
 ## 4. Seed the graph
 
-An empty graph has nothing to recall. Seed it from your existing codebase by
-asking your agent to run MOOSEDev's bootstrap skill,
-`skills/bootstrap-existing-codebase.md` — it walks the agent through recording
-the architectural decisions, constraints, and lessons behind the code as typed,
-linked, queryable records. From there, capture decisions as you work.
+An empty graph has nothing to recall. `moosedev init` installs the bootstrap
+skill into `.claude/skills/` — so just ask your agent to bootstrap this repo's
+memory. It will walk through recording the architectural decisions, constraints,
+and lessons behind the code as typed, linked, queryable records. From there,
+capture decisions as you work.
 
 ## 5. Commit the memory
 

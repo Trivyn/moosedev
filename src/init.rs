@@ -38,6 +38,48 @@ const MEMORY_END: &str = "moosedev:end -->";
 /// injects records into their context rather than relying on the model to pull.
 const OPENCODE_PLUGIN: &str = include_str!("../.opencode/plugins/moosedev-push.ts");
 
+/// Metadata for one agent skill file synthesised at `moosedev init` time from the
+/// shipped `skills/*.md` doc body plus a YAML frontmatter header that tells Claude
+/// Code / opencode / Codex what the skill does and when to invoke it automatically.
+struct SkillMeta {
+    name: &'static str,
+    description: &'static str,
+    body: &'static str,
+}
+
+/// The three agent workflow skills shipped with MOOSEDev. Each is installed as a
+/// `SKILL.md` into the conventional auto-discovery location (`.claude/skills/`).
+/// The source `skills/*.md` files are left unchanged — a bench harness and
+/// cross-references depend on those paths; this only synthesises the harness files.
+const SKILLS: &[SkillMeta] = &[
+    SkillMeta {
+        name: "bootstrap-existing-codebase",
+        description: "Recover and record the architectural decisions, constraints, lessons, and patterns behind an existing codebase into MOOSEDev's project knowledge graph as typed, linked records. Use when the user asks to bootstrap, seed, or initialize MOOSEDev project memory / the knowledge graph for a repository, or to recover design rationale from existing code.",
+        body: include_str!("../skills/bootstrap-existing-codebase.md"),
+    },
+    SkillMeta {
+        name: "generate-adrs-from-graph",
+        description: "Render the architectural decisions captured in MOOSEDev's knowledge graph as a set of Architecture Decision Records (ADRs). Use when the user asks to generate, export, or write ADRs from the MOOSEDev graph.",
+        body: include_str!("../skills/generate-adrs-from-graph.md"),
+    },
+    SkillMeta {
+        name: "temporal-episode-capture",
+        description: "Capture the decisions, constraints, and lessons from a single unit of work (a commit, PR, or work session) into MOOSEDev as typed, linked records. Use when the user asks to record or capture what changed in this episode/commit/PR into project memory.",
+        body: include_str!("../skills/temporal-episode-capture.md"),
+    },
+];
+
+/// Render a skill as a `SKILL.md` file: YAML frontmatter (`name` + `description`)
+/// followed by a blank line and the doc body. The frontmatter is what tells
+/// Claude Code / opencode the skill's purpose so agents auto-invoke it by
+/// description without the user having to supply the path.
+fn render_skill(s: &SkillMeta) -> String {
+    format!(
+        "---\nname: {}\ndescription: {}\n---\n\n{}",
+        s.name, s.description, s.body
+    )
+}
+
 /// How `init` should render the MCP server invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerMode {
@@ -126,6 +168,7 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     write_mcp_json(opts, &mut report)?;
     write_gitignore(opts, &mut report)?;
     write_claude_md(opts, &mut report)?;
+    write_skills(opts, &mut report)?;
     if opts.codex {
         write_codex_config(opts, &mut report)?;
     }
@@ -383,6 +426,88 @@ fn write_codex_config(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
             Outcome::Created
         },
     ));
+    Ok(())
+}
+
+/// Install agent skill `SKILL.md` files into the conventional auto-discovery
+/// locations. Claude Code and opencode read `.claude/skills/<name>/SKILL.md`; Codex
+/// reads `.agents/skills/<name>/SKILL.md`. The `.claude/skills/` tree is written on
+/// every run; `.agents/skills/` is additionally written when `opts.codex`. Both are
+/// non-clobbering unless `--force`. A summary note is pushed when at least one file
+/// in `.claude/skills/` is (re-)written.
+fn write_skills(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let mut claude_written = 0usize;
+    let mut agents_written = false;
+
+    for skill in SKILLS {
+        let content = render_skill(skill);
+
+        // Always install into .claude/skills/<name>/SKILL.md
+        {
+            let dir = opts
+                .target_dir
+                .join(".claude")
+                .join("skills")
+                .join(skill.name);
+            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+            let path = dir.join("SKILL.md");
+            let existed = path.exists();
+            if existed && !opts.force {
+                report.entries.push(Entry::new(path, Outcome::Skipped));
+            } else {
+                std::fs::write(&path, &content)
+                    .with_context(|| format!("write {}", path.display()))?;
+                report.entries.push(Entry::new(
+                    path,
+                    if existed {
+                        Outcome::Merged
+                    } else {
+                        Outcome::Created
+                    },
+                ));
+                claude_written += 1;
+            }
+        }
+
+        // Additionally install into .agents/skills/<name>/SKILL.md when --codex
+        if opts.codex {
+            let dir = opts
+                .target_dir
+                .join(".agents")
+                .join("skills")
+                .join(skill.name);
+            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+            let path = dir.join("SKILL.md");
+            let existed = path.exists();
+            if existed && !opts.force {
+                report.entries.push(Entry::new(path, Outcome::Skipped));
+            } else {
+                std::fs::write(&path, &content)
+                    .with_context(|| format!("write {}", path.display()))?;
+                report.entries.push(Entry::new(
+                    path,
+                    if existed {
+                        Outcome::Merged
+                    } else {
+                        Outcome::Created
+                    },
+                ));
+                agents_written = true;
+            }
+        }
+    }
+
+    if claude_written > 0 {
+        let mut note = format!(
+            "installed {} agent skill(s) into .claude/skills/ — your agent can auto-discover them (e.g. ask it to bootstrap this repo's memory)",
+            claude_written
+        );
+        if agents_written {
+            note.push_str("; also installed into .agents/skills/ for Codex");
+        }
+        report.notes.push(note);
+    }
+
     Ok(())
 }
 
@@ -671,5 +796,134 @@ mod tests {
             Some(["/.moosedev/*".to_string(), "!/.moosedev/kg.nq".to_string()])
         );
         assert_eq!(gitignore_lines("/abs/store"), None);
+    }
+
+    #[test]
+    fn installs_skills_into_dot_claude() {
+        let target = temp_project("skills-claude");
+        let report = init_project(&opts(&target)).unwrap();
+
+        let skill_path = target.join(".claude/skills/bootstrap-existing-codebase/SKILL.md");
+        assert!(
+            skill_path.exists(),
+            "bootstrap skill file should be created"
+        );
+
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(
+            content.contains("description:"),
+            "SKILL.md should contain YAML frontmatter with `description:`"
+        );
+        assert!(
+            content.contains("Bootstrap"),
+            "SKILL.md should contain body text from the source doc"
+        );
+
+        // Without --codex, .agents/skills/ must NOT be written.
+        assert!(
+            !target
+                .join(".agents/skills/bootstrap-existing-codebase/SKILL.md")
+                .exists(),
+            ".agents/skills/ must not be written without --codex"
+        );
+
+        assert_eq!(
+            outcome_for(&report, "bootstrap-existing-codebase/SKILL.md"),
+            Some(&Outcome::Created)
+        );
+        assert!(
+            report.notes.iter().any(|n| n.contains(".claude/skills/")),
+            "report should include a note about installed skills"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn codex_also_installs_agents_skills() {
+        let target = temp_project("skills-codex");
+        let mut o = opts(&target);
+        o.codex = true;
+        init_project(&o).unwrap();
+
+        let agents_path = target.join(".agents/skills/bootstrap-existing-codebase/SKILL.md");
+        assert!(
+            agents_path.exists(),
+            ".agents/skills/ should be written when --codex is set"
+        );
+        let content = std::fs::read_to_string(&agents_path).unwrap();
+        assert!(
+            content.contains("description:"),
+            "agents skill file should contain YAML frontmatter"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn skills_are_idempotent() {
+        let target = temp_project("skills-idem");
+        let o = opts(&target);
+        init_project(&o).unwrap();
+        let report = init_project(&o).unwrap();
+
+        // Second run must report Skipped, not Created.
+        assert_eq!(
+            outcome_for(&report, "bootstrap-existing-codebase/SKILL.md"),
+            Some(&Outcome::Skipped),
+            "second run should skip an already-installed skill"
+        );
+        // Content must still be valid.
+        let content = std::fs::read_to_string(
+            target.join(".claude/skills/bootstrap-existing-codebase/SKILL.md"),
+        )
+        .unwrap();
+        assert!(content.contains("description:"));
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn skills_force_overwrites_existing() {
+        let target = temp_project("skills-force");
+
+        // Pre-place a sentinel SKILL.md so we can detect whether it is clobbered.
+        let skill_dir = target.join(".claude/skills/bootstrap-existing-codebase");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "SENTINEL").unwrap();
+
+        // Without --force: sentinel must be preserved (Skipped).
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(
+            outcome_for(&report, "bootstrap-existing-codebase/SKILL.md"),
+            Some(&Outcome::Skipped),
+            "without --force the existing SKILL.md should be skipped"
+        );
+        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert!(
+            content.contains("SENTINEL"),
+            "sentinel must be preserved without --force"
+        );
+
+        // With --force: sentinel must be overwritten (Merged).
+        let mut o = opts(&target);
+        o.force = true;
+        let report = init_project(&o).unwrap();
+        assert_eq!(
+            outcome_for(&report, "bootstrap-existing-codebase/SKILL.md"),
+            Some(&Outcome::Merged),
+            "with --force the existing SKILL.md should be overwritten"
+        );
+        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert!(
+            !content.contains("SENTINEL"),
+            "sentinel must be gone after --force"
+        );
+        assert!(
+            content.contains("description:"),
+            "valid SKILL.md content expected after --force overwrite"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
     }
 }

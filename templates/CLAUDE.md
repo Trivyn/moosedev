@@ -7,7 +7,8 @@
   CLAUDE.md additionally carries the product's design invariants; a consuming project does not
   need those — keep this file about how to *work* in the project, with the graph as memory.
 
-  To seed an existing codebase's graph, run MOOSEDev's `skills/bootstrap-existing-codebase.md`.
+  To seed an existing codebase's graph, ask your agent to bootstrap this repo's memory — the
+  bootstrap skill is installed under `.claude/skills/` by `moosedev init`.
 -->
 
 # <PROJECT NAME>
@@ -99,7 +100,8 @@ The loop:
 <SETUP NOTES>
 
 ## Project specifics
-<!-- Fill in (or let `skills/bootstrap-existing-codebase.md` seed the graph): architecture
+<!-- Fill in (or ask your agent to bootstrap this repo's memory — the bootstrap skill is
+     installed under `.claude/skills/` by `moosedev init`): architecture
      overview, key modules, build/test commands, deployment, and known constraints. Durable
      items belong in the graph as typed records; keep this section a thin human-facing index. -->
 <PROJECT SPECIFICS>
