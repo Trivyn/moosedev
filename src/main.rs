@@ -70,6 +70,7 @@ struct InitArgs {
     target_dir: Option<PathBuf>,
     force: bool,
     codex: bool,
+    opencode: bool,
     stdio: bool,
     binary: Option<PathBuf>,
     data_dir: Option<String>,
@@ -118,6 +119,7 @@ INIT OPTIONS:
     --stdio                   Generate a bare-stdio MCP config (single client)
                               instead of the default shared --connect config
     --codex                   Also write .codex/config.toml for the Codex CLI
+    --opencode                Also install the opencode push plugin (.opencode/plugins/)
     --binary PATH             Force this binary path in the config instead of
                               the auto-resolved command (bare `moosedev` on PATH,
                               else this executable's absolute path)
@@ -276,6 +278,7 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
     let mut target_dir = None;
     let mut force = false;
     let mut codex = false;
+    let mut opencode = false;
     let mut stdio = false;
     let mut binary = None;
     let mut data_dir = None;
@@ -286,6 +289,8 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
             force = true;
         } else if arg == "--codex" {
             codex = true;
+        } else if arg == "--opencode" {
+            opencode = true;
         } else if arg == "--stdio" {
             stdio = true;
         } else if let Some(value) = arg.strip_prefix("--binary=") {
@@ -315,6 +320,7 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
         target_dir,
         force,
         codex,
+        opencode,
         stdio,
         binary,
         data_dir,
@@ -632,26 +638,6 @@ fn ontology_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
 }
 
-/// Locate the shipped `templates/` dir (holds the CLAUDE.md adoption template),
-/// mirroring [`ontology_dir`]'s resolution: explicit override, then next to the
-/// binary (released-tarball layout), then the crate dir (dev). `None` when none
-/// exist, so `init` skips the CLAUDE.md step with a clear message.
-fn templates_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("MOOSEDEV_TEMPLATES_DIR") {
-        let dir = PathBuf::from(dir);
-        return dir.is_dir().then_some(dir);
-    }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("templates")))
-        .filter(|p| p.is_dir())
-    {
-        return Some(dir);
-    }
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
-    crate_dir.is_dir().then_some(crate_dir)
-}
-
 /// Is `bin` reachable on `PATH`?
 fn is_on_path(bin: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
@@ -698,11 +684,11 @@ fn init_mode(args: InitArgs) -> anyhow::Result<()> {
     let opts = init::InitOptions {
         target_dir,
         command,
-        templates_dir: templates_dir(),
         data_dir,
         server_mode,
         force: args.force,
         codex: args.codex,
+        opencode: args.opencode,
     };
     let report = init::init_project(&opts)?;
     print_init_report(&opts, &report, path_note.as_deref());

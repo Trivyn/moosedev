@@ -316,12 +316,9 @@ async function getRelevantContext(
   limit: number,
   warnOnce: (key: string, message: string) => void,
 ): Promise<string | undefined> {
-  const dataDir = process.env.MOOSEDEV_DATA_DIR
-  if (!dataDir) {
-    warnOnce("missing-data-dir", "MOOSEDEV_DATA_DIR is unset; skipping project-memory injection.")
-    return undefined
-  }
-
+  // Default to the conventional per-project store, so `moosedev init --opencode`
+  // works with no extra env config when opencode runs from the project root.
+  const dataDir = process.env.MOOSEDEV_DATA_DIR || ".moosedev"
   const bin = process.env.MOOSEDEV_BIN || "moosedev"
   const child = spawn(bin, ["--connect"], {
     env: {

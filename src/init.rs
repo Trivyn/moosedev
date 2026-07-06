@@ -8,15 +8,35 @@
 //! `CLAUDE.md`, never destroys the user's work. `.mcp.json` is *merged* — the
 //! `moosedev` server is inserted alongside any servers already configured.
 //!
-//! The filesystem-facing inputs (the resolved binary command, the templates dir)
-//! are passed in by `main.rs`, keeping [`init_project`] a pure function of its
-//! [`InitOptions`] so it is unit-testable against a temp dir.
+//! The CLAUDE.md template is embedded via `include_str!`, so `init` never has to
+//! locate a `templates/` dir at runtime (it may be buried in a Homebrew Cellar).
+//! An existing CLAUDE.md gets the project-memory block *appended* — managed,
+//! idempotent, reversible — instead of the user being told to add it by hand.
+//!
+//! The one filesystem-facing input (the resolved binary command) is passed in by
+//! `main.rs`, keeping [`init_project`] a pure function of its [`InitOptions`] so
+//! it is unit-testable against a temp dir.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde_json::{json, Value};
+
+/// The CLAUDE.md adoption template, embedded so `init` needs no runtime
+/// `templates/` lookup. Its project-memory section is wrapped in the markers
+/// below so an existing CLAUDE.md can be detected and augmented idempotently.
+const CLAUDE_TEMPLATE: &str = include_str!("../templates/CLAUDE.md");
+/// Start of the managed project-memory block. Its presence means a CLAUDE.md is
+/// already memory-aware.
+const MEMORY_BEGIN: &str = "<!-- moosedev:begin";
+/// End of the managed project-memory block.
+const MEMORY_END: &str = "moosedev:end -->";
+
+/// The opencode project-memory PUSH plugin, embedded like the CLAUDE.md template.
+/// opencode targets local models that under-call MCP tools, so this proactively
+/// injects records into their context rather than relying on the model to pull.
+const OPENCODE_PLUGIN: &str = include_str!("../.opencode/plugins/moosedev-push.ts");
 
 /// How `init` should render the MCP server invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,17 +59,14 @@ impl ServerMode {
     }
 }
 
-/// Inputs to [`init_project`]. `main.rs` resolves the runtime-derived fields
-/// (`command`, `templates_dir`); everything else comes from argv.
+/// Inputs to [`init_project`]. `main.rs` resolves the runtime-derived `command`;
+/// everything else comes from argv.
 pub struct InitOptions {
     /// Directory to initialize (the target project root).
     pub target_dir: PathBuf,
     /// The command MCP clients should spawn — bare `"moosedev"` when it is on
     /// `PATH` (upgrade-stable), else an absolute binary path.
     pub command: String,
-    /// Directory holding `CLAUDE.md` (the shipped `templates/`), or `None` when
-    /// it could not be located — the CLAUDE.md step is then skipped with a note.
-    pub templates_dir: Option<PathBuf>,
     /// Value written for `MOOSEDEV_DATA_DIR`; relative keeps clones portable.
     pub data_dir: String,
     /// MCP invocation style.
@@ -58,6 +75,8 @@ pub struct InitOptions {
     pub force: bool,
     /// Also write `.codex/config.toml` for the Codex CLI.
     pub codex: bool,
+    /// Also install the opencode PUSH plugin into `.opencode/plugins/`.
+    pub opencode: bool,
 }
 
 /// What happened to one artifact.
@@ -109,6 +128,9 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     write_claude_md(opts, &mut report)?;
     if opts.codex {
         write_codex_config(opts, &mut report)?;
+    }
+    if opts.opencode {
+        write_opencode_plugin(opts, &mut report)?;
     }
 
     Ok(report)
@@ -254,41 +276,60 @@ fn write_gitignore(opts: &InitOptions, report: &mut InitReport) -> anyhow::Resul
     Ok(())
 }
 
-/// Copy the CLAUDE.md adoption template in, but never touch an existing one.
+/// The managed project-memory block (markers inclusive) sliced from the embedded
+/// template — this is what gets appended to an existing CLAUDE.md.
+fn memory_block() -> &'static str {
+    let begin = CLAUDE_TEMPLATE
+        .find(MEMORY_BEGIN)
+        .expect("embedded CLAUDE.md template must contain the moosedev:begin marker");
+    let end = CLAUDE_TEMPLATE
+        .find(MEMORY_END)
+        .expect("embedded CLAUDE.md template must contain the moosedev:end marker")
+        + MEMORY_END.len();
+    CLAUDE_TEMPLATE[begin..end].trim_end()
+}
+
+/// Make the target's CLAUDE.md memory-aware. Fresh: write the full embedded
+/// template. Existing: **append** the managed project-memory block (idempotent —
+/// skipped if the marker is already present), never rewriting the user's file.
+/// `--force` overwrites the whole file with the fresh template.
 fn write_claude_md(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
     let path = opts.target_dir.join("CLAUDE.md");
     let existed = path.exists();
 
-    if existed && !opts.force {
-        report.entries.push(Entry::new(path, Outcome::Skipped));
-        let where_from = match &opts.templates_dir {
-            Some(dir) => dir.join("CLAUDE.md").display().to_string(),
-            None => "MOOSEDev's templates/CLAUDE.md".to_string(),
-        };
-        report.notes.push(format!(
-            "CLAUDE.md exists; add the MOOSEDev memory section from {where_from}"
+    if !existed || opts.force {
+        std::fs::write(&path, CLAUDE_TEMPLATE)
+            .with_context(|| format!("write {}", path.display()))?;
+        report.entries.push(Entry::new(
+            path,
+            if existed {
+                Outcome::Merged
+            } else {
+                Outcome::Created
+            },
         ));
         return Ok(());
     }
 
-    let Some(templates) = &opts.templates_dir else {
-        report.notes.push(
-            "templates/ not found next to the binary; skipped CLAUDE.md (copy MOOSEDev's templates/CLAUDE.md manually)".to_string(),
-        );
+    let current =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    if current.contains(MEMORY_BEGIN) {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
         return Ok(());
-    };
-    let src = templates.join("CLAUDE.md");
-    let content = std::fs::read_to_string(&src)
-        .with_context(|| format!("read template {}", src.display()))?;
-    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
-    report.entries.push(Entry::new(
-        path,
-        if existed {
-            Outcome::Merged
-        } else {
-            Outcome::Created
-        },
-    ));
+    }
+
+    let mut out = current;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(memory_block());
+    out.push('\n');
+    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(path, Outcome::Merged));
+    report.notes.push(
+        "appended the MOOSEDev memory block to your existing CLAUDE.md (delete the moosedev:begin…end block to undo)".to_string(),
+    );
     Ok(())
 }
 
@@ -345,6 +386,36 @@ fn write_codex_config(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
     Ok(())
 }
 
+/// Install the opencode project-memory PUSH plugin into `.opencode/plugins/`.
+/// Unlike the pull-based MCP configs, opencode targets local models that
+/// under-call MCP tools, so the plugin proactively injects records into their
+/// context. It is self-contained (Node built-ins only — no `npm install`) and
+/// reads `MOOSEDEV_DATA_DIR` (defaulting to `.moosedev`). Non-clobbering.
+fn write_opencode_plugin(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let dir = opts.target_dir.join(".opencode").join("plugins");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("moosedev-push.ts");
+    let existed = path.exists();
+
+    if existed && !opts.force {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
+        return Ok(());
+    }
+    std::fs::write(&path, OPENCODE_PLUGIN).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    report.notes.push(
+        "installed the opencode push plugin (.opencode/plugins/moosedev-push.ts) — proactively injects memory for local models that under-call MCP tools".to_string(),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,24 +427,15 @@ mod tests {
         dir
     }
 
-    fn temp_templates(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("moosedev-init-tpl-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("CLAUDE.md"), "# TEMPLATE CLAUDE\n").unwrap();
-        dir
-    }
-
-    fn opts(target: &Path, templates: &Path) -> InitOptions {
+    fn opts(target: &Path) -> InitOptions {
         InitOptions {
             target_dir: target.to_path_buf(),
             command: "moosedev".to_string(),
-            templates_dir: Some(templates.to_path_buf()),
             data_dir: ".moosedev".to_string(),
             server_mode: ServerMode::Connect,
             force: false,
             codex: false,
+            opencode: false,
         }
     }
 
@@ -392,8 +454,7 @@ mod tests {
     #[test]
     fn writes_a_fresh_project() {
         let target = temp_project("fresh");
-        let templates = temp_templates("fresh");
-        let report = init_project(&opts(&target, &templates)).unwrap();
+        let report = init_project(&opts(&target)).unwrap();
 
         let mcp = read_json(&target.join(".mcp.json"));
         assert_eq!(mcp["mcpServers"]["moosedev"]["command"], "moosedev");
@@ -407,27 +468,25 @@ mod tests {
         assert!(gitignore.contains("/.moosedev/*"));
         assert!(gitignore.contains("!/.moosedev/kg.nq"));
 
-        assert!(std::fs::read_to_string(target.join("CLAUDE.md"))
-            .unwrap()
-            .contains("TEMPLATE CLAUDE"));
+        let claude = std::fs::read_to_string(target.join("CLAUDE.md")).unwrap();
+        assert!(claude.contains("Working with project memory"));
+        assert!(claude.contains(MEMORY_BEGIN), "carries the managed marker");
         assert!(target.join(".moosedev").is_dir());
         assert_eq!(outcome_for(&report, ".mcp.json"), Some(&Outcome::Created));
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
     }
 
     #[test]
     fn merges_into_an_existing_mcp_json() {
         let target = temp_project("merge");
-        let templates = temp_templates("merge");
         std::fs::write(
             target.join(".mcp.json"),
             r#"{"mcpServers":{"other":{"command":"x"}}}"#,
         )
         .unwrap();
 
-        let report = init_project(&opts(&target, &templates)).unwrap();
+        let report = init_project(&opts(&target)).unwrap();
 
         let mcp = read_json(&target.join(".mcp.json"));
         assert_eq!(
@@ -438,14 +497,12 @@ mod tests {
         assert_eq!(outcome_for(&report, ".mcp.json"), Some(&Outcome::Merged));
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
     }
 
     #[test]
     fn is_idempotent() {
         let target = temp_project("idem");
-        let templates = temp_templates("idem");
-        let o = opts(&target, &templates);
+        let o = opts(&target);
         init_project(&o).unwrap();
         let report = init_project(&o).unwrap();
 
@@ -456,35 +513,63 @@ mod tests {
             "gitignore line not duplicated"
         );
         assert_eq!(outcome_for(&report, ".mcp.json"), Some(&Outcome::Skipped));
+        // fresh run wrote the full template (with the marker), so the re-run skips.
         assert_eq!(outcome_for(&report, "CLAUDE.md"), Some(&Outcome::Skipped));
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
     }
 
     #[test]
-    fn preserves_an_existing_claude_md() {
+    fn appends_memory_block_to_an_existing_claude_md() {
         let target = temp_project("claude");
-        let templates = temp_templates("claude");
-        std::fs::write(target.join("CLAUDE.md"), "SENTINEL").unwrap();
+        std::fs::write(
+            target.join("CLAUDE.md"),
+            "# My Project\n\nExisting notes.\n",
+        )
+        .unwrap();
 
-        let report = init_project(&opts(&target, &templates)).unwrap();
+        let report = init_project(&opts(&target)).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(target.join("CLAUDE.md")).unwrap(),
-            "SENTINEL"
+        let claude = std::fs::read_to_string(target.join("CLAUDE.md")).unwrap();
+        assert!(
+            claude.contains("Existing notes."),
+            "preserves the user's content"
         );
-        assert_eq!(outcome_for(&report, "CLAUDE.md"), Some(&Outcome::Skipped));
-        assert!(report.notes.iter().any(|n| n.contains("CLAUDE.md exists")));
+        assert!(
+            claude.contains(MEMORY_BEGIN),
+            "appends the managed memory block"
+        );
+        assert!(claude.contains("Working with project memory"));
+        assert_eq!(outcome_for(&report, "CLAUDE.md"), Some(&Outcome::Merged));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("appended the MOOSEDev memory block")));
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
+    }
+
+    #[test]
+    fn appending_the_memory_block_is_idempotent() {
+        let target = temp_project("claude-idem");
+        std::fs::write(target.join("CLAUDE.md"), "# My Project\n").unwrap();
+        init_project(&opts(&target)).unwrap();
+        let report = init_project(&opts(&target)).unwrap();
+
+        let claude = std::fs::read_to_string(target.join("CLAUDE.md")).unwrap();
+        assert_eq!(
+            claude.matches(MEMORY_BEGIN).count(),
+            1,
+            "block not duplicated"
+        );
+        assert_eq!(outcome_for(&report, "CLAUDE.md"), Some(&Outcome::Skipped));
+
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]
     fn force_overwrites_existing_files() {
         let target = temp_project("force");
-        let templates = temp_templates("force");
         std::fs::write(target.join("CLAUDE.md"), "SENTINEL").unwrap();
         std::fs::write(
             target.join(".mcp.json"),
@@ -492,25 +577,26 @@ mod tests {
         )
         .unwrap();
 
-        let mut o = opts(&target, &templates);
+        let mut o = opts(&target);
         o.force = true;
         init_project(&o).unwrap();
 
-        assert!(std::fs::read_to_string(target.join("CLAUDE.md"))
-            .unwrap()
-            .contains("TEMPLATE"));
+        let claude = std::fs::read_to_string(target.join("CLAUDE.md")).unwrap();
+        assert!(
+            claude.contains(MEMORY_BEGIN),
+            "force rewrote with the full template"
+        );
+        assert!(!claude.contains("SENTINEL"));
         let mcp = read_json(&target.join(".mcp.json"));
         assert_eq!(mcp["mcpServers"]["moosedev"]["command"], "moosedev");
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
     }
 
     #[test]
     fn stdio_mode_writes_empty_args() {
         let target = temp_project("stdio");
-        let templates = temp_templates("stdio");
-        let mut o = opts(&target, &templates);
+        let mut o = opts(&target);
         o.server_mode = ServerMode::Stdio;
         init_project(&o).unwrap();
 
@@ -524,24 +610,20 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
     }
 
     #[test]
     fn rejects_invalid_mcp_json() {
         let target = temp_project("badjson");
-        let templates = temp_templates("badjson");
         std::fs::write(target.join(".mcp.json"), "not json {{{").unwrap();
-        assert!(init_project(&opts(&target, &templates)).is_err());
+        assert!(init_project(&opts(&target)).is_err());
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
     }
 
     #[test]
     fn writes_codex_config_when_requested() {
         let target = temp_project("codex");
-        let templates = temp_templates("codex");
-        let mut o = opts(&target, &templates);
+        let mut o = opts(&target);
         o.codex = true;
         init_project(&o).unwrap();
 
@@ -550,7 +632,36 @@ mod tests {
         assert!(toml.contains("command = \"moosedev\""));
 
         let _ = std::fs::remove_dir_all(&target);
-        let _ = std::fs::remove_dir_all(&templates);
+    }
+
+    #[test]
+    fn installs_opencode_plugin_only_when_requested() {
+        let off = temp_project("opencode-off");
+        init_project(&opts(&off)).unwrap();
+        assert!(
+            !off.join(".opencode/plugins/moosedev-push.ts").exists(),
+            "not installed without the flag"
+        );
+        let _ = std::fs::remove_dir_all(&off);
+
+        let target = temp_project("opencode");
+        let mut o = opts(&target);
+        o.opencode = true;
+        init_project(&o).unwrap();
+        let plugin =
+            std::fs::read_to_string(target.join(".opencode/plugins/moosedev-push.ts")).unwrap();
+        assert!(plugin.contains("MOOSEDEV_DATA_DIR"));
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn template_carries_the_memory_markers() {
+        assert!(CLAUDE_TEMPLATE.contains(MEMORY_BEGIN));
+        assert!(CLAUDE_TEMPLATE.contains(MEMORY_END));
+        let block = memory_block();
+        assert!(block.starts_with(MEMORY_BEGIN));
+        assert!(block.trim_end().ends_with(MEMORY_END));
+        assert!(block.contains("Working with project memory"));
     }
 
     #[test]

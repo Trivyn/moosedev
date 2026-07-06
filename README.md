@@ -146,7 +146,7 @@ cd /path/to/your/project
 moosedev init
 ```
 
-This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, and a `CLAUDE.md` template — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--stdio`, `--force`).
+This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, and a `CLAUDE.md` template — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--opencode`, `--stdio`, `--force`).
 
 <details>
 <summary>Manual configuration</summary>

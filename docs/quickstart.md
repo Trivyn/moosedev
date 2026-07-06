@@ -45,8 +45,10 @@ other MCP servers in your `.mcp.json`. It writes:
 - **`CLAUDE.md`** — the memory-workflow template (only if you don't have one).
 - **`.moosedev/`** — where the graph lives.
 
-Add `--codex` to also write `.codex/config.toml`, or `--stdio` for a single-client
-(non-shared) config.
+Add `--codex` to also write `.codex/config.toml`, `--opencode` to install the
+opencode push plugin (`.opencode/plugins/moosedev-push.ts` — proactively injects
+memory for local models that under-call MCP tools), or `--stdio` for a
+single-client (non-shared) config.
 
 ## 3. Reload your MCP client
 

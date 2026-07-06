@@ -15,6 +15,7 @@
 <!-- One short paragraph: what this project is and why it exists. Keep it current. -->
 <PROJECT DESCRIPTION>
 
+<!-- moosedev:begin — MOOSEDev project-memory workflow. Managed by `moosedev init`; edit around this block freely, or delete the whole begin…end block to opt out. -->
 > This project uses the **MOOSEDev** MCP server for durable, structured, long-term memory.
 > The typed **project knowledge graph is the source of truth** for architectural decisions,
 > lessons, constraints, requirements, and patterns — **not** markdown files. Free-text notes
@@ -52,6 +53,7 @@ The loop:
 `Constraint` (a hard limit/invariant) · `Requirement` (a goal/need) ·
 `Pattern` (a deliberate recurring approach) · `AntiPattern` (something to avoid, + why) ·
 `Lesson` (a non-obvious learning/gotcha).
+<!-- moosedev:end -->
 
 ## Development practices
 
