@@ -357,15 +357,29 @@ fn start_backend(
 
     let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe: {e}"))?;
 
+    // Pass an ABSOLUTE ontology dir: the child inherits our cwd, so a relative
+    // MOOSEDEV_ONTOLOGY_DIR (e.g. from a repo `.env`) would resolve against the
+    // wrong directory and the backend would fail to load its ontologies.
+    let ontology_abs = ontology_dir
+        .canonicalize()
+        .unwrap_or_else(|_| ontology_dir.to_path_buf());
+
+    // Capture the backend's stderr so an early-exit failure is diagnosable —
+    // otherwise a bare "exited early (code 1)" hides the real cause.
+    let serve_log = std::env::temp_dir().join("moosedev-temporal-serve.log");
+    let stderr_to = std::fs::File::create(&serve_log)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
     let mut child = Command::new(&exe)
         .arg("--serve")
         .env("MOOSEDEV_DATA_DIR", data_dir)
-        .env("MOOSEDEV_ONTOLOGY_DIR", ontology_dir)
+        .env("MOOSEDEV_ONTOLOGY_DIR", &ontology_abs)
         .env("MOOSEDEV_CAPTURE_TS_FILE", ts_file)
         .env("MOOSEDEV_CAPTURE_AUTHOR_FILE", author_file)
         .env("MOOSEDEV_NO_HTTP", "1")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr_to)
         .spawn()
         .map_err(|e| anyhow::anyhow!("spawn moosedev --serve: {e}"))?;
 
@@ -378,8 +392,18 @@ fn start_backend(
             return Ok(Backend { child });
         }
         if let Ok(Some(status)) = child.try_wait() {
+            let log = fs::read_to_string(&serve_log).unwrap_or_default();
+            let tail = log
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
             anyhow::bail!(
-                "moosedev --serve exited early (code {:?}); check the store",
+                "moosedev --serve exited early (code {:?}):\n{tail}",
                 status.code()
             );
         }
@@ -482,7 +506,6 @@ fn episode_prompt(ep: &Episode, diff: &str, repo_name: &str, skill_path: Option<
 // ── agent spawn ───────────────────────────────────────────────────────────────
 
 const AGENT_TIMEOUT_SECS: u64 = 900;
-const AGENT_MAX_TURNS: &str = "60";
 
 /// Poll-based wait with a timeout; returns true on success.
 fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> bool {
@@ -507,23 +530,26 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> bool
     }
 }
 
-fn spawn_claude(prompt: &str, mcp_config: &Path, repo: &Path, model: &str) -> bool {
+fn spawn_claude(prompt: &str, mcp_config: &Path, skill_dir: Option<&Path>, model: &str) -> bool {
     let mut cmd = Command::new("claude");
     cmd.args([
         "-p",
         prompt,
         "--mcp-config",
         &mcp_config.to_string_lossy(),
-        "--add-dir",
-        &repo.to_string_lossy(),
+        // Use ONLY our --mcp-config backend — never a project .mcp.json's own
+        // `moosedev` server, which would send captures into the wrong store.
+        "--strict-mcp-config",
         "--model",
         model,
         "--dangerously-skip-permissions",
-        "--max-turns",
-        AGENT_MAX_TURNS,
-    ])
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    ]);
+    // The skill doc lives in MOOSEDev's skills dir (not the target repo — the diff
+    // is inlined in the prompt), so grant the agent read access to it.
+    if let Some(dir) = skill_dir {
+        cmd.arg("--add-dir").arg(dir);
+    }
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
     match cmd.spawn() {
         Ok(mut child) => wait_with_timeout(&mut child, AGENT_TIMEOUT_SECS),
         Err(e) => {
@@ -537,6 +563,7 @@ fn spawn_codex(
     prompt: &str,
     data_dir: &str,
     ontology_dir: &Path,
+    skill_dir: Option<&Path>,
     repo: &Path,
     model: &str,
 ) -> bool {
@@ -553,7 +580,9 @@ fn spawn_codex(
         cmd.arg(o);
     }
     cmd.arg(prompt)
-        .current_dir(repo)
+        // Run where the skill doc is readable (MOOSEDev's skills dir); fall back to
+        // the target repo. The diff is inlined, so the target repo isn't required.
+        .current_dir(skill_dir.unwrap_or(repo))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     match cmd.spawn() {
@@ -686,6 +715,17 @@ pub fn run(args: BootstrapArgs) -> anyhow::Result<()> {
     eprintln!("backend ready");
 
     let model = resolve_model(args.agent, args.model.as_deref());
+    // The capture agent must read `temporal-episode-capture.md`, which ships in
+    // MOOSEDev's skills dir — grant access to that dir, not the target repo.
+    let skill_dir: Option<PathBuf> = args
+        .skill_path
+        .as_deref()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    if skill_dir.is_none() {
+        eprintln!(
+            "warning: temporal-episode-capture skill not found — captures will lack the workflow doc"
+        );
+    }
 
     // ── per-commit loop ───────────────────────────────────────────────────────
     let mut sent = 0usize;
@@ -719,13 +759,14 @@ pub fn run(args: BootstrapArgs) -> anyhow::Result<()> {
             Agent::Claude => spawn_claude(
                 &prompt,
                 mcp_config_path.as_ref().expect("mcp_config set for claude"),
-                &args.repo,
+                skill_dir.as_deref(),
                 &model,
             ),
             Agent::Codex => spawn_codex(
                 &prompt,
                 &args.data_dir,
                 &args.ontology_dir,
+                skill_dir.as_deref(),
                 &args.repo,
                 &model,
             ),
