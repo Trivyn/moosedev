@@ -55,6 +55,8 @@ enum Mode {
     Init(InitArgs),
     /// Temporal git-walk bootstrap: replay trunk history into the graph.
     Bootstrap(temporal::BootstrapArgs),
+    /// Print the resolved `skills/` dir + the agent workflow docs it holds.
+    Skills,
 }
 
 struct ExportArgs {
@@ -96,6 +98,7 @@ USAGE:
     moosedev init [DIR]       Configure DIR (default .) to use MOOSEDev as memory
     moosedev bootstrap --temporal
                               Replay git history into the graph (per-commit dates)
+    moosedev skills           List the shipped agent workflow docs (bootstrap, …)
     moosedev --help           Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
@@ -149,12 +152,13 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("import") => parse_import(iter).map(Mode::Import),
         Some("init") => parse_init(iter).map(Mode::Init),
         Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
+        Some("skills") => Ok(Mode::Skills),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
 }
@@ -607,6 +611,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Import(args) => import_mode(&data_dir, args),
         Mode::Init(args) => init_mode(args),
         Mode::Bootstrap(args) => temporal::run(args),
+        Mode::Skills => skills_mode(),
         Mode::Stdio => {
             let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
             runtime::serve_stdio(server).await
@@ -805,6 +810,32 @@ fn skills_dir() -> Option<PathBuf> {
     }
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
     crate_dir.is_dir().then_some(crate_dir)
+}
+
+/// `moosedev skills` — print the resolved `skills/` dir and the workflow docs it
+/// holds, with absolute paths a user can hand straight to their coding agent.
+fn skills_mode() -> anyhow::Result<()> {
+    let Some(dir) = skills_dir() else {
+        anyhow::bail!("no skills/ dir found next to the binary (set MOOSEDEV_SKILLS_DIR to override)");
+    };
+    println!("MOOSEDev skills: {}", dir.display());
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .filter(|n| n.to_string_lossy().ends_with(".md"))
+        .collect();
+    names.sort();
+    for name in &names {
+        println!("  {}", dir.join(name).display());
+    }
+    let bootstrap = dir.join("bootstrap-existing-codebase.md");
+    if bootstrap.is_file() {
+        println!(
+            "\nWith the moosedev MCP attached, point your coding agent at one, e.g.:\n  \"Follow {} to bootstrap this repo's project memory.\"",
+            bootstrap.display()
+        );
+    }
+    Ok(())
 }
 
 /// Is `bin` reachable on `PATH`?
