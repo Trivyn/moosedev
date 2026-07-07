@@ -1,7 +1,7 @@
 import ReactMarkdown, { Components } from 'react-markdown';
 import { Link as MuiLink } from '@mui/material';
 
-export type ArtifactKind = 'adrs' | 'requirements';
+export type ArtifactKind = 'adrs' | 'requirements' | 'lessons';
 
 export interface ArtifactTarget {
   kind: ArtifactKind;
@@ -19,6 +19,9 @@ function artifactTargetForIri(value: string): ArtifactTarget | null {
   }
   if (value.startsWith('https://moosedev.dev/kg/ArchitecturalDecision/')) {
     return { kind: 'adrs', iri: value };
+  }
+  if (value.startsWith('https://moosedev.dev/kg/Lesson/')) {
+    return { kind: 'lessons', iri: value };
   }
   return null;
 }

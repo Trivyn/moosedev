@@ -5,7 +5,7 @@ import LightModeIcon from '@mui/icons-material/LightMode';
 import { HealthResponse } from '../../api/types';
 import { MooseThemeMode } from '../../styles/theme';
 
-export type PageKey = 'chat' | 'adrs' | 'requirements' | 'sparql' | 'transfer';
+export type PageKey = 'chat' | 'adrs' | 'requirements' | 'lessons' | 'sparql' | 'transfer';
 
 interface AppShellProps {
   children: ReactNode;

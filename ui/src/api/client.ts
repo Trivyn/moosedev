@@ -8,6 +8,8 @@ import {
   ClarificationReply,
   GraphImportResponse,
   HealthResponse,
+  LessonDetailResponse,
+  LessonListResponse,
   QueryResponse,
   RequirementDetailResponse,
   RequirementListResponse,
@@ -59,6 +61,9 @@ export const api = {
   getRequirement: (num: string) =>
     request<RequirementDetailResponse>(`/requirements/${encodeURIComponent(num)}`),
   downloadRequirementArchive: () => download('/requirements/archive.zip'),
+  listLessons: () => request<LessonListResponse>('/lessons'),
+  getLesson: (num: string) => request<LessonDetailResponse>(`/lessons/${encodeURIComponent(num)}`),
+  downloadLessonArchive: () => download('/lessons/archive.zip'),
   chat: (payload: {
     session_id?: string;
     messages: ChatMessage[];

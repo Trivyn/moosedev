@@ -5,10 +5,12 @@ import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
 import ChatIcon from '@mui/icons-material/Forum';
 import ImportExportIcon from '@mui/icons-material/ImportExport';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
+import SchoolIcon from '@mui/icons-material/School';
 import AppShell, { PageKey } from './components/layout/AppShell';
 import AdrsPage from './pages/AdrsPage';
 import ChatPage from './pages/ChatPage';
 import GraphTransferPage from './pages/GraphTransferPage';
+import LessonsPage from './pages/LessonsPage';
 import RequirementsPage from './pages/RequirementsPage';
 import SparqlPage from './pages/SparqlPage';
 import { api } from './api/client';
@@ -42,6 +44,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
       label: 'Requirements',
       icon: <AssignmentTurnedInIcon fontSize="small" />,
     },
+    { key: 'lessons' as const, label: 'Lessons', icon: <SchoolIcon fontSize="small" /> },
     { key: 'sparql' as const, label: 'SPARQL', icon: <QueryStatsIcon fontSize="small" /> },
     { key: 'transfer' as const, label: 'Import / Export', icon: <ImportExportIcon fontSize="small" /> },
   ];
@@ -83,6 +86,8 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
           targetIri={artifactTargets.requirements}
           onNavigateArtifact={navigateArtifact}
         />
+      ) : page === 'lessons' ? (
+        <LessonsPage targetIri={artifactTargets.lessons} onNavigateArtifact={navigateArtifact} />
       ) : page === 'sparql' ? (
         <SparqlPage />
       ) : (
