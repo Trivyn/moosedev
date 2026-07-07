@@ -41,11 +41,15 @@ jobs:
             #     duplicates (macOS ld64 tolerates them). Accept them: safe because the
             #     overlapping symbols are byte-identical (growl 0.6.1 aligns slop-rdf with
             #     snarl-shacl 0.4.1).
-            #  2. Statically link libstdc++/libgcc so the binary does NOT require a newer
-            #     GLIBCXX than the target ships. RocksDB (via oxigraph) pulls in libstdc++;
-            #     building on 22.04/GCC 12 otherwise demands GLIBCXX_3.4.30, which older
-            #     distros (Rocky/RHEL 9 = GCC 11 = GLIBCXX_3.4.29) lack. glibc stays dynamic.
-            rustflags: "-C link-arg=-Wl,--allow-multiple-definition -C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
+            #  2. Statically link libstdc++ so the binary does NOT require a newer GLIBCXX
+            #     than the target distro ships (building on 22.04/GCC 12 demands
+            #     GLIBCXX_3.4.30; Rocky/RHEL 9 = GCC 11 tops out at 3.4.29). RocksDB's
+            #     build script emits an EXPLICIT `-lstdc++`, which `-static-libstdc++`
+            #     does not affect — so instead the "Stage static libstdc++" step below
+            #     exposes a search dir containing ONLY libstdc++.a, making `-lstdc++`
+            #     resolve statically. -static-libgcc handles the gcc runtime; glibc
+            #     stays dynamic (floor: 2.34 = Rocky/RHEL 9).
+            rustflags: "-C link-arg=-Wl,--allow-multiple-definition -L native=/opt/static-stdcxx -C link-arg=-static-libgcc"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout MOOSEDev
@@ -87,6 +91,17 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
+      - name: Stage static libstdc++ (Linux)
+        if: runner.os == 'Linux'
+        # librocksdb-sys links C++ with an explicit `-lstdc++`, which the usual
+        # -static-libstdc++ driver flag does NOT rewrite. Expose a search dir that
+        # holds ONLY the static archive (no .so), listed first via RUSTFLAGS
+        # `-L native=/opt/static-stdcxx`, so `-lstdc++` can only resolve statically.
+        run: |
+          sudo mkdir -p /opt/static-stdcxx
+          sudo ln -sf "$(g++ -print-file-name=libstdc++.a)" /opt/static-stdcxx/libstdc++.a
+          ls -l /opt/static-stdcxx/
+
       - name: Node toolchain
         uses: actions/setup-node@v4
         with:
@@ -103,6 +118,28 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
+
+      - name: Verify Linux binary portability
+        if: runner.os == 'Linux'
+        working-directory: moosedev
+        # Gate the release on what actually broke in the field (v0.6.1 on Rocky 9):
+        # a green build is NOT proof of portability, so assert it. The binary must
+        # not dynamically need libstdc++ (GLIBCXX drift) and must not require
+        # glibc newer than 2.34 (RHEL/Rocky 9 floor).
+        run: |
+          bin="target/${{ matrix.target }}/release/moosedev"
+          echo "== NEEDED =="
+          objdump -p "$bin" | awk '/NEEDED/{print $2}'
+          if objdump -p "$bin" | grep -qE 'NEEDED\s+libstdc\+\+'; then
+            echo "::error::moosedev still dynamically links libstdc++ — GLIBCXX portability regression"
+            exit 1
+          fi
+          max=$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+          echo "max GLIBC required: $max (floor: GLIBC_2.34)"
+          if [ "$(printf '%s\n' "$max" GLIBC_2.34 | sort -V | tail -1)" != "GLIBC_2.34" ]; then
+            echo "::error::binary requires $max, newer than RHEL/Rocky 9's glibc 2.34"
+            exit 1
+          fi
 
       - name: Package
         working-directory: moosedev
