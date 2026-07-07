@@ -1,3 +1,10 @@
+//! On-demand SCIP producer runner for `moosedev index`.
+//!
+//! The persisted substrate is the raw producer artifact plus `meta.json`.
+//! We deliberately validate the temporary SCIP file before promotion, then write
+//! metadata last so a metadata file means "the substrate is complete enough to
+//! load".
+
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -13,11 +20,17 @@ use super::{index_path, index_tmp_path, substrate_dir};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexReport {
+    /// Git commit captured before spawning the producer.
     pub commit: String,
+    /// Wall-clock time spent in producer execution plus validation/promotion.
     pub duration: std::time::Duration,
+    /// Number of documents in the accepted SCIP index.
     pub documents: usize,
+    /// Number of occurrences in the accepted SCIP index.
     pub occurrences: usize,
+    /// Number of definition occurrences in the accepted SCIP index.
     pub definitions: usize,
+    /// Size of the promoted `index.scip` file in bytes.
     pub index_bytes: u64,
 }
 
@@ -36,6 +49,8 @@ pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {
     let tmp_path = index_tmp_path(data_dir);
     let final_path = index_path(data_dir);
 
+    // rust-analyzer owns stdout/stderr while producing the index. This keeps the
+    // CLI honest about producer warnings instead of trying to summarize them.
     let started = Instant::now();
     let status = Command::new(&producer)
         .arg("scip")
@@ -64,6 +79,8 @@ pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {
         bail!("SCIP producer `{producer}` exited with status {status}");
     }
 
+    // Parse the tmp file once before promotion. This catches unsupported encodings
+    // or malformed ranges before `index.scip` can become the active substrate.
     let index = read_index(&tmp_path).with_context(|| {
         format!(
             "SCIP producer wrote invalid index {}; run `moosedev index` again",
@@ -76,6 +93,8 @@ pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {
         .with_context(|| format!("failed to stat temporary SCIP index {}", tmp_path.display()))?
         .len();
 
+    // Only the SCIP file is promoted atomically. Metadata is written last and acts
+    // as the completion marker for the pair.
     fs::rename(&tmp_path, &final_path).with_context(|| {
         format!(
             "failed to promote SCIP index {} to {}",

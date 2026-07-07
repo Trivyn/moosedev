@@ -1,3 +1,10 @@
+//! Public substrate resolver API.
+//!
+//! The resolver answers exact position lookups over the in-memory projection
+//! produced by `scip.rs`. Misses are intentional silence: no fuzzy matching and
+//! no enclosing-range fallback, because downstream surfaces must not present a
+//! lexical guess as a semantic entity.
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -8,31 +15,45 @@ use super::{index_path, meta_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
+    /// Zero-based line number.
     pub line: u32,
+    /// Zero-based UTF-8 byte column.
     pub col: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRange {
+    /// Inclusive start position.
     pub start: Position,
+    /// Exclusive end position.
     pub end: Position,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionMode {
+    /// Semantic resolution from the SCIP substrate.
     Scip,
+    /// Reserved for the tree-sitter fallback slice.
     TreeSitter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
+    /// Raw SCIP symbol string. It includes the producer's crate version.
     pub symbol: String,
+    /// Human display name from `Document.symbols`, when the producer supplied one.
     pub display_name: Option<String>,
+    /// SCIP symbol kind from `Document.symbols`, when known.
     pub kind: Option<String>,
+    /// True when SCIP role bit 1 marks this occurrence as a definition.
     pub is_definition: bool,
+    /// True for SCIP local symbols, which are not stable cross-file identities.
     pub is_local: bool,
+    /// Resolver backend used to produce this result.
     pub mode: ResolutionMode,
+    /// Smallest occurrence range enclosing the query position.
     pub range: SourceRange,
+    /// True when HEAD differs from `SubstrateMeta::indexed_commit`.
     pub stale: bool,
 }
 
@@ -48,6 +69,7 @@ pub struct SubstrateStats {
 pub struct Substrate {
     index: IngestedIndex,
     meta: SubstrateMeta,
+    /// Computed once at load time and copied into every resolution.
     stale: bool,
 }
 
@@ -74,11 +96,15 @@ impl Substrate {
     pub fn resolve(&self, relative_path: &str, pos: Position) -> Option<Resolution> {
         let file = self.index.files.get(relative_path)?;
         let occurrences = &file.occurrences;
+        // Occurrences are sorted by start position during ingestion. `partition_point`
+        // gives the first occurrence that cannot contain `pos` because it starts
+        // after the query.
         let insertion = occurrences.partition_point(|entry| entry.range.start <= pos);
         let min_start_line = pos.line.saturating_sub(file.max_line_span);
 
         let mut best: Option<&OccurrenceEntry> = None;
         for entry in occurrences[..insertion].iter().rev() {
+            // No earlier occurrence can span far enough forward to contain `pos`.
             if entry.range.start.line < min_start_line {
                 break;
             }
@@ -89,6 +115,8 @@ impl Substrate {
             if is_synthetic_crate_marker(symbol, entry.range) {
                 continue;
             }
+            // Nested names are common (`foo.bar`). The semantic token under the
+            // cursor is the smallest enclosing range, not the first broad range.
             best = match best {
                 Some(current) if range_len(entry.range) >= range_len(current.range) => {
                     Some(current)
@@ -143,6 +171,8 @@ fn range_contains(range: SourceRange, pos: Position) -> bool {
 }
 
 fn is_synthetic_crate_marker(symbol: &SymbolData, range: SourceRange) -> bool {
+    // rust-analyzer emits a whole-file `crate/` module occurrence. Treating it as
+    // a real token would turn whitespace/comment misses into file-wide hits.
     symbol.kind.as_deref() == Some("Module")
         && symbol.symbol.ends_with(" crate/")
         && range.start == (Position { line: 0, col: 0 })

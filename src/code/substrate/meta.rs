@@ -1,3 +1,9 @@
+//! Metadata sidecar for the derived substrate index.
+//!
+//! `meta.json` is intentionally small and human-readable. Its presence is the
+//! completion marker for an index build: `producer::run_index` writes the SCIP
+//! file first, validates it, promotes it into place, and saves metadata last.
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -12,13 +18,21 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubstrateMeta {
+    /// Version of this metadata schema, not the SCIP schema.
     pub schema_version: u32,
+    /// Git commit that was indexed. Compared to current HEAD at load time.
     pub indexed_commit: String,
+    /// Wall-clock time the producer output was accepted.
     pub indexed_at: DateTime<Utc>,
+    /// Producer name from SCIP metadata, for diagnostics only.
     pub producer: String,
+    /// Producer version from SCIP metadata, for diagnostics only.
     pub producer_version: String,
+    /// Resolution mode represented by this substrate, currently `"scip"`.
     pub mode: String,
+    /// Number of SCIP documents accepted during validation.
     pub documents: usize,
+    /// Number of SCIP occurrences accepted during validation.
     pub occurrences: usize,
 }
 
@@ -63,6 +77,8 @@ impl SubstrateMeta {
             Ok(output) if output.status.success() => {
                 String::from_utf8_lossy(&output.stdout).trim().to_string()
             }
+            // Non-git directories can still load a substrate for diagnostics; they
+            // simply report as stale against this sentinel.
             _ => "unknown".to_string(),
         }
     }

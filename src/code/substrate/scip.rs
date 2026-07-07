@@ -1,3 +1,10 @@
+//! SCIP decoding and producer-agnostic in-memory tables.
+//!
+//! This module is deliberately crate-private. Public callers work through
+//! `Substrate`, while this layer owns SCIP-specific quirks: protobuf parsing,
+//! UTF-8 position validation, range normalization, symbol interning, and
+//! occurrence sorting.
+
 use std::collections::{hash_map::Entry, HashMap};
 use std::fs;
 use std::path::Path;
@@ -13,7 +20,9 @@ use super::resolver::{Position, SourceRange};
 
 #[derive(Debug, Clone)]
 pub(crate) struct IngestedIndex {
+    /// Per-file occurrence tables keyed by SCIP `Document.relative_path`.
     pub(crate) files: HashMap<String, FileOccurrences>,
+    /// Interned raw SCIP symbol strings plus optional metadata.
     pub(crate) symbols: Vec<SymbolData>,
     pub(crate) documents: usize,
     pub(crate) occurrences: usize,
@@ -22,13 +31,17 @@ pub(crate) struct IngestedIndex {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileOccurrences {
+    /// Occurrences sorted by start/end range and symbol for deterministic lookup.
     pub(crate) occurrences: Vec<OccurrenceEntry>,
+    /// Largest line span in this file, used to bound resolver backtracking.
     pub(crate) max_line_span: u32,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct OccurrenceEntry {
     pub(crate) range: SourceRange,
+    /// Captured for future topology/dossier work. Resolution intentionally does
+    /// not fall back to this range on misses.
     #[allow(dead_code)]
     pub(crate) enclosing_range: Option<SourceRange>,
     pub(crate) symbol_id: usize,
@@ -37,9 +50,13 @@ pub(crate) struct OccurrenceEntry {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolData {
+    /// Raw SCIP symbol. It is the identity string for this phase.
     pub(crate) symbol: String,
+    /// Producer-supplied display name; first metadata record wins.
     pub(crate) display_name: Option<String>,
+    /// Producer-supplied SCIP kind; first metadata record wins.
     pub(crate) kind: Option<String>,
+    /// Local symbols are valid resolution results but not stable identities.
     pub(crate) is_local: bool,
 }
 
@@ -65,6 +82,8 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
     let mut occurrence_count = 0usize;
     let mut definition_count = 0usize;
 
+    // Pass 1 interns declared symbol metadata before occurrences. rust-analyzer
+    // may emit duplicate crate symbols, so the first metadata record wins.
     for document in &index.documents {
         validate_position_encoding(
             &document.relative_path,
@@ -75,6 +94,8 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
         }
     }
 
+    // Pass 2 builds producer-agnostic occurrence tables. Occurrences may mention
+    // symbols absent from `Document.symbols`; those get interned without metadata.
     for document in &index.documents {
         let mut entries = Vec::with_capacity(document.occurrences.len());
         let mut max_line_span = 0u32;
@@ -100,6 +121,8 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
             });
         }
 
+        // The resolver relies on start-position order for binary search, but we
+        // sort defensively instead of trusting producer output.
         entries.sort_by(|a, b| {
             range_key(&a.range)
                 .cmp(&range_key(&b.range))
@@ -169,6 +192,8 @@ fn validate_position_encoding(
     match encoding {
         PositionEncoding::UTF8CodeUnitOffsetFromLineStart => Ok(()),
         PositionEncoding::UnspecifiedPositionEncoding => {
+            // rust-analyzer emits UTF-8 today; unspecified is tolerated but noisy
+            // so we never silently accept a changed producer contract.
             tracing::warn!(
                 path = relative_path,
                 "SCIP document has unspecified position_encoding; treating as UTF-8"
@@ -235,6 +260,8 @@ fn intern_symbol_str(
 }
 
 fn is_local_symbol(symbol: &str) -> bool {
+    // scip::symbol handles the formal local-symbol encoding. The string prefix is
+    // a compatibility guard for producer output that uses the textual form.
     ::scip::symbol::is_local_symbol(symbol) || symbol.starts_with("local ")
 }
 
@@ -247,6 +274,8 @@ fn empty_to_none(value: &str) -> Option<String> {
 }
 
 fn occurrence_range(occurrence: &Occurrence) -> Result<SourceRange> {
+    // Newer SCIP messages may use typed range oneofs; older producer output uses
+    // the repeated integer field. Normalize both into our end-exclusive shape.
     match &occurrence.typed_range {
         Some(occurrence::Typed_range::SingleLineRange(range)) => single_line_range(range),
         Some(occurrence::Typed_range::MultiLineRange(range)) => multi_line_range(range),
@@ -256,6 +285,8 @@ fn occurrence_range(occurrence: &Occurrence) -> Result<SourceRange> {
 }
 
 fn occurrence_enclosing_range(occurrence: &Occurrence) -> Result<Option<SourceRange>> {
+    // Store enclosing ranges for later consumers, but keep resolver miss behavior
+    // strict: this data is never used as a fallback by `Substrate::resolve`.
     let range = match &occurrence.typed_enclosing_range {
         Some(occurrence::Typed_enclosing_range::SingleLineEnclosingRange(range)) => {
             Some(single_line_range(range)?)
@@ -289,6 +320,8 @@ fn multi_line_range(range: &MultiLineRange) -> Result<SourceRange> {
 }
 
 fn normalize_repeated_range(range: &[i32]) -> Result<SourceRange> {
+    // SCIP repeated ranges are either single-line [line,start,end] or multi-line
+    // [start_line,start,end_line,end].
     match range {
         [line, start_col, end_col] => make_range(*line, *start_col, *line, *end_col),
         [start_line, start_col, end_line, end_col] => {
