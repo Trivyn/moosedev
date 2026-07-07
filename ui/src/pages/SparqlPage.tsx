@@ -31,6 +31,17 @@ WHERE {
 LIMIT 100`,
   },
   {
+    label: 'Lessons',
+    query: `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?subject ?predicate ?object
+WHERE {
+  ?subject a ?kind ;
+           ?predicate ?object .
+  FILTER(CONTAINS(STR(?kind), "Lesson"))
+}
+LIMIT 100`,
+  },
+  {
     label: 'Graph',
     query: `CONSTRUCT { ?subject ?predicate ?object }
 WHERE {

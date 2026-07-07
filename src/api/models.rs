@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::adrs::{AdrSummary, AdrWarnings};
+use crate::lessons::{LessonSummary, LessonWarnings};
 use crate::requirements::{RequirementSummary, RequirementWarnings};
 
 #[derive(Serialize)]
@@ -51,6 +52,22 @@ pub struct RequirementListResponse {
 #[derive(Serialize)]
 pub struct RequirementDetailResponse {
     pub summary: RequirementSummary,
+    pub markdown: String,
+}
+
+#[derive(Serialize)]
+pub struct LessonListResponse {
+    pub generated_at: String,
+    pub graph_lessons: usize,
+    pub lesson_files: usize,
+    pub index_filename: String,
+    pub warnings: LessonWarnings,
+    pub lessons: Vec<LessonSummary>,
+}
+
+#[derive(Serialize)]
+pub struct LessonDetailResponse {
+    pub summary: LessonSummary,
     pub markdown: String,
 }
 

@@ -71,6 +71,36 @@ export interface RequirementDetailResponse {
   markdown: string;
 }
 
+export interface LessonWarnings {
+  missing_description: string[];
+  unlinked_lessons: string[];
+}
+
+export interface LessonSummary {
+  num: string;
+  title: string;
+  status: string;
+  date: string;
+  author: string;
+  iri: string;
+  filename: string;
+  related_sources: number;
+}
+
+export interface LessonListResponse {
+  generated_at: string;
+  graph_lessons: number;
+  lesson_files: number;
+  index_filename: string;
+  warnings: LessonWarnings;
+  lessons: LessonSummary[];
+}
+
+export interface LessonDetailResponse {
+  summary: LessonSummary;
+  markdown: string;
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;

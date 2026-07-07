@@ -88,6 +88,28 @@ fn record_api_requirement(state: &AppState, title: &str) -> String {
     .expect("record project requirement")
 }
 
+fn record_api_lesson(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("Lesson").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "Lesson".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (
+                    state.capture.description.clone(),
+                    format!("Lesson description for {title}"),
+                ),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record project lesson")
+}
+
 #[tokio::test]
 async fn health_reports_project_graph_and_data_dir() {
     let dir = temp_dir("health");
@@ -461,6 +483,96 @@ async fn requirements_archive_downloads_zip_with_generated_files() {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut requirement, &mut text).expect("read requirement");
     assert!(text.contains("Requirement description for Archive Requirement"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn lessons_list_renders_project_lessons() {
+    let dir = temp_dir("lessons-list");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let lesson = record_api_lesson(&state, "API Lesson visible");
+    let ad = record_api_decision(&state, "Lesson ADR");
+    graph::relate(&state, &lesson, "learnedFrom", &ad).expect("link lesson");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/lessons").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["graph_lessons"], 1);
+    assert_eq!(body["lesson_files"], 1);
+    assert_eq!(body["lessons"][0]["num"], "0001");
+    assert_eq!(body["lessons"][0]["title"], "API Lesson visible");
+    assert_eq!(body["lessons"][0]["filename"], "0001-api-lesson-visible.md");
+    assert_eq!(body["lessons"][0]["iri"], lesson);
+    assert_eq!(body["lessons"][0]["related_sources"], 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn lessons_detail_returns_generated_markdown() {
+    let dir = temp_dir("lessons-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let lesson = record_api_lesson(&state, "Detailed Lesson");
+    let ad = record_api_decision(&state, "Detailed Lesson ADR");
+    graph::relate(&state, &ad, "yieldsLesson", &lesson).expect("link lesson");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/lessons/0001").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["summary"]["filename"], "0001-detailed-lesson.md");
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains("Lesson description for Detailed Lesson"));
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains(&ad));
+
+    let missing = server.get("/api/v1/lessons/9999").await;
+    missing.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn lessons_archive_downloads_zip_with_generated_files() {
+    let dir = temp_dir("lessons-archive");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_lesson(&state, "Archive Lesson");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/lessons/archive.zip").await;
+
+    response.assert_status_ok();
+    assert_eq!(response.content_type(), "application/zip");
+    assert!(response
+        .header(CONTENT_DISPOSITION)
+        .to_str()
+        .expect("content-disposition is text")
+        .contains("attachment; filename=\"moosedev-lessons.zip\""));
+    assert_eq!(
+        response
+            .header(CONTENT_TYPE)
+            .to_str()
+            .expect("content-type is text"),
+        "application/zip"
+    );
+
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(response.as_bytes().as_ref())).expect("zip");
+    assert!(archive.by_name("0000-index.md").is_ok());
+    let mut lesson = archive
+        .by_name("0001-archive-lesson.md")
+        .expect("generated lesson file");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut lesson, &mut text).expect("read lesson");
+    assert!(text.contains("Lesson description for Archive Lesson"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
