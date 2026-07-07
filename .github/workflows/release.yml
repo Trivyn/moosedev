@@ -35,12 +35,17 @@ jobs:
           - os: ubuntu-22.04                   # pinned: build against older glibc for portability
             target: x86_64-unknown-linux-gnu
             cargo_flags: ""
-            # growl and snarl-shacl (pulled via moose) each vendor the SAME slop-rdf
-            # C runtime, so both define identical rdf_* symbols. GNU ld/lld reject the
-            # duplicates (macOS ld64 tolerates them). Accept them: it is safe because
-            # the overlapping symbols are byte-identical (growl 0.6.1 aligns slop-rdf
-            # with snarl-shacl 0.4.1). Mirrors Trivyn's release RUSTFLAGS.
-            rustflags: "-C link-arg=-Wl,--allow-multiple-definition"
+            # Two linker needs, both via RUSTFLAGS:
+            #  1. growl and snarl-shacl (pulled via moose) each vendor the SAME slop-rdf
+            #     C runtime, so both define identical rdf_* symbols. GNU ld/lld reject the
+            #     duplicates (macOS ld64 tolerates them). Accept them: safe because the
+            #     overlapping symbols are byte-identical (growl 0.6.1 aligns slop-rdf with
+            #     snarl-shacl 0.4.1).
+            #  2. Statically link libstdc++/libgcc so the binary does NOT require a newer
+            #     GLIBCXX than the target ships. RocksDB (via oxigraph) pulls in libstdc++;
+            #     building on 22.04/GCC 12 otherwise demands GLIBCXX_3.4.30, which older
+            #     distros (Rocky/RHEL 9 = GCC 11 = GLIBCXX_3.4.29) lack. glibc stays dynamic.
+            rustflags: "-C link-arg=-Wl,--allow-multiple-definition -C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout MOOSEDev
