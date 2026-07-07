@@ -1,0 +1,322 @@
+[
+  {
+    "path": "src/main.rs",
+    "line": 41,
+    "col": 6,
+    "expect_symbol": "Mode#",
+    "expect_definition": true,
+    "note": "CLI mode enum definition"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 90,
+    "col": 8,
+    "expect_symbol": "ResolveArgs#",
+    "expect_definition": true,
+    "note": "CLI resolve argument struct definition"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 161,
+    "col": 4,
+    "expect_symbol": "parse_mode().",
+    "expect_definition": true,
+    "note": "CLI mode parser definition"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 692,
+    "col": 4,
+    "expect_symbol": "index_mode().",
+    "expect_definition": true,
+    "note": "index CLI handler definition"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 709,
+    "col": 4,
+    "expect_symbol": "resolve_mode().",
+    "expect_definition": true,
+    "note": "resolve CLI handler definition"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 173,
+    "col": 26,
+    "expect_symbol": "parse_index().",
+    "expect_definition": false,
+    "note": "dispatch reference to index parser"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 174,
+    "col": 28,
+    "expect_symbol": "parse_resolve().",
+    "expect_definition": false,
+    "note": "dispatch reference to resolve parser"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 682,
+    "col": 24,
+    "expect_symbol": "index_mode().",
+    "expect_definition": false,
+    "note": "dispatch reference to index handler"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 683,
+    "col": 32,
+    "expect_symbol": "resolve_mode().",
+    "expect_definition": false,
+    "note": "dispatch reference to resolve handler"
+  },
+  {
+    "path": "src/main.rs",
+    "line": 711,
+    "col": 21,
+    "expect_symbol": "code/substrate/resolver/Substrate#",
+    "expect_definition": false,
+    "note": "reference to substrate loader type"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 10,
+    "col": 12,
+    "expect_symbol": "code/substrate/resolver/Position#",
+    "expect_definition": true,
+    "note": "substrate position struct definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 16,
+    "col": 12,
+    "expect_symbol": "code/substrate/resolver/SourceRange#",
+    "expect_definition": true,
+    "note": "substrate source range struct definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 22,
+    "col": 10,
+    "expect_symbol": "code/substrate/resolver/ResolutionMode#",
+    "expect_definition": true,
+    "note": "resolution mode enum definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 28,
+    "col": 12,
+    "expect_symbol": "code/substrate/resolver/Resolution#",
+    "expect_definition": true,
+    "note": "resolution result struct definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 48,
+    "col": 12,
+    "expect_symbol": "code/substrate/resolver/Substrate#",
+    "expect_definition": true,
+    "note": "substrate resolver struct definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 55,
+    "col": 12,
+    "expect_symbol": "code/substrate/resolver/impl#[Substrate]load().",
+    "expect_definition": true,
+    "note": "Substrate::load definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 74,
+    "col": 12,
+    "expect_symbol": "code/substrate/resolver/impl#[Substrate]resolve().",
+    "expect_definition": true,
+    "note": "Substrate::resolve definition"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 57,
+    "col": 27,
+    "expect_symbol": "code/substrate/scip/read_index().",
+    "expect_definition": false,
+    "note": "reference to SCIP index reader"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "line": 63,
+    "col": 20,
+    "expect_symbol": "code/substrate/meta/SubstrateMeta#",
+    "expect_definition": false,
+    "note": "reference to substrate metadata type"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "line": 14,
+    "col": 12,
+    "expect_symbol": "code/substrate/meta/SubstrateMeta#",
+    "expect_definition": true,
+    "note": "substrate metadata struct definition"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "line": 26,
+    "col": 12,
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]load().",
+    "expect_definition": true,
+    "note": "SubstrateMeta::load definition"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "line": 42,
+    "col": 12,
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]save().",
+    "expect_definition": true,
+    "note": "SubstrateMeta::save definition"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "line": 55,
+    "col": 12,
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]current_head().",
+    "expect_definition": true,
+    "note": "SubstrateMeta::current_head definition"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "line": 15,
+    "col": 12,
+    "expect_symbol": "code/substrate/producer/IndexReport#",
+    "expect_definition": true,
+    "note": "index report struct definition"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "line": 24,
+    "col": 8,
+    "expect_symbol": "code/substrate/producer/run_index().",
+    "expect_definition": true,
+    "note": "SCIP producer entry point definition"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "line": 33,
+    "col": 33,
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]current_head().",
+    "expect_definition": false,
+    "note": "reference to current HEAD helper"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "line": 67,
+    "col": 17,
+    "expect_symbol": "code/substrate/scip/read_index().",
+    "expect_definition": false,
+    "note": "reference to temporary SCIP index reader"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "line": 15,
+    "col": 19,
+    "expect_symbol": "code/substrate/scip/IngestedIndex#",
+    "expect_definition": true,
+    "note": "ingested SCIP table struct definition"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "line": 46,
+    "col": 15,
+    "expect_symbol": "code/substrate/scip/read_index().",
+    "expect_definition": true,
+    "note": "SCIP protobuf reader definition"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "line": 61,
+    "col": 15,
+    "expect_symbol": "code/substrate/scip/ingest().",
+    "expect_definition": true,
+    "note": "SCIP ingestion function definition"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "line": 83,
+    "col": 25,
+    "expect_symbol": "code/substrate/scip/occurrence_range().",
+    "expect_definition": false,
+    "note": "reference to occurrence range normalizer"
+  },
+  {
+    "path": "src/runtime.rs",
+    "line": 65,
+    "col": 14,
+    "expect_symbol": "runtime/build_server().",
+    "expect_definition": true,
+    "note": "runtime server builder definition"
+  },
+  {
+    "path": "src/runtime.rs",
+    "line": 73,
+    "col": 14,
+    "expect_symbol": "runtime/build_state().",
+    "expect_definition": true,
+    "note": "runtime state builder definition"
+  },
+  {
+    "path": "src/runtime.rs",
+    "line": 121,
+    "col": 14,
+    "expect_symbol": "runtime/spawn_http_if_enabled().",
+    "expect_definition": true,
+    "note": "HTTP UI spawn helper definition"
+  },
+  {
+    "path": "src/runtime.rs",
+    "line": 67,
+    "col": 9,
+    "expect_symbol": "runtime/build_state().",
+    "expect_definition": false,
+    "note": "reference to runtime state builder"
+  },
+  {
+    "path": "src/graph/capture.rs",
+    "line": 23,
+    "col": 12,
+    "expect_symbol": "graph/capture/RecordInput#",
+    "expect_definition": true,
+    "note": "record capture input struct definition"
+  },
+  {
+    "path": "src/graph/capture.rs",
+    "line": 53,
+    "col": 19,
+    "expect_symbol": "graph/util/mint_instance_iri().",
+    "expect_definition": false,
+    "note": "reference to IRI minting helper"
+  },
+  {
+    "path": "src/graph_import.rs",
+    "line": 89,
+    "col": 8,
+    "expect_symbol": "graph_import/import_graph().",
+    "expect_definition": true,
+    "note": "graph import entry point definition"
+  },
+  {
+    "path": "tests/graph_import.rs",
+    "line": 79,
+    "col": 17,
+    "expect_symbol": "graph_import/import_graph().",
+    "expect_definition": false,
+    "note": "integration test reference to graph import"
+  },
+  {
+    "path": "examples/capgap_probe.rs",
+    "line": 31,
+    "col": 10,
+    "expect_symbol": "main().",
+    "expect_definition": true,
+    "note": "example async main definition"
+  }
+]

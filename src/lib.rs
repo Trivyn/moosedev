@@ -10,6 +10,7 @@ pub mod alignment;
 pub mod api;
 mod artifacts;
 pub mod canonical;
+pub mod code;
 pub mod export;
 pub mod graph;
 pub mod graph_import;

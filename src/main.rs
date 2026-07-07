@@ -26,8 +26,9 @@
 //! `MOOSEDEV_NO_AUTOSPAWN=1` to make `--connect` require a pre-running backend.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use moosedev::code::substrate::{self, Position, ResolutionMode, Substrate};
 use moosedev::export::{export_graph, ExportFormat, ExportScope};
 use moosedev::graph;
 use moosedev::graph_import::{import_graph as import_rdf_graph, ImportFormat, ImportMode};
@@ -55,6 +56,10 @@ enum Mode {
     Init(InitArgs),
     /// Temporal git-walk bootstrap: replay trunk history into the graph.
     Bootstrap(temporal::BootstrapArgs),
+    /// Build the code substrate index.
+    Index,
+    /// Resolve a source position through the code substrate.
+    Resolve(ResolveArgs),
     /// Print the resolved `skills/` dir + the agent workflow docs it holds.
     Skills,
 }
@@ -82,6 +87,12 @@ struct InitArgs {
     data_dir: Option<String>,
 }
 
+struct ResolveArgs {
+    file: PathBuf,
+    line: u32,
+    col: u32,
+}
+
 const USAGE: &str = "\
 moosedev — neurosymbolic MCP memory server
 
@@ -98,6 +109,9 @@ USAGE:
     moosedev init [DIR]       Configure DIR (default .) to use MOOSEDev as memory
     moosedev bootstrap --temporal
                               Replay git history into the graph (per-commit dates)
+    moosedev index            Build the code substrate index (runs rust-analyzer scip)
+    moosedev resolve FILE LINE:COL
+                              Resolve a source position to a code entity (debug)
     moosedev skills           List the shipped agent workflow docs (bootstrap, …)
     moosedev --help           Show this help
 
@@ -123,6 +137,10 @@ IMPORT OPTIONS:
                               Target graph/scope (default: project)
     --mode patch|replace      Patch inserts missing quads; replace fully restores
                               the selected scope (default: patch)
+
+RESOLVE:
+    Input positions are 1-based. Columns are UTF-8 byte columns.
+    MOOSEDEV_SCIP_PRODUCER overrides the SCIP producer binary used by index.
 
 INIT OPTIONS:
     --stdio                   Generate a bare-stdio MCP config (single client)
@@ -152,13 +170,15 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("import") => parse_import(iter).map(Mode::Import),
         Some("init") => parse_init(iter).map(Mode::Init),
         Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
+        Some("index") => parse_index(iter).map(|()| Mode::Index),
+        Some("resolve") => parse_resolve(iter).map(Mode::Resolve),
         Some("skills") => Ok(Mode::Skills),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, index, resolve, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
 }
@@ -281,6 +301,54 @@ fn parse_import<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Im
         scope,
         mode,
     })
+}
+
+fn parse_index<'a>(mut iter: impl Iterator<Item = &'a String>) -> anyhow::Result<()> {
+    if let Some(extra) = iter.next() {
+        anyhow::bail!("index accepts no arguments; unexpected {extra:?}");
+    }
+    Ok(())
+}
+
+fn parse_resolve<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<ResolveArgs> {
+    let mut file = None;
+    let mut line = None;
+    let mut col = None;
+    let mut args = iter.peekable();
+
+    while let Some(arg) = args.next() {
+        if arg.starts_with('-') {
+            anyhow::bail!("unknown resolve option {arg:?}");
+        } else if file.is_none() {
+            file = Some(PathBuf::from(arg.as_str()));
+        } else if line.is_none() {
+            if let Some((line_value, col_value)) = arg.split_once(':') {
+                line = Some(parse_positive_position("line", line_value)?);
+                col = Some(parse_positive_position("column", col_value)?);
+            } else {
+                line = Some(parse_positive_position("line", arg)?);
+            }
+        } else if col.is_none() {
+            col = Some(parse_positive_position("column", arg)?);
+        } else {
+            anyhow::bail!("resolve accepts FILE LINE:COL or FILE LINE COL; unexpected {arg:?}");
+        }
+    }
+
+    let file = file.ok_or_else(|| anyhow::anyhow!("resolve requires FILE LINE:COL"))?;
+    let line = line.ok_or_else(|| anyhow::anyhow!("resolve requires FILE LINE:COL"))?;
+    let col = col.ok_or_else(|| anyhow::anyhow!("resolve requires FILE LINE:COL"))?;
+    Ok(ResolveArgs { file, line, col })
+}
+
+fn parse_positive_position(name: &str, value: &str) -> anyhow::Result<u32> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("{name} must be a positive integer, got {value:?}"))?;
+    if parsed == 0 {
+        anyhow::bail!("{name} must be 1-based, got 0");
+    }
+    Ok(parsed)
 }
 
 /// Parse `init`'s arguments: an optional target dir plus flags. Mirrors the
@@ -611,12 +679,106 @@ async fn main() -> anyhow::Result<()> {
         Mode::Import(args) => import_mode(&data_dir, args),
         Mode::Init(args) => init_mode(args),
         Mode::Bootstrap(args) => temporal::run(args),
+        Mode::Index => index_mode(&data_dir),
+        Mode::Resolve(args) => resolve_mode(&data_dir, args),
         Mode::Skills => skills_mode(),
         Mode::Stdio => {
             let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
             runtime::serve_stdio(server).await
         }
     }
+}
+
+fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
+    let repo_root = std::env::current_dir()?;
+    let report = substrate::producer::run_index(&repo_root, data_dir)?;
+    println!("substrate index");
+    println!("  commit:      {}", report.commit);
+    println!("  duration:    {:.3}s", report.duration.as_secs_f64());
+    println!("  documents:   {}", report.documents);
+    println!("  occurrences: {}", report.occurrences);
+    println!("  definitions: {}", report.definitions);
+    println!("  index size:  {} bytes", report.index_bytes);
+    println!(
+        "  output:      {}",
+        substrate::index_path(data_dir).display()
+    );
+    Ok(())
+}
+
+fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
+    let repo_root = std::env::current_dir()?;
+    let substrate = Substrate::load(data_dir, &repo_root)?;
+    let relative_path = normalize_resolve_path(&repo_root, &args.file);
+    let pos = Position {
+        line: args.line - 1,
+        col: args.col - 1,
+    };
+
+    let Some(resolution) = substrate.resolve(&relative_path, pos) else {
+        eprintln!(
+            "no entity at {}:{}:{}",
+            args.file.display(),
+            args.line,
+            args.col
+        );
+        std::process::exit(1);
+    };
+
+    let role = if resolution.is_definition {
+        "definition"
+    } else {
+        "reference"
+    };
+    let mode = match resolution.mode {
+        ResolutionMode::Scip => "scip",
+        ResolutionMode::TreeSitter => "tree-sitter",
+    };
+    println!("symbol:         {}", resolution.symbol);
+    println!(
+        "display name:   {}",
+        resolution.display_name.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "kind:           {}",
+        resolution.kind.as_deref().unwrap_or("<none>")
+    );
+    println!("role:           {role}");
+    println!(
+        "local:          {}",
+        if resolution.is_local { "yes" } else { "no" }
+    );
+    println!(
+        "range:          {}:{}-{}:{}",
+        resolution.range.start.line + 1,
+        resolution.range.start.col + 1,
+        resolution.range.end.line + 1,
+        resolution.range.end.col + 1
+    );
+    println!("mode:           {mode}");
+    println!("indexed commit: {}", substrate.meta().indexed_commit);
+    println!("stale:          {}", resolution.stale);
+    Ok(())
+}
+
+fn normalize_resolve_path(repo_root: &Path, file: &Path) -> String {
+    let normalized_separators = file.to_string_lossy().replace('\\', "/");
+    let path = Path::new(&normalized_separators);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(repo_root).unwrap_or(path)
+    } else {
+        path
+    };
+
+    relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::ParentDir => Some("..".to_string()),
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn export_mode(data_dir: &Path, args: ExportArgs) -> anyhow::Result<()> {
@@ -816,7 +978,9 @@ fn skills_dir() -> Option<PathBuf> {
 /// holds, with absolute paths a user can hand straight to their coding agent.
 fn skills_mode() -> anyhow::Result<()> {
     let Some(dir) = skills_dir() else {
-        anyhow::bail!("no skills/ dir found next to the binary (set MOOSEDEV_SKILLS_DIR to override)");
+        anyhow::bail!(
+            "no skills/ dir found next to the binary (set MOOSEDEV_SKILLS_DIR to override)"
+        );
     };
     println!("MOOSEDev skills: {}", dir.display());
     let mut names: Vec<_> = std::fs::read_dir(&dir)
@@ -1009,6 +1173,61 @@ mod tests {
                 assert_eq!(args.mode, ImportMode::Replace);
             }
             _ => panic!("expected import mode"),
+        }
+    }
+
+    #[test]
+    fn parse_index_accepts_no_args_and_rejects_extras() {
+        assert!(matches!(
+            parse_mode(&argv(&["index"])).unwrap(),
+            Mode::Index
+        ));
+        assert!(parse_mode(&argv(&["index", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_resolve_accepts_line_col_pair() {
+        match parse_mode(&argv(&["resolve", "src/main.rs", "144:4"])).unwrap() {
+            Mode::Resolve(args) => {
+                assert_eq!(args.file, PathBuf::from("src/main.rs"));
+                assert_eq!(args.line, 144);
+                assert_eq!(args.col, 4);
+            }
+            _ => panic!("expected resolve mode"),
+        }
+    }
+
+    #[test]
+    fn parse_resolve_accepts_split_line_col() {
+        match parse_mode(&argv(&["resolve", "src/main.rs", "144", "4"])).unwrap() {
+            Mode::Resolve(args) => {
+                assert_eq!(args.file, PathBuf::from("src/main.rs"));
+                assert_eq!(args.line, 144);
+                assert_eq!(args.col, 4);
+            }
+            _ => panic!("expected resolve mode"),
+        }
+    }
+
+    #[test]
+    fn parse_resolve_rejects_zero_and_garbage() {
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "0:4"])).is_err());
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "144:0"])).is_err());
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "abc:4"])).is_err());
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "144", "garbage"])).is_err());
+    }
+
+    #[test]
+    fn normalize_resolve_path_accepts_debug_cli_path_forms() {
+        let repo_root = std::env::current_dir().unwrap();
+        let cases = [
+            PathBuf::from("./src/runtime.rs"),
+            repo_root.join("src/runtime.rs"),
+            PathBuf::from("src\\runtime.rs"),
+        ];
+
+        for path in cases {
+            assert_eq!(normalize_resolve_path(&repo_root, &path), "src/runtime.rs");
         }
     }
 
