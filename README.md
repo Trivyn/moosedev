@@ -84,7 +84,7 @@ This is an active build with a working v1 surface. **Live today and exercised by
 - **SPARQL** reads (`sparql`) and **SHACL validation** of recorded knowledge against the architecture shapes (`validate_against_architecture`).
 - **Graph export / import** for backup and version control (CLI plus the `export_graph` tool).
 - A **shared multi-client backend** (one `--serve` process, thin `--connect` proxies) so several agents share one live graph concurrently, and a **loopback web UI** for humans.
-- The **history-walking bootstrap workflow** for recovering knowledge from an existing codebase (`skills/bootstrap-existing-codebase.md`).
+- **Bootstrap** an existing codebase into the graph two ways: a **snapshot** agent skill that surveys current design rationale (`skills/bootstrap-existing-codebase.md`, auto-installed by `moosedev init`), and a **temporal** git-walk command (`moosedev bootstrap --temporal`) that replays trunk history, stamping each decision-bearing commit with its real commit date + author.
 - A **graph→docs workflow** that renders captured decisions as a standard ADR set (`skills/generate-adrs-from-graph.md`).
 - A **stdio MCP server** (rmcp 1.7, latest negotiated protocol) verified end-to-end (`initialize` → `tools/list` → `tools/call`), and persistence across restarts (on-disk oxigraph).
 
@@ -146,7 +146,7 @@ cd /path/to/your/project
 moosedev init
 ```
 
-This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, and a `CLAUDE.md` template — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--opencode`, `--stdio`, `--force`).
+This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, a `CLAUDE.md` template, and the bootstrap agent skills under `.claude/skills/` — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--opencode`, `--stdio`, `--force`).
 
 <details>
 <summary>Manual configuration</summary>
@@ -168,6 +168,35 @@ Use an absolute path to the binary if `moosedev` isn't on the client's `PATH`. T
 </details>
 
 All tools in the [v1 tool surface](#v1-tool-surface) are available over this transport.
+
+### Seed the graph (bootstrap)
+
+A fresh graph has nothing to recall — **bootstrap** it from your existing codebase so agents start
+with real context, not a blank store. Two complementary paths:
+
+- **Snapshot bootstrap** *(agent skill)* — a one-shot survey of the codebase's *current* design
+  rationale (architecture, decisions, constraints, lessons), captured as typed, linked records.
+  `moosedev init` installs it as an auto-discoverable agent skill, so you just tell your coding
+  agent: *"bootstrap this repo's memory into MOOSEDev."* (`moosedev skills` lists the shipped
+  workflow docs.)
+
+- **Temporal bootstrap** *(built-in command)* — replays your git history oldest→newest, capturing
+  each decision-bearing commit with its **real commit date and author**, so the graph carries an
+  accurate timeline and honest `supersedes` chains as decisions evolved:
+
+  ```sh
+  moosedev bootstrap --temporal --repo . --dry-run                        # preview the triage — no agents
+  moosedev bootstrap --temporal --repo . --data-dir .moosedev --limit 5   # capture the first few commits
+  moosedev bootstrap --temporal --repo . --data-dir .moosedev --resume    # …then finish the rest
+  ```
+
+  It drives a coding agent (`claude` by default, or `--agent codex`) **once per decision-bearing
+  commit** — sequential, so pace larger histories with `--limit` / `--resume`. Mechanical commits
+  (fmt / bump / wip) are triaged out, and each commit's date + author are stamped server-side rather
+  than left to the LLM.
+
+Either way, commit the resulting `.moosedev/kg.nq` to version your project's memory with the code.
+See the **[Quickstart](docs/quickstart.md)** for the end-to-end flow.
 
 ### Shared mode (multiple clients / agents)
 
