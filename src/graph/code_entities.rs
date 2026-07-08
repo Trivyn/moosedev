@@ -259,6 +259,7 @@ pub fn ensure_entity(
     terms: &CodeTerms,
     components: &[ComponentEntry],
     entry: &DefinitionEntry,
+    agent: &str,
 ) -> anyhow::Result<EnsuredEntity> {
     if let Some(iri) = entity_for_symbol(state, terms, &entry.normalized_symbol)? {
         return Ok(EnsuredEntity {
@@ -272,7 +273,7 @@ pub fn ensure_entity(
     let quads = create_quads(terms, &iri, entry, realizes)?;
     commit_project_quads(state, &quads, &[], "ensure code entity")?;
 
-    if let Err(e) = provenance::record_provenance(&state.store, &iri, "moosedev-mint") {
+    if let Err(e) = provenance::record_provenance(&state.store, &iri, agent) {
         tracing::warn!("failed to record code entity provenance for {iri}: {e}");
     }
 
@@ -399,7 +400,7 @@ fn desired_entity_kind(entry: &DefinitionEntry) -> String {
 }
 
 /// Return the display name written to both `rdfs:label` and `hasCodeName`.
-fn desired_name(entry: &DefinitionEntry) -> String {
+pub(crate) fn desired_name(entry: &DefinitionEntry) -> String {
     entry
         .display_name
         .clone()

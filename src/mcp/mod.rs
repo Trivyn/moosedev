@@ -256,6 +256,23 @@ pub struct RelateArgs {
     pub object_iri: String,
 }
 
+/// Arguments for the `link_code` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LinkCodeArgs {
+    /// IRI of the typed KG record to link.
+    pub record_iri: String,
+    /// Object-property local name for the link. Defaults to "concerns".
+    pub predicate: Option<String>,
+    /// Repo-relative path as stored in the substrate index; use with `line` and `col`.
+    pub file: Option<String>,
+    /// 1-based source line for a position selector.
+    pub line: Option<u32>,
+    /// 1-based UTF-8 byte column for a position selector.
+    pub col: Option<u32>,
+    /// SCIP symbol, raw or version-normalized, as an alternative to a file position.
+    pub symbol: Option<String>,
+}
+
 /// Arguments for the `get_provenance` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetProvenanceArgs {
@@ -630,6 +647,97 @@ impl MooseDevServer {
                 )))
             }
             Err(e) => Ok(tool_error(format!("failed to relate: {e}"))),
+        }
+    }
+
+    /// Link a typed knowledge record to a CodeEntity resolved from the substrate.
+    #[tool(
+        description = "Link a typed knowledge record to the code entity at a source position or SCIP symbol, lazily minting the CodeEntity in the project KG when it is not yet minted. Pass exactly one selector: either `file` + 1-based `line` + 1-based `col`, or `symbol` (raw or normalized). `predicate` defaults to `concerns`; intent links such as `realizes`, `satisfies`, and `embodies` are auto-oriented."
+    )]
+    async fn link_code(
+        &self,
+        Parameters(args): Parameters<LinkCodeArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let record_iri = args.record_iri.trim().to_string();
+        if record_iri.is_empty() {
+            return Ok(tool_error("`record_iri` must not be empty"));
+        }
+        let predicate = args
+            .predicate
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("concerns")
+            .to_string();
+
+        let file = args.file.map(|s| s.trim().to_string());
+        let symbol = args.symbol.map(|s| s.trim().to_string());
+        let position_supplied = file.is_some() || args.line.is_some() || args.col.is_some();
+        let symbol_supplied = symbol.as_deref().is_some_and(|s| !s.is_empty());
+        if symbol.as_deref().is_some_and(str::is_empty) {
+            return Ok(tool_error("`symbol` must not be empty when provided"));
+        }
+        if position_supplied {
+            let mut missing = Vec::new();
+            if file.as_deref().is_none_or(str::is_empty) {
+                missing.push("file");
+            }
+            if args.line.is_none() {
+                missing.push("line");
+            }
+            if args.col.is_none() {
+                missing.push("col");
+            }
+            if !missing.is_empty() {
+                return Ok(tool_error(format!(
+                    "position selector requires `file`, `line`, and `col`; missing {}",
+                    missing.join(", ")
+                )));
+            }
+        }
+        if position_supplied && symbol_supplied {
+            return Ok(tool_error(
+                "pass exactly one selector: `file` + `line` + `col`, or `symbol`",
+            ));
+        }
+        if !position_supplied && !symbol_supplied {
+            return Ok(tool_error(
+                "pass exactly one selector: `file` + `line` + `col`, or `symbol`",
+            ));
+        }
+
+        let selector = if position_supplied {
+            graph::CodeSelector::Position {
+                file: file.expect("validated file"),
+                line: args.line.expect("validated line"),
+                col: args.col.expect("validated col"),
+            }
+        } else {
+            graph::CodeSelector::Symbol(symbol.expect("validated symbol"))
+        };
+        let agent = resolve_author(&None, &context);
+
+        match graph::link_code(&self.state, &record_iri, &predicate, &selector, &agent) {
+            Ok(out) => {
+                self.state.note_project_write();
+                let stale_note = if out.substrate_stale {
+                    "\nwarning: substrate is stale; positions may have drifted, re-run `moosedev index`."
+                } else {
+                    ""
+                };
+                Ok(tool_ok(format!(
+                    "Linked CodeEntity \"{}\" ({}) [created: {}]\nedge: {} -{}-> {}{}",
+                    out.entity_name,
+                    out.entity_iri,
+                    out.created,
+                    out.subject_iri,
+                    out.predicate_local,
+                    out.object_iri,
+                    stale_note
+                )))
+            }
+            Err(e) => Ok(tool_error(e.to_string())),
         }
     }
 

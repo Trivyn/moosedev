@@ -345,7 +345,8 @@ fn ensure_entity_reuses_existing_and_mints_private_symbols() {
         graph::entities_by_symbol(&state, &terms).unwrap()[&public.normalized_symbol].clone();
     let count_before = project_quad_count(&state);
 
-    let ensured = graph::ensure_entity(&state, &terms, &components, &public).unwrap();
+    let ensured =
+        graph::ensure_entity(&state, &terms, &components, &public, "moosedev-mint").unwrap();
     assert!(!ensured.created);
     assert_eq!(ensured.iri, existing_iri);
     assert_eq!(project_quad_count(&state), count_before);
@@ -359,7 +360,8 @@ fn ensure_entity_reuses_existing_and_mints_private_symbols() {
         false,
         false,
     );
-    let ensured = graph::ensure_entity(&state, &terms, &components, &private).unwrap();
+    let ensured =
+        graph::ensure_entity(&state, &terms, &components, &private, "moosedev-mint").unwrap();
     assert!(ensured.created);
     assert_eq!(
         literal_values(&state, &ensured.iri, &terms.has_scip_symbol),

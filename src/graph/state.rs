@@ -2,7 +2,7 @@
 //! This module owns long-lived graph services and calls sibling modules only for focused primitives.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use moose::chat::session_db::SessionDb;
 use moose::embeddings::vec_store::VecStore;
@@ -15,6 +15,7 @@ use moose::types::{CompactVocabulary, HybridConfig, LlmAssistLevel, WalkBudgets}
 use oxigraph::model::NamedNode;
 use oxigraph::store::Store;
 
+use crate::code::substrate::Substrate;
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::ontology::{self, MooseDevOntologyResolver};
 
@@ -106,6 +107,9 @@ pub struct AppState {
     pub session_db: Option<Arc<SessionDb>>,
     /// Data dir (the persistent KG store and the built vector DB live here).
     pub data_dir: PathBuf,
+    /// Best-effort code substrate. Absent when no index has been built; position-
+    /// based tools degrade with honest errors instead of blocking server startup.
+    substrate: RwLock<Option<Arc<Substrate>>>,
     /// Set true by any write that changes the project graph; drained by
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
@@ -208,6 +212,7 @@ impl AppState {
             session_db: None,
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
+            substrate: RwLock::new(None),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
             canonical_throttle: crate::canonical::WriteThrottle::default(),
@@ -232,6 +237,36 @@ impl AppState {
         self.mark_inferred_stale();
         self.canonical_throttle
             .note_write(&self.store, &self.data_dir);
+    }
+
+    /// Return the loaded code substrate, if startup or a test injected one.
+    pub fn substrate(&self) -> Option<Arc<Substrate>> {
+        self.substrate
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace the current code substrate. Used by runtime startup and tests.
+    pub fn set_substrate(&self, substrate: Arc<Substrate>) {
+        *self
+            .substrate
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(substrate);
+    }
+
+    /// Best-effort load of the code substrate from disk. Missing or invalid
+    /// indexes are normal before `moosedev index`; callers should surface
+    /// substrate absence at tool-use time.
+    pub fn load_substrate(&self, repo_root: &Path) {
+        match Substrate::load(&self.data_dir, repo_root) {
+            Ok(substrate) => {
+                let definitions = substrate.stats().definitions;
+                self.set_substrate(Arc::new(substrate));
+                tracing::info!("MOOSEDev: loaded code substrate ({definitions} definition(s))");
+            }
+            Err(e) => tracing::info!("MOOSEDev: code substrate unavailable: {e}"),
+        }
     }
 
     /// Lazily re-run GROWL enrichment when a prior write invalidated the materialized

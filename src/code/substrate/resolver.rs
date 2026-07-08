@@ -184,7 +184,18 @@ impl Substrate {
         definitions
     }
 
-    pub(crate) fn from_index(
+    pub fn definition_for_symbol(&self, symbol: &str) -> Option<DefinitionEntry> {
+        self.index.symbols.iter().find_map(|data| {
+            (data.symbol == symbol
+                || symbols::normalize_symbol(&data.symbol).as_deref() == Some(symbol))
+            .then(|| definition_entry(data))
+            .flatten()
+        })
+    }
+
+    /// Public so integration tests and tooling can inject a synthetic substrate;
+    /// production code uses [`Substrate::load`].
+    pub fn from_index(
         index: ::scip::types::Index,
         meta: SubstrateMeta,
         stale: bool,
