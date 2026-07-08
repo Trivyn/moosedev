@@ -6,6 +6,7 @@
 @prefix shape: <https://trivyn.io/ontologies/software/architecture/shapes#> .
 @prefix dcam: <http://purl.org/dc/dcam/> .
 @prefix domain: <https://trivyn.io/ontologies/software/architecture#> .
+@prefix code: <https://trivyn.io/ontologies/software/code#> .
 
 <https://trivyn.io/ontologies/software/architecture/shapes> a owl:Ontology ;
     rdfs:label "SHACL Shapes" ;
@@ -66,6 +67,7 @@ shape:ConstraintShape a sh:NodeShape ;
         sh:or (
             [ sh:class domain:ArchitecturalDecision ]
             [ sh:class domain:SystemComponent ]
+            [ sh:class code:CodeEntity ]
         )
     ] ;
     sh:property [
@@ -75,7 +77,10 @@ shape:ConstraintShape a sh:NodeShape ;
     ] ;
     sh:property [
         sh:path domain:isViolatedBy ;
-        sh:class domain:AntiPattern
+        sh:or (
+            [ sh:class domain:AntiPattern ]
+            [ sh:class code:CodeEntity ]
+        )
     ] .
 
 shape:InformationRecordShape a sh:NodeShape ;
@@ -109,7 +114,10 @@ shape:InformationRecordShape a sh:NodeShape ;
     ] ;
     sh:property [
         sh:path domain:concerns ;
-        sh:class domain:SystemComponent
+        sh:or (
+            [ sh:class domain:SystemComponent ]
+            [ sh:class code:CodeEntity ]
+        )
     ] ;
     sh:property [
         sh:path domain:isSupersededBy ;

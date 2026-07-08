@@ -398,9 +398,14 @@ mod tests {
             );
         }
         let concerns = format!("{ARCH}concerns");
+        let mut objects = cat.expected_object_classes(&concerns);
+        objects.sort();
         assert_eq!(
-            cat.expected_object_classes(&concerns),
-            vec![cls("SystemComponent")]
+            objects,
+            vec![
+                cls("SystemComponent"),
+                "https://trivyn.io/ontologies/software/code#CodeEntity".to_string(),
+            ]
         );
     }
 
