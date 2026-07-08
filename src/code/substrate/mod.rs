@@ -3,8 +3,8 @@
 //! This module consumes the derived `.moosedev/substrate/` SCIP index and
 //! resolves source positions to semantic symbols. Positions are 0-based UTF-8
 //! byte offsets within a line, and ranges are end-exclusive. SCIP symbol strings
-//! are preserved as emitted, including crate versions; symbol normalization is a
-//! later slice's concern.
+//! are preserved as emitted for resolution; helper APIs expose version-normalized
+//! forms for stable code-entity identity.
 
 use std::path::{Path, PathBuf};
 
@@ -12,10 +12,13 @@ pub mod meta;
 pub mod producer;
 pub mod resolver;
 pub(crate) mod scip;
+pub mod symbols;
 
 pub use meta::SubstrateMeta;
 pub use producer::{run_index, IndexReport};
-pub use resolver::{Position, Resolution, ResolutionMode, SourceRange, Substrate, SubstrateStats};
+pub use resolver::{
+    DefinitionEntry, Position, Resolution, ResolutionMode, SourceRange, Substrate, SubstrateStats,
+};
 
 pub const SUBSTRATE_DIR: &str = "substrate";
 pub const INDEX_FILE_NAME: &str = "index.scip";

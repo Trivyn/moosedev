@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 
 use super::meta::SubstrateMeta;
 use super::scip::{self, IngestedIndex, OccurrenceEntry, SymbolData};
+use super::symbols;
 use super::{index_path, meta_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,6 +64,22 @@ pub struct SubstrateStats {
     pub occurrences: usize,
     pub definitions: usize,
     pub symbols: usize,
+}
+
+/// One workspace definition, enumerated for KG minting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionEntry {
+    /// Raw SCIP symbol string.
+    pub symbol: String,
+    /// Version-normalized SCIP symbol string.
+    pub normalized_symbol: String,
+    pub display_name: Option<String>,
+    pub kind: Option<String>,
+    pub signature: Option<String>,
+    /// Defining document `relative_path`.
+    pub file: String,
+    pub is_module: bool,
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +173,17 @@ impl Substrate {
         }
     }
 
+    pub fn definitions(&self) -> Vec<DefinitionEntry> {
+        let mut definitions = self
+            .index
+            .symbols
+            .iter()
+            .filter_map(definition_entry)
+            .collect::<Vec<_>>();
+        definitions.sort_by(|a, b| a.normalized_symbol.cmp(&b.normalized_symbol));
+        definitions
+    }
+
     pub(crate) fn from_index(
         index: ::scip::types::Index,
         meta: SubstrateMeta,
@@ -164,6 +192,34 @@ impl Substrate {
         let index = scip::ingest(&index)?;
         Ok(Substrate { index, meta, stale })
     }
+}
+
+fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
+    if symbol.is_local {
+        return None;
+    }
+    let file = symbol.defined_in.clone()?;
+    let normalized_symbol = symbols::normalize_symbol(&symbol.symbol)?;
+    let signature = symbol.signature.clone();
+    // rust-analyzer renders Rust visibility as the signature prefix, so `pub`,
+    // `pub(crate)`, and `pub(super)` all match. A substring check would
+    // misclassify private items whose names or parameters contain "pub"
+    // (e.g. `fn ..._publishes_...()`). Items with no rendered visibility
+    // (trait/impl members) are treated as private; lazy minting covers them.
+    let is_public = signature
+        .as_deref()
+        .is_some_and(|text| text.starts_with("pub"));
+
+    Some(DefinitionEntry {
+        symbol: symbol.symbol.clone(),
+        normalized_symbol,
+        display_name: symbol.display_name.clone(),
+        kind: symbol.kind.clone(),
+        signature,
+        file,
+        is_module: symbols::is_module_symbol(&symbol.symbol),
+        is_public,
+    })
 }
 
 fn range_contains(range: SourceRange, pos: Position) -> bool {
@@ -189,13 +245,15 @@ fn range_len(range: SourceRange) -> (u32, u32, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use ::scip::types::{
-        symbol_information, Document, Index, Occurrence, PositionEncoding, SymbolInformation,
-    };
     use chrono::{DateTime, Utc};
     use protobuf::EnumOrUnknown;
+    use protobuf::MessageField;
+    use scip::types::{
+        symbol_information, Document, Index, Occurrence, PositionEncoding, Signature,
+        SymbolInformation,
+    };
 
-    use super::*;
+    use super::{Position, SourceRange, Substrate, SubstrateMeta};
     use crate::code::substrate::meta::CURRENT_SCHEMA_VERSION;
 
     #[test]
@@ -385,6 +443,167 @@ mod tests {
     }
 
     #[test]
+    fn definitions_include_defining_file_and_signature() {
+        let symbol = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            symbol,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        document.occurrences.push(occ(symbol, vec![7, 4, 16], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+        let definitions = substrate.definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].symbol, symbol);
+        assert_eq!(
+            definitions[0].normalized_symbol,
+            "rust-analyzer cargo moosedev . runtime/build_server()."
+        );
+        assert_eq!(definitions[0].display_name.as_deref(), Some("build_server"));
+        assert_eq!(definitions[0].kind.as_deref(), Some("Function"));
+        assert_eq!(
+            definitions[0].signature.as_deref(),
+            Some("pub fn build_server()")
+        );
+        assert_eq!(definitions[0].file, "src/runtime.rs");
+        assert!(!definitions[0].is_module);
+        assert!(definitions[0].is_public);
+    }
+
+    #[test]
+    fn definitions_skip_reference_only_and_local_symbols() {
+        let global = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let local = "local 1";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            global,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        document.occurrences.push(occ(global, vec![0, 0, 12], 0));
+        document.symbols.push(info(
+            local,
+            "tmp",
+            symbol_information::Kind::Variable,
+            "let tmp",
+        ));
+        document.occurrences.push(occ(local, vec![1, 4, 7], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        assert!(substrate.definitions().is_empty());
+    }
+
+    #[test]
+    fn definitions_are_sorted_by_normalized_symbol() {
+        let b = "rust-analyzer cargo moosedev 0.6.3 runtime/b().";
+        let a = "rust-analyzer cargo moosedev 0.6.3 runtime/a().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document
+            .symbols
+            .push(info(b, "b", symbol_information::Kind::Function, "fn b()"));
+        document.occurrences.push(occ(b, vec![0, 0, 1], 1));
+        document
+            .symbols
+            .push(info(a, "a", symbol_information::Kind::Function, "fn a()"));
+        document.occurrences.push(occ(a, vec![1, 0, 1], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+        let symbols = substrate
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.display_name.unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(symbols, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn definitions_public_flag_follows_signature_text() {
+        let public = "rust-analyzer cargo moosedev 0.6.3 runtime/public().";
+        let private = "rust-analyzer cargo moosedev 0.6.3 runtime/private().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            public,
+            "public",
+            symbol_information::Kind::Function,
+            "pub(crate) fn public()",
+        ));
+        document.occurrences.push(occ(public, vec![0, 0, 6], 1));
+        document.symbols.push(info(
+            private,
+            "private",
+            symbol_information::Kind::Function,
+            "fn private()",
+        ));
+        document.occurrences.push(occ(private, vec![1, 0, 7], 1));
+        // Private, but "pub" appears as a substring of the name and a
+        // parameter — must not be classified public.
+        let pub_substring = "rust-analyzer cargo moosedev 0.6.3 runtime/publishes_port().";
+        document.symbols.push(info(
+            pub_substring,
+            "publishes_port",
+            symbol_information::Kind::Function,
+            "fn publishes_port(publish: bool)",
+        ));
+        document
+            .occurrences
+            .push(occ(pub_substring, vec![2, 0, 14], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+        let definitions = substrate.definitions();
+
+        assert_eq!(definitions.len(), 3);
+        let private_definition = definitions
+            .iter()
+            .find(|definition| definition.display_name.as_deref() == Some("private"))
+            .unwrap();
+        let public_definition = definitions
+            .iter()
+            .find(|definition| definition.display_name.as_deref() == Some("public"))
+            .unwrap();
+        let pub_substring_definition = definitions
+            .iter()
+            .find(|definition| definition.display_name.as_deref() == Some("publishes_port"))
+            .unwrap();
+        assert!(!private_definition.is_public);
+        assert!(public_definition.is_public);
+        assert!(!pub_substring_definition.is_public);
+    }
+
+    #[test]
+    fn definitions_identify_modules() {
+        let module = "rust-analyzer cargo moosedev 0.6.3 runtime/";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            module,
+            "runtime",
+            symbol_information::Kind::Module,
+            "pub mod runtime",
+        ));
+        document.occurrences.push(occ(module, vec![0, 0, 7], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        assert!(substrate.definitions()[0].is_module);
+    }
+
+    #[test]
     fn utf16_document_errors() {
         let mut index = Index::new();
         let mut document = doc("src/lib.rs");
@@ -430,6 +649,22 @@ mod tests {
         occurrence.symbol_roles = symbol_roles;
         occurrence.enclosing_range = vec![0, 0, 10, 0];
         occurrence
+    }
+
+    fn info(
+        symbol: &str,
+        display_name: &str,
+        kind: symbol_information::Kind,
+        signature: &str,
+    ) -> SymbolInformation {
+        let mut info = SymbolInformation::new();
+        info.symbol = symbol.to_string();
+        info.display_name = display_name.to_string();
+        info.kind = EnumOrUnknown::new(kind);
+        let mut signature_documentation = Signature::new();
+        signature_documentation.text = signature.to_string();
+        info.signature_documentation = MessageField::some(signature_documentation);
+        info
     }
 
     fn meta() -> SubstrateMeta {

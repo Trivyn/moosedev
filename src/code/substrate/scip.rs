@@ -9,12 +9,12 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::fs;
 use std::path::Path;
 
-use ::scip::types::{
+use anyhow::{bail, Context, Result};
+use protobuf::Message;
+use scip::types::{
     occurrence, symbol_information, Index, MultiLineRange, Occurrence, PositionEncoding,
     SingleLineRange, SymbolInformation,
 };
-use anyhow::{bail, Context, Result};
-use protobuf::Message;
 
 use super::resolver::{Position, SourceRange};
 
@@ -56,6 +56,10 @@ pub(crate) struct SymbolData {
     pub(crate) display_name: Option<String>,
     /// Producer-supplied SCIP kind; first metadata record wins.
     pub(crate) kind: Option<String>,
+    /// Producer-supplied signature text; first metadata record wins.
+    pub(crate) signature: Option<String>,
+    /// `Document.relative_path` of the first definition-role occurrence.
+    pub(crate) defined_in: Option<String>,
     /// Local symbols are valid resolution results but not stable identities.
     pub(crate) is_local: bool,
 }
@@ -111,6 +115,9 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
             max_line_span = max_line_span.max(line_span);
             if is_definition_role(occurrence.symbol_roles) {
                 definition_count += 1;
+                symbols[symbol_id]
+                    .defined_in
+                    .get_or_insert_with(|| document.relative_path.clone());
             }
             occurrence_count += 1;
             entries.push(OccurrenceEntry {
@@ -221,6 +228,10 @@ fn intern_symbol(
         symbol_information::Kind::UnspecifiedKind => None,
         _ => Some(format!("{kind:?}")),
     });
+    let signature = info
+        .signature_documentation
+        .as_ref()
+        .and_then(|signature| empty_to_none(&signature.text));
 
     match symbol_ids.entry(info.symbol.clone()) {
         Entry::Occupied(entry) => *entry.get(),
@@ -230,6 +241,8 @@ fn intern_symbol(
                 symbol: entry.key().clone(),
                 display_name,
                 kind,
+                signature,
+                defined_in: None,
                 is_local: is_local_symbol(entry.key()),
             });
             entry.insert(id);
@@ -251,6 +264,8 @@ fn intern_symbol_str(
                 symbol: entry.key().clone(),
                 display_name: None,
                 kind: None,
+                signature: None,
+                defined_in: None,
                 is_local: is_local_symbol(entry.key()),
             });
             entry.insert(id);
