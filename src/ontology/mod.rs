@@ -1,15 +1,16 @@
 //! Ontology loading + resolution for MOOSEDev.
 //!
 //! Loads MOOSEDev's domain ontologies (Turtle) into the durable RDF store,
-//! exposes the architecture-domain MOOSE [`CompactVocabulary`], and implements
+//! exposes the domain MOOSE [`CompactVocabulary`] values, and implements
 //! MOOSE's [`OntologyResolver`] so the query pipeline knows which ontology
 //! graphs (and SHACL shape graphs) are aligned to the project knowledge graph.
 //!
 //! The ontology *content* is produced by Trivyn's ontology generator; MOOSEDev
-//! only consumes it. Two domains ship: a general software-engineering backbone
-//! (`software-engineering.ttl`) and a software-architecture domain layered on
-//! top (`software-architecture.ttl`) — the classes MOOSEDev captures into. Each
-//! domain has a companion SHACL shapes graph. This loader is **content-agnostic**.
+//! only consumes it. Three domains ship: a general software-engineering backbone
+//! (`software-engineering.ttl`), a software-architecture domain layered on top
+//! (`software-architecture.ttl`) — the classes MOOSEDev captures into — and a
+//! code layer (`software-code.ttl`). Each domain has a companion SHACL shapes
+//! graph. This loader is **content-agnostic**.
 
 use std::path::Path;
 
@@ -34,12 +35,24 @@ pub const SE_SHAPES_GRAPH_IRI: &str =
 pub const ARCH_DOMAIN_GRAPH_IRI: &str = "https://moosedev.dev/kg/ontology/software-architecture";
 pub const ARCH_SHAPES_GRAPH_IRI: &str =
     "https://moosedev.dev/kg/ontology/software-architecture/shapes";
+pub const CODE_DOMAIN_GRAPH_IRI: &str = "https://moosedev.dev/kg/ontology/software-code";
+pub const CODE_SHAPES_GRAPH_IRI: &str = "https://moosedev.dev/kg/ontology/software-code/shapes";
 
 /// File names of the shipped ontologies, relative to the ontology directory.
 pub const SE_DOMAIN_TTL: &str = "software-engineering.ttl";
 pub const SE_SHAPES_TTL: &str = "software-engineering_shapes.ttl";
 pub const ARCH_DOMAIN_TTL: &str = "software-architecture.ttl";
 pub const ARCH_SHAPES_TTL: &str = "software-architecture_shapes.ttl";
+pub const CODE_DOMAIN_TTL: &str = "software-code.ttl";
+pub const CODE_SHAPES_TTL: &str = "software-code_shapes.ttl";
+
+/// Vocabularies extracted from the loaded domain ontologies, by local name.
+pub struct DomainVocabularies {
+    /// Architecture domain — the classes MOOSEDev captures into.
+    pub arch: CompactVocabulary,
+    /// Code domain — CodeEntity + its properties and the intent links.
+    pub code: CompactVocabulary,
+}
 
 /// Parse a Turtle file and load it into `store` under the named graph `graph_iri`.
 ///
@@ -67,19 +80,25 @@ pub fn load_turtle(store: &Store, path: &Path, graph_iri: &str) -> anyhow::Resul
     Ok(())
 }
 
-/// Load all shipped ontologies (both domains + their SHACL shape graphs) from
-/// `dir` into their named graphs, and return the **architecture-domain**
-/// [`CompactVocabulary`] — the classes/relations MOOSEDev captures into and the
-/// query pipeline consults. The software-engineering backbone is loaded so the
-/// alignment/query layers can see it (via the resolver), but capture is scoped
-/// to the architecture domain.
-pub fn load_ontologies(store: &Store, dir: &Path) -> anyhow::Result<CompactVocabulary> {
+/// Load all shipped ontologies (domains + SHACL shape graphs) from `dir` into
+/// their named graphs, and return compact vocabularies for the domain modules
+/// MOOSEDev resolves terms from. The software-engineering backbone is loaded so
+/// the alignment/query layers can see it (via the resolver), but capture is
+/// scoped to the architecture domain.
+pub fn load_ontologies(store: &Store, dir: &Path) -> anyhow::Result<DomainVocabularies> {
     load_turtle(store, &dir.join(SE_DOMAIN_TTL), SE_DOMAIN_GRAPH_IRI)?;
     load_turtle(store, &dir.join(SE_SHAPES_TTL), SE_SHAPES_GRAPH_IRI)?;
     load_turtle(store, &dir.join(ARCH_DOMAIN_TTL), ARCH_DOMAIN_GRAPH_IRI)?;
     load_turtle(store, &dir.join(ARCH_SHAPES_TTL), ARCH_SHAPES_GRAPH_IRI)?;
-    extract_compact_vocabulary(store, ARCH_DOMAIN_GRAPH_IRI, None)
-        .map_err(|e| anyhow::anyhow!("extract_compact_vocabulary({ARCH_DOMAIN_GRAPH_IRI}): {e:?}"))
+    load_turtle(store, &dir.join(CODE_DOMAIN_TTL), CODE_DOMAIN_GRAPH_IRI)?;
+    load_turtle(store, &dir.join(CODE_SHAPES_TTL), CODE_SHAPES_GRAPH_IRI)?;
+    let arch = extract_compact_vocabulary(store, ARCH_DOMAIN_GRAPH_IRI, None).map_err(|e| {
+        anyhow::anyhow!("extract_compact_vocabulary({ARCH_DOMAIN_GRAPH_IRI}): {e:?}")
+    })?;
+    let code = extract_compact_vocabulary(store, CODE_DOMAIN_GRAPH_IRI, None).map_err(|e| {
+        anyhow::anyhow!("extract_compact_vocabulary({CODE_DOMAIN_GRAPH_IRI}): {e:?}")
+    })?;
+    Ok(DomainVocabularies { arch, code })
 }
 
 /// MOOSE [`OntologyResolver`] for MOOSEDev: the project KG (data graph) is
@@ -105,6 +124,7 @@ impl OntologyResolver for MooseDevOntologyResolver {
         Ok(vec![
             SE_DOMAIN_GRAPH_IRI.to_string(),
             ARCH_DOMAIN_GRAPH_IRI.to_string(),
+            CODE_DOMAIN_GRAPH_IRI.to_string(),
         ])
     }
 
@@ -112,6 +132,7 @@ impl OntologyResolver for MooseDevOntologyResolver {
         Ok(vec![
             SE_SHAPES_GRAPH_IRI.to_string(),
             ARCH_SHAPES_GRAPH_IRI.to_string(),
+            CODE_SHAPES_GRAPH_IRI.to_string(),
         ])
     }
 }

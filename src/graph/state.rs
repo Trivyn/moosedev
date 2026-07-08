@@ -84,6 +84,9 @@ pub struct AppState {
     pub instance_store: Arc<InstanceVecStore>,
     pub moose_cache: Arc<MooseOntologyCache>,
     pub arch_vocab: CompactVocabulary,
+    /// Code vocabulary kept separate so code classes stay out of capture kinds,
+    /// the dense instance index, and `get_relevant_context` seeding.
+    pub code_vocab: CompactVocabulary,
     pub capture: CapturePredicates,
     /// Object-property domain/range table from the SHACL shapes, built once at
     /// bootstrap. The legality source for relation writes (`relate` + inline
@@ -155,8 +158,9 @@ impl AppState {
         std::env::set_var("MOOSE_ONTOLOGY_DIR", ontology_dir);
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
-        let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
-        let capture = CapturePredicates::resolve(&arch_vocab)?;
+        let ontology::DomainVocabularies { arch, code } =
+            ontology::load_ontologies(&store, ontology_dir)?;
+        let capture = CapturePredicates::resolve(&arch)?;
         let catalogue = build_relation_catalogue(&store);
         let entity_index = Arc::new(EntityIndexCache::new(64));
 
@@ -192,7 +196,8 @@ impl AppState {
             // keeps that store coherent thereafter.
             instance_store: Arc::new(InstanceVecStore::ephemeral()),
             moose_cache,
-            arch_vocab,
+            arch_vocab: arch,
+            code_vocab: code,
             capture,
             catalogue,
             engine_config,
@@ -482,10 +487,37 @@ impl AppState {
         })
     }
 
+    /// Resolve a code-domain class by local-name lookup in the loaded code
+    /// vocabulary. Kept separate from [`Self::resolve_class`] so capture kinds
+    /// and the dense instance index remain architecture-scoped.
+    pub fn resolve_code_class(&self, local: &str) -> anyhow::Result<String> {
+        iri_by_local_name(&self.code_vocab.classes, local).ok_or_else(|| {
+            anyhow::anyhow!("unknown code class {local:?}: not a class in the code ontology")
+        })
+    }
+
+    /// Resolve a code-domain datatype property by local name.
+    pub fn resolve_code_datatype_property(&self, local: &str) -> anyhow::Result<String> {
+        datatype_property_iri(&self.code_vocab, local).map_err(|_| {
+            anyhow::anyhow!(
+                "unknown code datatype property {local:?}: not a datatype property in the code ontology"
+            )
+        })
+    }
+
     /// Resolve a relation local name (e.g. "supersedes", "hasRationale") to its
-    /// full IRI from the loaded architecture vocabulary.
+    /// full IRI from the loaded vocabularies, checking architecture first and
+    /// then the code domain for code-side intent links.
     pub fn resolve_object_property(&self, local: &str) -> anyhow::Result<String> {
-        object_property_iri(&self.arch_vocab, local)
+        if let Ok(iri) = object_property_iri(&self.arch_vocab, local) {
+            return Ok(iri);
+        }
+        if let Ok(iri) = object_property_iri(&self.code_vocab, local) {
+            return Ok(iri);
+        }
+        anyhow::bail!(
+            "unknown relation {local:?}: not an object property in the architecture or code ontology"
+        )
     }
 }
 
@@ -516,6 +548,17 @@ fn assist_level_from_raw(raw: Option<&str>, llm_configured: bool) -> LlmAssistLe
 mod tests {
     use super::*;
 
+    const ARCH: &str = "https://trivyn.io/ontologies/software/architecture#";
+    const CODE: &str = "https://trivyn.io/ontologies/software/code#";
+
+    fn bootstrap_test_state(name: &str) -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("moosedev-state-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ontology_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+        AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state")
+    }
+
     #[test]
     fn assist_level_is_pure_symbolic_without_provider() {
         assert!(matches!(
@@ -542,5 +585,33 @@ mod tests {
             assist_level_from_raw(Some("5"), true),
             LlmAssistLevel::FallbackExecutor
         ));
+    }
+
+    #[test]
+    fn code_vocabulary_resolution_is_separate_from_capture_kinds() {
+        let state = bootstrap_test_state("code-vocab-resolution");
+
+        assert_eq!(
+            state.resolve_code_class("CodeEntity").unwrap(),
+            format!("{CODE}CodeEntity")
+        );
+        assert!(
+            state.resolve_class("CodeEntity").is_err(),
+            "CodeEntity must stay out of architecture capture kinds"
+        );
+        assert_eq!(
+            state
+                .resolve_code_datatype_property("hasScipSymbol")
+                .unwrap(),
+            format!("{CODE}hasScipSymbol")
+        );
+        assert_eq!(
+            state.resolve_object_property("realizes").unwrap(),
+            format!("{CODE}realizes")
+        );
+        assert_eq!(
+            state.resolve_object_property("concerns").unwrap(),
+            format!("{ARCH}concerns")
+        );
     }
 }

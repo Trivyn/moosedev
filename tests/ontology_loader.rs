@@ -6,11 +6,12 @@
 
 use std::path::Path;
 
+use moose::traits::OntologyResolver;
 use moosedev::ontology;
 use oxigraph::store::Store;
 
 #[test]
-fn loads_ontologies_and_extracts_architecture_vocabulary() {
+fn loads_ontologies_and_extracts_domain_vocabularies() {
     let store = Store::new().expect("in-memory store");
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
 
@@ -19,6 +20,7 @@ fn loads_ontologies_and_extracts_architecture_vocabulary() {
     // The architecture domain's typed classes must surface — these are what
     // `record_important_decision` types instances against (resolved by local name).
     let locals: Vec<&str> = vocab
+        .arch
         .classes
         .iter()
         .map(|c| c.local_name.as_str())
@@ -37,14 +39,15 @@ fn loads_ontologies_and_extracts_architecture_vocabulary() {
 
     // The relations the NLQ query traverses (concerns, isMotivatedBy, hasRationale, …).
     assert!(
-        vocab.object_properties.len() >= 3,
+        vocab.arch.object_properties.len() >= 3,
         "expected several architecture relations; got {}",
-        vocab.object_properties.len()
+        vocab.arch.object_properties.len()
     );
 
     // The capture predicates are resolved by local name at bootstrap, so they
     // must be present as datatype properties in the extracted vocabulary.
     let dt_locals: Vec<&str> = vocab
+        .arch
         .datatype_properties
         .iter()
         .map(|e| e.local_name.as_str())
@@ -61,4 +64,84 @@ fn loads_ontologies_and_extracts_architecture_vocabulary() {
             "expected datatype property {expected}; got {dt_locals:?}"
         );
     }
+
+    let code_classes: Vec<&str> = vocab
+        .code
+        .classes
+        .iter()
+        .map(|e| e.local_name.as_str())
+        .collect();
+    assert!(
+        code_classes.contains(&"CodeEntity"),
+        "expected CodeEntity in code vocab; got {code_classes:?}"
+    );
+
+    let code_dt_locals: Vec<&str> = vocab
+        .code
+        .datatype_properties
+        .iter()
+        .map(|e| e.local_name.as_str())
+        .collect();
+    for expected in [
+        "hasScipSymbol",
+        "hasEntityKind",
+        "hasCodeName",
+        "hasLogicalPath",
+        "definedInPath",
+    ] {
+        assert!(
+            code_dt_locals.contains(&expected),
+            "expected code datatype property {expected}; got {code_dt_locals:?}"
+        );
+    }
+
+    let code_obj_locals: Vec<&str> = vocab
+        .code
+        .object_properties
+        .iter()
+        .map(|e| e.local_name.as_str())
+        .collect();
+    for expected in [
+        "realizes",
+        "isRealizedBy",
+        "satisfies",
+        "isSatisfiedBy",
+        "embodies",
+        "isEmbodiedBy",
+    ] {
+        assert!(
+            code_obj_locals.contains(&expected),
+            "expected code object property {expected}; got {code_obj_locals:?}"
+        );
+    }
+
+    let arch_obj_locals: Vec<&str> = vocab
+        .arch
+        .object_properties
+        .iter()
+        .map(|e| e.local_name.as_str())
+        .collect();
+    assert!(
+        !arch_obj_locals.contains(&"realizes"),
+        "realizes must come from the code vocabulary, not architecture"
+    );
+}
+
+#[tokio::test]
+async fn resolver_lists_code_domain_and_shapes() {
+    let resolver = ontology::MooseDevOntologyResolver::new();
+    let aligned = resolver
+        .get_aligned_ontologies(&[])
+        .await
+        .expect("aligned ontologies");
+    assert!(
+        aligned.contains(&ontology::CODE_DOMAIN_GRAPH_IRI.to_string()),
+        "resolver aligned ontologies should include code domain: {aligned:?}"
+    );
+
+    let shapes = resolver.get_shape_graphs(&[]).await.expect("shape graphs");
+    assert!(
+        shapes.contains(&ontology::CODE_SHAPES_GRAPH_IRI.to_string()),
+        "resolver shape graphs should include code shapes: {shapes:?}"
+    );
 }
