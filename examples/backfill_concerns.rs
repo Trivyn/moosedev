@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
+use moosedev::graph::{
+    self, best_component_for_path, load_components, AppState, ComponentEntry, RecordInput,
+    PROJECT_KG_GRAPH_IRI,
+};
 use moosedev::{canonical, runtime, validation};
 use oxigraph::model::{
     GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, Term,
@@ -85,13 +88,6 @@ struct Args {
 }
 
 #[derive(Debug, Clone)]
-struct Component {
-    iri: Option<String>,
-    name: String,
-    covers_paths: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone)]
 struct Record {
     iri: String,
     kind: String,
@@ -141,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let resolved = resolve_terms(&state)?;
 
-    let existing = read_components(&state, &resolved)?;
+    let existing = load_components(&state)?;
     let (mut components, seed_actions) = seed_plan(existing);
     for action in &seed_actions {
         println!("{action}");
@@ -149,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
     if args.apply {
         apply_seed_actions(&state, &resolved, &seed_actions, &args.author)?;
-        components = read_components(&state, &resolved)?;
+        components = load_components(&state)?;
     }
 
     let records = read_information_records(&state, &resolved)?;
@@ -268,40 +264,8 @@ fn resolve_terms(state: &AppState) -> anyhow::Result<Resolved> {
     })
 }
 
-fn read_components(state: &AppState, resolved: &Resolved) -> anyhow::Result<Vec<Component>> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let rdf_type = NamedNodeRef::new(moose::RDF_TYPE)?;
-    let class = NamedNodeRef::new(&resolved.system_component)?;
-    let mut out = Vec::new();
-    for q in state.store.quads_for_pattern(
-        None,
-        Some(rdf_type),
-        Some(class.into()),
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        let q = q?;
-        let NamedOrBlankNode::NamedNode(subject) = q.subject else {
-            continue;
-        };
-        let iri = subject.as_str().to_string();
-        let name = first_literal_any(
-            state,
-            &iri,
-            &[moose::RDFS_LABEL, state.capture.title.as_str()],
-        )
-        .unwrap_or_else(|| iri.clone());
-        let covers_paths = literal_values(state, &iri, &resolved.covers_path)?;
-        out.push(Component {
-            iri: Some(iri),
-            name,
-            covers_paths,
-        });
-    }
-    Ok(out)
-}
-
-fn seed_plan(existing: Vec<Component>) -> (Vec<Component>, Vec<String>) {
-    let mut by_name: BTreeMap<String, Component> = existing
+fn seed_plan(existing: Vec<ComponentEntry>) -> (Vec<ComponentEntry>, Vec<String>) {
+    let mut by_name: BTreeMap<String, ComponentEntry> = existing
         .into_iter()
         .map(|component| (component.name.clone(), component))
         .collect();
@@ -323,7 +287,7 @@ fn seed_plan(existing: Vec<Component>) -> (Vec<Component>, Vec<String>) {
                 ));
                 by_name.insert(
                     seed.name.to_string(),
-                    Component {
+                    ComponentEntry {
                         iri: None,
                         name: seed.name.to_string(),
                         covers_paths: seed.paths.iter().map(|p| (*p).to_string()).collect(),
@@ -344,8 +308,8 @@ fn apply_seed_actions(
     if actions.is_empty() {
         return Ok(());
     }
-    let existing = read_components(state, resolved)?;
-    let existing_by_name: BTreeMap<String, Component> = existing
+    let existing = load_components(state)?;
+    let existing_by_name: BTreeMap<String, ComponentEntry> = existing
         .into_iter()
         .map(|component| (component.name.clone(), component))
         .collect();
@@ -463,29 +427,6 @@ fn read_information_records(state: &AppState, resolved: &Resolved) -> anyhow::Re
     Ok(out)
 }
 
-fn literal_values(
-    state: &AppState,
-    subject_iri: &str,
-    predicate_iri: &str,
-) -> anyhow::Result<BTreeSet<String>> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let subject = NamedNodeRef::new(subject_iri)?;
-    let predicate = NamedNodeRef::new(predicate_iri)?;
-    let mut out = BTreeSet::new();
-    for q in state.store.quads_for_pattern(
-        Some(subject.into()),
-        Some(predicate),
-        None,
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        let q = q?;
-        if let Term::Literal(literal) = q.object {
-            out.insert(literal.value().to_string());
-        }
-    }
-    Ok(out)
-}
-
 fn first_literal_any(state: &AppState, subject_iri: &str, predicates: &[&str]) -> Option<String> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).ok()?;
     let subject = NamedNodeRef::new(subject_iri).ok()?;
@@ -526,7 +467,7 @@ fn has_outgoing(state: &AppState, subject_iri: &str, predicate_iri: &str) -> any
         .is_some())
 }
 
-fn match_records_to_components(records: &[Record], components: &[Component]) -> MatchOutcome {
+fn match_records_to_components(records: &[Record], components: &[ComponentEntry]) -> MatchOutcome {
     let mut links = Vec::new();
     let mut unmatched_tokens = BTreeSet::new();
     for record in records.iter().filter(|record| !record.has_concerns) {
@@ -534,7 +475,7 @@ fn match_records_to_components(records: &[Record], components: &[Component]) -> 
         let tokens = extract_path_tokens(&text);
         let mut by_component: BTreeMap<String, PlannedLink> = BTreeMap::new();
         for token in tokens {
-            match best_component_for_token(&token, components) {
+            match best_component_for_path(&token, components) {
                 Some(component) => {
                     by_component
                         .entry(component.name.clone())
@@ -564,23 +505,6 @@ fn match_records_to_components(records: &[Record], components: &[Component]) -> 
         links,
         unmatched_tokens,
     }
-}
-
-fn best_component_for_token<'a>(token: &str, components: &'a [Component]) -> Option<&'a Component> {
-    let mut best: Option<(&Component, usize)> = None;
-    for component in components {
-        for path in &component.covers_paths {
-            let matched = if path.ends_with('/') {
-                token.starts_with(path)
-            } else {
-                token == path
-            };
-            if matched && best.is_none_or(|(_, len)| path.len() > len) {
-                best = Some((component, path.len()));
-            }
-        }
-    }
-    best.map(|(component, _)| component)
 }
 
 fn extract_path_tokens(text: &str) -> Vec<String> {
@@ -658,8 +582,8 @@ fn local_name(iri: &str) -> &str {
 mod tests {
     use super::*;
 
-    fn component(name: &str, paths: &[&str]) -> Component {
-        Component {
+    fn component(name: &str, paths: &[&str]) -> ComponentEntry {
+        ComponentEntry {
             iri: Some(format!("urn:{name}")),
             name: name.to_string(),
             covers_paths: paths.iter().map(|p| (*p).to_string()).collect(),
@@ -679,16 +603,6 @@ mod tests {
                 "ui/src/App.tsx"
             ]
         );
-    }
-
-    #[test]
-    fn longest_prefix_wins() {
-        let components = vec![
-            component("broad graph", &["src/"]),
-            component("graph layer", &["src/graph/"]),
-        ];
-        let best = best_component_for_token("src/graph/capture.rs", &components).unwrap();
-        assert_eq!(best.name, "graph layer");
     }
 
     #[test]

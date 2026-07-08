@@ -28,6 +28,7 @@
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
+use anyhow::Context;
 use moosedev::code::substrate::{self, Position, ResolutionMode, Substrate};
 use moosedev::export::{export_graph, ExportFormat, ExportScope};
 use moosedev::graph;
@@ -58,6 +59,10 @@ enum Mode {
     Bootstrap(temporal::BootstrapArgs),
     /// Build the code substrate index.
     Index,
+    /// Plan/apply CodeEntity minting from the code substrate.
+    Mint {
+        apply: bool,
+    },
     /// Resolve a source position through the code substrate.
     Resolve(ResolveArgs),
     /// Print the resolved `skills/` dir + the agent workflow docs it holds.
@@ -110,6 +115,8 @@ USAGE:
     moosedev bootstrap --temporal
                               Replay git history into the graph (per-commit dates)
     moosedev index            Build the code substrate index (runs rust-analyzer scip)
+    moosedev mint [--apply]   Mint CodeEntity continuants from the substrate
+                              (dry-run unless --apply is present)
     moosedev resolve FILE LINE:COL
                               Resolve a source position to a code entity (debug)
     moosedev skills           List the shipped agent workflow docs (bootstrap, …)
@@ -171,6 +178,7 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("init") => parse_init(iter).map(Mode::Init),
         Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
         Some("index") => parse_index(iter).map(|()| Mode::Index),
+        Some("mint") => parse_mint(iter).map(|apply| Mode::Mint { apply }),
         Some("resolve") => parse_resolve(iter).map(Mode::Resolve),
         Some("skills") => Ok(Mode::Skills),
         Some("--help" | "-h") => {
@@ -178,7 +186,7 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, index, resolve, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
 }
@@ -308,6 +316,21 @@ fn parse_index<'a>(mut iter: impl Iterator<Item = &'a String>) -> anyhow::Result
         anyhow::bail!("index accepts no arguments; unexpected {extra:?}");
     }
     Ok(())
+}
+
+/// Parse `mint`'s single optional flag; the command is dry-run unless `--apply`.
+fn parse_mint<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<bool> {
+    let mut apply = false;
+    for arg in iter {
+        if arg == "--apply" {
+            apply = true;
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown mint option {arg:?}; expected optional --apply");
+        } else {
+            anyhow::bail!("mint accepts only optional --apply; unexpected {arg:?}");
+        }
+    }
+    Ok(apply)
 }
 
 fn parse_resolve<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<ResolveArgs> {
@@ -680,6 +703,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Init(args) => init_mode(args),
         Mode::Bootstrap(args) => temporal::run(args),
         Mode::Index => index_mode(&data_dir),
+        Mode::Mint { apply } => mint_mode(&data_dir, apply).await,
         Mode::Resolve(args) => resolve_mode(&data_dir, args),
         Mode::Skills => skills_mode(),
         Mode::Stdio => {
@@ -704,6 +728,137 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
         substrate::index_path(data_dir).display()
     );
     Ok(())
+}
+
+/// Plan or apply CodeEntity minting from the previously built code substrate.
+async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let repo_root = std::env::current_dir()?;
+    let substrate = Substrate::load(data_dir, &repo_root)
+        .with_context(|| "load code substrate for mint; run `moosedev index` first")?;
+    let state = match runtime::build_state(data_dir, &ontology_dir()).await {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!(
+                "failed to open MOOSEDev state at {}: {e}\n\
+                 Stop the daemon first, for example: kill $(cat {}/moosedev-serve.pid)",
+                data_dir.display(),
+                data_dir.display()
+            );
+            return Err(e);
+        }
+    };
+
+    let terms = graph::CodeTerms::resolve(&state)?;
+    let components = graph::load_components(&state)?;
+    let definitions = substrate.definitions();
+    let plan = graph::plan_mint(&state, &definitions, &terms, &components)?;
+    report_mint_plan(&plan, &components);
+
+    if !apply {
+        println!("dry-run only; re-run with --apply");
+        return Ok(());
+    }
+
+    let outcome = graph::apply_mint(&state, &plan, &terms)?;
+    let validation_started = std::time::Instant::now();
+    state.ensure_enriched();
+    moosedev::canonical::write_through(&state.store, data_dir)?;
+    let report = moosedev::validation::validate_project(&state)?;
+    println!("\n{}", moosedev::validation::format_report(&report));
+    println!(
+        "enrich+validate: {:.3}s",
+        validation_started.elapsed().as_secs_f64()
+    );
+    if !report.conforms() {
+        anyhow::bail!("post-mint validation failed");
+    }
+    println!(
+        "mint applied: created {}, updated {} in {:.3}s",
+        outcome.created.len(),
+        outcome.updated,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Print the human-facing dry-run/apply plan summary.
+fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]) {
+    let component_names = components
+        .iter()
+        .filter_map(|component| {
+            component
+                .iri
+                .as_ref()
+                .map(|iri| (iri.as_str(), component.name.as_str()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for planned in &plan.create {
+        report_planned_entity("CREATE", planned, &component_names);
+    }
+    for planned in &plan.update {
+        report_planned_entity("UPDATE", planned, &component_names);
+    }
+
+    if !plan.collisions.is_empty() {
+        println!("collisions:");
+        for collision in &plan.collisions {
+            println!(
+                "  {} kept {} dropped {}",
+                collision.normalized_symbol,
+                collision.kept_file,
+                collision.dropped.join(", ")
+            );
+        }
+    }
+    if !plan.unmapped_paths.is_empty() {
+        println!("unmapped paths:");
+        for path in &plan.unmapped_paths {
+            println!("  {path}");
+        }
+    }
+    if !plan.orphaned.is_empty() {
+        println!("orphaned entities:");
+        for (iri, symbol) in &plan.orphaned {
+            println!("  {symbol} {iri}");
+        }
+    }
+
+    println!(
+        "summary: create={} update={} unchanged={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={}",
+        plan.create.len(),
+        plan.update.len(),
+        plan.unchanged,
+        plan.skipped_scope,
+        plan.skipped_tests,
+        plan.collisions.len(),
+        plan.unmapped_paths.len(),
+        plan.orphaned.len()
+    );
+}
+
+/// Print one planned create/update line, including the component link if present.
+fn report_planned_entity(
+    action: &str,
+    planned: &graph::PlannedEntity,
+    component_names: &std::collections::BTreeMap<&str, &str>,
+) {
+    print!(
+        "{} {} {} ({})",
+        action,
+        planned.display_kind(),
+        planned.display_name(),
+        planned.entry.file
+    );
+    if let Some(component_iri) = planned.realizes.as_deref() {
+        let name = component_names
+            .get(component_iri)
+            .copied()
+            .unwrap_or(component_iri);
+        print!(" -> realizes {name}");
+    }
+    println!();
 }
 
 fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
@@ -1183,6 +1338,19 @@ mod tests {
             Mode::Index
         ));
         assert!(parse_mode(&argv(&["index", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_mint_accepts_optional_apply_and_rejects_extras() {
+        assert!(matches!(
+            parse_mode(&argv(&["mint"])).unwrap(),
+            Mode::Mint { apply: false }
+        ));
+        assert!(matches!(
+            parse_mode(&argv(&["mint", "--apply"])).unwrap(),
+            Mode::Mint { apply: true }
+        ));
+        assert!(parse_mode(&argv(&["mint", "extra"])).is_err());
     }
 
     #[test]

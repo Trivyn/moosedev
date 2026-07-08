@@ -10,6 +10,8 @@
 //! re-exports each submodule so the public `crate::graph::*` API remains stable.
 
 pub mod capture;
+pub mod code_entities;
+pub mod components;
 pub mod context;
 pub mod lifecycle;
 pub mod links;
@@ -19,6 +21,8 @@ pub mod state;
 pub mod util;
 
 pub use capture::*;
+pub use code_entities::*;
+pub use components::*;
 pub use context::*;
 pub use lifecycle::*;
 pub use links::*;
