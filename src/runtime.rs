@@ -320,34 +320,56 @@ pub fn spawn_detached_backend(socket: &Path, data_dir: &Path) -> anyhow::Result<
 /// Connect to a backend, auto-spawning a detached one when the rendezvous socket
 /// is absent or stale. Permission and other hard errors are returned unchanged.
 pub async fn connect_or_spawn(socket: &Path, data_dir: &Path) -> anyhow::Result<UnixStream> {
-    match UnixStream::connect(socket).await {
+    connect_or_spawn_inner(socket, socket, data_dir, "backend").await
+}
+
+/// Connect to the daemon's Knowledge-LSP socket, auto-spawning the detached
+/// backend through the MCP socket when nothing is listening yet. The daemon
+/// creates both sockets; this waits for the LSP socket specifically.
+pub async fn connect_or_spawn_lsp(
+    lsp_socket: &Path,
+    mcp_socket: &Path,
+    data_dir: &Path,
+) -> anyhow::Result<UnixStream> {
+    connect_or_spawn_inner(lsp_socket, mcp_socket, data_dir, "Knowledge-LSP").await
+}
+
+async fn connect_or_spawn_inner(
+    connect_socket: &Path,
+    spawn_socket: &Path,
+    data_dir: &Path,
+    surface: &str,
+) -> anyhow::Result<UnixStream> {
+    // LSP connects to one socket but auto-spawns the daemon through the MCP
+    // socket, because `--serve` owns both listeners.
+    match UnixStream::connect(connect_socket).await {
         Ok(stream) => return Ok(stream),
         Err(e) if should_spawn(e.kind()) => {
             if autospawn_disabled() {
                 anyhow::bail!(
-                    "connect {}: {e} — no MOOSEDev backend is listening and MOOSEDEV_NO_AUTOSPAWN is set; start one with `moosedev --serve {}`",
-                    socket.display(),
-                    socket.display()
+                    "connect {}: {e} — no MOOSEDev {surface} is listening and MOOSEDEV_NO_AUTOSPAWN is set; start one with `moosedev --serve {}`",
+                    connect_socket.display(),
+                    spawn_socket.display()
                 );
             }
             tracing::info!(
-                "MOOSEDev proxy: no backend listening on {}; auto-spawning detached backend",
-                socket.display()
+                "MOOSEDev proxy: no {surface} listening on {}; auto-spawning detached backend",
+                connect_socket.display()
             );
-            spawn_detached_backend(socket, data_dir)?;
+            spawn_detached_backend(spawn_socket, data_dir)?;
         }
-        Err(e) => return Err(anyhow::anyhow!("connect {}: {e}", socket.display())),
+        Err(e) => return Err(anyhow::anyhow!("connect {}: {e}", connect_socket.display())),
     }
 
     let log_path = serve_log_path_for(data_dir);
     let deadline = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            match UnixStream::connect(socket).await {
+            match UnixStream::connect(connect_socket).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) if should_spawn(e.kind()) => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                Err(e) => return Err(anyhow::anyhow!("connect {}: {e}", socket.display())),
+                Err(e) => return Err(anyhow::anyhow!("connect {}: {e}", connect_socket.display())),
             }
         }
     })
@@ -356,8 +378,8 @@ pub async fn connect_or_spawn(socket: &Path, data_dir: &Path) -> anyhow::Result<
     match deadline {
         Ok(result) => result,
         Err(_) => anyhow::bail!(
-            "timed out waiting for auto-spawned MOOSEDev backend on {} (see log: {})",
-            socket.display(),
+            "timed out waiting for auto-spawned MOOSEDev {surface} on {} (see log: {})",
+            connect_socket.display(),
             log_path.display()
         ),
     }
@@ -420,17 +442,45 @@ pub async fn serve_unix(server: MooseDevServer, socket: &Path) -> anyhow::Result
 /// to a stdio server; we forward those bytes to the shared backend and stream
 /// its replies back. No MCP awareness needed — both ends share the framing.
 pub async fn connect_unix(socket: &Path, data_dir: &Path) -> anyhow::Result<()> {
-    let mut stream = connect_or_spawn(socket, data_dir).await?;
+    let stream = connect_or_spawn(socket, data_dir).await?;
     tracing::info!("MOOSEDev proxy: relaying stdio ⇄ {}", socket.display());
+    relay_stdio_to_stream(stream, "proxy").await
+}
 
+/// Run as the Knowledge-LSP shim: relay stdio to/from the daemon's LSP socket.
+pub async fn connect_lsp_unix(
+    lsp_socket: &Path,
+    mcp_socket: &Path,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let stream = connect_or_spawn_lsp(lsp_socket, mcp_socket, data_dir).await?;
+    tracing::info!(
+        "MOOSEDev Knowledge-LSP shim: relaying stdio ⇄ {}",
+        lsp_socket.display()
+    );
+    relay_stdio_to_stream(stream, "Knowledge-LSP shim").await
+}
+
+/// Relay stdio to an already-connected daemon socket. MCP and LSP both rely on
+/// this byte pump staying protocol-agnostic.
+async fn relay_stdio_to_stream(mut stream: UnixStream, label: &str) -> anyhow::Result<()> {
     // `join` turns the separate stdin/stdout halves into one duplex so
     // `copy_bidirectional` can pump both directions, flush promptly, and
     // half-close correctly when either side hangs up.
     let mut client = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
-    tokio::io::copy_bidirectional(&mut client, &mut stream)
-        .await
-        .map_err(|e| anyhow::anyhow!("proxy relay failed: {e}"))?;
-    tracing::info!("MOOSEDev proxy: connection closed.");
+    match tokio::io::copy_bidirectional(&mut client, &mut stream).await {
+        Ok(_) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::NotConnected | ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+            ) =>
+        {
+            tracing::info!("MOOSEDev {label}: peer closed during relay shutdown: {e}");
+        }
+        Err(e) => return Err(anyhow::anyhow!("{label} relay failed: {e}")),
+    }
+    tracing::info!("MOOSEDev {label}: connection closed.");
     Ok(())
 }
 

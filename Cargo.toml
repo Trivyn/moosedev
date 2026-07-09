@@ -24,6 +24,10 @@ growl = "0.6.1"
 # schemas (re-exported as `rmcp::schemars`, so versions always match).
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "schemars"] }
 
+# Knowledge-LSP transport scaffold: synchronous JSON-RPC framing + protocol types.
+lsp-server = "0.8"
+lsp-types = "0.97"
+
 # Async runtime + server plumbing. stdout is the MCP JSON-RPC channel, so logs
 # (tracing) are routed to stderr in main.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "signal", "time"] }

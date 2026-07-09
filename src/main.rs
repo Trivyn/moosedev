@@ -15,6 +15,8 @@
 //! - `--connect [SOCKET]`: run as a thin proxy — relay this process's stdio to a
 //!   running backend, auto-spawning a detached backend when none is listening.
 //!   This is what each MCP client spawns.
+//! - `lsp`: run as a thin Knowledge-LSP shim — relay editor stdio to the
+//!   daemon-owned LSP socket.
 //! - `--status [SOCKET]`: report backend + web UI status without opening the
 //!   store (socket-only liveness probe).
 //! - `ui [SOCKET]`: open the backend's web UI in a browser, auto-spawning a
@@ -46,6 +48,8 @@ enum Mode {
         open: bool,
     },
     Connect(Option<PathBuf>),
+    /// Relay editor stdio to the daemon-owned Knowledge-LSP socket.
+    Lsp,
     /// Report backend + web UI status without opening the store (socket-only).
     Status(Option<PathBuf>),
     /// Open the running backend's web UI in a browser (auto-spawning if needed).
@@ -107,6 +111,7 @@ USAGE:
                               Run the shared backend on a Unix socket; --open
                               launches the web UI in a browser once it is up
     moosedev --connect [SOCK] Proxy stdio to a backend; auto-spawn if needed
+    moosedev lsp              Proxy editor stdio to the daemon Knowledge-LSP
     moosedev --status [SOCK]  Report backend + web UI status (no store lock)
     moosedev ui [SOCK]        Open the backend's web UI in a browser (auto-spawn)
     moosedev export [PATH]    Export the graph; no running backend required
@@ -128,7 +133,8 @@ The web UI binds an ephemeral loopback port by default (discoverable via
 or MOOSEDEV_NO_HTTP=1 to disable it.
 Configuration: repo-root .env plus environment variables. Explicit environment
 values win. Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
-MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_AUTOSPAWN.
+MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_LSP,
+MOOSEDEV_NO_AUTOSPAWN.
 LLM assistance is disabled unless MOOSEDEV_LLM_BASE_URL is explicitly set;
 then MOOSEDEV_LLM_API_KEY, MOOSEDEV_LLM_MODEL, and MOOSEDEV_LLM_ASSIST_LEVEL
 configure the provider and assist level.
@@ -171,6 +177,7 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         None => Ok(Mode::Stdio),
         Some("--serve") => parse_serve(iter),
         Some("--connect") => Ok(Mode::Connect(parse_optional_path(&mut iter, "--connect")?)),
+        Some("lsp") => parse_no_args(iter, "lsp").map(|()| Mode::Lsp),
         Some("--status") => Ok(Mode::Status(parse_optional_path(&mut iter, "--status")?)),
         Some("ui") => Ok(Mode::Ui(parse_optional_path(&mut iter, "ui")?)),
         Some("export") => parse_export(iter).map(Mode::Export),
@@ -186,9 +193,16 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, lsp, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
+}
+
+fn parse_no_args<'a>(mut iter: impl Iterator<Item = &'a String>, mode: &str) -> anyhow::Result<()> {
+    if let Some(extra) = iter.next() {
+        anyhow::bail!("{mode} accepts no arguments; unexpected {extra:?}");
+    }
+    Ok(())
 }
 
 /// Parse `--serve`'s arguments: an optional socket path and an optional `--open`
@@ -655,6 +669,11 @@ async fn main() -> anyhow::Result<()> {
             let socket = prepare_socket(sock, &data_dir)?;
             runtime::connect_unix(&socket, &data_dir).await
         }
+        Mode::Lsp => {
+            let mcp_socket = prepare_socket(None, &data_dir)?;
+            let lsp_socket = moosedev::lsp::lsp_socket_path_for(&data_dir);
+            runtime::connect_lsp_unix(&lsp_socket, &mcp_socket, &data_dir).await
+        }
         Mode::Serve { socket: sock, open } => {
             let socket = prepare_socket(sock, &data_dir)?;
             // Probe before the (expensive) bootstrap: a same-data-dir conflict
@@ -665,7 +684,8 @@ async fn main() -> anyhow::Result<()> {
             let server = moosedev::mcp::MooseDevServer::new(state.clone());
             // Infallible: a UI bind failure must not abort the MCP backend. The
             // bound address (None if the UI is disabled/failed) drives --open.
-            let http_addr = runtime::spawn_http_if_enabled(state, &data_dir).await;
+            let http_addr = runtime::spawn_http_if_enabled(state.clone(), &data_dir).await;
+            let lsp_socket = moosedev::lsp::spawn_lsp_listener(state, &data_dir).await;
             let pidfile = runtime::pidfile_path_for(&data_dir);
             std::fs::write(&pidfile, format!("{}\n", std::process::id()))
                 .map_err(|e| anyhow::anyhow!("write pidfile {}: {e}", pidfile.display()))?;
@@ -678,14 +698,21 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             tracing::info!(
-                "MOOSEDev backend startup: data_dir={}, socket={}, pidfile={}",
+                "MOOSEDev backend startup: data_dir={}, socket={}, lsp_socket={}, pidfile={}",
                 data_dir.display(),
                 socket.display(),
+                lsp_socket
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<disabled>".to_string()),
                 pidfile.display()
             );
             let result = runtime::serve_unix(server, &socket).await;
             let _ = std::fs::remove_file(&pidfile);
             let _ = std::fs::remove_file(runtime::http_addr_file_path_for(&data_dir));
+            if let Some(lsp_socket) = lsp_socket {
+                let _ = std::fs::remove_file(lsp_socket);
+            }
             result
         }
         // --status / ui are socket-only: they connect (or auto-spawn) but never
@@ -1304,6 +1331,12 @@ mod tests {
             parse_mode(&argv(&["ui", "/tmp/m.sock"])).unwrap(),
             Mode::Ui(Some(_))
         ));
+    }
+
+    #[test]
+    fn parse_lsp_accepts_no_args() {
+        assert!(matches!(parse_mode(&argv(&["lsp"])).unwrap(), Mode::Lsp));
+        assert!(parse_mode(&argv(&["lsp", "extra"])).is_err());
     }
 
     #[test]

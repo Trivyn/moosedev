@@ -17,6 +17,7 @@ pub mod graph_import;
 pub mod init;
 pub mod lessons;
 pub mod llm;
+pub mod lsp;
 pub mod mcp;
 pub mod ontology;
 pub mod provenance;
