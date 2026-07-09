@@ -80,7 +80,9 @@ pub struct MintPlan {
     pub skipped_tests: usize,
     pub collisions: Vec<SymbolCollision>,
     pub unmapped_paths: BTreeSet<String>,
-    /// (iri, normalized_symbol) in KG but gone from the kept set. Report only.
+    /// (iri, normalized_symbol) in KG but gone from the substrate's workspace
+    /// definitions. Out-of-scope (lazily minted private) entities are NOT
+    /// orphans while their symbol still exists. Report only.
     pub orphaned: Vec<(String, String)>,
 }
 
@@ -142,7 +144,10 @@ pub fn plan_mint(
     let (candidates, skipped_scope, skipped_tests) = mint_candidates(definitions);
     let (kept, collisions) = dedupe_collisions(candidates);
     let existing = entities_by_symbol(state, terms)?;
-    let kept_symbols = kept
+    // Orphans are judged against ALL workspace definitions, not the mint scope:
+    // lazily minted private entities are alive in the substrate and must not be
+    // reported as gone.
+    let substrate_symbols = definitions
         .iter()
         .map(|entry| entry.normalized_symbol.clone())
         .collect::<BTreeSet<_>>();
@@ -188,7 +193,7 @@ pub fn plan_mint(
 
     plan.orphaned = existing
         .into_iter()
-        .filter_map(|(symbol, iri)| (!kept_symbols.contains(&symbol)).then_some((iri, symbol)))
+        .filter_map(|(symbol, iri)| (!substrate_symbols.contains(&symbol)).then_some((iri, symbol)))
         .collect();
     Ok(plan)
 }

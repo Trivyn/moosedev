@@ -19,6 +19,7 @@ use scip::types::{
 };
 
 const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
+const MODULE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/";
 const PUBLIC_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
 const PRIVATE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/private_helper().";
 const LOCAL_SYMBOL: &str = "local 0";
@@ -402,6 +403,33 @@ fn whitespace_and_local_positions_are_silence() {
     .is_none());
 }
 
+/// Whole-file Module definitions are mintable by symbol but not resolved as
+/// source tokens for comment/blank positions inside the file.
+#[test]
+fn whole_file_module_dossier_does_not_surface_at_tokenless_position() {
+    let state = state_with_substrate("whole-file-module");
+    let decision = record(&state, "ArchitecturalDecision", "Module-level decision");
+    graph::link_code(
+        &state,
+        &decision,
+        "concerns",
+        &CodeSelector::Symbol(MODULE_SYMBOL.to_string()),
+        "tester",
+    )
+    .expect("link module by symbol");
+
+    assert!(graph::get_entity_dossier(
+        &state,
+        &DossierTarget::Position {
+            file: "src/runtime.rs".to_string(),
+            line: 2,
+            col: 1,
+        },
+    )
+    .unwrap()
+    .is_none());
+}
+
 /// When the real repo substrate exists, verify the position selector against an
 /// actual source definition while still writing only to an isolated temp state.
 #[test]
@@ -486,6 +514,15 @@ fn synthetic_substrate(stale: bool) -> Substrate {
     let mut index = Index::new();
     let mut document = doc("src/runtime.rs");
     document.symbols.push(info(
+        MODULE_SYMBOL,
+        "runtime",
+        symbol_information::Kind::Module,
+        "pub mod runtime",
+    ));
+    document
+        .occurrences
+        .push(occ(MODULE_SYMBOL, vec![0, 0, 30, 0], 1));
+    document.symbols.push(info(
         PUBLIC_SYMBOL,
         "build_server",
         symbol_information::Kind::Function,
@@ -565,6 +602,6 @@ fn meta() -> SubstrateMeta {
         producer_version: "1.0.0".to_string(),
         mode: "scip".to_string(),
         documents: 1,
-        occurrences: 3,
+        occurrences: 4,
     }
 }

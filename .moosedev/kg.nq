@@ -16,6 +16,24 @@
 <https://moosedev.dev/kg/Alternative/0db62e0e-420a-4f06-a5e8-e9a6d9062812> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/0db62e0e-420a-4f06-a5e8-e9a6d9062812> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T05:18:55.859659Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/0db62e0e-420a-4f06-a5e8-e9a6d9062812> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Error on unknown/unlinked positions like link_code - rejected: an editor-facing read surface must degrade to no-response, not error noise" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Alternative> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <http://www.w3.org/2000/01/rdf-schema#label> "Fold coverage into record_important_decision as a SystemComponent-only field - rejected: coverage is declared and evolved after capture at least as often as at capture time; a dedicated idempotent tool serves both moments" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:41:07.029518Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Fold coverage into record_important_decision as a SystemComponent-only field - rejected: coverage is declared and evolved after capture at least as often as at capture time; a dedicated idempotent tool serves both moments" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Alternative> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <http://www.w3.org/2000/01/rdf-schema#label> "Extend the seed table in backfill_concerns per repo - rejected: repo-local maintenance code, unreachable by bootstrap agents on foreign projects" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:41:07.029518Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Extend the seed table in backfill_concerns per repo - rejected: repo-local maintenance code, unreachable by bootstrap agents on foreign projects" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Alternative> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <http://www.w3.org/2000/01/rdf-schema#label> "Split by surface: dossier lenient, link_code strict - rejected: a read/write asymmetry in resolution semantics is a new rule to remember, and the resolver would still contradict the recorded decision" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:40:20.782062Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Split by surface: dossier lenient, link_code strict - rejected: a read/write asymmetry in resolution semantics is a new rule to remember, and the resolver would still contradict the recorded decision" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/17ecf875-a930-4672-b589-65804ebf219b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Alternative> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/17ecf875-a930-4672-b589-65804ebf219b> <http://www.w3.org/2000/01/rdf-schema#label> "Session-scoped only (remember_for_user=false): a pure UI change with zero backend edits, but a taught surface form would not carry into a new session - rejected as weaker for a durable-memory tool." <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/17ecf875-a930-4672-b589-65804ebf219b> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "claude-code" <https://moosedev.dev/kg/project> .
@@ -310,6 +328,12 @@
 <https://moosedev.dev/kg/Alternative/f73339a3-6da9-45c1-b98f-868f223425e7> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "proposed" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/f73339a3-6da9-45c1-b98f-868f223425e7> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-06-25T19:15:36.20909Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Alternative/f73339a3-6da9-45c1-b98f-868f223425e7> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Nested {title, description} cluster fields — rejected: arrays-of-objects are the schema shape small models most often mis-form" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Alternative> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <http://www.w3.org/2000/01/rdf-schema#label> "Keep the fallback as file-level knowledge (hover anywhere shows module records) - rejected: contradicts the slice-1 rejection rationale (hides absent-token positions) and leaves the link_code mistyped-position footgun" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:40:20.782062Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Keep the fallback as file-level knowledge (hover anywhere shows module records) - rejected: contradicts the slice-1 rejection rationale (hides absent-token positions) and leaves the link_code mistyped-position footgun" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/013a9706-3932-4ce5-8777-64aab321cc32> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#ArchitecturalDecision> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/013a9706-3932-4ce5-8777-64aab321cc32> <http://www.w3.org/2000/01/rdf-schema#label> "Committed canonical kg.nq: write-through export + hash-stamp startup reconciliation" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/013a9706-3932-4ce5-8777-64aab321cc32> <https://trivyn.io/ontologies/software/architecture#concerns> <https://moosedev.dev/kg/SystemComponent/11e01ea2-f520-4f7c-a165-09532dacd43f> <https://moosedev.dev/kg/project> .
@@ -877,6 +901,17 @@
 <https://moosedev.dev/kg/ArchitecturalDecision/9edda690-2ac1-494b-bd07-04a92cc4f787> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/9edda690-2ac1-494b-bd07-04a92cc4f787> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-06-20T19:46:05.657631Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/9edda690-2ac1-494b-bd07-04a92cc4f787> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Web UI defaults to an ephemeral loopback port, discovered via http.addr + --status/ui" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#ArchitecturalDecision> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <http://www.w3.org/2000/01/rdf-schema#label> "Whole-file module occurrences are not position hits" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#concerns> <https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#concerns> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#hasDescription> "Substrate::resolve skips any Module-kind occurrence that starts at 0:0 and spans multiple lines (is_synthetic_whole_file_marker) - rust-analyzer emits these as whole-file containers for every file, not as tokens. Token-less positions (comments, blank lines) therefore miss honestly instead of resolving to the enclosing module; modules stay reachable via their mod declaration name token, SCIP symbol, or entity IRI. Generalizes AD 77b7f5f7 (which filtered only the crate/ marker) to all per-file module symbols; resolves the 2026-07-08 slice-2 acceptance finding where a comment line in a module-linked file surfaced the module dossier and a mistyped link_code position could silently link the whole module. The multi-line requirement is what keeps real module name tokens (always single-line) resolvable; ingestion and definitions() are untouched, so module entities remain mintable." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:40:20.782062Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Whole-file module occurrences are not position hits" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#weighs> <https://moosedev.dev/kg/Alternative/17b33064-170f-4838-a351-811aa7b143e6> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/ab379ef4-e43c-457b-ab4b-e51fe68a450d> <https://trivyn.io/ontologies/software/architecture#weighs> <https://moosedev.dev/kg/Alternative/ff00bb2d-ef36-4797-ac7a-7feaa594e13e> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/b0d3e4d9-873c-4b5b-bff1-0403c6ab1724> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#ArchitecturalDecision> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/b0d3e4d9-873c-4b5b-bff1-0403c6ab1724> <http://www.w3.org/2000/01/rdf-schema#label> "Code-layer ontology: three strata with distinct change-semantics" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/b0d3e4d9-873c-4b5b-bff1-0403c6ab1724> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "claude-code" <https://moosedev.dev/kg/project> .
@@ -1039,6 +1074,18 @@
 <https://moosedev.dev/kg/ArchitecturalDecision/d91288c9-5d4a-494f-95b5-5d5a26383b0a> <https://trivyn.io/ontologies/software/architecture#resultsIn> <https://moosedev.dev/kg/Consequence/6e1c25e8-0ec3-42ea-ba6e-29275b6e0327> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/d91288c9-5d4a-494f-95b5-5d5a26383b0a> <https://trivyn.io/ontologies/software/architecture#resultsIn> <https://moosedev.dev/kg/Consequence/c2d83825-adeb-4174-9af6-7d92502fd8a0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/d91288c9-5d4a-494f-95b5-5d5a26383b0a> <https://trivyn.io/ontologies/software/architecture#weighs> <https://moosedev.dev/kg/Alternative/c01d4d21-b8ab-4950-9552-28751fbfd383> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#ArchitecturalDecision> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <http://www.w3.org/2000/01/rdf-schema#label> "Path coverage is a first-class MCP write: declare_component_paths" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#concerns> <https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#concerns> <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#hasDescription> "SystemComponent coversPath coverage is declarable over the MCP surface (declare_component_paths: exact name or IRI, repo-relative paths, add-only and idempotent, SHACL-typed target check) instead of only via the hardcoded seed table in examples/backfill_concerns.rs. Coverage is what moosedev mint uses to derive realizes edges (path to owning component, longest match wins), so without an agent-reachable write, bootstrapped projects inevitably end up with covered-nothing components - exactly the hole MOOSEDev's own repo fell into (the code layer substrate component sat coverage-less from slice 1 until 2026-07-09, leaving 12 paths unmapped and substrate entities without realizes edges). First real use: declaring src/code/ on that component, then an idempotent re-mint added the 106 missing realizes edges as an adds-only update. Both bootstrap skills (bootstrap-existing-codebase, temporal-episode-capture) now include the code-entity phase: declare coverage, index + mint, link_code the strongest records. Deferred: an in-process MCP mint tool so re-mint does not require stopping the daemon (the CLI holds the store lock)." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:41:07.029518Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Path coverage is a first-class MCP write: declare_component_paths" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#isMotivatedBy> <https://moosedev.dev/kg/Requirement/d459cac2-09f6-4f7b-b959-0f5337d6c5f4> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#weighs> <https://moosedev.dev/kg/Alternative/0ed7298f-6564-4b7a-b4c8-43da64b70247> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/ArchitecturalDecision/dddeed22-985a-4c12-873a-142f2923a115> <https://trivyn.io/ontologies/software/architecture#weighs> <https://moosedev.dev/kg/Alternative/0efa1834-7eed-4317-bfc4-c26ffe25a75b> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/e0b7b528-58f9-4638-a0d8-ef4cc6063c6b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#ArchitecturalDecision> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/e0b7b528-58f9-4638-a0d8-ef4cc6063c6b> <http://www.w3.org/2000/01/rdf-schema#label> "GROWL enrich co-locates inferred edges in kg/project" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/ArchitecturalDecision/e0b7b528-58f9-4638-a0d8-ef4cc6063c6b> <https://trivyn.io/ontologies/software/architecture#concerns> <https://moosedev.dev/kg/SystemComponent/11e01ea2-f520-4f7c-a165-09532dacd43f> <https://moosedev.dev/kg/project> .
@@ -1187,6 +1234,7 @@
 <https://moosedev.dev/kg/CodeEntity/02af2668-a3f5-4ff1-a2bd-11d3fed5e247> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/02af2668-a3f5-4ff1-a2bd-11d3fed5e247> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::signature" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/02af2668-a3f5-4ff1-a2bd-11d3fed5e247> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#signature." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/02af2668-a3f5-4ff1-a2bd-11d3fed5e247> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/031a4715-01e5-4910-8d62-f10d7f108711> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/031a4715-01e5-4910-8d62-f10d7f108711> <http://www.w3.org/2000/01/rdf-schema#label> "Agent" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/031a4715-01e5-4910-8d62-f10d7f108711> <https://trivyn.io/ontologies/software/code#definedInPath> "src/temporal.rs" <https://moosedev.dev/kg/project> .
@@ -1358,6 +1406,7 @@
 <https://moosedev.dev/kg/CodeEntity/081b15db-cedd-487a-bac8-cdd32eafbec7> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/081b15db-cedd-487a-bac8-cdd32eafbec7> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/081b15db-cedd-487a-bac8-cdd32eafbec7> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/081b15db-cedd-487a-bac8-cdd32eafbec7> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/084aa51c-abeb-43a1-9b8d-6c8440b616f6> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/084aa51c-abeb-43a1-9b8d-6c8440b616f6> <http://www.w3.org/2000/01/rdf-schema#label> "query" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/084aa51c-abeb-43a1-9b8d-6c8440b616f6> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -1373,6 +1422,7 @@
 <https://moosedev.dev/kg/CodeEntity/0862dfd3-173f-45c3-8c4d-cc5ef6a401e7> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0862dfd3-173f-45c3-8c4d-cc5ef6a401e7> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0862dfd3-173f-45c3-8c4d-cc5ef6a401e7> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/0862dfd3-173f-45c3-8c4d-cc5ef6a401e7> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0865db5e-9284-46fc-852f-23054887ce6d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0865db5e-9284-46fc-852f-23054887ce6d> <http://www.w3.org/2000/01/rdf-schema#label> "parse" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0865db5e-9284-46fc-852f-23054887ce6d> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph_import.rs" <https://moosedev.dev/kg/project> .
@@ -1419,6 +1469,7 @@
 <https://moosedev.dev/kg/CodeEntity/0972ba14-0da8-4953-a5a7-e92b46fbd79e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0972ba14-0da8-4953-a5a7-e92b46fbd79e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::indexed_commit" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0972ba14-0da8-4953-a5a7-e92b46fbd79e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#indexed_commit." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/0972ba14-0da8-4953-a5a7-e92b46fbd79e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/09941627-aaf6-430f-83c3-a562f19a30db> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/09941627-aaf6-430f-83c3-a562f19a30db> <http://www.w3.org/2000/01/rdf-schema#label> "reasoning" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/09941627-aaf6-430f-83c3-a562f19a30db> <https://trivyn.io/ontologies/software/code#definedInPath> "src/reasoning/mod.rs" <https://moosedev.dev/kg/project> .
@@ -1527,6 +1578,7 @@
 <https://moosedev.dev/kg/CodeEntity/0b756fd7-5ede-4ecb-b48a-fb9fc4414b87> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0b756fd7-5ede-4ecb-b48a-fb9fc4414b87> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0b756fd7-5ede-4ecb-b48a-fb9fc4414b87> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/0b756fd7-5ede-4ecb-b48a-fb9fc4414b87> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <http://www.w3.org/2000/01/rdf-schema#label> "resolver" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/resolver.rs" <https://moosedev.dev/kg/project> .
@@ -1534,6 +1586,7 @@
 <https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/0c042477-d0d6-4a04-8072-e0f7f1c53b36> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c04b00d-454c-44fe-baca-3e6bc21f309f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c04b00d-454c-44fe-baca-3e6bc21f309f> <http://www.w3.org/2000/01/rdf-schema#label> "sessions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c04b00d-454c-44fe-baca-3e6bc21f309f> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -1549,6 +1602,7 @@
 <https://moosedev.dev/kg/CodeEntity/0c42b15e-4dba-47f2-ac4b-b8d3d244e911> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c42b15e-4dba-47f2-ac4b-b8d3d244e911> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData::display_name" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0c42b15e-4dba-47f2-ac4b-b8d3d244e911> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#display_name." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/0c42b15e-4dba-47f2-ac4b-b8d3d244e911> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0ca101fd-fca7-4265-afa5-6bfc75eafa0c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0ca101fd-fca7-4265-afa5-6bfc75eafa0c> <http://www.w3.org/2000/01/rdf-schema#label> "record_instance_with_relation_args" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/0ca101fd-fca7-4265-afa5-6bfc75eafa0c> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/capture.rs" <https://moosedev.dev/kg/project> .
@@ -1682,6 +1736,7 @@
 <https://moosedev.dev/kg/CodeEntity/111a3541-1dc6-4797-abce-97f262d5b7fc> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Enum" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/111a3541-1dc6-4797-abce-97f262d5b7fc> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::ResolutionMode" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/111a3541-1dc6-4797-abce-97f262d5b7fc> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/ResolutionMode#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/111a3541-1dc6-4797-abce-97f262d5b7fc> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/116dd726-6c3e-4742-8506-d1cc740d2c1f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/116dd726-6c3e-4742-8506-d1cc740d2c1f> <http://www.w3.org/2000/01/rdf-schema#label> "mark_inferred_stale" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/116dd726-6c3e-4742-8506-d1cc740d2c1f> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -1935,6 +1990,7 @@
 <https://moosedev.dev/kg/CodeEntity/19244bf0-b593-47da-baad-3e6a0b368b2d> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/19244bf0-b593-47da-baad-3e6a0b368b2d> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::symbols::tests" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/19244bf0-b593-47da-baad-3e6a0b368b2d> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/symbols/tests/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/19244bf0-b593-47da-baad-3e6a0b368b2d> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/19973fe4-5c38-4e1a-b596-9772983efcb4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/19973fe4-5c38-4e1a-b596-9772983efcb4> <http://www.w3.org/2000/01/rdf-schema#label> "generated_at" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/19973fe4-5c38-4e1a-b596-9772983efcb4> <https://trivyn.io/ontologies/software/code#definedInPath> "src/lessons.rs" <https://moosedev.dev/kg/project> .
@@ -1957,6 +2013,7 @@
 <https://moosedev.dev/kg/CodeEntity/1aa493f2-d39b-404d-8b92-ae5d3fe08d43> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1aa493f2-d39b-404d-8b92-ae5d3fe08d43> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::normalized_symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1aa493f2-d39b-404d-8b92-ae5d3fe08d43> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#normalized_symbol." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/1aa493f2-d39b-404d-8b92-ae5d3fe08d43> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1ab279a8-7376-4710-9898-397197320f60> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1ab279a8-7376-4710-9898-397197320f60> <http://www.w3.org/2000/01/rdf-schema#label> "title" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1ab279a8-7376-4710-9898-397197320f60> <https://trivyn.io/ontologies/software/code#definedInPath> "src/adrs.rs" <https://moosedev.dev/kg/project> .
@@ -1972,6 +2029,7 @@
 <https://moosedev.dev/kg/CodeEntity/1b53907a-f755-46e6-bf9b-ba34d7be122e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1b53907a-f755-46e6-bf9b-ba34d7be122e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SourceRange::start" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1b53907a-f755-46e6-bf9b-ba34d7be122e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SourceRange#start." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/1b53907a-f755-46e6-bf9b-ba34d7be122e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1bddcec3-c59d-4854-a7b6-d3e958dd71dc> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1bddcec3-c59d-4854-a7b6-d3e958dd71dc> <http://www.w3.org/2000/01/rdf-schema#label> "timestamp" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1bddcec3-c59d-4854-a7b6-d3e958dd71dc> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/dossier.rs" <https://moosedev.dev/kg/project> .
@@ -2019,6 +2077,7 @@
 <https://moosedev.dev/kg/CodeEntity/1d940b23-c37a-4d41-b52f-b28607d94d8f> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1d940b23-c37a-4d41-b52f-b28607d94d8f> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::read_index" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1d940b23-c37a-4d41-b52f-b28607d94d8f> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/read_index()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/1d940b23-c37a-4d41-b52f-b28607d94d8f> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1db20af7-09cf-4f85-a73e-356d642387fe> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1db20af7-09cf-4f85-a73e-356d642387fe> <http://www.w3.org/2000/01/rdf-schema#label> "index_markdown" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/1db20af7-09cf-4f85-a73e-356d642387fe> <https://trivyn.io/ontologies/software/code#definedInPath> "src/lessons.rs" <https://moosedev.dev/kg/project> .
@@ -2110,6 +2169,7 @@
 <https://moosedev.dev/kg/CodeEntity/2028da68-b1be-40b1-bac0-84203ec02dbd> <https://trivyn.io/ontologies/software/code#hasEntityKind> "StaticMethod" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2028da68-b1be-40b1-bac0-84203ec02dbd> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::from_index" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2028da68-b1be-40b1-bac0-84203ec02dbd> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]from_index()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/2028da68-b1be-40b1-bac0-84203ec02dbd> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/202d11b2-bd2f-4154-9166-221a16dcc309> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/202d11b2-bd2f-4154-9166-221a16dcc309> <http://www.w3.org/2000/01/rdf-schema#label> "turn_count" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/202d11b2-bd2f-4154-9166-221a16dcc309> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -2189,6 +2249,7 @@
 <https://moosedev.dev/kg/CodeEntity/228c0ff9-638c-4de7-ac77-508de20edf00> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/228c0ff9-638c-4de7-ac77-508de20edf00> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Position::col" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/228c0ff9-638c-4de7-ac77-508de20edf00> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Position#col." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/228c0ff9-638c-4de7-ac77-508de20edf00> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <http://www.w3.org/2000/01/rdf-schema#label> "index_tmp_path" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/mod.rs" <https://moosedev.dev/kg/project> .
@@ -2196,6 +2257,7 @@
 <https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::index_tmp_path" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/index_tmp_path()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/2344fc4d-1e28-4ffa-91ae-7b94b860c12f> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2378ac66-1c91-4d95-aec1-7f960d7e3593> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2378ac66-1c91-4d95-aec1-7f960d7e3593> <http://www.w3.org/2000/01/rdf-schema#label> "supersede_decision" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2378ac66-1c91-4d95-aec1-7f960d7e3593> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/lifecycle.rs" <https://moosedev.dev/kg/project> .
@@ -2219,6 +2281,7 @@
 <https://moosedev.dev/kg/CodeEntity/2422544a-d5da-41b9-aab2-c392de642617> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2422544a-d5da-41b9-aab2-c392de642617> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::range" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2422544a-d5da-41b9-aab2-c392de642617> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#range." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/2422544a-d5da-41b9-aab2-c392de642617> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/25472ee0-2473-460d-9a98-a969a8a0a11c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/25472ee0-2473-460d-9a98-a969a8a0a11c> <http://www.w3.org/2000/01/rdf-schema#label> "messages" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/25472ee0-2473-460d-9a98-a969a8a0a11c> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -2313,6 +2376,7 @@
 <https://moosedev.dev/kg/CodeEntity/289dde69-4077-46fe-9db4-1f24d371dbea> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/289dde69-4077-46fe-9db4-1f24d371dbea> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::FileOccurrences::max_line_span" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/289dde69-4077-46fe-9db4-1f24d371dbea> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/FileOccurrences#max_line_span." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/289dde69-4077-46fe-9db4-1f24d371dbea> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/292280fe-d500-4a45-90c3-cc2a09508f6d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/292280fe-d500-4a45-90c3-cc2a09508f6d> <http://www.w3.org/2000/01/rdf-schema#label> "is_historical" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/292280fe-d500-4a45-90c3-cc2a09508f6d> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/context.rs" <https://moosedev.dev/kg/project> .
@@ -2359,6 +2423,7 @@
 <https://moosedev.dev/kg/CodeEntity/2a34cf73-5426-4259-8d6d-3c953539ad13> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Constant" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2a34cf73-5426-4259-8d6d-3c953539ad13> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::CURRENT_SCHEMA_VERSION" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2a34cf73-5426-4259-8d6d-3c953539ad13> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/CURRENT_SCHEMA_VERSION." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/2a34cf73-5426-4259-8d6d-3c953539ad13> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2ab93696-59f3-4217-9d52-fa816302f499> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2ab93696-59f3-4217-9d52-fa816302f499> <http://www.w3.org/2000/01/rdf-schema#label> "object_title" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2ab93696-59f3-4217-9d52-fa816302f499> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/links.rs" <https://moosedev.dev/kg/project> .
@@ -2406,6 +2471,7 @@
 <https://moosedev.dev/kg/CodeEntity/2b5e6531-25ed-4e3d-b586-71233c1c2da2> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2b5e6531-25ed-4e3d-b586-71233c1c2da2> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SubstrateStats::documents" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2b5e6531-25ed-4e3d-b586-71233c1c2da2> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SubstrateStats#documents." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/2b5e6531-25ed-4e3d-b586-71233c1c2da2> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2b82e56e-cede-41e5-bfeb-001489706708> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2b82e56e-cede-41e5-bfeb-001489706708> <http://www.w3.org/2000/01/rdf-schema#label> "GetProvenanceArgs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2b82e56e-cede-41e5-bfeb-001489706708> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -2437,6 +2503,7 @@
 <https://moosedev.dev/kg/CodeEntity/2c8ed103-18d6-46b9-a886-d9b0953bdc77> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2c8ed103-18d6-46b9-a886-d9b0953bdc77> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::substrate_dir" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2c8ed103-18d6-46b9-a886-d9b0953bdc77> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/substrate_dir()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/2c8ed103-18d6-46b9-a886-d9b0953bdc77> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2c90d5ea-e184-40c1-a128-ea98ce22db9b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2c90d5ea-e184-40c1-a128-ea98ce22db9b> <http://www.w3.org/2000/01/rdf-schema#label> "retract_decision" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/2c90d5ea-e184-40c1-a128-ea98ce22db9b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/lifecycle.rs" <https://moosedev.dev/kg/project> .
@@ -2572,6 +2639,7 @@
 <https://moosedev.dev/kg/CodeEntity/30e46e75-115d-4fa8-ab38-63ae0bd5df42> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/30e46e75-115d-4fa8-ab38-63ae0bd5df42> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData::is_local" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/30e46e75-115d-4fa8-ab38-63ae0bd5df42> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#is_local." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/30e46e75-115d-4fa8-ab38-63ae0bd5df42> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/31193cb2-09de-475d-885a-e5ceeef220b7> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/31193cb2-09de-475d-885a-e5ceeef220b7> <http://www.w3.org/2000/01/rdf-schema#label> "tests" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/31193cb2-09de-475d-885a-e5ceeef220b7> <https://trivyn.io/ontologies/software/code#definedInPath> "src/canonical.rs" <https://moosedev.dev/kg/project> .
@@ -2682,6 +2750,7 @@
 <https://moosedev.dev/kg/CodeEntity/33087d5b-36d0-4c80-b100-7661f30daa92> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/33087d5b-36d0-4c80-b100-7661f30daa92> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/33087d5b-36d0-4c80-b100-7661f30daa92> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/33087d5b-36d0-4c80-b100-7661f30daa92> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/333b8050-3cf6-40b7-81e2-08178adb1003> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/333b8050-3cf6-40b7-81e2-08178adb1003> <http://www.w3.org/2000/01/rdf-schema#label> "run_query" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/333b8050-3cf6-40b7-81e2-08178adb1003> <https://trivyn.io/ontologies/software/code#definedInPath> "src/sparql.rs" <https://moosedev.dev/kg/project> .
@@ -2705,6 +2774,7 @@
 <https://moosedev.dev/kg/CodeEntity/336c39e8-9005-49d3-89f1-d3cca1d324e3> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/336c39e8-9005-49d3-89f1-d3cca1d324e3> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::run_index" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/336c39e8-9005-49d3-89f1-d3cca1d324e3> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/run_index()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/336c39e8-9005-49d3-89f1-d3cca1d324e3> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/34266412-40d5-4dbc-a46f-3308c90dcf95> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/34266412-40d5-4dbc-a46f-3308c90dcf95> <http://www.w3.org/2000/01/rdf-schema#label> "status" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/34266412-40d5-4dbc-a46f-3308c90dcf95> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -2720,6 +2790,7 @@
 <https://moosedev.dev/kg/CodeEntity/3464c157-857c-4fae-877d-81790f2f9509> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3464c157-857c-4fae-877d-81790f2f9509> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::mode" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3464c157-857c-4fae-877d-81790f2f9509> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#mode." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3464c157-857c-4fae-877d-81790f2f9509> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/346a62f5-7153-492b-b858-00bdf21c56d8> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/346a62f5-7153-492b-b858-00bdf21c56d8> <http://www.w3.org/2000/01/rdf-schema#label> "data_dir" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/346a62f5-7153-492b-b858-00bdf21c56d8> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -2774,6 +2845,7 @@
 <https://moosedev.dev/kg/CodeEntity/3560f0a4-30c4-451e-93b6-2fa2fe451281> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3560f0a4-30c4-451e-93b6-2fa2fe451281> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3560f0a4-30c4-451e-93b6-2fa2fe451281> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3560f0a4-30c4-451e-93b6-2fa2fe451281> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/35862f10-9aca-4e47-a9c0-936830633499> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/35862f10-9aca-4e47-a9c0-936830633499> <http://www.w3.org/2000/01/rdf-schema#label> "mode" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/35862f10-9aca-4e47-a9c0-936830633499> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph_import.rs" <https://moosedev.dev/kg/project> .
@@ -2797,6 +2869,7 @@
 <https://moosedev.dev/kg/CodeEntity/35eb7a82-b367-4e84-bb6a-d737613ff6c0> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/35eb7a82-b367-4e84-bb6a-d737613ff6c0> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::index_path" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/35eb7a82-b367-4e84-bb6a-d737613ff6c0> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/index_path()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/35eb7a82-b367-4e84-bb6a-d737613ff6c0> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3755c2d0-5576-4711-bdbd-3f6e0b1c9207> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3755c2d0-5576-4711-bdbd-3f6e0b1c9207> <http://www.w3.org/2000/01/rdf-schema#label> "node" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3755c2d0-5576-4711-bdbd-3f6e0b1c9207> <https://trivyn.io/ontologies/software/code#definedInPath> "src/validation.rs" <https://moosedev.dev/kg/project> .
@@ -2884,6 +2957,7 @@
 <https://moosedev.dev/kg/CodeEntity/3a2faf22-70a7-4d7c-98b1-374f61a39c0a> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3a2faf22-70a7-4d7c-98b1-374f61a39c0a> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::is_local" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3a2faf22-70a7-4d7c-98b1-374f61a39c0a> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#is_local." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3a2faf22-70a7-4d7c-98b1-374f61a39c0a> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3a55fc1e-9f79-42a0-8b35-823e30b0b74d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3a55fc1e-9f79-42a0-8b35-823e30b0b74d> <http://www.w3.org/2000/01/rdf-schema#label> "RecordInput" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3a55fc1e-9f79-42a0-8b35-823e30b0b74d> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/capture.rs" <https://moosedev.dev/kg/project> .
@@ -2976,6 +3050,7 @@
 <https://moosedev.dev/kg/CodeEntity/3cc845c1-b2fe-4848-a0c4-f0980bd037fc> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3cc845c1-b2fe-4848-a0c4-f0980bd037fc> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::is_definition_role" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3cc845c1-b2fe-4848-a0c4-f0980bd037fc> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/is_definition_role()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3cc845c1-b2fe-4848-a0c4-f0980bd037fc> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3d341a37-b3a0-4594-93f2-6c1dd773d574> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3d341a37-b3a0-4594-93f2-6c1dd773d574> <http://www.w3.org/2000/01/rdf-schema#label> "llm_assist_level" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3d341a37-b3a0-4594-93f2-6c1dd773d574> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -3000,6 +3075,14 @@
 <https://moosedev.dev/kg/CodeEntity/3dadf963-c0aa-40df-8b9e-bc5b2755a238> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "runtime::http_addr_file_path_for" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3dadf963-c0aa-40df-8b9e-bc5b2755a238> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . runtime/http_addr_file_path_for()." <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3dadf963-c0aa-40df-8b9e-bc5b2755a238> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <http://www.w3.org/2000/01/rdf-schema#label> "declare_component_paths" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/components.rs" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://trivyn.io/ontologies/software/code#hasCodeName> "declare_component_paths" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "graph::components::declare_component_paths" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . graph/components/declare_component_paths()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3dd4e492-6488-49f0-8aa0-6188ab8112f1> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/11e01ea2-f520-4f7c-a165-09532dacd43f> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3df44816-b425-48bc-8617-64a05ca091e5> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3df44816-b425-48bc-8617-64a05ca091e5> <http://www.w3.org/2000/01/rdf-schema#label> "format_outcome" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3df44816-b425-48bc-8617-64a05ca091e5> <https://trivyn.io/ontologies/software/code#definedInPath> "src/alignment/mod.rs" <https://moosedev.dev/kg/project> .
@@ -3023,6 +3106,7 @@
 <https://moosedev.dev/kg/CodeEntity/3e84ffb9-9006-4ea4-a910-e3f5b9622597> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3e84ffb9-9006-4ea4-a910-e3f5b9622597> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::documents" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3e84ffb9-9006-4ea4-a910-e3f5b9622597> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#documents." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/3e84ffb9-9006-4ea4-a910-e3f5b9622597> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3eef16fd-457b-42cb-b1ed-dcc3887bfb68> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3eef16fd-457b-42cb-b1ed-dcc3887bfb68> <http://www.w3.org/2000/01/rdf-schema#label> "alignment" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/3eef16fd-457b-42cb-b1ed-dcc3887bfb68> <https://trivyn.io/ontologies/software/code#definedInPath> "src/alignment/mod.rs" <https://moosedev.dev/kg/project> .
@@ -3124,6 +3208,7 @@
 <https://moosedev.dev/kg/CodeEntity/41fe0fcd-d041-4272-87fa-cad8e8909bbc> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/41fe0fcd-d041-4272-87fa-cad8e8909bbc> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::resolve" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/41fe0fcd-d041-4272-87fa-cad8e8909bbc> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]resolve()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/41fe0fcd-d041-4272-87fa-cad8e8909bbc> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42050514-f5a3-42e0-8f55-1a58c22c2464> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42050514-f5a3-42e0-8f55-1a58c22c2464> <http://www.w3.org/2000/01/rdf-schema#label> "num" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42050514-f5a3-42e0-8f55-1a58c22c2464> <https://trivyn.io/ontologies/software/code#definedInPath> "src/adrs.rs" <https://moosedev.dev/kg/project> .
@@ -3139,6 +3224,7 @@
 <https://moosedev.dev/kg/CodeEntity/42c43ab0-64b8-4672-9481-a8c4bd6ef1f8> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42c43ab0-64b8-4672-9481-a8c4bd6ef1f8> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::symbols" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42c43ab0-64b8-4672-9481-a8c4bd6ef1f8> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/symbols/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/42c43ab0-64b8-4672-9481-a8c4bd6ef1f8> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42eb904d-a391-4a31-ab63-80dfaea34054> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42eb904d-a391-4a31-ab63-80dfaea34054> <http://www.w3.org/2000/01/rdf-schema#label> "RelateOutcome" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/42eb904d-a391-4a31-ab63-80dfaea34054> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/lifecycle.rs" <https://moosedev.dev/kg/project> .
@@ -3170,6 +3256,7 @@
 <https://moosedev.dev/kg/CodeEntity/432bf703-4d3c-4745-8a90-8e4a535a079d> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/432bf703-4d3c-4745-8a90-8e4a535a079d> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::display_name" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/432bf703-4d3c-4745-8a90-8e4a535a079d> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#display_name." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/432bf703-4d3c-4745-8a90-8e4a535a079d> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/433648b0-ff51-4347-865c-e166928dc352> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/433648b0-ff51-4347-865c-e166928dc352> <http://www.w3.org/2000/01/rdf-schema#label> "iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/433648b0-ff51-4347-865c-e166928dc352> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/code_entities.rs" <https://moosedev.dev/kg/project> .
@@ -3223,6 +3310,7 @@
 <https://moosedev.dev/kg/CodeEntity/44ffa3f6-0228-49c3-a047-1b9847d75ac7> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/44ffa3f6-0228-49c3-a047-1b9847d75ac7> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::FileOccurrences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/44ffa3f6-0228-49c3-a047-1b9847d75ac7> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/FileOccurrences#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/44ffa3f6-0228-49c3-a047-1b9847d75ac7> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4576dcfe-f319-4dc8-a5d1-d4712c075d74> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4576dcfe-f319-4dc8-a5d1-d4712c075d74> <http://www.w3.org/2000/01/rdf-schema#label> "timestamp" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4576dcfe-f319-4dc8-a5d1-d4712c075d74> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -3277,6 +3365,7 @@
 <https://moosedev.dev/kg/CodeEntity/45fb60de-ed96-4a64-9789-e0ef53b3e27b> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/45fb60de-ed96-4a64-9789-e0ef53b3e27b> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::IngestedIndex::documents" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/45fb60de-ed96-4a64-9789-e0ef53b3e27b> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/IngestedIndex#documents." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/45fb60de-ed96-4a64-9789-e0ef53b3e27b> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <http://www.w3.org/2000/01/rdf-schema#label> "producer" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/producer.rs" <https://moosedev.dev/kg/project> .
@@ -3284,6 +3373,7 @@
 <https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/4675f573-7f83-40b1-a5ef-f6318a34e3d6> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <http://www.w3.org/2000/01/rdf-schema#label> "kind" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/scip.rs" <https://moosedev.dev/kg/project> .
@@ -3291,6 +3381,7 @@
 <https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData::kind" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#kind." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/46c73f84-b5aa-4474-9caf-78437280dfe0> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46d37921-d18b-42ea-b02d-bc799285353d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46d37921-d18b-42ea-b02d-bc799285353d> <http://www.w3.org/2000/01/rdf-schema#label> "format" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/46d37921-d18b-42ea-b02d-bc799285353d> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/handlers/export.rs" <https://moosedev.dev/kg/project> .
@@ -3367,6 +3458,7 @@
 <https://moosedev.dev/kg/CodeEntity/49e3f60f-e8d1-45af-ab8f-3ff4c55e12ae> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/49e3f60f-e8d1-45af-ab8f-3ff4c55e12ae> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::definition_for_symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/49e3f60f-e8d1-45af-ab8f-3ff4c55e12ae> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]definition_for_symbol()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/49e3f60f-e8d1-45af-ab8f-3ff4c55e12ae> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/49e502e0-7212-4c4b-b4ff-98a706252152> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/49e502e0-7212-4c4b-b4ff-98a706252152> <http://www.w3.org/2000/01/rdf-schema#label> "clear_reasoner_inferences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/49e502e0-7212-4c4b-b4ff-98a706252152> <https://trivyn.io/ontologies/software/code#definedInPath> "src/provenance/mod.rs" <https://moosedev.dev/kg/project> .
@@ -3382,6 +3474,7 @@
 <https://moosedev.dev/kg/CodeEntity/4a20719b-d1bb-472b-bdbb-fd1f5d01a22a> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4a20719b-d1bb-472b-bdbb-fd1f5d01a22a> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::impl::SubstrateMeta::save" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4a20719b-d1bb-472b-bdbb-fd1f5d01a22a> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/impl#[SubstrateMeta]save()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/4a20719b-d1bb-472b-bdbb-fd1f5d01a22a> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4a881c74-08ac-4c3a-aa98-e9167ebded53> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4a881c74-08ac-4c3a-aa98-e9167ebded53> <http://www.w3.org/2000/01/rdf-schema#label> "export_graph" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4a881c74-08ac-4c3a-aa98-e9167ebded53> <https://trivyn.io/ontologies/software/code#definedInPath> "src/export.rs" <https://moosedev.dev/kg/project> .
@@ -3420,6 +3513,7 @@
 <https://moosedev.dev/kg/CodeEntity/4c641073-f9ff-44db-b028-3805ed7effc3> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4c641073-f9ff-44db-b028-3805ed7effc3> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::producer_info" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4c641073-f9ff-44db-b028-3805ed7effc3> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/producer_info()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/4c641073-f9ff-44db-b028-3805ed7effc3> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4cbea428-5303-46f6-885e-6fdf2121622e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4cbea428-5303-46f6-885e-6fdf2121622e> <http://www.w3.org/2000/01/rdf-schema#label> "date" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/4cbea428-5303-46f6-885e-6fdf2121622e> <https://trivyn.io/ontologies/software/code#definedInPath> "src/lessons.rs" <https://moosedev.dev/kg/project> .
@@ -3566,6 +3660,7 @@
 <https://moosedev.dev/kg/CodeEntity/520b5fb2-21e1-40ac-bd97-fa21780d0f99> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/520b5fb2-21e1-40ac-bd97-fa21780d0f99> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::display_name" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/520b5fb2-21e1-40ac-bd97-fa21780d0f99> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#display_name." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/520b5fb2-21e1-40ac-bd97-fa21780d0f99> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/522a8c83-ccba-4d17-9ffe-264485fd9566> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/522a8c83-ccba-4d17-9ffe-264485fd9566> <http://www.w3.org/2000/01/rdf-schema#label> "ClusterSlot" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/522a8c83-ccba-4d17-9ffe-264485fd9566> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/capture.rs" <https://moosedev.dev/kg/project> .
@@ -3721,6 +3816,7 @@
 <https://moosedev.dev/kg/CodeEntity/5b7ff8f2-9fb6-4464-a547-38e28c6720db> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5b7ff8f2-9fb6-4464-a547-38e28c6720db> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::occurrences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5b7ff8f2-9fb6-4464-a547-38e28c6720db> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#occurrences." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/5b7ff8f2-9fb6-4464-a547-38e28c6720db> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5baf65d4-8aed-480c-8979-58f8593bc6f2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5baf65d4-8aed-480c-8979-58f8593bc6f2> <http://www.w3.org/2000/01/rdf-schema#label> "ExportFormat" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5baf65d4-8aed-480c-8979-58f8593bc6f2> <https://trivyn.io/ontologies/software/code#definedInPath> "src/export.rs" <https://moosedev.dev/kg/project> .
@@ -3744,6 +3840,7 @@
 <https://moosedev.dev/kg/CodeEntity/5cee8006-fc02-4b35-b0ca-76670000ef42> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5cee8006-fc02-4b35-b0ca-76670000ef42> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::tests" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5cee8006-fc02-4b35-b0ca-76670000ef42> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/tests/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/5cee8006-fc02-4b35-b0ca-76670000ef42> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5d3013ad-f7d8-445f-aeff-e45da0ea9b78> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5d3013ad-f7d8-445f-aeff-e45da0ea9b78> <http://www.w3.org/2000/01/rdf-schema#label> "vars" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5d3013ad-f7d8-445f-aeff-e45da0ea9b78> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -3807,6 +3904,7 @@
 <https://moosedev.dev/kg/CodeEntity/5e9c8c82-c62d-4d32-8e0a-2206d4c74547> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5e9c8c82-c62d-4d32-8e0a-2206d4c74547> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::producer_version" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5e9c8c82-c62d-4d32-8e0a-2206d4c74547> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#producer_version." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/5e9c8c82-c62d-4d32-8e0a-2206d4c74547> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5f319323-136e-4df4-8e97-1a26aeef1bc9> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5f319323-136e-4df4-8e97-1a26aeef1bc9> <http://www.w3.org/2000/01/rdf-schema#label> "LessonSet" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/5f319323-136e-4df4-8e97-1a26aeef1bc9> <https://trivyn.io/ontologies/software/code#definedInPath> "src/lessons.rs" <https://moosedev.dev/kg/project> .
@@ -3915,6 +4013,7 @@
 <https://moosedev.dev/kg/CodeEntity/6300206f-b4bf-4566-9be6-32cb09781d77> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6300206f-b4bf-4566-9be6-32cb09781d77> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::IngestedIndex::definitions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6300206f-b4bf-4566-9be6-32cb09781d77> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/IngestedIndex#definitions." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/6300206f-b4bf-4566-9be6-32cb09781d77> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <http://www.w3.org/2000/01/rdf-schema#label> "stale" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/resolver.rs" <https://moosedev.dev/kg/project> .
@@ -3922,6 +4021,7 @@
 <https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::stale" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#stale." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/634a826d-e42c-43f5-b65b-3fdea09fb575> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/63aac6cd-3f45-4268-97ec-053fab3b0db4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/63aac6cd-3f45-4268-97ec-053fab3b0db4> <http://www.w3.org/2000/01/rdf-schema#label> "record_embed_text" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/63aac6cd-3f45-4268-97ec-053fab3b0db4> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -3976,6 +4076,7 @@
 <https://moosedev.dev/kg/CodeEntity/65627397-e070-4e7a-932d-48b11d69f9b2> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/65627397-e070-4e7a-932d-48b11d69f9b2> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::OccurrenceEntry::symbol_id" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/65627397-e070-4e7a-932d-48b11d69f9b2> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/OccurrenceEntry#symbol_id." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/65627397-e070-4e7a-932d-48b11d69f9b2> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/658e1101-59c2-4251-8f84-dbe72b6db92c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/658e1101-59c2-4251-8f84-dbe72b6db92c> <http://www.w3.org/2000/01/rdf-schema#label> "pidfile_path_for" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/658e1101-59c2-4251-8f84-dbe72b6db92c> <https://trivyn.io/ontologies/software/code#definedInPath> "src/runtime.rs" <https://moosedev.dev/kg/project> .
@@ -4037,6 +4138,7 @@
 <https://moosedev.dev/kg/CodeEntity/683629e1-05b5-42c8-8430-fdcef331a52d> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/683629e1-05b5-42c8-8430-fdcef331a52d> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::IngestedIndex::occurrences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/683629e1-05b5-42c8-8430-fdcef331a52d> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/IngestedIndex#occurrences." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/683629e1-05b5-42c8-8430-fdcef331a52d> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/68b8601b-1e81-4021-b361-aa10787d5e3f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/68b8601b-1e81-4021-b361-aa10787d5e3f> <http://www.w3.org/2000/01/rdf-schema#label> "markdown" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/68b8601b-1e81-4021-b361-aa10787d5e3f> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -4114,6 +4216,7 @@
 <https://moosedev.dev/kg/CodeEntity/6c22aa16-d1a2-4850-8524-897a234ce3a3> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6c22aa16-d1a2-4850-8524-897a234ce3a3> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport::documents" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6c22aa16-d1a2-4850-8524-897a234ce3a3> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#documents." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/6c22aa16-d1a2-4850-8524-897a234ce3a3> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6c4657a2-c811-44c5-b65b-122c28870eb7> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6c4657a2-c811-44c5-b65b-122c28870eb7> <http://www.w3.org/2000/01/rdf-schema#label> "instance_store" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6c4657a2-c811-44c5-b65b-122c28870eb7> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -4137,6 +4240,7 @@
 <https://moosedev.dev/kg/CodeEntity/6d61f53b-64e1-40d8-bbf4-ab8d8e3e1cb6> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d61f53b-64e1-40d8-bbf4-ab8d8e3e1cb6> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport::index_bytes" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d61f53b-64e1-40d8-bbf4-ab8d8e3e1cb6> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#index_bytes." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/6d61f53b-64e1-40d8-bbf4-ab8d8e3e1cb6> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d71da33-f33d-40b2-8616-aae0fa81d9a0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d71da33-f33d-40b2-8616-aae0fa81d9a0> <http://www.w3.org/2000/01/rdf-schema#label> "is_merge" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d71da33-f33d-40b2-8616-aae0fa81d9a0> <https://trivyn.io/ontologies/software/code#definedInPath> "src/temporal.rs" <https://moosedev.dev/kg/project> .
@@ -4151,6 +4255,7 @@
 <https://moosedev.dev/kg/CodeEntity/6d7a03fe-9bb6-44fb-9cbf-ae17403175b0> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d7a03fe-9bb6-44fb-9cbf-ae17403175b0> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::ingest" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6d7a03fe-9bb6-44fb-9cbf-ae17403175b0> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/ingest()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/6d7a03fe-9bb6-44fb-9cbf-ae17403175b0> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6e0feb42-d74e-4136-b2cf-7db6272ca3fe> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6e0feb42-d74e-4136-b2cf-7db6272ca3fe> <http://www.w3.org/2000/01/rdf-schema#label> "load_substrate" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/6e0feb42-d74e-4136-b2cf-7db6272ca3fe> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -4226,6 +4331,7 @@
 <https://moosedev.dev/kg/CodeEntity/70bc0994-d7d8-4d2f-b74c-3b247baa8431> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/70bc0994-d7d8-4d2f-b74c-3b247baa8431> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::is_public" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/70bc0994-d7d8-4d2f-b74c-3b247baa8431> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#is_public." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/70bc0994-d7d8-4d2f-b74c-3b247baa8431> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/70d70223-b8ea-4d34-a95b-bf254ca02e71> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/70d70223-b8ea-4d34-a95b-bf254ca02e71> <http://www.w3.org/2000/01/rdf-schema#label> "datatype_property_iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/70d70223-b8ea-4d34-a95b-bf254ca02e71> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/util.rs" <https://moosedev.dev/kg/project> .
@@ -4342,6 +4448,7 @@
 <https://moosedev.dev/kg/CodeEntity/74ebeb28-f895-4808-86f1-3ab0200e7b36> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/74ebeb28-f895-4808-86f1-3ab0200e7b36> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SourceRange" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/74ebeb28-f895-4808-86f1-3ab0200e7b36> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SourceRange#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/74ebeb28-f895-4808-86f1-3ab0200e7b36> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <http://www.w3.org/2000/01/rdf-schema#label> "files" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/scip.rs" <https://moosedev.dev/kg/project> .
@@ -4349,6 +4456,7 @@
 <https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::IngestedIndex::files" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/IngestedIndex#files." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/756480b7-1522-4be1-a0d1-3304a5b3dc1a> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756615a5-23c1-4c12-9514-cf03a0619346> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756615a5-23c1-4c12-9514-cf03a0619346> <http://www.w3.org/2000/01/rdf-schema#label> "STAMP_FILE_NAME" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/756615a5-23c1-4c12-9514-cf03a0619346> <https://trivyn.io/ontologies/software/code#definedInPath> "src/canonical.rs" <https://moosedev.dev/kg/project> .
@@ -4419,6 +4527,7 @@
 <https://moosedev.dev/kg/CodeEntity/779f134c-0846-4f1b-b192-33391c9f0676> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/779f134c-0846-4f1b-b192-33391c9f0676> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::FileOccurrences::occurrences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/779f134c-0846-4f1b-b192-33391c9f0676> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/FileOccurrences#occurrences." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/779f134c-0846-4f1b-b192-33391c9f0676> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <http://www.w3.org/2000/01/rdf-schema#label> "load" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/meta.rs" <https://moosedev.dev/kg/project> .
@@ -4426,6 +4535,7 @@
 <https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <https://trivyn.io/ontologies/software/code#hasEntityKind> "StaticMethod" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::impl::SubstrateMeta::load" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/impl#[SubstrateMeta]load()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/77cfa46b-0a36-438d-add7-2f4952523e11> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77f3a395-1288-4034-84d8-40b67dd7216b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77f3a395-1288-4034-84d8-40b67dd7216b> <http://www.w3.org/2000/01/rdf-schema#label> "graph_requirements" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/77f3a395-1288-4034-84d8-40b67dd7216b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/requirements.rs" <https://moosedev.dev/kg/project> .
@@ -4487,6 +4597,7 @@
 <https://moosedev.dev/kg/CodeEntity/7b3a8d2b-f110-4c29-98c5-c96594a67f07> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7b3a8d2b-f110-4c29-98c5-c96594a67f07> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7b3a8d2b-f110-4c29-98c5-c96594a67f07> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#symbol." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/7b3a8d2b-f110-4c29-98c5-c96594a67f07> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7b71c569-d9ba-4573-a386-8d89641d1b2f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7b71c569-d9ba-4573-a386-8d89641d1b2f> <http://www.w3.org/2000/01/rdf-schema#label> "SH_PATH" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7b71c569-d9ba-4573-a386-8d89641d1b2f> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/util.rs" <https://moosedev.dev/kg/project> .
@@ -4526,6 +4637,7 @@
 <https://moosedev.dev/kg/CodeEntity/7c7de8c4-1f75-406c-be06-32c50e1347ba> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7c7de8c4-1f75-406c-be06-32c50e1347ba> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SubstrateStats::occurrences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7c7de8c4-1f75-406c-be06-32c50e1347ba> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SubstrateStats#occurrences." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/7c7de8c4-1f75-406c-be06-32c50e1347ba> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7c9327df-fae5-418c-ac21-d473f1c9af11> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7c9327df-fae5-418c-ac21-d473f1c9af11> <http://www.w3.org/2000/01/rdf-schema#label> "GetEntityDossierArgs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7c9327df-fae5-418c-ac21-d473f1c9af11> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -4557,6 +4669,7 @@
 <https://moosedev.dev/kg/CodeEntity/7caf4b49-95e6-4d6b-aa11-6f0930a91e7c> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7caf4b49-95e6-4d6b-aa11-6f0930a91e7c> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Position" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7caf4b49-95e6-4d6b-aa11-6f0930a91e7c> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Position#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/7caf4b49-95e6-4d6b-aa11-6f0930a91e7c> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7cdcbc4a-1f02-483d-9795-d403ad51913a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7cdcbc4a-1f02-483d-9795-d403ad51913a> <http://www.w3.org/2000/01/rdf-schema#label> "SuggestMappingsArgs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/7cdcbc4a-1f02-483d-9795-d403ad51913a> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -4707,6 +4820,7 @@
 <https://moosedev.dev/kg/CodeEntity/811bc56b-b3f6-4aec-8265-600dce50cd6e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Constant" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/811bc56b-b3f6-4aec-8265-600dce50cd6e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::INDEX_TMP_FILE_NAME" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/811bc56b-b3f6-4aec-8265-600dce50cd6e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/INDEX_TMP_FILE_NAME." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/811bc56b-b3f6-4aec-8265-600dce50cd6e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/81ca9a5e-2582-4202-811f-9dd02dc44bc7> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/81ca9a5e-2582-4202-811f-9dd02dc44bc7> <http://www.w3.org/2000/01/rdf-schema#label> "include_metrics" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/81ca9a5e-2582-4202-811f-9dd02dc44bc7> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -4777,6 +4891,7 @@
 <https://moosedev.dev/kg/CodeEntity/836a87a1-97ee-4e4d-a1cd-b30ba6776534> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/836a87a1-97ee-4e4d-a1cd-b30ba6776534> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData::signature" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/836a87a1-97ee-4e4d-a1cd-b30ba6776534> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#signature." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/836a87a1-97ee-4e4d-a1cd-b30ba6776534> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/83d131df-fdf7-4006-afc8-50d0afccf18b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/83d131df-fdf7-4006-afc8-50d0afccf18b> <http://www.w3.org/2000/01/rdf-schema#label> "api_key" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/83d131df-fdf7-4006-afc8-50d0afccf18b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/llm/mod.rs" <https://moosedev.dev/kg/project> .
@@ -4831,6 +4946,7 @@
 <https://moosedev.dev/kg/CodeEntity/862f929e-7c4d-4625-8f20-9075a8e53c2a> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/862f929e-7c4d-4625-8f20-9075a8e53c2a> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::kind" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/862f929e-7c4d-4625-8f20-9075a8e53c2a> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#kind." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/862f929e-7c4d-4625-8f20-9075a8e53c2a> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8653b264-0bac-471a-83b3-fd0de9a3572c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8653b264-0bac-471a-83b3-fd0de9a3572c> <http://www.w3.org/2000/01/rdf-schema#label> "answer" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8653b264-0bac-471a-83b3-fd0de9a3572c> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/query.rs" <https://moosedev.dev/kg/project> .
@@ -4918,6 +5034,14 @@
 <https://moosedev.dev/kg/CodeEntity/886faa6f-cb75-42c2-87ce-b05e3746aa7f> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "api::models::RequirementListResponse::graph_requirements" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/886faa6f-cb75-42c2-87ce-b05e3746aa7f> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . api/models/RequirementListResponse#graph_requirements." <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/886faa6f-cb75-42c2-87ce-b05e3746aa7f> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/19df26dc-076b-4339-bee6-bfdc602c13ff> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <http://www.w3.org/2000/01/rdf-schema#label> "is_synthetic_whole_file_marker" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/resolver.rs" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://trivyn.io/ontologies/software/code#hasCodeName> "is_synthetic_whole_file_marker" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::is_synthetic_whole_file_marker" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/is_synthetic_whole_file_marker()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/889e6b24-de43-4786-b592-ae057aad54f1> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/89b525e8-5259-40e7-b6ac-8d1ebfcb548b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/89b525e8-5259-40e7-b6ac-8d1ebfcb548b> <http://www.w3.org/2000/01/rdf-schema#label> "tests" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/89b525e8-5259-40e7-b6ac-8d1ebfcb548b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/handlers/chat.rs" <https://moosedev.dev/kg/project> .
@@ -4995,6 +5119,7 @@
 <https://moosedev.dev/kg/CodeEntity/8c4d63f7-398e-4490-820a-3d82695575e5> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8c4d63f7-398e-4490-820a-3d82695575e5> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport::duration" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8c4d63f7-398e-4490-820a-3d82695575e5> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#duration." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/8c4d63f7-398e-4490-820a-3d82695575e5> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8cab697a-b84f-4c2a-b99b-e8b9866e35a0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8cab697a-b84f-4c2a-b99b-e8b9866e35a0> <http://www.w3.org/2000/01/rdf-schema#label> "related_adrs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8cab697a-b84f-4c2a-b99b-e8b9866e35a0> <https://trivyn.io/ontologies/software/code#definedInPath> "src/requirements.rs" <https://moosedev.dev/kg/project> .
@@ -5009,6 +5134,7 @@
 <https://moosedev.dev/kg/CodeEntity/8cb5dfb5-6843-4b3e-82e4-6259147ff604> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8cb5dfb5-6843-4b3e-82e4-6259147ff604> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport::occurrences" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8cb5dfb5-6843-4b3e-82e4-6259147ff604> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#occurrences." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/8cb5dfb5-6843-4b3e-82e4-6259147ff604> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8d3b7875-e0d9-4c9f-bf17-cc2c6b780051> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8d3b7875-e0d9-4c9f-bf17-cc2c6b780051> <http://www.w3.org/2000/01/rdf-schema#label> "opencode" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8d3b7875-e0d9-4c9f-bf17-cc2c6b780051> <https://trivyn.io/ontologies/software/code#definedInPath> "src/init.rs" <https://moosedev.dev/kg/project> .
@@ -5046,6 +5172,7 @@
 <https://moosedev.dev/kg/CodeEntity/8ec76106-e148-4952-a49b-eccf59e8a9ea> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8ec76106-e148-4952-a49b-eccf59e8a9ea> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8ec76106-e148-4952-a49b-eccf59e8a9ea> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#symbol." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/8ec76106-e148-4952-a49b-eccf59e8a9ea> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8fb3c63a-c5bf-4bec-acdd-bdd655cfd6e2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8fb3c63a-c5bf-4bec-acdd-bdd655cfd6e2> <http://www.w3.org/2000/01/rdf-schema#label> "iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/8fb3c63a-c5bf-4bec-acdd-bdd655cfd6e2> <https://trivyn.io/ontologies/software/code#definedInPath> "src/lessons.rs" <https://moosedev.dev/kg/project> .
@@ -5091,6 +5218,7 @@
 <https://moosedev.dev/kg/CodeEntity/91369017-d9cb-4dcb-8e16-ca4d77289c1c> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/91369017-d9cb-4dcb-8e16-ca4d77289c1c> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::indexed_at" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/91369017-d9cb-4dcb-8e16-ca4d77289c1c> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#indexed_at." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/91369017-d9cb-4dcb-8e16-ca4d77289c1c> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/917843cb-7528-416e-bc79-79687f4ba836> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/917843cb-7528-416e-bc79-79687f4ba836> <http://www.w3.org/2000/01/rdf-schema#label> "parse" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/917843cb-7528-416e-bc79-79687f4ba836> <https://trivyn.io/ontologies/software/code#definedInPath> "src/export.rs" <https://moosedev.dev/kg/project> .
@@ -5208,6 +5336,7 @@
 <https://moosedev.dev/kg/CodeEntity/959e791c-e300-4657-9330-4ad17bb03adf> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/959e791c-e300-4657-9330-4ad17bb03adf> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::stats" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/959e791c-e300-4657-9330-4ad17bb03adf> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]stats()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/959e791c-e300-4657-9330-4ad17bb03adf> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/95b42079-e415-4978-9636-cfc9f0e4c0a5> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/95b42079-e415-4978-9636-cfc9f0e4c0a5> <http://www.w3.org/2000/01/rdf-schema#label> "create" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/95b42079-e415-4978-9636-cfc9f0e4c0a5> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/code_entities.rs" <https://moosedev.dev/kg/project> .
@@ -5295,6 +5424,7 @@
 <https://moosedev.dev/kg/CodeEntity/99ce662a-5e4b-42f7-bb72-e89b335d117f> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/99ce662a-5e4b-42f7-bb72-e89b335d117f> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::symbols::normalize_symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/99ce662a-5e4b-42f7-bb72-e89b335d117f> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/symbols/normalize_symbol()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/99ce662a-5e4b-42f7-bb72-e89b335d117f> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/99dabeef-3e6e-40c6-aa31-28d480fa7fa0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/99dabeef-3e6e-40c6-aa31-28d480fa7fa0> <http://www.w3.org/2000/01/rdf-schema#label> "class_local" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/99dabeef-3e6e-40c6-aa31-28d480fa7fa0> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/links.rs" <https://moosedev.dev/kg/project> .
@@ -5438,6 +5568,7 @@
 <https://moosedev.dev/kg/CodeEntity/9f031a00-9749-4323-a510-c503e922c77e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/9f031a00-9749-4323-a510-c503e922c77e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta_path" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/9f031a00-9749-4323-a510-c503e922c77e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta_path()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/9f031a00-9749-4323-a510-c503e922c77e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/9fcbabf5-969a-4e48-ac28-5af623f80649> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/9fcbabf5-969a-4e48-ac28-5af623f80649> <http://www.w3.org/2000/01/rdf-schema#label> "ImportMode" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/9fcbabf5-969a-4e48-ac28-5af623f80649> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph_import.rs" <https://moosedev.dev/kg/project> .
@@ -5485,6 +5616,7 @@
 <https://moosedev.dev/kg/CodeEntity/a059e38a-7a03-4bc9-b083-c783a6b705d4> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a059e38a-7a03-4bc9-b083-c783a6b705d4> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SubstrateStats::symbols" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a059e38a-7a03-4bc9-b083-c783a6b705d4> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SubstrateStats#symbols." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/a059e38a-7a03-4bc9-b083-c783a6b705d4> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a1bd9485-8917-4669-b93d-ec4c49e7a7b1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a1bd9485-8917-4669-b93d-ec4c49e7a7b1> <http://www.w3.org/2000/01/rdf-schema#label> "entity_iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a1bd9485-8917-4669-b93d-ec4c49e7a7b1> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/link_code.rs" <https://moosedev.dev/kg/project> .
@@ -5674,6 +5806,7 @@
 <https://moosedev.dev/kg/CodeEntity/a83c153a-32cb-4124-9f25-2334b5c06fe8> <https://trivyn.io/ontologies/software/code#hasEntityKind> "StaticMethod" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a83c153a-32cb-4124-9f25-2334b5c06fe8> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::load" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a83c153a-32cb-4124-9f25-2334b5c06fe8> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]load()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/a83c153a-32cb-4124-9f25-2334b5c06fe8> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a84fab68-90eb-4ddc-af19-0f7ad2934845> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a84fab68-90eb-4ddc-af19-0f7ad2934845> <http://www.w3.org/2000/01/rdf-schema#label> "missing_decision" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a84fab68-90eb-4ddc-af19-0f7ad2934845> <https://trivyn.io/ontologies/software/code#definedInPath> "src/adrs.rs" <https://moosedev.dev/kg/project> .
@@ -5689,6 +5822,7 @@
 <https://moosedev.dev/kg/CodeEntity/a87f7238-4d73-47a7-8a55-0b50233bdca6> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Constant" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a87f7238-4d73-47a7-8a55-0b50233bdca6> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::SUBSTRATE_DIR" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a87f7238-4d73-47a7-8a55-0b50233bdca6> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/SUBSTRATE_DIR." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/a87f7238-4d73-47a7-8a55-0b50233bdca6> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a89f9953-524b-4b8b-a33b-0092cf25a9e2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a89f9953-524b-4b8b-a33b-0092cf25a9e2> <http://www.w3.org/2000/01/rdf-schema#label> "InitOptions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/a89f9953-524b-4b8b-a33b-0092cf25a9e2> <https://trivyn.io/ontologies/software/code#definedInPath> "src/init.rs" <https://moosedev.dev/kg/project> .
@@ -5838,6 +5972,7 @@
 <https://moosedev.dev/kg/CodeEntity/af3b0857-f562-4d7c-b2c8-97c3d62a3039> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/af3b0857-f562-4d7c-b2c8-97c3d62a3039> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::schema_version" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/af3b0857-f562-4d7c-b2c8-97c3d62a3039> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#schema_version." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/af3b0857-f562-4d7c-b2c8-97c3d62a3039> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/af47d6a2-ce1d-4a1c-b25b-e5b84497ddcc> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/af47d6a2-ce1d-4a1c-b25b-e5b84497ddcc> <http://www.w3.org/2000/01/rdf-schema#label> "status" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/af47d6a2-ce1d-4a1c-b25b-e5b84497ddcc> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/capture.rs" <https://moosedev.dev/kg/project> .
@@ -5892,6 +6027,7 @@
 <https://moosedev.dev/kg/CodeEntity/b1cf8069-0274-43a2-839a-60865881c087> <https://trivyn.io/ontologies/software/code#hasEntityKind> "StaticMethod" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b1cf8069-0274-43a2-839a-60865881c087> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::impl::SubstrateMeta::current_head" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b1cf8069-0274-43a2-839a-60865881c087> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/impl#[SubstrateMeta]current_head()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/b1cf8069-0274-43a2-839a-60865881c087> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b20a2987-d3c3-4850-97c8-1f4a93f4721b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b20a2987-d3c3-4850-97c8-1f4a93f4721b> <http://www.w3.org/2000/01/rdf-schema#label> "health" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b20a2987-d3c3-4850-97c8-1f4a93f4721b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/handlers/health.rs" <https://moosedev.dev/kg/project> .
@@ -5907,6 +6043,7 @@
 <https://moosedev.dev/kg/CodeEntity/b2da92dd-6977-4b01-a700-04d3a5520f65> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2da92dd-6977-4b01-a700-04d3a5520f65> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::IngestedIndex::symbols" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2da92dd-6977-4b01-a700-04d3a5520f65> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/IngestedIndex#symbols." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/b2da92dd-6977-4b01-a700-04d3a5520f65> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <http://www.w3.org/2000/01/rdf-schema#label> "DefinitionEntry" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/resolver.rs" <https://moosedev.dev/kg/project> .
@@ -5914,6 +6051,7 @@
 <https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/b2f31f31-f897-40c2-9c65-85f0038e0abc> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b3226049-eb65-43cb-b4d9-5f52e8367372> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b3226049-eb65-43cb-b4d9-5f52e8367372> <http://www.w3.org/2000/01/rdf-schema#label> "ChatRequestPayload" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b3226049-eb65-43cb-b4d9-5f52e8367372> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/models.rs" <https://moosedev.dev/kg/project> .
@@ -6025,6 +6163,7 @@
 <https://moosedev.dev/kg/CodeEntity/b8f6e161-ba3b-4705-bdcd-e33b2c6b03ee> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b8f6e161-ba3b-4705-bdcd-e33b2c6b03ee> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::kind" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b8f6e161-ba3b-4705-bdcd-e33b2c6b03ee> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#kind." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/b8f6e161-ba3b-4705-bdcd-e33b2c6b03ee> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b90e63aa-a11d-43d2-84b8-aef82858e290> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b90e63aa-a11d-43d2-84b8-aef82858e290> <http://www.w3.org/2000/01/rdf-schema#label> "enrich_now" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/b90e63aa-a11d-43d2-84b8-aef82858e290> <https://trivyn.io/ontologies/software/code#definedInPath> "src/reasoning/mod.rs" <https://moosedev.dev/kg/project> .
@@ -6048,6 +6187,7 @@
 <https://moosedev.dev/kg/CodeEntity/ba6d75b9-c1d9-4364-8356-2f24df47fdc9> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ba6d75b9-c1d9-4364-8356-2f24df47fdc9> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::OccurrenceEntry::symbol_roles" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ba6d75b9-c1d9-4364-8356-2f24df47fdc9> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/OccurrenceEntry#symbol_roles." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/ba6d75b9-c1d9-4364-8356-2f24df47fdc9> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bad8f1fd-770d-4f26-9f9d-cca1cf46d78b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bad8f1fd-770d-4f26-9f9d-cca1cf46d78b> <http://www.w3.org/2000/01/rdf-schema#label> "MooseDevServer" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bad8f1fd-770d-4f26-9f9d-cca1cf46d78b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -6102,6 +6242,7 @@
 <https://moosedev.dev/kg/CodeEntity/bda09572-d5e4-402a-b2b3-4b773ce6dbe5> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bda09572-d5e4-402a-b2b3-4b773ce6dbe5> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::OccurrenceEntry::enclosing_range" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bda09572-d5e4-402a-b2b3-4b773ce6dbe5> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/OccurrenceEntry#enclosing_range." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/bda09572-d5e4-402a-b2b3-4b773ce6dbe5> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bdb35b03-24cb-4a3f-9d0b-b20598761aab> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bdb35b03-24cb-4a3f-9d0b-b20598761aab> <http://www.w3.org/2000/01/rdf-schema#label> "sync_on_startup" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/bdb35b03-24cb-4a3f-9d0b-b20598761aab> <https://trivyn.io/ontologies/software/code#definedInPath> "src/canonical.rs" <https://moosedev.dev/kg/project> .
@@ -6226,6 +6367,7 @@
 <https://moosedev.dev/kg/CodeEntity/c2026277-9ecf-499e-88fa-306e1111ace4> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c2026277-9ecf-499e-88fa-306e1111ace4> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::file" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c2026277-9ecf-499e-88fa-306e1111ace4> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#file." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/c2026277-9ecf-499e-88fa-306e1111ace4> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c235d9ba-d7de-4665-812f-8b0934b0a80e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c235d9ba-d7de-4665-812f-8b0934b0a80e> <http://www.w3.org/2000/01/rdf-schema#label> "shapes_checked" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c235d9ba-d7de-4665-812f-8b0934b0a80e> <https://trivyn.io/ontologies/software/code#definedInPath> "src/validation.rs" <https://moosedev.dev/kg/project> .
@@ -6321,6 +6463,7 @@
 <https://moosedev.dev/kg/CodeEntity/c59ba9b3-c4d6-4540-8f5c-a8ab56585181> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c59ba9b3-c4d6-4540-8f5c-a8ab56585181> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::mode" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c59ba9b3-c4d6-4540-8f5c-a8ab56585181> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#mode." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/c59ba9b3-c4d6-4540-8f5c-a8ab56585181> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c5e34171-c97c-4dce-a76e-608c1f060d6f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c5e34171-c97c-4dce-a76e-608c1f060d6f> <http://www.w3.org/2000/01/rdf-schema#label> "iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c5e34171-c97c-4dce-a76e-608c1f060d6f> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/components.rs" <https://moosedev.dev/kg/project> .
@@ -6336,6 +6479,7 @@
 <https://moosedev.dev/kg/CodeEntity/c64320f0-1c6d-43b4-95f1-b0eef25202a2> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c64320f0-1c6d-43b4-95f1-b0eef25202a2> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::DefinitionEntry::is_module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c64320f0-1c6d-43b4-95f1-b0eef25202a2> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/DefinitionEntry#is_module." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/c64320f0-1c6d-43b4-95f1-b0eef25202a2> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c6468c7e-7bf6-48d8-a3fa-2137cc0eb455> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c6468c7e-7bf6-48d8-a3fa-2137cc0eb455> <http://www.w3.org/2000/01/rdf-schema#label> "data_dir" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c6468c7e-7bf6-48d8-a3fa-2137cc0eb455> <https://trivyn.io/ontologies/software/code#definedInPath> "src/temporal.rs" <https://moosedev.dev/kg/project> .
@@ -6405,6 +6549,7 @@
 <https://moosedev.dev/kg/CodeEntity/c77c0fb7-9d02-4d72-864e-a6531782fc8a> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c77c0fb7-9d02-4d72-864e-a6531782fc8a> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::symbols::logical_path" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c77c0fb7-9d02-4d72-864e-a6531782fc8a> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/symbols/logical_path()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/c77c0fb7-9d02-4d72-864e-a6531782fc8a> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c7a2f4ca-4292-4e01-b259-25bb0b996154> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c7a2f4ca-4292-4e01-b259-25bb0b996154> <http://www.w3.org/2000/01/rdf-schema#label> "entity_name" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c7a2f4ca-4292-4e01-b259-25bb0b996154> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/link_code.rs" <https://moosedev.dev/kg/project> .
@@ -6420,6 +6565,7 @@
 <https://moosedev.dev/kg/CodeEntity/c7b0ae91-a2ab-43bc-b3e5-0fa7ad0f5c4e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c7b0ae91-a2ab-43bc-b3e5-0fa7ad0f5c4e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport::commit" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c7b0ae91-a2ab-43bc-b3e5-0fa7ad0f5c4e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#commit." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/c7b0ae91-a2ab-43bc-b3e5-0fa7ad0f5c4e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c8a3d3d2-94e3-45a2-8b59-adcb766291a5> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c8a3d3d2-94e3-45a2-8b59-adcb766291a5> <http://www.w3.org/2000/01/rdf-schema#label> "tests" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/c8a3d3d2-94e3-45a2-8b59-adcb766291a5> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/relations.rs" <https://moosedev.dev/kg/project> .
@@ -6631,6 +6777,7 @@
 <https://moosedev.dev/kg/CodeEntity/d05cb944-f1e6-447c-96be-6e411000bc4f> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d05cb944-f1e6-447c-96be-6e411000bc4f> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::IngestedIndex" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d05cb944-f1e6-447c-96be-6e411000bc4f> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/IngestedIndex#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/d05cb944-f1e6-447c-96be-6e411000bc4f> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d0a598a1-9797-422d-9b10-9f37b462073a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d0a598a1-9797-422d-9b10-9f37b462073a> <http://www.w3.org/2000/01/rdf-schema#label> "PROVENANCE_GRAPH_IRI" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d0a598a1-9797-422d-9b10-9f37b462073a> <https://trivyn.io/ontologies/software/code#definedInPath> "src/provenance/mod.rs" <https://moosedev.dev/kg/project> .
@@ -6669,6 +6816,7 @@
 <https://moosedev.dev/kg/CodeEntity/d12b4c3e-3d6b-4a1d-9ae7-9d072c33ba5c> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d12b4c3e-3d6b-4a1d-9ae7-9d072c33ba5c> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::definitions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d12b4c3e-3d6b-4a1d-9ae7-9d072c33ba5c> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]definitions()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/d12b4c3e-3d6b-4a1d-9ae7-9d072c33ba5c> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d12ba64a-b92b-4a15-af84-7a42612ba5c3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d12ba64a-b92b-4a15-af84-7a42612ba5c3> <http://www.w3.org/2000/01/rdf-schema#label> "record_iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d12ba64a-b92b-4a15-af84-7a42612ba5c3> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -6834,6 +6982,7 @@
 <https://moosedev.dev/kg/CodeEntity/d902e9ce-1dc6-4cdf-9f98-34f194c221f6> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Constant" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d902e9ce-1dc6-4cdf-9f98-34f194c221f6> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::META_FILE_NAME" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d902e9ce-1dc6-4cdf-9f98-34f194c221f6> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/META_FILE_NAME." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/d902e9ce-1dc6-4cdf-9f98-34f194c221f6> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d942971f-71c7-4ae8-9c1f-0f532d290c9a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d942971f-71c7-4ae8-9c1f-0f532d290c9a> <http://www.w3.org/2000/01/rdf-schema#label> "reasoner_inference_quads" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/d942971f-71c7-4ae8-9c1f-0f532d290c9a> <https://trivyn.io/ontologies/software/code#definedInPath> "src/provenance/mod.rs" <https://moosedev.dev/kg/project> .
@@ -7020,6 +7169,7 @@
 <https://moosedev.dev/kg/CodeEntity/dde578f6-d50a-4ad8-b8ff-681bc6bf20f0> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dde578f6-d50a-4ad8-b8ff-681bc6bf20f0> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SubstrateStats" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dde578f6-d50a-4ad8-b8ff-681bc6bf20f0> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SubstrateStats#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/dde578f6-d50a-4ad8-b8ff-681bc6bf20f0> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <http://www.w3.org/2000/01/rdf-schema#label> "OccurrenceEntry" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/scip.rs" <https://moosedev.dev/kg/project> .
@@ -7027,6 +7177,7 @@
 <https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::OccurrenceEntry" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/OccurrenceEntry#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/de0ff4d5-f263-407a-86d7-18259e6310e4> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de6b554a-dbbe-44ee-9552-f98d9beb1424> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de6b554a-dbbe-44ee-9552-f98d9beb1424> <http://www.w3.org/2000/01/rdf-schema#label> "subject_kind" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/de6b554a-dbbe-44ee-9552-f98d9beb1424> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/links.rs" <https://moosedev.dev/kg/project> .
@@ -7082,6 +7233,7 @@
 <https://moosedev.dev/kg/CodeEntity/dfbced90-c116-400d-811b-621f80ad88a7> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dfbced90-c116-400d-811b-621f80ad88a7> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dfbced90-c116-400d-811b-621f80ad88a7> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/dfbced90-c116-400d-811b-621f80ad88a7> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dfcd87d0-3455-4755-830a-67b31c23d0ec> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dfcd87d0-3455-4755-830a-67b31c23d0ec> <http://www.w3.org/2000/01/rdf-schema#label> "related_sources" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/dfcd87d0-3455-4755-830a-67b31c23d0ec> <https://trivyn.io/ontologies/software/code#definedInPath> "src/lessons.rs" <https://moosedev.dev/kg/project> .
@@ -7136,6 +7288,7 @@
 <https://moosedev.dev/kg/CodeEntity/e1e419bf-e2ef-462f-bab6-6001916881ec> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e1e419bf-e2ef-462f-bab6-6001916881ec> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Position::line" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e1e419bf-e2ef-462f-bab6-6001916881ec> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Position#line." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/e1e419bf-e2ef-462f-bab6-6001916881ec> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e21637c3-e951-4eff-b461-d8f197077d1c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e21637c3-e951-4eff-b461-d8f197077d1c> <http://www.w3.org/2000/01/rdf-schema#label> "action" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e21637c3-e951-4eff-b461-d8f197077d1c> <https://trivyn.io/ontologies/software/code#definedInPath> "src/canonical.rs" <https://moosedev.dev/kg/project> .
@@ -7324,6 +7477,7 @@
 <https://moosedev.dev/kg/CodeEntity/e853396c-ca78-486d-80b7-c390923eb3dc> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e853396c-ca78-486d-80b7-c390923eb3dc> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::SubstrateMeta::producer" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e853396c-ca78-486d-80b7-c390923eb3dc> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/SubstrateMeta#producer." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/e853396c-ca78-486d-80b7-c390923eb3dc> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e896a310-c9eb-4646-abe6-3a0e5a37adad> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e896a310-c9eb-4646-abe6-3a0e5a37adad> <http://www.w3.org/2000/01/rdf-schema#label> "read_provenance" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e896a310-c9eb-4646-abe6-3a0e5a37adad> <https://trivyn.io/ontologies/software/code#definedInPath> "src/provenance/mod.rs" <https://moosedev.dev/kg/project> .
@@ -7387,6 +7541,7 @@
 <https://moosedev.dev/kg/CodeEntity/e9ee64f0-8404-44cf-9418-20f767e6771e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e9ee64f0-8404-44cf-9418-20f767e6771e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Substrate" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e9ee64f0-8404-44cf-9418-20f767e6771e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Substrate#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/e9ee64f0-8404-44cf-9418-20f767e6771e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e9efed19-dce0-422e-9c29-31eba4f37f11> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e9efed19-dce0-422e-9c29-31eba4f37f11> <http://www.w3.org/2000/01/rdf-schema#label> "graph_import" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/e9efed19-dce0-422e-9c29-31eba4f37f11> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph_import.rs" <https://moosedev.dev/kg/project> .
@@ -7464,6 +7619,7 @@
 <https://moosedev.dev/kg/CodeEntity/ec8c3538-8f65-4242-bbe5-5583a333a892> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ec8c3538-8f65-4242-bbe5-5583a333a892> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ec8c3538-8f65-4242-bbe5-5583a333a892> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/ec8c3538-8f65-4242-bbe5-5583a333a892> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/eccbc215-47cb-430e-ae74-b2ba1bd9c267> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/eccbc215-47cb-430e-ae74-b2ba1bd9c267> <http://www.w3.org/2000/01/rdf-schema#label> "list_adrs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/eccbc215-47cb-430e-ae74-b2ba1bd9c267> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/handlers/adrs.rs" <https://moosedev.dev/kg/project> .
@@ -7535,6 +7691,7 @@
 <https://moosedev.dev/kg/CodeEntity/ee1dc51e-b2c2-406f-bd28-a9bddd61713e> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Struct" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ee1dc51e-b2c2-406f-bd28-a9bddd61713e> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ee1dc51e-b2c2-406f-bd28-a9bddd61713e> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/ee1dc51e-b2c2-406f-bd28-a9bddd61713e> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ee760c8e-5771-468a-887e-96ffe8d867b2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ee760c8e-5771-468a-887e-96ffe8d867b2> <http://www.w3.org/2000/01/rdf-schema#label> "collisions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/ee760c8e-5771-468a-887e-96ffe8d867b2> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/code_entities.rs" <https://moosedev.dev/kg/project> .
@@ -7650,6 +7807,7 @@
 <https://moosedev.dev/kg/CodeEntity/f3092b58-2fc1-42af-80cd-abf77616a848> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f3092b58-2fc1-42af-80cd-abf77616a848> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SourceRange::end" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f3092b58-2fc1-42af-80cd-abf77616a848> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SourceRange#end." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/f3092b58-2fc1-42af-80cd-abf77616a848> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <http://www.w3.org/2000/01/rdf-schema#label> "definitions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/resolver.rs" <https://moosedev.dev/kg/project> .
@@ -7657,6 +7815,7 @@
 <https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::SubstrateStats::definitions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/SubstrateStats#definitions." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/f31e792a-f1f4-4305-ba3c-bfb01a211eb8> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <http://www.w3.org/2000/01/rdf-schema#label> "defined_in" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/scip.rs" <https://moosedev.dev/kg/project> .
@@ -7664,6 +7823,7 @@
 <https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData::defined_in" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#defined_in." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/f322f81e-0268-4618-bc71-ea79980b87ef> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f46124bd-f534-46dc-9415-f9ea46061c94> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f46124bd-f534-46dc-9415-f9ea46061c94> <http://www.w3.org/2000/01/rdf-schema#label> "adrs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f46124bd-f534-46dc-9415-f9ea46061c94> <https://trivyn.io/ontologies/software/code#definedInPath> "src/api/handlers/adrs.rs" <https://moosedev.dev/kg/project> .
@@ -7711,6 +7871,7 @@
 <https://moosedev.dev/kg/CodeEntity/f53f66f6-b443-48b3-ad97-6b26123fa691> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f53f66f6-b443-48b3-ad97-6b26123fa691> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::SymbolData::symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f53f66f6-b443-48b3-ad97-6b26123fa691> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/SymbolData#symbol." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/f53f66f6-b443-48b3-ad97-6b26123fa691> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f549937e-e462-45c2-aa1c-aedffa6e1aef> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f549937e-e462-45c2-aa1c-aedffa6e1aef> <http://www.w3.org/2000/01/rdf-schema#label> "surface_labels" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/f549937e-e462-45c2-aa1c-aedffa6e1aef> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -7844,6 +8005,7 @@
 <https://moosedev.dev/kg/CodeEntity/fa40402f-6b51-46de-81e4-06d17a893ad0> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Function" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa40402f-6b51-46de-81e4-06d17a893ad0> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::symbols::is_module_symbol" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa40402f-6b51-46de-81e4-06d17a893ad0> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/symbols/is_module_symbol()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fa40402f-6b51-46de-81e4-06d17a893ad0> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa5fbaf4-1d7f-4645-abe5-1d8a7e725f22> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa5fbaf4-1d7f-4645-abe5-1d8a7e725f22> <http://www.w3.org/2000/01/rdf-schema#label> "engine_config" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa5fbaf4-1d7f-4645-abe5-1d8a7e725f22> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/state.rs" <https://moosedev.dev/kg/project> .
@@ -7875,6 +8037,7 @@
 <https://moosedev.dev/kg/CodeEntity/fa80a703-480f-4baf-9b0b-e98768826433> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa80a703-480f-4baf-9b0b-e98768826433> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::producer::IndexReport::definitions" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fa80a703-480f-4baf-9b0b-e98768826433> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/producer/IndexReport#definitions." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fa80a703-480f-4baf-9b0b-e98768826433> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/faa69323-1ddc-40f8-86f1-38b318eeb704> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/faa69323-1ddc-40f8-86f1-38b318eeb704> <http://www.w3.org/2000/01/rdf-schema#label> "author" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/faa69323-1ddc-40f8-86f1-38b318eeb704> <https://trivyn.io/ontologies/software/code#definedInPath> "src/requirements.rs" <https://moosedev.dev/kg/project> .
@@ -7904,6 +8067,7 @@
 <https://moosedev.dev/kg/CodeEntity/fac0f875-d354-499d-8fe2-471bb06ba7f6> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fac0f875-d354-499d-8fe2-471bb06ba7f6> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::Resolution::is_definition" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fac0f875-d354-499d-8fe2-471bb06ba7f6> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/Resolution#is_definition." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fac0f875-d354-499d-8fe2-471bb06ba7f6> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fad369c7-65e6-4997-8220-8cb51a758384> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fad369c7-65e6-4997-8220-8cb51a758384> <http://www.w3.org/2000/01/rdf-schema#label> "code_entities" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fad369c7-65e6-4997-8220-8cb51a758384> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/code_entities.rs" <https://moosedev.dev/kg/project> .
@@ -7919,6 +8083,7 @@
 <https://moosedev.dev/kg/CodeEntity/fae1a3a4-ea59-471d-8a34-ae1b7db11b0d> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fae1a3a4-ea59-471d-8a34-ae1b7db11b0d> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::is_stale" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fae1a3a4-ea59-471d-8a34-ae1b7db11b0d> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]is_stale()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fae1a3a4-ea59-471d-8a34-ae1b7db11b0d> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fb351f5e-09ac-4a57-b5c1-6e98e035ea8e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fb351f5e-09ac-4a57-b5c1-6e98e035ea8e> <http://www.w3.org/2000/01/rdf-schema#label> "description" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fb351f5e-09ac-4a57-b5c1-6e98e035ea8e> <https://trivyn.io/ontologies/software/code#definedInPath> "src/mcp/mod.rs" <https://moosedev.dev/kg/project> .
@@ -7972,6 +8137,7 @@
 <https://moosedev.dev/kg/CodeEntity/fc666469-15d8-455e-9e4b-98595f232602> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Constant" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fc666469-15d8-455e-9e4b-98595f232602> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::INDEX_FILE_NAME" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fc666469-15d8-455e-9e4b-98595f232602> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/INDEX_FILE_NAME." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fc666469-15d8-455e-9e4b-98595f232602> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fc75db94-3955-4bae-a5ec-6d4c00d709f8> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fc75db94-3955-4bae-a5ec-6d4c00d709f8> <http://www.w3.org/2000/01/rdf-schema#label> "validate_project" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fc75db94-3955-4bae-a5ec-6d4c00d709f8> <https://trivyn.io/ontologies/software/code#definedInPath> "src/validation.rs" <https://moosedev.dev/kg/project> .
@@ -7995,6 +8161,7 @@
 <https://moosedev.dev/kg/CodeEntity/fcda031f-c357-43aa-a5cd-ba7b1adde4f1> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Method" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fcda031f-c357-43aa-a5cd-ba7b1adde4f1> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::resolver::impl::Substrate::meta" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fcda031f-c357-43aa-a5cd-ba7b1adde4f1> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/resolver/impl#[Substrate]meta()." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fcda031f-c357-43aa-a5cd-ba7b1adde4f1> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <http://www.w3.org/2000/01/rdf-schema#label> "range" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <https://trivyn.io/ontologies/software/code#definedInPath> "src/code/substrate/scip.rs" <https://moosedev.dev/kg/project> .
@@ -8002,6 +8169,7 @@
 <https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Field" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::scip::OccurrenceEntry::range" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/scip/OccurrenceEntry#range." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fce1705a-97fb-4bb0-b1da-a7f6b72c6268> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce4abca-a92c-493b-8fe6-f4c5274b5e2b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce4abca-a92c-493b-8fe6-f4c5274b5e2b> <http://www.w3.org/2000/01/rdf-schema#label> "rationale_iri" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fce4abca-a92c-493b-8fe6-f4c5274b5e2b> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/lifecycle.rs" <https://moosedev.dev/kg/project> .
@@ -8048,6 +8216,7 @@
 <https://moosedev.dev/kg/CodeEntity/fe3e70e1-07d5-4023-a450-13321d0749d8> <https://trivyn.io/ontologies/software/code#hasEntityKind> "Module" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fe3e70e1-07d5-4023-a450-13321d0749d8> <https://trivyn.io/ontologies/software/code#hasLogicalPath> "code::substrate::meta::tests" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fe3e70e1-07d5-4023-a450-13321d0749d8> <https://trivyn.io/ontologies/software/code#hasScipSymbol> "rust-analyzer cargo moosedev . code/substrate/meta/tests/" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/CodeEntity/fe3e70e1-07d5-4023-a450-13321d0749d8> <https://trivyn.io/ontologies/software/code#realizes> <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fe481074-9abb-4c60-a918-94e32c64fdb1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/code#CodeEntity> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fe481074-9abb-4c60-a918-94e32c64fdb1> <http://www.w3.org/2000/01/rdf-schema#label> "entry" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/CodeEntity/fe481074-9abb-4c60-a918-94e32c64fdb1> <https://trivyn.io/ontologies/software/code#definedInPath> "src/graph/code_entities.rs" <https://moosedev.dev/kg/project> .
@@ -8176,7 +8345,8 @@
 <https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Consequence> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <http://www.w3.org/2000/01/rdf-schema#label> "With a module-level link in place, token-less positions (comments, blank lines) surface the module dossier via rust-analyzer whole-file module occurrences - 2026-07-08 acceptance finding, resolution pending" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
-<https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "deprecated" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <https://trivyn.io/ontologies/software/architecture#hasRationale> <https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T05:18:55.859659Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Consequence/27c9cec0-2ae5-4fe6-abac-5aa651f9266f> <https://trivyn.io/ontologies/software/architecture#hasTitle> "With a module-level link in place, token-less positions (comments, blank lines) surface the module dossier via rust-analyzer whole-file module occurrences - 2026-07-08 acceptance finding, resolution pending" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Consequence/2ff40771-c414-4ec6-ba75-c08ec6982477> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Consequence> <https://moosedev.dev/kg/project> .
@@ -9692,6 +9862,13 @@
 <https://moosedev.dev/kg/Rationale/ccfac08f-0221-4a0b-b690-2dedc02be062> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Rationale/ccfac08f-0221-4a0b-b690-2dedc02be062> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-06-19T05:24:22.905811Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Rationale/ccfac08f-0221-4a0b-b690-2dedc02be062> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Rationale: Push/injection delivery: built, mechanically validated, AND evidence-supported — injecting the record took a local model 0.4→1.0 on the multi-module cache-gap task (the only condition that worked)" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Rationale> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <http://www.w3.org/2000/01/rdf-schema#label> "Rationale: retract With a module-level link in place, token-less positions (comments, blank lines) surface the module dossier via rust-analyzer whole-file module occurrences - 2026-07-08 acceptance finding, resolution pending" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "phase7-acceptance" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <https://trivyn.io/ontologies/software/architecture#hasDescription> "Resolved: AD ab379ef4 (whole-file module occurrences are not position hits) removed the module fallback - token-less positions now miss honestly, so this consequence no longer holds." <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <https://trivyn.io/ontologies/software/architecture#hasLifecycleStatus> "accepted" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-09T14:41:49.542636Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/Rationale/deadcb05-97ad-403e-817c-dd47cfbb92d3> <https://trivyn.io/ontologies/software/architecture#hasTitle> "Rationale: retract With a module-level link in place, token-less positions (comments, blank lines) surface the module dossier via rust-analyzer whole-file module occurrences - 2026-07-08 acceptance finding, resolution pending" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Rationale/ee150eab-c520-48b2-849e-2621fbecd1b7> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#Rationale> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Rationale/ee150eab-c520-48b2-849e-2621fbecd1b7> <http://www.w3.org/2000/01/rdf-schema#label> "Rationale: pull gap is real, push closes it" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/Rationale/ee150eab-c520-48b2-849e-2621fbecd1b7> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "claude-code" <https://moosedev.dev/kg/project> .
@@ -9912,6 +10089,7 @@
 <https://moosedev.dev/kg/SystemComponent/8d48edbd-7ee2-4a52-9eac-f2a09c858637> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-04T06:01:57.459759Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#SystemComponent> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <http://www.w3.org/2000/01/rdf-schema#label> "code layer substrate (index & resolver)" <https://moosedev.dev/kg/project> .
+<https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/code/" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "claude-code" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://trivyn.io/ontologies/software/architecture#hasComponentName> "code layer substrate (index & resolver)" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/accf4f9f-6309-4d3f-8705-26e551824eb0> <https://trivyn.io/ontologies/software/architecture#hasDescription> "The v2 code-layer substrate subsystem: src/code/substrate/ — SCIP index ingestion (scip.rs), position→symbol resolver (resolver.rs), producer runner (producer.rs), and index metadata/staleness (meta.rs), plus the `moosedev index` / `moosedev resolve` CLI modes. First implemented component of the v2 code layer (spec/MOOSEDev_v2_spec.md §3.1–3.3)." <https://moosedev.dev/kg/project> .

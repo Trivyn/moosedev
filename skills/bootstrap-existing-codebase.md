@@ -209,6 +209,40 @@ relate(subject_iri, predicate, object_iri)   // IRIs from the registry; predicat
 `relate()` is idempotent and SHACL-validated. A rejected edge names the offending endpoint and
 the expected class — that's a signal your cluster is mis-shaped, not a reason to force it.
 
+### Phase 5b — Ground records in code (v2 code entities)
+
+Components and records so far live above the code. This phase pins them to it, so
+`get_entity_dossier` (and the editor hover built on it) can answer *"what is known about the
+code under my cursor?"*.
+
+1. **Declare path coverage** — for every `SystemComponent` with an identifiable code home:
+   ```
+   declare_component_paths(component: "<exact name or IRI>", paths: ["src/foo/", "src/bar.rs"])
+   ```
+   Trailing `/` = directory prefix; no slash = exact file; longest match wins. Idempotent and
+   add-only. Skip components with no code home (process/docs components) — do not force paths.
+2. **Mint the skeleton** (operator step, daemon stopped — it holds the store lock; the CLI
+   prints the pidfile hint): `moosedev index && moosedev mint` — review the dry-run
+   (creates in the expected range, `unmapped paths` should shrink to files you deliberately
+   left uncovered) — then `moosedev mint --apply`. Idempotent: a re-run plans nothing.
+   `realizes` edges derive automatically from the coverage you declared in step 1.
+3. **Link the strongest records to the code they are really about** — for each load-bearing
+   Constraint/Decision/Lesson whose subject is a *specific* function, type, or module (not a
+   whole component):
+   ```
+   link_code(record_iri, predicate: "constrains" | "concerns", file/line/col | symbol)
+   ```
+   Point at the definition's name token (or pass the SCIP symbol). Private items are minted
+   lazily by this call. Misses error honestly — never link a guessed position.
+4. **Spot-check** — `get_entity_dossier` on two or three linked positions: the record appears
+   under **Records**, component knowledge under **Via component …**. An unlinked file must
+   answer with the no-recorded-knowledge reply (silence is correct, not a failure).
+
+Coverage discipline mirrors record discipline: a handful of precise `link_code` edges on the
+decisions that actually constrain specific code beat blanket linking (noise is comprehension
+debt). Component-level knowledge already flows through `realizes` — don't duplicate it per
+entity.
+
 ### Phase 6 — Validate + lint + connectivity (prove it isn't flat)
 
 1. `validate_against_architecture` → expect **0 violations**. **Necessary, not sufficient:** it
@@ -302,4 +336,7 @@ knowledge — so a fabricated edge is a durable false claim. Therefore:
 - [ ] Edges drawn with `relate()` per the predicate map; each edge evidence-grounded.
 - [ ] `validate_against_architecture` → 0 violations.
 - [ ] Edge histogram non-empty; edge-type matrix clean; orphans ≈ 0; **edges ≳ nodes**.
+- [ ] Code grounding (v2): components carry `coversPath`; `index` + `mint --apply` ran clean;
+      strongest records linked via `link_code`; dossier spot-check passed (incl. silence on
+      unlinked code).
 - [ ] Competency questions return rows; `get_relevant_context` shows `linkedVia` neighbors.

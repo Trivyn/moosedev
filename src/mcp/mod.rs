@@ -49,6 +49,14 @@ fn format_suggestions(suggestions: &[graph::LinkSuggestion]) -> String {
     out
 }
 
+fn format_path_list(paths: &[String]) -> String {
+    if paths.is_empty() {
+        "(none)".to_string()
+    } else {
+        format!("[{}]", paths.join(", "))
+    }
+}
+
 /// Best-effort capture-time nudge: up to three legal, unasserted links for the new
 /// record. Never fails the write — a suggestion error just yields no note.
 async fn capture_suggestion_note(state: &graph::AppState, iri: &str) -> String {
@@ -271,6 +279,16 @@ pub struct LinkCodeArgs {
     pub col: Option<u32>,
     /// SCIP symbol, raw or version-normalized, as an alternative to a file position.
     pub symbol: Option<String>,
+}
+
+/// Arguments for the `declare_component_paths` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeclareComponentPathsArgs {
+    /// SystemComponent IRI, or its exact name (rdfs:label).
+    pub component: String,
+    /// Repo-relative paths the component covers. Trailing '/' = directory
+    /// prefix (e.g. "src/code/"); no trailing slash = exact file path.
+    pub paths: Vec<String>,
 }
 
 /// Arguments for the `get_entity_dossier` tool.
@@ -750,6 +768,37 @@ impl MooseDevServer {
                     out.predicate_local,
                     out.object_iri,
                     stale_note
+                )))
+            }
+            Err(e) => Ok(tool_error(e.to_string())),
+        }
+    }
+
+    /// Declare repo path coverage for a SystemComponent.
+    #[tool(
+        description = "Declare repo-relative path coverage for a SystemComponent. Coverage drives `moosedev mint`'s `realizes` derivation by mapping source paths to owning components. A path ending in `/` is a directory prefix; without a trailing slash it is an exact file path. The call is idempotent and add-only. When several components cover a file, the longest matching path wins."
+    )]
+    async fn declare_component_paths(
+        &self,
+        Parameters(args): Parameters<DeclareComponentPathsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let component = args.component.trim().to_string();
+        if component.is_empty() {
+            return Ok(tool_error("`component` must not be empty"));
+        }
+        if args.paths.is_empty() {
+            return Ok(tool_error("`paths` must not be empty"));
+        }
+
+        match graph::declare_component_paths(&self.state, &component, &args.paths) {
+            Ok(out) => {
+                self.state.note_project_write();
+                Ok(tool_ok(format!(
+                    "Declared coverage for \"{}\" ({})\nadded: {}\nalready covered: {}",
+                    out.component_name,
+                    out.component_iri,
+                    format_path_list(&out.added),
+                    format_path_list(&out.already_covered)
                 )))
             }
             Err(e) => Ok(tool_error(e.to_string())),

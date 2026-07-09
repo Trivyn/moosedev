@@ -129,7 +129,7 @@ impl Substrate {
                 continue;
             }
             let symbol = &self.index.symbols[entry.symbol_id];
-            if is_synthetic_crate_marker(symbol, entry.range) {
+            if is_synthetic_whole_file_marker(symbol, entry.range) {
                 continue;
             }
             // Nested names are common (`foo.bar`). The semantic token under the
@@ -237,12 +237,13 @@ fn range_contains(range: SourceRange, pos: Position) -> bool {
     range.start <= pos && pos < range.end
 }
 
-fn is_synthetic_crate_marker(symbol: &SymbolData, range: SourceRange) -> bool {
-    // rust-analyzer emits a whole-file `crate/` module occurrence. Treating it as
-    // a real token would turn whitespace/comment misses into file-wide hits.
+fn is_synthetic_whole_file_marker(symbol: &SymbolData, range: SourceRange) -> bool {
+    // rust-analyzer emits whole-file Module occurrences as synthetic containers.
+    // They are not tokens: positions with no real token must remain honest misses.
+    // Real module name tokens are single-line ranges and still resolve normally.
     symbol.kind.as_deref() == Some("Module")
-        && symbol.symbol.ends_with(" crate/")
         && range.start == (Position { line: 0, col: 0 })
+        && range.end.line > range.start.line
 }
 
 fn range_len(range: SourceRange) -> (u32, u32, u32, u32) {
@@ -344,18 +345,20 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_crate_marker_does_not_turn_miss_into_file_wide_hit() {
+    fn synthetic_whole_file_module_marker_does_not_turn_miss_into_file_wide_hit() {
         let mut index = Index::new();
         let mut document = doc("src/lib.rs");
 
-        let crate_symbol = "rust-analyzer cargo moosedev 0.6.3 crate/";
-        let mut crate_info = SymbolInformation::new();
-        crate_info.symbol = crate_symbol.to_string();
-        crate_info.kind = EnumOrUnknown::new(symbol_information::Kind::Module);
-        document.symbols.push(crate_info);
+        let module_symbol = "rust-analyzer cargo moosedev 0.6.3 runtime/";
+        document.symbols.push(info(
+            module_symbol,
+            "runtime",
+            symbol_information::Kind::Module,
+            "pub mod runtime",
+        ));
         document
             .occurrences
-            .push(occ(crate_symbol, vec![0, 0, 10, 0], 1));
+            .push(occ(module_symbol, vec![0, 0, 10, 0], 1));
 
         let function_symbol = "rust-analyzer cargo moosedev 0.6.3 parse_mode().";
         let mut function_info = SymbolInformation::new();
@@ -370,7 +373,7 @@ mod tests {
 
         let substrate = Substrate::from_index(index, meta(), false).unwrap();
         assert!(substrate
-            .resolve("src/lib.rs", Position { line: 0, col: 0 })
+            .resolve("src/lib.rs", Position { line: 1, col: 0 })
             .is_none());
         assert_eq!(
             substrate
@@ -378,6 +381,33 @@ mod tests {
                 .unwrap()
                 .symbol,
             function_symbol
+        );
+    }
+
+    #[test]
+    fn narrow_single_line_module_reference_resolves() {
+        let module_symbol = "rust-analyzer cargo moosedev 0.6.3 runtime/";
+        let mut index = Index::new();
+        let mut document = doc("src/lib.rs");
+        document.symbols.push(info(
+            module_symbol,
+            "runtime",
+            symbol_information::Kind::Module,
+            "mod runtime;",
+        ));
+        document
+            .occurrences
+            .push(occ(module_symbol, vec![2, 4, 11], 0));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        assert_eq!(
+            substrate
+                .resolve("src/lib.rs", Position { line: 2, col: 5 })
+                .unwrap()
+                .symbol,
+            module_symbol
         );
     }
 
@@ -612,6 +642,29 @@ mod tests {
         let substrate = Substrate::from_index(index, meta(), false).unwrap();
 
         assert!(substrate.definitions()[0].is_module);
+    }
+
+    #[test]
+    fn definitions_include_whole_file_module_definitions() {
+        let module = "rust-analyzer cargo moosedev 0.6.3 runtime/";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            module,
+            "runtime",
+            symbol_information::Kind::Module,
+            "pub mod runtime",
+        ));
+        document.occurrences.push(occ(module, vec![0, 0, 30, 0], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+        let definitions = substrate.definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].symbol, module);
+        assert_eq!(definitions[0].file, "src/runtime.rs");
+        assert!(definitions[0].is_module);
     }
 
     #[test]

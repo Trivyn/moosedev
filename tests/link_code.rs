@@ -13,6 +13,7 @@ use scip::types::{
 };
 
 const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
+const MODULE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/";
 const PUBLIC_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
 const PRIVATE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/private_helper().";
 const LOCAL_SYMBOL: &str = "local 0";
@@ -229,7 +230,9 @@ fn whitespace_position_writes_nothing() {
     let err = graph::link_code(&state, &decision, "concerns", &selector, "tester")
         .expect_err("whitespace should miss");
 
-    assert!(err.to_string().contains("no code entity"));
+    assert!(err
+        .to_string()
+        .starts_with("no code entity at src/runtime.rs:2:1"));
     assert_eq!(project_quad_count(&state), count_before);
 }
 
@@ -330,6 +333,15 @@ fn synthetic_substrate(stale: bool) -> Substrate {
     let mut index = Index::new();
     let mut document = doc("src/runtime.rs");
     document.symbols.push(info(
+        MODULE_SYMBOL,
+        "runtime",
+        symbol_information::Kind::Module,
+        "pub mod runtime",
+    ));
+    document
+        .occurrences
+        .push(occ(MODULE_SYMBOL, vec![0, 0, 30, 0], 1));
+    document.symbols.push(info(
         PUBLIC_SYMBOL,
         "build_server",
         symbol_information::Kind::Function,
@@ -405,6 +417,6 @@ fn meta() -> SubstrateMeta {
         producer_version: "1.0.0".to_string(),
         mode: "scip".to_string(),
         documents: 1,
-        occurrences: 3,
+        occurrences: 4,
     }
 }

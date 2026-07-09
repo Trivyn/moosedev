@@ -205,6 +205,53 @@ fn mint_twice_is_idempotent_and_validates() {
 }
 
 #[test]
+fn lazy_minted_private_entity_is_not_reported_as_orphan() {
+    let state = bootstrap("lazy-not-orphan");
+    seed_component(&state, "runtime component", "src/");
+    let components = graph::load_components(&state).unwrap();
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let public = def(
+        "runtime/build_server().",
+        "src/runtime.rs",
+        Some("build_server"),
+        Some("Function"),
+        Some("pub fn build_server()"),
+        false,
+        true,
+    );
+    let private = def(
+        "runtime/private_helper().",
+        "src/runtime.rs",
+        Some("private_helper"),
+        Some("Function"),
+        Some("fn private_helper()"),
+        false,
+        false,
+    );
+    let definitions = vec![public, private.clone()];
+    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+
+    // Lazily mint the out-of-scope private definition, as link_code would.
+    let ensured = graph::ensure_entity(&state, &terms, &components, &private, "tester").unwrap();
+    assert!(ensured.created);
+
+    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    assert_eq!(plan.create.len(), 0);
+    assert_eq!(plan.update.len(), 0);
+    assert_eq!(
+        plan.orphaned,
+        Vec::<(String, String)>::new(),
+        "a lazily minted private entity whose symbol is still defined must not be an orphan"
+    );
+
+    // A symbol truly gone from the substrate is still reported.
+    let plan = graph::plan_mint(&state, &definitions[..1], &terms, &components).unwrap();
+    assert_eq!(plan.orphaned.len(), 1);
+    assert_eq!(plan.orphaned[0].1, private.normalized_symbol);
+}
+
+#[test]
 fn rename_reports_create_and_orphan_without_changing_other_iri() {
     let state = bootstrap("rename");
     seed_component(&state, "runtime component", "src/");
