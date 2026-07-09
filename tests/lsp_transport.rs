@@ -209,16 +209,11 @@ async fn direct_client(
     Ok(RawLspClient::new(reader, writer))
 }
 
-fn assert_hover_placeholder(response: &Value) {
+fn assert_hover_silent(response: &Value) {
     assert!(response.get("error").is_none(), "hover error: {response}");
-    assert_eq!(
-        response["result"]["contents"]["kind"],
-        json!("markdown"),
-        "hover should return markdown: {response}"
-    );
-    assert_eq!(
-        response["result"]["contents"]["value"],
-        json!("MOOSEDev knowledge-LSP: transport OK (dossier wiring lands in phase 2)")
+    assert!(
+        response["result"].is_null(),
+        "hover without dossier should be silent: {response}"
     );
 }
 
@@ -237,7 +232,7 @@ async fn initialize_negotiates_and_declares_capabilities() -> anyhow::Result<()>
     assert_eq!(capabilities["textDocumentSync"]["save"], json!(true));
     assert_eq!(capabilities["positionEncoding"], json!("utf-8"));
 
-    assert_hover_placeholder(&client.hover(2).await?);
+    assert_hover_silent(&client.hover(2).await?);
     client.shutdown_and_exit().await?;
     let closed = tokio::time::timeout(Duration::from_secs(10), client.read()).await??;
     assert!(closed.is_none(), "socket should close cleanly: {closed:?}");
@@ -301,7 +296,7 @@ async fn shim_relays_end_to_end() -> anyhow::Result<()> {
         init["result"]["capabilities"]["positionEncoding"],
         json!("utf-8")
     );
-    assert_hover_placeholder(&client.hover(2).await.context("shim hover")?);
+    assert_hover_silent(&client.hover(2).await.context("shim hover")?);
     client
         .shutdown_and_exit()
         .await
@@ -350,7 +345,7 @@ async fn unknown_request_gets_method_not_found() -> anyhow::Result<()> {
     assert_eq!(response["id"], json!(7));
     assert_eq!(response["error"]["code"], json!(-32601));
 
-    assert_hover_placeholder(&client.hover(8).await?);
+    assert_hover_silent(&client.hover(8).await?);
     client.shutdown_and_exit().await?;
 
     let _ = std::fs::remove_dir_all(&data_dir);
