@@ -105,13 +105,12 @@ pub fn get_entity_dossier(
     let defined_in = first_literal(&state.store, &entity_iri, &terms.defined_in_path);
     let realizes = first_realized_component(state, &terms, &entity_iri)?;
 
-    let pairs = LinkPairs::resolve(state)?;
-    let mut direct_records = collect_records(state, &pairs.all, &entity_iri)?;
-    sort_records(&mut direct_records);
+    let direct_records = direct_records_for_entity(state, &entity_iri)?;
     if direct_records.is_empty() {
         return Ok(None);
     }
 
+    let pairs = LinkPairs::resolve(state)?;
     let direct_iris = direct_records
         .iter()
         .map(|record| record.iri.as_str())
@@ -138,6 +137,17 @@ pub fn get_entity_dossier(
         judgments: Vec::new(),
         observations: Vec::new(),
     }))
+}
+
+/// Return all non-deprecated knowledge records directly linked to one CodeEntity.
+pub(crate) fn direct_records_for_entity(
+    state: &AppState,
+    entity_iri: &str,
+) -> anyhow::Result<Vec<RecordSummary>> {
+    let pairs = LinkPairs::resolve(state)?;
+    let mut direct_records = collect_records(state, &pairs.all, entity_iri)?;
+    sort_records(&mut direct_records);
+    Ok(direct_records)
 }
 
 /// Render a stable Markdown view suitable for MCP and future hover surfaces.

@@ -6,20 +6,28 @@
 
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 
-use lsp_server::{Connection, ErrorCode, Message, Response};
+use chrono::{DateTime, FixedOffset};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::{
-    ClientCapabilities, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, MarkupContent, MarkupKind, PositionEncodingKind,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions,
+    ClientCapabilities, Diagnostic, DiagnosticSeverity, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent, MarkupKind,
+    Position, PositionEncodingKind, PublishDiagnosticsParams, Range, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
+use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::graph::{get_entity_dossier, render_markdown, AppState, DossierTarget};
+use crate::code::substrate::SourceRange;
+use crate::graph::{
+    direct_records_for_entity, entities_by_symbol, get_entity_dossier, render_markdown, AppState,
+    CodeTerms, DossierTarget,
+};
 
 const LSP_SOCKET_FILE_NAME: &str = "moosedev-lsp.sock";
 
@@ -34,6 +42,34 @@ struct LspSession {
     connection: Connection,
     encoding: SessionEncoding,
     repo_root: PathBuf,
+    diagnostics: DiagnosticsConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+struct DiagnosticsConfig {
+    #[serde(default = "true_bool")]
+    constraints: bool,
+    #[serde(default = "true_bool", rename = "staleRationale")]
+    stale_rationale: bool,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            constraints: true,
+            stale_rationale: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+struct InitializationOptions {
+    #[serde(default)]
+    diagnostics: DiagnosticsConfig,
+}
+
+fn true_bool() -> bool {
+    true
 }
 
 /// Derive the Knowledge-LSP rendezvous socket path for a data dir.
@@ -165,6 +201,7 @@ fn run_session(
         connection,
         encoding: SessionEncoding::Utf16,
         repo_root,
+        diagnostics: DiagnosticsConfig::default(),
     };
     session.initialize()?;
     session.run()?;
@@ -237,6 +274,7 @@ impl LspSession {
         let (id, params) = self.connection.initialize_start()?;
         let params: InitializeParams = serde_json::from_value(params)?;
         self.encoding = negotiate_session_encoding(&params.capabilities);
+        self.diagnostics = diagnostics_config(params.initialization_options);
 
         let result = InitializeResult {
             capabilities: server_capabilities(self.encoding),
@@ -268,16 +306,178 @@ impl LspSession {
                     }
                 }
                 Message::Notification(notification) => match notification.method.as_str() {
-                    "textDocument/didOpen"
-                    | "textDocument/didSave"
-                    | "textDocument/didClose"
-                    | "textDocument/didChange" => {}
+                    "textDocument/didOpen" | "textDocument/didSave" => {
+                        self.handle_diagnostics_event(notification.params)?;
+                    }
+                    "textDocument/didClose" | "textDocument/didChange" => {}
                     "exit" => break,
                     _ => {}
                 },
                 Message::Response(_) => {}
             }
         }
+        Ok(())
+    }
+
+    fn handle_diagnostics_event(&self, params: serde_json::Value) -> anyhow::Result<()> {
+        // Diagnostics are intentionally saved-state only: use the URI from the
+        // event, but ignore any text payload the editor sends with didOpen/didSave.
+        let Some(uri) = notification_text_document_uri(&params) else {
+            return Ok(());
+        };
+        let Some(rel_path) = repo_relative_path(&self.repo_root, &uri) else {
+            return Ok(());
+        };
+        let diagnostics = self.file_diagnostics(&rel_path);
+        self.publish(uri, diagnostics)
+    }
+
+    fn file_diagnostics(&self, rel_path: &str) -> Vec<Diagnostic> {
+        let Some(substrate) = self.state.substrate() else {
+            return Vec::new();
+        };
+
+        let terms = match CodeTerms::resolve(&self.state) {
+            Ok(terms) => terms,
+            Err(e) => {
+                tracing::warn!("Knowledge-LSP diagnostics term lookup failed: {e}");
+                return Vec::new();
+            }
+        };
+        let entities = match entities_by_symbol(&self.state, &terms) {
+            Ok(entities) => entities,
+            Err(e) => {
+                tracing::warn!("Knowledge-LSP diagnostics entity lookup failed: {e}");
+                return Vec::new();
+            }
+        };
+        let file_commit = self
+            .diagnostics
+            .stale_rationale
+            .then(|| self.file_last_commit_instant(rel_path))
+            .flatten();
+
+        let mut diagnostics = Vec::new();
+        for definition in substrate.definitions_in_file(rel_path) {
+            let Some(entity_iri) = entities.get(&definition.entry.normalized_symbol) else {
+                continue;
+            };
+            let records = match direct_records_for_entity(&self.state, entity_iri) {
+                Ok(records) => records,
+                Err(e) => {
+                    tracing::warn!("Knowledge-LSP diagnostics record lookup failed: {e}");
+                    continue;
+                }
+            };
+            if records.is_empty() {
+                continue;
+            }
+            let Some(range) = self.diagnostic_range(rel_path, definition.range) else {
+                continue;
+            };
+
+            if self.diagnostics.constraints {
+                for record in records.iter().filter(|record| record.kind == "Constraint") {
+                    diagnostics.push(Diagnostic::new(
+                        range,
+                        Some(DiagnosticSeverity::INFORMATION),
+                        None,
+                        Some("moosedev".to_string()),
+                        format!(
+                            "constrained by \"{}\" ({})",
+                            record.title,
+                            short_record_id(&record.iri)
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+            }
+
+            if self.diagnostics.stale_rationale && stale_rationale_applies(&records, file_commit) {
+                diagnostics.push(Diagnostic::new(
+                    range,
+                    Some(DiagnosticSeverity::HINT),
+                    None,
+                    Some("moosedev".to_string()),
+                    "rationale predates later changes to this file".to_string(),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        diagnostics.sort_by(|a, b| {
+            a.range
+                .start
+                .line
+                .cmp(&b.range.start.line)
+                .then_with(|| a.range.start.character.cmp(&b.range.start.character))
+                .then_with(|| diagnostic_severity_rank(a).cmp(&diagnostic_severity_rank(b)))
+        });
+        diagnostics
+    }
+
+    fn diagnostic_range(&self, rel_path: &str, range: SourceRange) -> Option<Range> {
+        match self.encoding {
+            SessionEncoding::Utf8 => Some(Range::new(
+                Position::new(range.start.line, range.start.col),
+                Position::new(range.end.line, range.end.col),
+            )),
+            SessionEncoding::Utf16 => {
+                let file = std::fs::read_to_string(self.repo_root.join(rel_path)).ok()?;
+                let start_line = file.lines().nth(range.start.line as usize)?;
+                let end_line = file.lines().nth(range.end.line as usize)?;
+                Some(Range::new(
+                    Position::new(
+                        range.start.line,
+                        utf8_col_to_utf16_character(start_line, range.start.col),
+                    ),
+                    Position::new(
+                        range.end.line,
+                        utf8_col_to_utf16_character(end_line, range.end.col),
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn file_last_commit_instant(&self, rel_path: &str) -> Option<DateTime<FixedOffset>> {
+        let output = Command::new("git")
+            .arg("log")
+            .arg("-1")
+            .arg("--format=%cI")
+            .arg("--")
+            .arg(rel_path)
+            .current_dir(&self.repo_root)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let timestamp = text.trim();
+        if timestamp.is_empty() {
+            return None;
+        }
+        DateTime::parse_from_rfc3339(timestamp).ok()
+    }
+
+    fn publish(&self, uri: Uri, diagnostics: Vec<Diagnostic>) -> anyhow::Result<()> {
+        // Load-bearing severity ceiling: every diagnostics publish flows through
+        // this gate so v2.0 cannot accidentally emit Warning or Error.
+        debug_assert!(diagnostics.iter().all(is_allowed_diagnostic_severity));
+        self.connection.sender.send(
+            Notification::new(
+                "textDocument/publishDiagnostics".to_string(),
+                PublishDiagnosticsParams {
+                    uri,
+                    diagnostics,
+                    version: None,
+                },
+            )
+            .into(),
+        )?;
         Ok(())
     }
 
@@ -341,6 +541,12 @@ fn repo_relative_path(repo_root: &Path, uri: &lsp_types::Uri) -> Option<String> 
     let decoded = percent_decode_utf8(uri.path().as_str())?;
     let absolute_path = PathBuf::from(decoded);
     let relative = absolute_path.strip_prefix(repo_root).ok()?;
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
     // Do not canonicalize or resolve symlinks here: the substrate stores the
     // literal repo-relative paths produced during indexing.
     Some(
@@ -348,6 +554,21 @@ fn repo_relative_path(repo_root: &Path, uri: &lsp_types::Uri) -> Option<String> 
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/"),
     )
+}
+
+fn diagnostics_config(options: Option<serde_json::Value>) -> DiagnosticsConfig {
+    options
+        .and_then(|options| serde_json::from_value::<InitializationOptions>(options).ok())
+        .map(|options| options.diagnostics)
+        .unwrap_or_default()
+}
+
+fn notification_text_document_uri(params: &serde_json::Value) -> Option<Uri> {
+    params
+        .get("textDocument")?
+        .get("uri")?
+        .as_str()
+        .and_then(|uri| Uri::from_str(uri).ok())
 }
 
 fn percent_decode_utf8(value: &str) -> Option<String> {
@@ -419,6 +640,74 @@ fn utf16_character_to_utf8_col(line: &str, character: u32) -> u32 {
     }
 
     line.len() as u32
+}
+
+fn utf8_col_to_utf16_character(line: &str, byte_col: u32) -> u32 {
+    // SCIP stores UTF-8 byte columns; LSP diagnostics must be reported in the
+    // session encoding negotiated with the editor.
+    let mut utf16_units = 0;
+    let mut utf8_bytes = 0;
+
+    for ch in line.chars() {
+        if utf8_bytes >= byte_col {
+            return utf16_units;
+        }
+
+        let next_utf8_bytes = utf8_bytes + ch.len_utf8() as u32;
+        if next_utf8_bytes > byte_col {
+            return utf16_units;
+        }
+
+        utf8_bytes = next_utf8_bytes;
+        utf16_units += ch.len_utf16() as u32;
+
+        if utf8_bytes == byte_col {
+            return utf16_units;
+        }
+    }
+
+    line.encode_utf16().count() as u32
+}
+
+fn newest_record_instant(records: &[crate::graph::RecordSummary]) -> Option<DateTime<FixedOffset>> {
+    records
+        .iter()
+        .filter_map(|record| DateTime::parse_from_rfc3339(&record.timestamp).ok())
+        .max()
+}
+
+fn stale_rationale_applies(
+    records: &[crate::graph::RecordSummary],
+    file_commit: Option<DateTime<FixedOffset>>,
+) -> bool {
+    match (newest_record_instant(records), file_commit) {
+        (Some(newest), Some(file_commit)) => newest < file_commit,
+        _ => false,
+    }
+}
+
+fn short_record_id(iri: &str) -> String {
+    iri.rsplit(['/', '#'])
+        .next()
+        .unwrap_or(iri)
+        .chars()
+        .take(8)
+        .collect()
+}
+
+fn is_allowed_diagnostic_severity(diagnostic: &Diagnostic) -> bool {
+    matches!(
+        diagnostic.severity,
+        Some(DiagnosticSeverity::INFORMATION | DiagnosticSeverity::HINT)
+    )
+}
+
+fn diagnostic_severity_rank(diagnostic: &Diagnostic) -> u8 {
+    match diagnostic.severity {
+        Some(DiagnosticSeverity::INFORMATION) => 3,
+        Some(DiagnosticSeverity::HINT) => 4,
+        _ => 255,
+    }
 }
 
 fn server_capabilities(encoding: SessionEncoding) -> ServerCapabilities {
@@ -516,6 +805,61 @@ mod tests {
     }
 
     #[test]
+    fn utf8_col_to_utf16_character_handles_multibyte_and_clamps() {
+        let line = "létter 😀 αβ fn";
+
+        assert_eq!(utf8_col_to_utf16_character(line, 0), 0);
+        assert_eq!(utf8_col_to_utf16_character(line, 1), 1);
+        assert_eq!(utf8_col_to_utf16_character(line, "lé".len() as u32), 2);
+
+        let emoji_utf8 = "létter ".len() as u32;
+        let emoji_utf16 = "létter ".encode_utf16().count() as u32;
+        assert_eq!(utf8_col_to_utf16_character(line, emoji_utf8), emoji_utf16);
+        assert_eq!(
+            utf8_col_to_utf16_character(line, emoji_utf8 + "😀".len() as u32),
+            emoji_utf16 + 2
+        );
+
+        assert_eq!(
+            utf8_col_to_utf16_character(line, "létter 😀 αβ".len() as u32),
+            "létter 😀 αβ".encode_utf16().count() as u32
+        );
+        assert_eq!(
+            utf8_col_to_utf16_character(line, 10_000),
+            line.encode_utf16().count() as u32
+        );
+    }
+
+    #[test]
+    fn diagnostics_config_defaults_on_absent_or_malformed_options() {
+        assert_eq!(diagnostics_config(None), DiagnosticsConfig::default());
+        assert_eq!(
+            diagnostics_config(Some(serde_json::json!("not an object"))),
+            DiagnosticsConfig::default()
+        );
+    }
+
+    #[test]
+    fn diagnostics_config_honors_false_and_ignores_unknown_keys() {
+        let config = diagnostics_config(Some(serde_json::json!({
+            "diagnostics": {
+                "constraints": false,
+                "staleRationale": false,
+                "ignored": "value"
+            },
+            "other": true
+        })));
+
+        assert_eq!(
+            config,
+            DiagnosticsConfig {
+                constraints: false,
+                stale_rationale: false,
+            }
+        );
+    }
+
+    #[test]
     fn repo_relative_path_accepts_file_uri_under_root() {
         let root = Path::new("/tmp/moosedev root");
         let uri = lsp_types::Uri::from_str("file:///tmp/moosedev%20root/src/runtime.rs").unwrap();
@@ -535,5 +879,13 @@ mod tests {
 
         assert!(repo_relative_path(root, &outside).is_none());
         assert!(repo_relative_path(root, &untitled).is_none());
+    }
+
+    #[test]
+    fn repo_relative_path_rejects_parent_dir_components() {
+        let root = Path::new("/tmp/moosedev-root");
+        let uri = lsp_types::Uri::from_str("file:///tmp/moosedev-root/src/../secret.rs").unwrap();
+
+        assert!(repo_relative_path(root, &uri).is_none());
     }
 }

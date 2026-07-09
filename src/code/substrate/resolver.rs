@@ -82,6 +82,13 @@ pub struct DefinitionEntry {
     pub is_public: bool,
 }
 
+/// One workspace definition with the source range of its definition occurrence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDefinition {
+    pub entry: DefinitionEntry,
+    pub range: SourceRange,
+}
+
 #[derive(Debug, Clone)]
 pub struct Substrate {
     index: IngestedIndex,
@@ -181,6 +188,35 @@ impl Substrate {
             .filter_map(definition_entry)
             .collect::<Vec<_>>();
         definitions.sort_by(|a, b| a.normalized_symbol.cmp(&b.normalized_symbol));
+        definitions
+    }
+
+    pub fn definitions_in_file(&self, relative_path: &str) -> Vec<FileDefinition> {
+        let Some(file) = self.index.files.get(relative_path) else {
+            return Vec::new();
+        };
+
+        let mut definitions = file
+            .occurrences
+            .iter()
+            .filter(|entry| scip::is_definition_role(entry.symbol_roles))
+            .filter_map(|entry| {
+                let symbol = &self.index.symbols[entry.symbol_id];
+                if symbol.is_local || is_synthetic_whole_file_marker(symbol, entry.range) {
+                    return None;
+                }
+                Some(FileDefinition {
+                    entry: definition_entry(symbol)?,
+                    range: entry.range,
+                })
+            })
+            .collect::<Vec<_>>();
+        definitions.sort_by(|a, b| {
+            a.range
+                .start
+                .cmp(&b.range.start)
+                .then_with(|| a.entry.normalized_symbol.cmp(&b.entry.normalized_symbol))
+        });
         definitions
     }
 
@@ -665,6 +701,42 @@ mod tests {
         assert_eq!(definitions[0].symbol, module);
         assert_eq!(definitions[0].file, "src/runtime.rs");
         assert!(definitions[0].is_module);
+    }
+
+    #[test]
+    fn definitions_in_file_excludes_whole_file_module_and_keeps_token_range() {
+        let module = "rust-analyzer cargo moosedev 0.6.3 runtime/";
+        let function = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            module,
+            "runtime",
+            symbol_information::Kind::Module,
+            "pub mod runtime",
+        ));
+        document.occurrences.push(occ(module, vec![0, 0, 30, 0], 1));
+        document.symbols.push(info(
+            function,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        document.occurrences.push(occ(function, vec![7, 4, 16], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+        let definitions = substrate.definitions_in_file("src/runtime.rs");
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].entry.symbol, function);
+        assert_eq!(
+            definitions[0].range,
+            SourceRange {
+                start: Position { line: 7, col: 4 },
+                end: Position { line: 7, col: 16 },
+            }
+        );
     }
 
     #[test]
