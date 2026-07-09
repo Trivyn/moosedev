@@ -119,6 +119,8 @@ pub struct InitOptions {
     pub codex: bool,
     /// Also install the opencode PUSH plugin into `.opencode/plugins/`.
     pub opencode: bool,
+    /// Also write project-local Zed LSP settings.
+    pub zed: bool,
 }
 
 /// What happened to one artifact.
@@ -175,6 +177,10 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     if opts.opencode {
         write_opencode_plugin(opts, &mut report)?;
     }
+    if opts.zed {
+        write_zed_settings(opts, &mut report)?;
+    }
+    offer_post_commit_hook(opts, &mut report)?;
 
     Ok(report)
 }
@@ -253,6 +259,132 @@ fn write_mcp_json(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result
             Outcome::Created
         },
     ));
+    Ok(())
+}
+
+/// The `lsp.moosedev` value written into `.zed/settings.json`.
+fn zed_lsp_entry() -> Value {
+    json!({
+        "initialization_options": {
+            "diagnostics": {
+                "constraints": true,
+                "staleRationale": true,
+            },
+        },
+    })
+}
+
+/// Merge MOOSEDev's optional diagnostics into project-local Zed settings.
+/// Existing JSON that cannot be parsed is never overwritten.
+fn write_zed_settings(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let path = opts.target_dir.join(".zed/settings.json");
+    let existed = path.exists();
+
+    let mut root: Value = if existed {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "{} is not valid JSON — fix or move it, then re-run init",
+                path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} must be a JSON object", path.display()))?;
+    let lsp = obj
+        .entry("lsp")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} `lsp` must be an object", path.display()))?;
+
+    report.notes.push(
+        "Zed needs the thin extension in `clients/zed` of the MOOSEDev source checkout (or from the Zed registry once published): zed: install dev extension → clients/zed. Requires `rustup target add wasm32-wasip1`."
+            .to_string(),
+    );
+    if lsp.contains_key("moosedev") && !opts.force {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
+        report.notes.push(
+            "`.zed/settings.json` already configures `lsp.moosedev`; left as-is (use --force to overwrite)"
+                .to_string(),
+        );
+        return Ok(());
+    }
+    lsp.insert("moosedev".to_string(), zed_lsp_entry());
+
+    let dir = path.parent().expect("settings path has a parent");
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let serialized = format!("{}\n", serde_json::to_string_pretty(&root)?);
+    std::fs::write(&path, serialized).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    Ok(())
+}
+
+/// Offer a safe, project-local re-index hook without changing user hook content.
+fn offer_post_commit_hook(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let git_dir = opts.target_dir.join(".git");
+    if !git_dir.is_dir() {
+        report.notes.push(
+            "no .git directory found; post-commit re-index hook was not installed".to_string(),
+        );
+        return Ok(());
+    }
+
+    let path = git_dir.join("hooks/post-commit");
+    let hook_exists = match std::fs::symlink_metadata(&path) {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    };
+    if hook_exists {
+        let content = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        if content
+            .windows(b"moosedev index".len())
+            .any(|part| part == b"moosedev index")
+        {
+            report.entries.push(Entry::new(path, Outcome::Skipped));
+        } else {
+            report.notes.push(
+                "post-commit hook exists without MOOSEDev; append this exact line manually: moosedev index || true"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+
+    let dir = path.parent().expect("hook path has a parent");
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n# moosedev: refresh the code substrate after each commit\nmoosedev index || true\n",
+    )
+    .with_context(|| format!("write {}", path.display()))?;
+    set_executable(&path)?;
+    report.entries.push(Entry::new(path, Outcome::Created));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("mark {} executable", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -561,6 +693,7 @@ mod tests {
             force: false,
             codex: false,
             opencode: false,
+            zed: false,
         }
     }
 
@@ -776,6 +909,164 @@ mod tests {
         let plugin =
             std::fs::read_to_string(target.join(".opencode/plugins/moosedev-push.ts")).unwrap();
         assert!(plugin.contains("MOOSEDEV_DATA_DIR"));
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn zed_settings_created_fresh() {
+        let target = temp_project("zed-fresh");
+        let mut o = opts(&target);
+        o.zed = true;
+        let report = init_project(&o).unwrap();
+
+        let settings = read_json(&target.join(".zed/settings.json"));
+        assert_eq!(
+            settings["lsp"]["moosedev"]["initialization_options"]["diagnostics"]["constraints"],
+            true
+        );
+        assert_eq!(
+            settings["lsp"]["moosedev"]["initialization_options"]["diagnostics"]["staleRationale"],
+            true
+        );
+        assert_eq!(
+            outcome_for(&report, ".zed/settings.json"),
+            Some(&Outcome::Created)
+        );
+        assert!(
+            report.notes.iter().any(|note| note.contains("clients/zed")),
+            "report should point to the dev extension"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn zed_settings_merge_preserves_existing() {
+        let target = temp_project("zed-merge");
+        let zed_dir = target.join(".zed");
+        std::fs::create_dir_all(&zed_dir).unwrap();
+        std::fs::write(
+            zed_dir.join("settings.json"),
+            r#"{"theme":"One Dark","lsp":{"rust-analyzer":{"x":1}}}"#,
+        )
+        .unwrap();
+        let mut o = opts(&target);
+        o.zed = true;
+        let report = init_project(&o).unwrap();
+
+        let settings = read_json(&zed_dir.join("settings.json"));
+        assert_eq!(settings["theme"], "One Dark");
+        assert_eq!(settings["lsp"]["rust-analyzer"]["x"], 1);
+        assert_eq!(
+            settings["lsp"]["moosedev"]["initialization_options"]["diagnostics"]["constraints"],
+            true
+        );
+        assert_eq!(
+            outcome_for(&report, ".zed/settings.json"),
+            Some(&Outcome::Merged)
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn zed_settings_existing_moosedev_skipped_without_force() {
+        let target = temp_project("zed-existing");
+        let zed_dir = target.join(".zed");
+        std::fs::create_dir_all(&zed_dir).unwrap();
+        let path = zed_dir.join("settings.json");
+        std::fs::write(&path, r#"{"lsp":{"moosedev":{"custom":true}}}"#).unwrap();
+        let mut o = opts(&target);
+        o.zed = true;
+
+        let report = init_project(&o).unwrap();
+        assert_eq!(
+            outcome_for(&report, ".zed/settings.json"),
+            Some(&Outcome::Skipped)
+        );
+        assert_eq!(read_json(&path)["lsp"]["moosedev"]["custom"], true);
+
+        o.force = true;
+        let report = init_project(&o).unwrap();
+        let settings = read_json(&path);
+        assert_eq!(
+            outcome_for(&report, ".zed/settings.json"),
+            Some(&Outcome::Merged)
+        );
+        assert_eq!(
+            settings["lsp"]["moosedev"]["initialization_options"]["diagnostics"]["staleRationale"],
+            true
+        );
+        assert!(settings["lsp"]["moosedev"].get("custom").is_none());
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn post_commit_hook_created_when_missing() {
+        let target = temp_project("hook-fresh");
+        std::fs::create_dir_all(target.join(".git/hooks")).unwrap();
+
+        let report = init_project(&opts(&target)).unwrap();
+        let path = target.join(".git/hooks/post-commit");
+        let hook = std::fs::read_to_string(&path).unwrap();
+        assert!(hook.contains("moosedev index || true"));
+        assert_eq!(
+            outcome_for(&report, ".git/hooks/post-commit"),
+            Some(&Outcome::Created)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+                0
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn post_commit_hook_existing_untouched() {
+        let target = temp_project("hook-existing");
+        let hook_dir = target.join(".git/hooks");
+        std::fs::create_dir_all(&hook_dir).unwrap();
+        let path = hook_dir.join("post-commit");
+        let custom = b"#!/bin/sh\necho custom\n";
+        std::fs::write(&path, custom).unwrap();
+
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), custom);
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("moosedev index || true")));
+        assert!(outcome_for(&report, ".git/hooks/post-commit").is_none());
+
+        let existing = b"#!/bin/sh\nmoosedev index || true\n";
+        std::fs::write(&path, existing).unwrap();
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), existing);
+        assert_eq!(
+            outcome_for(&report, ".git/hooks/post-commit"),
+            Some(&Outcome::Skipped)
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn no_git_dir_skips_hook() {
+        let target = temp_project("hook-no-git");
+        let report = init_project(&opts(&target)).unwrap();
+
+        assert!(!target.join(".git/hooks/post-commit").exists());
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("no .git directory")));
+
         let _ = std::fs::remove_dir_all(&target);
     }
 
