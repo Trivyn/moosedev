@@ -1,7 +1,7 @@
 [
   {
     "path": "src/main.rs",
-    "line": 41,
+    "line": 42,
     "col": 6,
     "expect_symbol": "Mode#",
     "expect_definition": true,
@@ -9,7 +9,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 90,
+    "line": 95,
     "col": 8,
     "expect_symbol": "ResolveArgs#",
     "expect_definition": true,
@@ -17,7 +17,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 161,
+    "line": 168,
     "col": 4,
     "expect_symbol": "parse_mode().",
     "expect_definition": true,
@@ -25,7 +25,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 692,
+    "line": 716,
     "col": 4,
     "expect_symbol": "index_mode().",
     "expect_definition": true,
@@ -33,7 +33,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 709,
+    "line": 864,
     "col": 4,
     "expect_symbol": "resolve_mode().",
     "expect_definition": true,
@@ -41,7 +41,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 173,
+    "line": 180,
     "col": 26,
     "expect_symbol": "parse_index().",
     "expect_definition": false,
@@ -49,7 +49,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 174,
+    "line": 182,
     "col": 28,
     "expect_symbol": "parse_resolve().",
     "expect_definition": false,
@@ -57,7 +57,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 682,
+    "line": 705,
     "col": 24,
     "expect_symbol": "index_mode().",
     "expect_definition": false,
@@ -65,7 +65,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 683,
+    "line": 707,
     "col": 32,
     "expect_symbol": "resolve_mode().",
     "expect_definition": false,
@@ -73,7 +73,7 @@
   },
   {
     "path": "src/main.rs",
-    "line": 711,
+    "line": 866,
     "col": 21,
     "expect_symbol": "code/substrate/resolver/Substrate#",
     "expect_definition": false,
@@ -81,7 +81,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 10,
+    "line": 18,
     "col": 12,
     "expect_symbol": "code/substrate/resolver/Position#",
     "expect_definition": true,
@@ -89,7 +89,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 16,
+    "line": 26,
     "col": 12,
     "expect_symbol": "code/substrate/resolver/SourceRange#",
     "expect_definition": true,
@@ -97,7 +97,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 22,
+    "line": 34,
     "col": 10,
     "expect_symbol": "code/substrate/resolver/ResolutionMode#",
     "expect_definition": true,
@@ -105,7 +105,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 28,
+    "line": 42,
     "col": 12,
     "expect_symbol": "code/substrate/resolver/Resolution#",
     "expect_definition": true,
@@ -113,7 +113,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 48,
+    "line": 86,
     "col": 12,
     "expect_symbol": "code/substrate/resolver/Substrate#",
     "expect_definition": true,
@@ -121,7 +121,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 55,
+    "line": 94,
     "col": 12,
     "expect_symbol": "code/substrate/resolver/impl#[Substrate]load().",
     "expect_definition": true,
@@ -129,7 +129,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 74,
+    "line": 113,
     "col": 12,
     "expect_symbol": "code/substrate/resolver/impl#[Substrate]resolve().",
     "expect_definition": true,
@@ -137,7 +137,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 57,
+    "line": 96,
     "col": 27,
     "expect_symbol": "code/substrate/scip/read_index().",
     "expect_definition": false,
@@ -145,7 +145,7 @@
   },
   {
     "path": "src/code/substrate/resolver.rs",
-    "line": 63,
+    "line": 102,
     "col": 20,
     "expect_symbol": "code/substrate/meta/SubstrateMeta#",
     "expect_definition": false,
@@ -153,7 +153,7 @@
   },
   {
     "path": "src/code/substrate/meta.rs",
-    "line": 14,
+    "line": 20,
     "col": 12,
     "expect_symbol": "code/substrate/meta/SubstrateMeta#",
     "expect_definition": true,
@@ -161,7 +161,7 @@
   },
   {
     "path": "src/code/substrate/meta.rs",
-    "line": 26,
+    "line": 40,
     "col": 12,
     "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]load().",
     "expect_definition": true,
@@ -169,7 +169,7 @@
   },
   {
     "path": "src/code/substrate/meta.rs",
-    "line": 42,
+    "line": 56,
     "col": 12,
     "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]save().",
     "expect_definition": true,
@@ -177,7 +177,7 @@
   },
   {
     "path": "src/code/substrate/meta.rs",
-    "line": 55,
+    "line": 69,
     "col": 12,
     "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]current_head().",
     "expect_definition": true,
@@ -185,7 +185,7 @@
   },
   {
     "path": "src/code/substrate/producer.rs",
-    "line": 15,
+    "line": 22,
     "col": 12,
     "expect_symbol": "code/substrate/producer/IndexReport#",
     "expect_definition": true,
@@ -193,7 +193,7 @@
   },
   {
     "path": "src/code/substrate/producer.rs",
-    "line": 24,
+    "line": 37,
     "col": 8,
     "expect_symbol": "code/substrate/producer/run_index().",
     "expect_definition": true,
@@ -201,7 +201,7 @@
   },
   {
     "path": "src/code/substrate/producer.rs",
-    "line": 33,
+    "line": 46,
     "col": 33,
     "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]current_head().",
     "expect_definition": false,
@@ -209,7 +209,7 @@
   },
   {
     "path": "src/code/substrate/producer.rs",
-    "line": 67,
+    "line": 84,
     "col": 17,
     "expect_symbol": "code/substrate/scip/read_index().",
     "expect_definition": false,
@@ -217,7 +217,7 @@
   },
   {
     "path": "src/code/substrate/scip.rs",
-    "line": 15,
+    "line": 22,
     "col": 19,
     "expect_symbol": "code/substrate/scip/IngestedIndex#",
     "expect_definition": true,
@@ -225,7 +225,7 @@
   },
   {
     "path": "src/code/substrate/scip.rs",
-    "line": 46,
+    "line": 67,
     "col": 15,
     "expect_symbol": "code/substrate/scip/read_index().",
     "expect_definition": true,
@@ -233,7 +233,7 @@
   },
   {
     "path": "src/code/substrate/scip.rs",
-    "line": 61,
+    "line": 82,
     "col": 15,
     "expect_symbol": "code/substrate/scip/ingest().",
     "expect_definition": true,
@@ -241,7 +241,7 @@
   },
   {
     "path": "src/code/substrate/scip.rs",
-    "line": 83,
+    "line": 108,
     "col": 25,
     "expect_symbol": "code/substrate/scip/occurrence_range().",
     "expect_definition": false,
@@ -265,7 +265,7 @@
   },
   {
     "path": "src/runtime.rs",
-    "line": 121,
+    "line": 122,
     "col": 14,
     "expect_symbol": "runtime/spawn_http_if_enabled().",
     "expect_definition": true,
