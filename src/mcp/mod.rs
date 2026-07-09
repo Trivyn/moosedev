@@ -273,6 +273,21 @@ pub struct LinkCodeArgs {
     pub symbol: Option<String>,
 }
 
+/// Arguments for the `get_entity_dossier` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetEntityDossierArgs {
+    /// Repo-relative path as stored in the substrate index; use with `line` and `col`.
+    pub file: Option<String>,
+    /// 1-based source line for a position selector.
+    pub line: Option<u32>,
+    /// 1-based UTF-8 byte column for a position selector.
+    pub col: Option<u32>,
+    /// SCIP symbol, raw or version-normalized, as an alternative selector.
+    pub symbol: Option<String>,
+    /// CodeEntity IRI as an alternative selector.
+    pub iri: Option<String>,
+}
+
 /// Arguments for the `get_provenance` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetProvenanceArgs {
@@ -737,6 +752,74 @@ impl MooseDevServer {
                     stale_note
                 )))
             }
+            Err(e) => Ok(tool_error(e.to_string())),
+        }
+    }
+
+    /// Get the recorded knowledge directly linked to a CodeEntity.
+    #[tool(
+        description = "Returns the recorded knowledge (decisions, constraints, lessons, requirements, and related records) directly linked to the code entity at a position, symbol, or IRI. Pass exactly one selector: `file` + 1-based `line` + 1-based `col`, `symbol`, or `iri`. When no recorded knowledge is directly linked, returns a clear no-recorded-knowledge reply; use `link_code` to attach records."
+    )]
+    async fn get_entity_dossier(
+        &self,
+        Parameters(args): Parameters<GetEntityDossierArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let file = args.file.map(|s| s.trim().to_string());
+        let symbol = args.symbol.map(|s| s.trim().to_string());
+        let iri = args.iri.map(|s| s.trim().to_string());
+        let position_supplied = file.is_some() || args.line.is_some() || args.col.is_some();
+        let symbol_supplied = symbol.is_some();
+        let iri_supplied = iri.is_some();
+
+        if symbol.as_deref().is_some_and(str::is_empty) {
+            return Ok(tool_error("`symbol` must not be empty when provided"));
+        }
+        if iri.as_deref().is_some_and(str::is_empty) {
+            return Ok(tool_error("`iri` must not be empty when provided"));
+        }
+        if position_supplied {
+            let mut missing = Vec::new();
+            if file.as_deref().is_none_or(str::is_empty) {
+                missing.push("file");
+            }
+            if args.line.is_none() {
+                missing.push("line");
+            }
+            if args.col.is_none() {
+                missing.push("col");
+            }
+            if !missing.is_empty() {
+                return Ok(tool_error(format!(
+                    "position selector requires `file`, `line`, and `col`; missing {}",
+                    missing.join(", ")
+                )));
+            }
+        }
+
+        let selector_count = position_supplied as u8 + symbol_supplied as u8 + iri_supplied as u8;
+        if selector_count != 1 {
+            return Ok(tool_error(
+                "pass exactly one selector: `file` + `line` + `col`, `symbol`, or `iri`",
+            ));
+        }
+
+        let target = if position_supplied {
+            graph::DossierTarget::Position {
+                file: file.expect("validated file"),
+                line: args.line.expect("validated line"),
+                col: args.col.expect("validated col"),
+            }
+        } else if let Some(symbol) = symbol {
+            graph::DossierTarget::Symbol(symbol)
+        } else {
+            graph::DossierTarget::Iri(iri.expect("validated iri"))
+        };
+
+        match graph::get_entity_dossier(&self.state, &target) {
+            Ok(Some(dossier)) => Ok(tool_ok(graph::render_markdown(&dossier))),
+            Ok(None) => Ok(tool_ok(
+                "No recorded knowledge is linked to this code; attach records with `link_code`.",
+            )),
             Err(e) => Ok(tool_error(e.to_string())),
         }
     }
