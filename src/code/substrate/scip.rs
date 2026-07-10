@@ -134,17 +134,36 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
     let mut symbols = Vec::<SymbolData>::new();
     let mut occurrence_count = 0usize;
     let mut definition_count = 0usize;
+    let is_scip_typescript = index
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.tool_info.as_ref())
+        .is_some_and(|tool| tool.name == "scip-typescript");
+    let mut unspecified_encoding_documents = 0usize;
 
     // Pass 1 interns declared symbol metadata before occurrences. rust-analyzer
     // may emit duplicate crate symbols, so the first metadata record wins.
     for document in &index.documents {
-        validate_position_encoding(
+        if validate_position_encoding(
             &document.relative_path,
             document.position_encoding.enum_value(),
-        )?;
-        for symbol_info in &document.symbols {
-            intern_symbol(symbol_info, &mut symbol_ids, &mut symbols);
+        )? {
+            unspecified_encoding_documents += 1;
         }
+        for symbol_info in &document.symbols {
+            intern_symbol(
+                symbol_info,
+                is_scip_typescript,
+                &mut symbol_ids,
+                &mut symbols,
+            );
+        }
+    }
+    if unspecified_encoding_documents > 0 {
+        tracing::warn!(
+            documents = unspecified_encoding_documents,
+            "SCIP documents have unspecified position_encoding; treating as UTF-8"
+        );
     }
 
     // Pass 2 builds producer-agnostic occurrence tables. Occurrences may mention
@@ -237,7 +256,7 @@ pub(crate) fn is_definition_role(symbol_roles: i32) -> bool {
 fn validate_position_encoding(
     relative_path: &str,
     encoding: std::result::Result<PositionEncoding, i32>,
-) -> Result<()> {
+) -> Result<bool> {
     let encoding = match encoding {
         Ok(encoding) => encoding,
         Err(value) => bail!(
@@ -247,16 +266,11 @@ fn validate_position_encoding(
         ),
     };
     match encoding {
-        PositionEncoding::UTF8CodeUnitOffsetFromLineStart => Ok(()),
-        PositionEncoding::UnspecifiedPositionEncoding => {
-            // rust-analyzer emits UTF-8 today; unspecified is tolerated but noisy
-            // so we never silently accept a changed producer contract.
-            tracing::warn!(
-                path = relative_path,
-                "SCIP document has unspecified position_encoding; treating as UTF-8"
-            );
-            Ok(())
-        }
+        PositionEncoding::UTF8CodeUnitOffsetFromLineStart => Ok(false),
+        // Producers can declare UTF-8 in index metadata while leaving the
+        // per-document encoding unspecified. Accept it, but report the aggregate
+        // once per ingested index so a changed producer contract remains visible.
+        PositionEncoding::UnspecifiedPositionEncoding => Ok(true),
         PositionEncoding::UTF16CodeUnitOffsetFromLineStart
         | PositionEncoding::UTF32CodeUnitOffsetFromLineStart => {
             bail!(
@@ -270,6 +284,7 @@ fn validate_position_encoding(
 
 fn intern_symbol(
     info: &SymbolInformation,
+    is_scip_typescript: bool,
     symbol_ids: &mut HashMap<String, usize>,
     symbols: &mut Vec<SymbolData>,
 ) -> usize {
@@ -281,7 +296,12 @@ fn intern_symbol(
     let signature = info
         .signature_documentation
         .as_ref()
-        .and_then(|signature| empty_to_none(&signature.text));
+        .and_then(|signature| empty_to_none(&signature.text))
+        .or_else(|| {
+            is_scip_typescript
+                .then(|| typescript_signature_from_documentation(&info.documentation))
+                .flatten()
+        });
 
     match symbol_ids.entry(info.symbol.clone()) {
         Entry::Occupied(entry) => *entry.get(),
@@ -300,6 +320,14 @@ fn intern_symbol(
             id
         }
     }
+}
+
+fn typescript_signature_from_documentation(documentation: &[String]) -> Option<String> {
+    let text = documentation.first()?;
+    text.strip_prefix("```ts\n")
+        .and_then(|body| body.strip_suffix("\n```"))
+        .filter(|body| !body.is_empty())
+        .map(str::to_string)
 }
 
 fn intern_symbol_str(

@@ -41,6 +41,30 @@ pub fn logical_path(raw: &str) -> Option<String> {
     )
 }
 
+/// The final descriptor name, suitable as a display label when a producer
+/// leaves `SymbolInformation.display_name` empty.
+pub fn last_descriptor_name(raw: &str) -> Option<String> {
+    parse_symbol(raw)
+        .ok()?
+        .descriptors
+        .last()
+        .map(|descriptor| descriptor.name.clone())
+}
+
+/// True for a parsed, non-module symbol whose ancestors are all namespaces.
+pub(crate) fn is_top_level_declaration(raw: &str) -> bool {
+    let Ok(symbol) = parse_symbol(raw) else {
+        return false;
+    };
+    let Some((last, ancestors)) = symbol.descriptors.split_last() else {
+        return false;
+    };
+    let suffix = |descriptor: &scip::types::Descriptor| {
+        descriptor.suffix.enum_value().ok() == Some(descriptor::Suffix::Namespace)
+    };
+    ancestors.iter().all(suffix) && !suffix(last)
+}
+
 /// True when the symbol's last descriptor is a namespace, i.e. the symbol names
 /// a module.
 pub fn is_module_symbol(raw: &str) -> bool {
@@ -58,6 +82,15 @@ mod tests {
 
     const FUNCTION: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
     const NORMALIZED_FUNCTION: &str = "rust-analyzer cargo moosedev . runtime/build_server().";
+    const TS_MODULE: &str = "scip-typescript npm moosedev-ui 0.6.3 src/pages/`RecordPage.tsx`/";
+    const TS_FUNCTION: &str =
+        "scip-typescript npm moosedev-ui 0.6.3 src/pages/`RecordPage.tsx`/RecordPage().";
+    const TS_INTERFACE: &str = "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedIface#";
+    const TS_PROPERTY: &str = "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedIface#a.";
+    const TS_METHOD: &str =
+        "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedClass#method().";
+    const TS_PARAMETER: &str =
+        "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/exportedFn().(x)";
 
     #[test]
     fn normalizes_package_version() {
@@ -110,6 +143,33 @@ mod tests {
         assert_eq!(
             logical_path(FUNCTION).as_deref(),
             Some("runtime::build_server")
+        );
+    }
+
+    #[test]
+    fn typescript_symbols_normalize_idempotently_and_preserve_grammar() {
+        for raw in [
+            TS_MODULE,
+            TS_FUNCTION,
+            TS_INTERFACE,
+            TS_PROPERTY,
+            TS_METHOD,
+            TS_PARAMETER,
+        ] {
+            let normalized = normalize_symbol(raw).unwrap();
+            assert!(normalized.contains(" . "), "{normalized}");
+            assert!(!normalized.contains(" 0.6.3 "), "{normalized}");
+            assert!(!normalized.contains(" 1.2.3 "), "{normalized}");
+            assert_eq!(
+                normalize_symbol(&normalized).as_deref(),
+                Some(normalized.as_str())
+            );
+        }
+        assert!(is_module_symbol(TS_MODULE));
+        assert!(!is_module_symbol(TS_FUNCTION));
+        assert_eq!(
+            logical_path(TS_FUNCTION).as_deref(),
+            Some("src::pages::RecordPage.tsx::RecordPage")
         );
     }
 }

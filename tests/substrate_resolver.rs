@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use moosedev::code::substrate::{Position, Substrate};
+use moosedev::code::substrate::{Position, Substrate, SubstrateMeta};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -42,7 +42,6 @@ fn acceptance_40_positions() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-
     let substrate = Substrate::load(&data_dir, repo_root)?;
     let samples: Vec<Sample> = serde_json::from_str(include_str!("fixtures/resolver_sample.json"))?;
     assert_eq!(
@@ -101,6 +100,40 @@ fn acceptance_40_positions() -> anyhow::Result<()> {
         "resolver acceptance passed {passed}/{} positions; expected at least 38",
         samples.len()
     );
+    Ok(())
+}
+
+#[test]
+fn repository_dual_producer_substrate_loads() -> anyhow::Result<()> {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let data_dir = repo_root.join(".moosedev");
+    let meta_path = data_dir.join("substrate").join("meta.json");
+    if !meta_path.is_file() {
+        eprintln!(
+            "skipping dual-producer substrate acceptance: {} is absent; run the real dual-producer index at review time",
+            meta_path.display()
+        );
+        return Ok(());
+    }
+    let meta = SubstrateMeta::load(&data_dir)?;
+    if !meta
+        .producers
+        .iter()
+        .any(|producer| producer.name == "scip-typescript")
+    {
+        eprintln!(
+            "skipping dual-producer substrate acceptance: meta.json does not list scip-typescript; run the real dual-producer index at review time"
+        );
+        return Ok(());
+    }
+
+    let definitions = Substrate::load(&data_dir, repo_root)?.definitions();
+    assert!(definitions.iter().any(|entry| {
+        entry.producer == "rust-analyzer" && entry.symbol.contains("runtime/build_server().")
+    }));
+    assert!(definitions
+        .iter()
+        .any(|entry| { entry.producer == "scip-typescript" && entry.file.starts_with("ui/") }));
     Ok(())
 }
 

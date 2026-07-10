@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -21,37 +21,108 @@ use super::{
     substrate_dir,
 };
 
-pub struct ProducerSpec {
-    pub name: &'static str,
-    pub detect: fn(&Path) -> bool,
-    pub command: fn(&Path, &Path) -> Command,
-    pub path_prefix: Option<&'static str>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerTarget {
+    pub project_dir: PathBuf,
+    pub path_prefix: Option<String>,
 }
 
-static PRODUCERS: [ProducerSpec; 1] = [ProducerSpec {
-    name: "rust-analyzer",
-    detect: detect_rust,
-    command: rust_analyzer_command,
-    path_prefix: None,
-}];
+pub struct ProducerSpec {
+    pub name: &'static str,
+    /// Detect one project target. Multi-project producers are a future registry seam.
+    pub detect: fn(&Path) -> Option<ProducerTarget>,
+    pub command: fn(&ProducerTarget, &Path) -> Command,
+}
+
+static PRODUCERS: [ProducerSpec; 2] = [
+    ProducerSpec {
+        name: "rust-analyzer",
+        detect: detect_rust,
+        command: rust_analyzer_command,
+    },
+    ProducerSpec {
+        name: "scip-typescript",
+        detect: detect_typescript,
+        command: scip_typescript_command,
+    },
+];
 
 pub fn registry() -> &'static [ProducerSpec] {
     &PRODUCERS
 }
 
-fn detect_rust(repo_root: &Path) -> bool {
-    repo_root.join("Cargo.toml").is_file()
+fn detect_rust(repo_root: &Path) -> Option<ProducerTarget> {
+    repo_root
+        .join("Cargo.toml")
+        .is_file()
+        .then(|| ProducerTarget {
+            project_dir: repo_root.to_path_buf(),
+            path_prefix: None,
+        })
 }
 
-fn rust_analyzer_command(repo_root: &Path, output_tmp: &Path) -> Command {
+fn rust_analyzer_command(target: &ProducerTarget, output_tmp: &Path) -> Command {
     let binary =
         std::env::var("MOOSEDEV_SCIP_PRODUCER").unwrap_or_else(|_| "rust-analyzer".to_string());
     let mut command = Command::new(binary);
     command
         .arg("scip")
-        .arg(repo_root)
+        .arg(&target.project_dir)
         .arg("--output")
         .arg(output_tmp);
+    command
+}
+
+fn detect_typescript(repo_root: &Path) -> Option<ProducerTarget> {
+    if is_typescript_project(repo_root) {
+        return Some(ProducerTarget {
+            project_dir: repo_root.to_path_buf(),
+            path_prefix: None,
+        });
+    }
+
+    let mut directories = fs::read_dir(repo_root)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name != "node_modules" && !name.starts_with('.')
+        })
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|entry| entry.file_name());
+
+    directories.into_iter().find_map(|entry| {
+        let project_dir = entry.path();
+        is_typescript_project(&project_dir).then(|| ProducerTarget {
+            project_dir,
+            path_prefix: Some(format!("{}/", entry.file_name().to_string_lossy())),
+        })
+    })
+}
+
+fn is_typescript_project(path: &Path) -> bool {
+    path.join("tsconfig.json").is_file() && path.join("package.json").is_file()
+}
+
+fn scip_typescript_command(target: &ProducerTarget, output_tmp: &Path) -> Command {
+    let mut command = match std::env::var_os("MOOSEDEV_SCIP_TYPESCRIPT") {
+        Some(binary) => {
+            let mut command = Command::new(binary);
+            command.arg("index");
+            command
+        }
+        None => {
+            let mut command = Command::new("npx");
+            command.args(["--yes", "@sourcegraph/scip-typescript", "index"]);
+            command
+        }
+    };
+    command
+        .arg("--output")
+        .arg(output_tmp)
+        .current_dir(&target.project_dir);
     command
 }
 
@@ -106,7 +177,7 @@ pub fn run_index_with(
     let commit = SubstrateMeta::current_head(repo_root);
     let detected = producers
         .iter()
-        .filter(|producer| (producer.detect)(repo_root))
+        .filter_map(|producer| (producer.detect)(repo_root).map(|target| (producer, target)))
         .collect::<Vec<_>>();
     if detected.is_empty() {
         bail!(
@@ -120,9 +191,9 @@ pub fn run_index_with(
     let mut runs = Vec::new();
     let mut reports = Vec::new();
     let mut warnings = Vec::new();
-    for spec in detected {
+    for (spec, target) in detected {
         write_log_header(data_dir, spec.name)?;
-        match run_producer(spec, repo_root, data_dir) {
+        match run_producer(spec, &target, data_dir) {
             Ok((run, report)) => {
                 runs.push(run);
                 reports.push(report);
@@ -161,14 +232,20 @@ pub fn run_index_with(
 
 fn run_producer(
     spec: &ProducerSpec,
-    repo_root: &Path,
+    target: &ProducerTarget,
     data_dir: &Path,
 ) -> Result<(ProducerRun, ProducerReport)> {
     let tmp_path = producer_index_tmp_path(data_dir, spec.name);
+    let absolute_tmp_path = std::path::absolute(&tmp_path).with_context(|| {
+        format!(
+            "failed to absolutize temporary SCIP index {}",
+            tmp_path.display()
+        )
+    })?;
     let final_path = producer_index_path(data_dir, spec.name);
     remove_if_present(&tmp_path)?;
 
-    let mut command = (spec.command)(repo_root, &tmp_path);
+    let mut command = (spec.command)(target, &absolute_tmp_path);
     let program = command.get_program().to_string_lossy().into_owned();
     let status = command
         .stdin(Stdio::inherit())
@@ -215,7 +292,7 @@ fn run_producer(
             mode: "scip".to_string(),
             documents: ingested.documents,
             occurrences: ingested.occurrences,
-            path_prefix: spec.path_prefix.map(str::to_string),
+            path_prefix: target.path_prefix.clone(),
         },
         ProducerReport {
             name: spec.name.to_string(),
@@ -366,13 +443,61 @@ mod tests {
     fn rust_registry_detection_requires_cargo_manifest() {
         let repo_root = unique_temp_dir("registry-detect");
         let rust = &registry()[0];
-        assert!(!(rust.detect)(&repo_root));
+        assert!((rust.detect)(&repo_root).is_none());
         fs::write(
             repo_root.join("Cargo.toml"),
             "[package]\nname='fixture'\nversion='0.1.0'\n",
         )
         .unwrap();
-        assert!((rust.detect)(&repo_root));
+        assert_eq!(
+            (rust.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.clone(),
+                path_prefix: None,
+            })
+        );
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn typescript_detection_finds_root_or_sorted_first_level_project() {
+        let repo_root = unique_temp_dir("typescript-detect");
+        let typescript = &registry()[1];
+        assert!((typescript.detect)(&repo_root).is_none());
+
+        write_typescript_manifests(&repo_root.join("z-project"));
+        write_typescript_manifests(&repo_root.join("a-project"));
+        assert_eq!(
+            (typescript.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.join("a-project"),
+                path_prefix: Some("a-project/".to_string()),
+            })
+        );
+
+        write_typescript_manifests(&repo_root);
+        assert_eq!(
+            (typescript.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.clone(),
+                path_prefix: None,
+            })
+        );
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn typescript_detection_requires_both_manifests_and_skips_excluded_directories() {
+        let repo_root = unique_temp_dir("typescript-exclusions");
+        let typescript = &registry()[1];
+        fs::create_dir_all(repo_root.join("only-tsconfig")).unwrap();
+        fs::write(repo_root.join("only-tsconfig/tsconfig.json"), "{}").unwrap();
+        fs::create_dir_all(repo_root.join("only-package")).unwrap();
+        fs::write(repo_root.join("only-package/package.json"), "{}").unwrap();
+        write_typescript_manifests(&repo_root.join("node_modules"));
+        write_typescript_manifests(&repo_root.join(".hidden"));
+
+        assert!((typescript.detect)(&repo_root).is_none());
         let _ = fs::remove_dir_all(repo_root);
     }
 
@@ -381,11 +506,39 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("MOOSEDEV_SCIP_PRODUCER");
         std::env::set_var("MOOSEDEV_SCIP_PRODUCER", "fake-scip-producer");
-        let command = (registry()[0].command)(Path::new("repo"), Path::new("out.scip"));
+        let target = ProducerTarget {
+            project_dir: PathBuf::from("repo"),
+            path_prefix: None,
+        };
+        let command = (registry()[0].command)(&target, Path::new("out.scip"));
         assert_eq!(command.get_program(), "fake-scip-producer");
         match previous {
             Some(value) => std::env::set_var("MOOSEDEV_SCIP_PRODUCER", value),
             None => std::env::remove_var("MOOSEDEV_SCIP_PRODUCER"),
+        }
+    }
+
+    #[test]
+    fn typescript_command_override_replaces_npx_and_sets_project_directory() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("MOOSEDEV_SCIP_TYPESCRIPT");
+        std::env::set_var("MOOSEDEV_SCIP_TYPESCRIPT", "fake-scip-typescript");
+        let target = ProducerTarget {
+            project_dir: PathBuf::from("ui"),
+            path_prefix: Some("ui/".to_string()),
+        };
+
+        let command = (registry()[1].command)(&target, Path::new("/tmp/out.scip"));
+        assert_eq!(command.get_program(), "fake-scip-typescript");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["index", "--output", "/tmp/out.scip"]
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("ui")));
+
+        match previous {
+            Some(value) => std::env::set_var("MOOSEDEV_SCIP_TYPESCRIPT", value),
+            None => std::env::remove_var("MOOSEDEV_SCIP_TYPESCRIPT"),
         }
     }
 
@@ -400,13 +553,11 @@ mod tests {
                 name: "first",
                 detect: detect_all,
                 command: copy_first,
-                path_prefix: None,
             },
             ProducerSpec {
                 name: "second",
-                detect: detect_all,
+                detect: detect_prefixed,
                 command: copy_second,
-                path_prefix: Some("ui/"),
             },
         ];
 
@@ -438,13 +589,11 @@ mod tests {
                 name: "first",
                 detect: detect_all,
                 command: copy_first,
-                path_prefix: None,
             },
             ProducerSpec {
                 name: "failed",
                 detect: detect_all,
                 command: fail_command,
-                path_prefix: None,
             },
         ];
 
@@ -460,26 +609,46 @@ mod tests {
         let _ = fs::remove_dir_all(data_dir);
     }
 
-    fn detect_all(_: &Path) -> bool {
-        true
+    fn detect_all(repo_root: &Path) -> Option<ProducerTarget> {
+        Some(ProducerTarget {
+            project_dir: repo_root.to_path_buf(),
+            path_prefix: None,
+        })
     }
 
-    fn copy_first(repo_root: &Path, output: &Path) -> Command {
+    fn detect_prefixed(repo_root: &Path) -> Option<ProducerTarget> {
+        Some(ProducerTarget {
+            project_dir: repo_root.to_path_buf(),
+            path_prefix: Some("ui/".to_string()),
+        })
+    }
+
+    fn copy_first(target: &ProducerTarget, output: &Path) -> Command {
         let mut command = Command::new("cp");
-        command.arg(repo_root.join("first.scip")).arg(output);
+        command
+            .arg(target.project_dir.join("first.scip"))
+            .arg(output);
         command
     }
 
-    fn copy_second(repo_root: &Path, output: &Path) -> Command {
+    fn copy_second(target: &ProducerTarget, output: &Path) -> Command {
         let mut command = Command::new("cp");
-        command.arg(repo_root.join("second.scip")).arg(output);
+        command
+            .arg(target.project_dir.join("second.scip"))
+            .arg(output);
         command
     }
 
-    fn fail_command(_: &Path, _: &Path) -> Command {
+    fn fail_command(_: &ProducerTarget, _: &Path) -> Command {
         let mut command = Command::new("sh");
         command.args(["-c", "exit 1"]);
         command
+    }
+
+    fn write_typescript_manifests(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("tsconfig.json"), "{}").unwrap();
+        fs::write(path.join("package.json"), "{}").unwrap();
     }
 
     fn write_prepared(path: &Path, relative_path: &str, symbol: &str) {

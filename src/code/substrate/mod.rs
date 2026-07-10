@@ -15,7 +15,9 @@ pub(crate) mod scip;
 pub mod symbols;
 
 pub use meta::{ProducerRun, SubstrateMeta};
-pub use producer::{registry, run_index, IndexReport, ProducerReport, ProducerSpec};
+pub use producer::{
+    registry, run_index, IndexReport, ProducerReport, ProducerSpec, ProducerTarget,
+};
 pub use resolver::{
     DefinitionEntry, Position, Resolution, ResolutionMode, SourceRange, Substrate, SubstrateStats,
     STALE_CHECK_TTL,

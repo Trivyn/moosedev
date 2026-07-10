@@ -442,8 +442,11 @@ fn repo_substrate_plan_counts_when_index_present() -> anyhow::Result<()> {
     let definitions = substrate.definitions();
     let plan = graph::plan_mint(&state, &definitions, &terms, &components)?;
 
+    // Envelope for the dual-producer substrate: ~930 rust entities plus the
+    // scip-typescript top-level surface of ui/ (~950; export-ness is not
+    // encoded, so private top-level declarations are included by design).
     assert!(
-        (300..=1500).contains(&plan.create.len()),
+        (300..=3000).contains(&plan.create.len()),
         "expected repo mint creates in range, got {}",
         plan.create.len()
     );

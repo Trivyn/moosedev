@@ -330,13 +330,16 @@ fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
     let file = symbol.defined_in.clone()?;
     let normalized_symbol = symbols::normalize_symbol(&symbol.symbol)?;
     let signature = symbol.signature.clone();
-    let is_public = definition_is_public(&symbol.producer, signature.as_deref());
+    let is_public = definition_is_public(symbol);
 
     Some(DefinitionEntry {
         producer: symbol.producer.clone(),
         symbol: symbol.symbol.clone(),
         normalized_symbol,
-        display_name: symbol.display_name.clone(),
+        display_name: symbol
+            .display_name
+            .clone()
+            .or_else(|| symbols::last_descriptor_name(&symbol.symbol)),
         kind: symbol.kind.clone(),
         signature,
         file,
@@ -345,8 +348,8 @@ fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
     })
 }
 
-fn definition_is_public(producer: &str, signature: Option<&str>) -> bool {
-    match producer {
+fn definition_is_public(symbol: &SymbolData) -> bool {
+    match symbol.producer.as_str() {
         "rust-analyzer" => {
             // Invariant: rust-analyzer renders Rust visibility as the signature
             // prefix, so `pub`, `pub(crate)`, and `pub(super)` all match. A
@@ -354,8 +357,15 @@ fn definition_is_public(producer: &str, signature: Option<&str>) -> bool {
             // parameters contain "pub" (e.g. `fn ..._publishes_...()`). Items
             // with no rendered visibility (trait/impl members) are treated as
             // private; lazy minting covers them.
-            signature.is_some_and(|text| text.starts_with("pub"))
+            symbol
+                .signature
+                .as_deref()
+                .is_some_and(|text| text.starts_with("pub"))
         }
+        // scip-typescript 0.4.0 does not encode export-ness. This structural
+        // over-approximation therefore includes private top-level declarations,
+        // while members and parameters remain lazy-mint-only.
+        "scip-typescript" => !symbol.is_local && symbols::is_top_level_declaration(&symbol.symbol),
         // Unknown producers remain lazy-mint-only until their visibility
         // semantics have an explicit dispatch arm.
         _ => false,
@@ -392,8 +402,8 @@ mod tests {
     use protobuf::EnumOrUnknown;
     use protobuf::{Message, MessageField};
     use scip::types::{
-        symbol_information, Document, Index, Occurrence, PositionEncoding, Signature,
-        SymbolInformation,
+        symbol_information, Document, Index, Metadata, Occurrence, PositionEncoding, Signature,
+        SymbolInformation, ToolInfo,
     };
 
     use super::{Position, SourceRange, Substrate, SubstrateMeta};
@@ -661,6 +671,56 @@ mod tests {
     }
 
     #[test]
+    fn typescript_definition_uses_descriptor_name_and_fenced_declaration() {
+        let symbol =
+            "scip-typescript npm moosedev-ui 0.6.3 src/pages/`RecordPage.tsx`/RecordPage().";
+        let mut index = Index::new();
+        set_tool_name(&mut index, "scip-typescript");
+        let mut document = doc("src/vis.ts");
+        let mut symbol_info = SymbolInformation::new();
+        symbol_info.symbol = symbol.to_string();
+        symbol_info.documentation =
+            vec!["```ts\nfunction exportedFn(x: number): number\n```".to_string()];
+        document.symbols.push(symbol_info);
+        document.occurrences.push(occ(symbol, vec![0, 9, 19], 1));
+        index.documents.push(document);
+
+        let definition = Substrate::from_index(index, meta_for("scip-typescript"), false)
+            .unwrap()
+            .definitions()
+            .remove(0);
+
+        assert_eq!(definition.display_name.as_deref(), Some("RecordPage"));
+        assert_eq!(
+            definition.signature.as_deref(),
+            Some("function exportedFn(x: number): number")
+        );
+        assert!(definition.is_public);
+    }
+
+    #[test]
+    fn non_typescript_documentation_is_not_used_as_a_signature() {
+        let symbol = "rust-analyzer cargo moosedev 0.6.3 runtime/helper().";
+        let mut index = Index::new();
+        set_tool_name(&mut index, "rust-analyzer");
+        let mut document = doc("src/runtime.rs");
+        let mut symbol_info = SymbolInformation::new();
+        symbol_info.symbol = symbol.to_string();
+        symbol_info.documentation = vec!["```ts\nfn helper()\n```".to_string()];
+        document.symbols.push(symbol_info);
+        document.occurrences.push(occ(symbol, vec![0, 0, 6], 1));
+        index.documents.push(document);
+
+        let definition = Substrate::from_index(index, meta(), false)
+            .unwrap()
+            .definitions()
+            .remove(0);
+
+        assert_eq!(definition.signature, None);
+        assert!(!definition.is_public);
+    }
+
+    #[test]
     fn definitions_skip_reference_only_and_local_symbols() {
         let global = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
         let local = "local 1";
@@ -766,6 +826,65 @@ mod tests {
         assert!(!private_definition.is_public);
         assert!(public_definition.is_public);
         assert!(!pub_substring_definition.is_public);
+    }
+
+    #[test]
+    fn typescript_public_gate_keeps_only_top_level_declarations() {
+        let fixtures = [
+            (
+                "scip-typescript npm moosedev-ui 0.6.3 src/pages/`RecordPage.tsx`/RecordPage().",
+                true,
+            ),
+            (
+                "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedIface#",
+                true,
+            ),
+            (
+                "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedIface#a.",
+                false,
+            ),
+            (
+                "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedClass#method().",
+                false,
+            ),
+            (
+                "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/exportedFn().(x)",
+                false,
+            ),
+        ];
+        let mut index = Index::new();
+        set_tool_name(&mut index, "scip-typescript");
+        let mut document = doc("src/vis.ts");
+        for (line, (symbol, _)) in fixtures.iter().enumerate() {
+            let mut symbol_info = SymbolInformation::new();
+            symbol_info.symbol = (*symbol).to_string();
+            document.symbols.push(symbol_info);
+            document
+                .occurrences
+                .push(occ(symbol, vec![line as i32, 0, 1], 1));
+        }
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta_for("scip-typescript"), false).unwrap();
+        for (symbol, expected) in fixtures {
+            assert_eq!(
+                substrate.definition_for_symbol(symbol).unwrap().is_public,
+                expected,
+                "{symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn unspecified_position_encodings_are_accepted_for_an_index() {
+        let mut index = Index::new();
+        for n in 0..3 {
+            let mut document = Document::new();
+            document.relative_path = format!("src/{n}.ts");
+            index.documents.push(document);
+        }
+
+        assert!(Substrate::from_index(index, meta_for("scip-typescript"), false).is_ok());
     }
 
     #[test]
@@ -1054,8 +1173,12 @@ mod tests {
     }
 
     fn meta() -> SubstrateMeta {
+        meta_for("rust-analyzer")
+    }
+
+    fn meta_for(producer: &str) -> SubstrateMeta {
         SubstrateMeta::single(
-            "rust-analyzer",
+            producer,
             "abc123",
             DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
                 .unwrap()
@@ -1063,5 +1186,13 @@ mod tests {
             1,
             1,
         )
+    }
+
+    fn set_tool_name(index: &mut Index, name: &str) {
+        let mut tool = ToolInfo::new();
+        tool.name = name.to_string();
+        let mut metadata = Metadata::new();
+        metadata.tool_info = MessageField::some(tool);
+        index.metadata = MessageField::some(metadata);
     }
 }

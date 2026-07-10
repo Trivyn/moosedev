@@ -530,7 +530,7 @@ fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, us
     let mut skipped_scope = 0usize;
     let mut skipped_tests = 0usize;
     for entry in definitions {
-        if entry.file.starts_with("tests/") {
+        if is_test_path(&entry.file) {
             skipped_tests += 1;
         } else if !(entry.is_module || entry.is_public) {
             skipped_scope += 1;
@@ -539,6 +539,16 @@ fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, us
         }
     }
     (kept, skipped_scope, skipped_tests)
+}
+
+fn is_test_path(path: &str) -> bool {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    path.starts_with("tests/")
+        || path
+            .split('/')
+            .any(|segment| matches!(segment, "test" | "tests"))
+        || file_name.contains(".test.")
+        || file_name.contains(".spec.")
 }
 
 /// Deterministically keep the first `(file, symbol)` entry per normalized symbol.
@@ -622,6 +632,34 @@ mod tests {
         assert_eq!(kept, vec![module, public_fn]);
         assert_eq!(skipped_scope, 1);
         assert_eq!(skipped_tests, 1);
+    }
+
+    #[test]
+    fn mint_rule_skips_rust_and_typescript_test_conventions() {
+        let skipped = [
+            "ui/src/App.test.ts",
+            "ui/src/test/helper.ts",
+            "ui/src/pages/RecordPage.test.tsx",
+            "ui/src/example.spec.ts",
+            "tests/foo.rs",
+        ];
+        let kept_files = ["ui/src/pages/RecordPage.tsx", "src/main.rs"];
+        let definitions = skipped
+            .iter()
+            .chain(kept_files.iter())
+            .map(|file| entry("symbol", file, false, true))
+            .collect::<Vec<_>>();
+
+        let (kept, skipped_scope, skipped_tests) = mint_candidates(&definitions);
+
+        assert_eq!(
+            kept.iter()
+                .map(|entry| entry.file.as_str())
+                .collect::<Vec<_>>(),
+            kept_files
+        );
+        assert_eq!(skipped_scope, 0);
+        assert_eq!(skipped_tests, skipped.len());
     }
 
     #[test]

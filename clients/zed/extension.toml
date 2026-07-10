@@ -7,4 +7,4 @@ repository = "https://github.com/Trivyn/moosedev"
 
 [language_servers.moosedev]
 name = "MOOSEDev Knowledge-LSP"
-languages = ["Rust"]
+languages = ["Rust", "TypeScript", "TSX"]
