@@ -23,6 +23,8 @@ moose_sessions.db
 /.moosedev/*
 !/.moosedev/kg.nq
 
+.zed/
+
 # Transient SQLite sidecars — safe to ignore even when a .db is intentionally
 # committed (e.g. the precomputed ontology-vector store used by alignment).
 *.db-shm
@@ -65,4 +67,3 @@ bench/seed_recall/
 
 # --- Python ------
 __pycache__/
-
