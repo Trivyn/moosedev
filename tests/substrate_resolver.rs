@@ -3,8 +3,8 @@
 // Regenerate the substrate with:
 //   cargo run --no-default-features -- index
 //
-// If fixture line numbers drift, repair `tests/fixtures/resolver_sample.json` by
-// re-verifying each changed position with:
+// If source text changes, repair the affected fixture anchor (rather than
+// renumbering a position) and re-verify it with:
 //   cargo run --no-default-features -- resolve <path> <line>:<col>
 //
 // Manual rename-continuity gate:
@@ -22,8 +22,9 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct Sample {
     path: String,
-    line: u32,
-    col: u32,
+    anchor: String,
+    token: String,
+    occurrence: Option<usize>,
     expect_symbol: String,
     expect_definition: bool,
     note: String,
@@ -58,14 +59,13 @@ fn acceptance_40_positions() -> anyhow::Result<()> {
 
     let mut passed = 0usize;
     for sample in &samples {
-        assert!(sample.line > 0, "fixture lines are 1-based");
-        assert!(sample.col > 0, "fixture columns are 1-based");
+        let (line, col) = locate_position(repo_root, sample);
 
         let got = substrate.resolve(
             &sample.path,
             Position {
-                line: sample.line - 1,
-                col: sample.col - 1,
+                line: line - 1,
+                col: col - 1,
             },
         );
         let ok = got.as_ref().is_some_and(|resolution| {
@@ -86,7 +86,7 @@ fn acceptance_40_positions() -> anyhow::Result<()> {
             .unwrap_or_else(|| "MISS".to_string());
         println!(
             "{:<45} {:<52} {:<8} {}",
-            format!("{}:{}:{}", sample.path, sample.line, sample.col),
+            format!("{}:{line}:{col}", sample.path),
             format!("{} ({expected_role})", sample.expect_symbol),
             if ok { "PASS" } else { "FAIL" },
             got_text
@@ -102,6 +102,40 @@ fn acceptance_40_positions() -> anyhow::Result<()> {
         samples.len()
     );
     Ok(())
+}
+
+fn locate_position(repo_root: &Path, sample: &Sample) -> (u32, u32) {
+    let path = repo_root.join(&sample.path);
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read resolver sample {}: {error}", path.display()));
+    let matches = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&sample.anchor))
+        .collect::<Vec<_>>();
+    assert!(
+        !matches.is_empty(),
+        "anchor not found for {}: {:?}",
+        sample.path,
+        sample.anchor
+    );
+
+    let occurrence = sample.occurrence.unwrap_or(1);
+    assert!(
+        occurrence > 0 && occurrence <= matches.len(),
+        "anchor occurrence {occurrence} out of range for {}: {:?} ({} match(es))",
+        sample.path,
+        sample.anchor,
+        matches.len()
+    );
+    let (line_index, line) = matches[occurrence - 1];
+    let col = line.find(&sample.token).unwrap_or_else(|| {
+        panic!(
+            "token {:?} not in anchor line for {}: {:?}",
+            sample.token, sample.path, sample.anchor
+        )
+    });
+    ((line_index + 1) as u32, (col + 1) as u32)
 }
 
 fn role_label(is_definition: bool) -> &'static str {

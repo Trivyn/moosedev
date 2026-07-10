@@ -11,6 +11,7 @@ import {
   LessonDetailResponse,
   LessonListResponse,
   QueryResponse,
+  RecordDetailResponse,
   RequirementDetailResponse,
   RequirementListResponse,
 } from './types';
@@ -64,6 +65,7 @@ export const api = {
   listLessons: () => request<LessonListResponse>('/lessons'),
   getLesson: (num: string) => request<LessonDetailResponse>(`/lessons/${encodeURIComponent(num)}`),
   downloadLessonArchive: () => download('/lessons/archive.zip'),
+  record: (uuid: string) => request<RecordDetailResponse>(`/records/${encodeURIComponent(uuid)}`),
   chat: (payload: {
     session_id?: string;
     messages: ChatMessage[];

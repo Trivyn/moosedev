@@ -104,6 +104,26 @@ fn record(state: &AppState, kind: &str, title: &str) -> String {
     record_at(state, kind, title, Utc::now())
 }
 
+fn record_with_description(state: &AppState, kind: &str, title: &str, description: &str) -> String {
+    let class_iri = state.resolve_class(kind).expect("known class");
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: kind.to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.description.clone(), description.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("record item")
+}
+
 fn seed_component(state: &AppState, title: &str, covers_path: &str) -> String {
     let iri = record(state, "SystemComponent", title);
     insert_literal(state, &iri, COVERS_PATH, covers_path);
@@ -493,7 +513,60 @@ async fn constrained_entity_gets_information() -> anyhow::Result<()> {
         .as_str()
         .unwrap()
         .contains("Runtime builder must stay local"));
+    assert_eq!(
+        diagnostics[0]["message"],
+        json!(
+            "constrained by \"Runtime builder must stay local\" (".to_string()
+                + &constraint.rsplit('/').next().unwrap()[..8]
+                + ")"
+        )
+    );
+    assert!(diagnostics[0].get("codeDescription").is_none());
     assert_severity_ceiling(&diagnostics);
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn constraint_diagnostic_links_to_workbench_with_description() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-link-root", "    build_server();");
+    let data_dir = fresh_dir("diag-link-data");
+    let state = Arc::new(state_with_substrate("diag-link-state", 4));
+    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")?;
+    let constraint = record_with_description(
+        &state,
+        "Constraint",
+        "Linked constraint",
+        "The public builder must remain local. This sentence is not shown.",
+    );
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    let published = client.read_until_diagnostics(&uri).await?;
+    let diagnostics = diagnostics(&published);
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0]["message"],
+        json!("constrained by \"Linked constraint\": The public builder must remain local.")
+    );
+    assert_eq!(
+        diagnostics[0]["code"],
+        json!(constraint.rsplit('/').next().unwrap()[..8].to_string())
+    );
+    assert!(diagnostics[0]["codeDescription"]["href"]
+        .as_str()
+        .expect("workbench href")
+        .contains("/#/record/"));
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

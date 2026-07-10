@@ -15,10 +15,11 @@ use std::thread;
 use chrono::{DateTime, FixedOffset};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::{
-    ClientCapabilities, Diagnostic, DiagnosticSeverity, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent, MarkupKind,
-    Position, PositionEncodingKind, PublishDiagnosticsParams, Range, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    ClientCapabilities, CodeDescription, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent,
+    MarkupKind, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -378,32 +379,46 @@ impl LspSession {
 
             if self.diagnostics.constraints {
                 for record in records.iter().filter(|record| record.kind == "Constraint") {
-                    diagnostics.push(Diagnostic::new(
-                        range,
-                        Some(DiagnosticSeverity::INFORMATION),
-                        None,
-                        Some("moosedev".to_string()),
-                        format!(
+                    let message = match &record.description {
+                        Some(description) => format!(
+                            "constrained by \"{}\": {}",
+                            record.title,
+                            description_claim(description)
+                        ),
+                        None => format!(
                             "constrained by \"{}\" ({})",
                             record.title,
                             short_record_id(&record.iri)
                         ),
+                    };
+                    let mut diagnostic = Diagnostic::new(
+                        range,
+                        Some(DiagnosticSeverity::INFORMATION),
+                        None,
+                        Some("moosedev".to_string()),
+                        message,
                         None,
                         None,
-                    ));
+                    );
+                    add_record_code(&mut diagnostic, record);
+                    diagnostics.push(diagnostic);
                 }
             }
 
-            if self.diagnostics.stale_rationale && stale_rationale_applies(&records, file_commit) {
-                diagnostics.push(Diagnostic::new(
-                    range,
-                    Some(DiagnosticSeverity::HINT),
-                    None,
-                    Some("moosedev".to_string()),
-                    "rationale predates later changes to this file".to_string(),
-                    None,
-                    None,
-                ));
+            if self.diagnostics.stale_rationale {
+                if let Some(record) = stale_rationale_record(&records, file_commit) {
+                    let mut diagnostic = Diagnostic::new(
+                        range,
+                        Some(DiagnosticSeverity::HINT),
+                        None,
+                        Some("moosedev".to_string()),
+                        "rationale predates later changes to this file".to_string(),
+                        None,
+                        None,
+                    );
+                    add_record_code(&mut diagnostic, record);
+                    diagnostics.push(diagnostic);
+                }
             }
         }
 
@@ -669,21 +684,46 @@ fn utf8_col_to_utf16_character(line: &str, byte_col: u32) -> u32 {
     line.encode_utf16().count() as u32
 }
 
-fn newest_record_instant(records: &[crate::graph::RecordSummary]) -> Option<DateTime<FixedOffset>> {
+fn newest_record(records: &[crate::graph::RecordSummary]) -> Option<&crate::graph::RecordSummary> {
     records
         .iter()
-        .filter_map(|record| DateTime::parse_from_rfc3339(&record.timestamp).ok())
-        .max()
+        .filter_map(|record| {
+            DateTime::parse_from_rfc3339(&record.timestamp)
+                .ok()
+                .map(|instant| (instant, record))
+        })
+        .max_by_key(|(instant, _)| *instant)
+        .map(|(_, record)| record)
 }
 
-fn stale_rationale_applies(
+fn stale_rationale_record(
     records: &[crate::graph::RecordSummary],
     file_commit: Option<DateTime<FixedOffset>>,
-) -> bool {
-    match (newest_record_instant(records), file_commit) {
-        (Some(newest), Some(file_commit)) => newest < file_commit,
-        _ => false,
+) -> Option<&crate::graph::RecordSummary> {
+    let record = newest_record(records)?;
+    let instant = DateTime::parse_from_rfc3339(&record.timestamp).ok()?;
+    (instant < file_commit?).then_some(record)
+}
+
+fn description_claim(description: &str) -> String {
+    // First sentence or 140 chars, whichever ends first — a late first period
+    // must not produce a paragraph-length diagnostic message.
+    let capped = description.chars().take(140).collect::<String>();
+    match capped.find('.') {
+        Some(end) => capped[..=end].trim().to_string(),
+        None => capped.trim().to_string(),
     }
+}
+
+fn add_record_code(diagnostic: &mut Diagnostic, record: &crate::graph::RecordSummary) {
+    let Some(url) = &record.workbench_url else {
+        return;
+    };
+    let Ok(href) = Uri::from_str(url) else {
+        return;
+    };
+    diagnostic.code = Some(NumberOrString::String(short_record_id(&record.iri)));
+    diagnostic.code_description = Some(CodeDescription { href });
 }
 
 fn short_record_id(iri: &str) -> String {

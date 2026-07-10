@@ -40,6 +40,35 @@ pub struct AdrDetailResponse {
 }
 
 #[derive(Serialize)]
+pub struct RecordDetailResponse {
+    pub iri: String,
+    pub kind: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub timestamp: Option<String>,
+    pub author: Option<String>,
+    pub outgoing: Vec<RecordOutgoingEdge>,
+    pub incoming: Vec<RecordIncomingEdge>,
+}
+
+#[derive(Serialize)]
+pub struct RecordOutgoingEdge {
+    pub predicate: String,
+    pub target_iri: String,
+    pub target_label: String,
+    pub target_kind: String,
+}
+
+#[derive(Serialize)]
+pub struct RecordIncomingEdge {
+    pub predicate: String,
+    pub source_iri: String,
+    pub source_label: String,
+    pub source_kind: String,
+}
+
+#[derive(Serialize)]
 pub struct RequirementListResponse {
     pub generated_at: String,
     pub graph_requirements: usize,

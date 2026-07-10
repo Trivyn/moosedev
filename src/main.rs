@@ -755,7 +755,11 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
     println!("  documents:   {}", report.documents);
     println!("  occurrences: {}", report.occurrences);
     println!("  definitions: {}", report.definitions);
-    println!("  index size:  {} bytes", report.index_bytes);
+    println!(
+        "  index size:  {} bytes\n  {}",
+        report.index_bytes,
+        substrate::producer::diagnostic_summary(data_dir)
+    );
     println!(
         "  output:      {}",
         substrate::index_path(data_dir).display()

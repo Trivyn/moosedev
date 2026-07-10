@@ -5,7 +5,7 @@ import GeneratedArtifactPage from '../components/artifacts/GeneratedArtifactPage
 import { ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
 
 interface RequirementsPageProps {
-  targetIri?: string;
+  targetUuid?: string;
   onNavigateArtifact?: (target: ArtifactTarget) => void;
 }
 
@@ -38,15 +38,16 @@ function RequirementListMeta(requirement: RequirementSummary) {
   );
 }
 
-export default function RequirementsPage({ targetIri, onNavigateArtifact }: RequirementsPageProps) {
+export default function RequirementsPage({ targetUuid, onNavigateArtifact }: RequirementsPageProps) {
   return (
     <GeneratedArtifactPage<
       RequirementSummary,
       Awaited<ReturnType<typeof api.listRequirements>>,
       RequirementWarnings
     >
-      targetIri={targetIri}
+      targetUuid={targetUuid}
       onNavigateArtifact={onNavigateArtifact}
+      artifactKind="requirements"
       title="Requirements"
       emptyText="No requirements recorded."
       selectText="Select a requirement."

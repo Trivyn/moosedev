@@ -13,7 +13,7 @@ interface LinkedMarkdownProps {
   onNavigateArtifact?: (target: ArtifactTarget) => void;
 }
 
-function artifactTargetForIri(value: string): ArtifactTarget | null {
+export function artifactTargetForIri(value: string): ArtifactTarget | null {
   if (value.startsWith('https://moosedev.dev/kg/Requirement/')) {
     return { kind: 'requirements', iri: value };
   }

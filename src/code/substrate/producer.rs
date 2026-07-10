@@ -16,7 +16,7 @@ use chrono::Utc;
 
 use super::meta::{SubstrateMeta, CURRENT_SCHEMA_VERSION};
 use super::scip::{ingest, producer_info, read_index};
-use super::{index_path, index_tmp_path, substrate_dir};
+use super::{index_log_path, index_path, index_tmp_path, substrate_dir};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexReport {
@@ -49,17 +49,17 @@ pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {
     let tmp_path = index_tmp_path(data_dir);
     let final_path = index_path(data_dir);
 
-    // rust-analyzer owns stdout/stderr while producing the index. This keeps the
-    // CLI honest about producer warnings instead of trying to summarize them.
-    let started = Instant::now();
+    // Preserve upstream diagnostics in a per-run log and summarize their signal
+    // for the CLI. Verbose mode intentionally restores direct producer output.
+    let started = start_index(data_dir)?;
     let status = Command::new(&producer)
         .arg("scip")
         .arg(repo_root)
         .arg("--output")
         .arg(&tmp_path)
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(producer_output(data_dir)?)
+        .stderr(producer_output(data_dir)?)
         .status();
 
     let status = match status {
@@ -76,7 +76,7 @@ pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {
     };
 
     if !status.success() {
-        bail!("SCIP producer `{producer}` exited with status {status}");
+        return Err(producer_failure(&producer, status, data_dir));
     }
 
     // Parse the tmp file once before promotion. This catches unsupported encodings
@@ -124,4 +124,85 @@ pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {
         definitions: ingested.definitions,
         index_bytes,
     })
+}
+
+/// Summarize the producer log without re-emitting noisy upstream diagnostics.
+pub fn diagnostic_summary(data_dir: &Path) -> String {
+    if index_verbose() {
+        return "producer diagnostics: verbose output enabled".to_string();
+    }
+    let count = count_noteworthy_lines(&index_log_path(data_dir));
+    if count == 0 {
+        "producer diagnostics: none".to_string()
+    } else {
+        format!(
+            "producer diagnostics: {count} noteworthy line(s) — see {}",
+            index_log_path(data_dir).display()
+        )
+    }
+}
+
+/// Count the lines retained in the per-run producer log for tests and callers
+/// that need structured access to the concise diagnostics summary.
+pub fn noteworthy_diagnostics(data_dir: &Path) -> Option<usize> {
+    (!index_verbose()).then(|| count_noteworthy_lines(&index_log_path(data_dir)))
+}
+
+fn index_verbose() -> bool {
+    std::env::var_os("MOOSEDEV_INDEX_VERBOSE")
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+fn prepare_log(data_dir: &Path) -> Result<()> {
+    if index_verbose() {
+        return Ok(());
+    }
+    let path = index_log_path(data_dir);
+    fs::File::create(&path)
+        .with_context(|| format!("failed to create producer log {}", path.display()))?;
+    Ok(())
+}
+
+fn start_index(data_dir: &Path) -> Result<Instant> {
+    prepare_log(data_dir)?;
+    Ok(Instant::now())
+}
+
+fn producer_output(data_dir: &Path) -> Result<Stdio> {
+    if index_verbose() {
+        return Ok(Stdio::inherit());
+    }
+    let path = index_log_path(data_dir);
+    let log = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open producer log {}", path.display()))?;
+    Ok(Stdio::from(log))
+}
+
+fn producer_failure(
+    producer: &str,
+    status: std::process::ExitStatus,
+    data_dir: &Path,
+) -> anyhow::Error {
+    if index_verbose() {
+        return anyhow::anyhow!(
+            "SCIP producer `{producer}` exited with status {status}; check terminal output"
+        );
+    }
+    anyhow::anyhow!(
+        "SCIP producer `{producer}` exited with status {status}; check {}",
+        index_log_path(data_dir).display()
+    )
+}
+
+fn count_noteworthy_lines(path: &Path) -> usize {
+    fs::read_to_string(path)
+        .map(|text| {
+            text.lines()
+                .filter(|line| line.contains("ERROR") || line.contains("Duplicate symbol"))
+                .count()
+        })
+        .unwrap_or(0)
 }

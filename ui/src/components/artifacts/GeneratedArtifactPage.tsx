@@ -33,8 +33,9 @@ interface ArtifactDetail<TSummary extends ArtifactSummaryBase> {
 }
 
 interface GeneratedArtifactPageProps<TSummary extends ArtifactSummaryBase, TList, TWarnings> {
-  targetIri?: string;
+  targetUuid?: string;
   onNavigateArtifact?: (target: ArtifactTarget) => void;
+  artifactKind: ArtifactTarget['kind'];
   title: string;
   emptyText: string;
   selectText: string;
@@ -70,6 +71,10 @@ function statusColor(status: string): ArtifactStatusColor {
 
 function artifactNumber(record: ArtifactSummaryBase, prefix?: string) {
   return prefix ? `${prefix}-${record.num}` : record.num;
+}
+
+function recordUuid(record: ArtifactSummaryBase) {
+  return record.iri.slice(Math.max(record.iri.lastIndexOf('/'), record.iri.lastIndexOf('#')) + 1);
 }
 
 function ArtifactListItem<TSummary extends ArtifactSummaryBase>({
@@ -123,8 +128,9 @@ function ArtifactListItem<TSummary extends ArtifactSummaryBase>({
 }
 
 export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBase, TList, TWarnings>({
-  targetIri,
+  targetUuid,
   onNavigateArtifact,
+  artifactKind,
   title,
   emptyText,
   selectText,
@@ -163,24 +169,23 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
     setError(null);
     try {
       const response = await loadList();
+      const responseRecords = recordsOf(response);
+      const target = targetUuid
+        ? responseRecords.find((record) => recordUuid(record) === targetUuid)
+        : null;
       setList(response);
-      setSelectedNum((current) => current ?? recordsOf(response)[0]?.num ?? null);
+      if (targetUuid) {
+        setSelectedNum(target?.num ?? null);
+        if (!target) {
+          setError(`Record ${targetUuid} was not found.`);
+        }
+      } else {
+        setSelectedNum((current) => current ?? responseRecords[0]?.num ?? null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoadingList(false);
-    }
-  };
-
-  const refreshDetail = async (num: string) => {
-    setLoadingDetail(true);
-    setError(null);
-    try {
-      setDetail(await loadDetail(num));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoadingDetail(false);
     }
   };
 
@@ -209,21 +214,45 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
   }, []);
 
   useEffect(() => {
-    if (!targetIri) {
+    if (!targetUuid) {
       return;
     }
-    const target = records.find((record) => record.iri === targetIri);
-    if (target) {
-      setSelectedNum(target.num);
+    const target = records.find((record) => recordUuid(record) === targetUuid);
+    setSelectedNum(target?.num ?? null);
+    if (records.length > 0) {
+      setError(target ? null : `Record ${targetUuid} was not found.`);
     }
-  }, [targetIri, records]);
+  }, [targetUuid, records]);
 
   useEffect(() => {
-    if (selectedNum) {
-      refreshDetail(selectedNum);
-    } else {
+    if (!selectedNum) {
       setDetail(null);
+      return;
     }
+
+    let cancelled = false;
+    setLoadingDetail(true);
+    setError(null);
+    loadDetail(selectedNum)
+      .then((response) => {
+        if (!cancelled) {
+          setDetail(response);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingDetail(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedNum]);
 
   const warnings = list ? warningsOf(list) : null;
@@ -294,7 +323,10 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
                   record={record}
                   prefix={recordPrefix}
                   selected={record.num === selectedNum}
-                  onSelect={() => setSelectedNum(record.num)}
+                  onSelect={() => {
+                    setSelectedNum(record.num);
+                    onNavigateArtifact?.({ kind: artifactKind, iri: record.iri });
+                  }}
                   renderListMeta={renderListMeta}
                 />
               ))}

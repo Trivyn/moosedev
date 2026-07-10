@@ -46,17 +46,30 @@ fn state_with_substrate(name: &str) -> AppState {
 
 /// Record a minimal typed knowledge node with title and accepted status.
 fn record(state: &AppState, kind: &str, title: &str) -> String {
+    record_with_description(state, kind, title, None)
+}
+
+fn record_with_description(
+    state: &AppState,
+    kind: &str,
+    title: &str,
+    description: Option<&str>,
+) -> String {
     let class_iri = state.resolve_class(kind).expect("known class");
+    let mut properties = vec![
+        (moose::RDFS_LABEL.to_string(), title.to_string()),
+        (state.capture.title.clone(), title.to_string()),
+        (state.capture.status.clone(), "accepted".to_string()),
+    ];
+    if let Some(description) = description {
+        properties.push((state.capture.description.clone(), description.to_string()));
+    }
     graph::record_instance(
         state,
         &RecordInput {
             class_iri,
             class_local: kind.to_string(),
-            properties: vec![
-                (moose::RDFS_LABEL.to_string(), title.to_string()),
-                (state.capture.title.clone(), title.to_string()),
-                (state.capture.status.clone(), "accepted".to_string()),
-            ],
+            properties,
         },
         "tester",
         Utc::now(),
@@ -174,6 +187,71 @@ fn full_dossier_ordering_and_markdown() {
     assert!(markdown.contains("[Constraint]"));
     assert!(markdown.contains("[ArchitecturalDecision]"));
     assert!(markdown.contains("[Requirement]"));
+    assert!(markdown.contains("- [Constraint] Runtime builder constraint -"));
+    assert!(!markdown.contains("]("));
+}
+
+#[test]
+fn record_summaries_include_description_and_workbench_link_when_published() {
+    let state = state_with_substrate("workbench-link");
+    let constraint = record_with_description(
+        &state,
+        "Constraint",
+        "Workbench constraint",
+        Some("Keep this record addressable."),
+    );
+    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")
+        .expect("write published HTTP address");
+    link_public(&state, &constraint, "constrains");
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+    let record = dossier.direct_records.first().expect("constraint summary");
+    let expected_url = format!(
+        "http://127.0.0.1:7474/#/record/{}",
+        record.iri.rsplit('/').next().expect("record local name")
+    );
+
+    assert_eq!(
+        record.description.as_deref(),
+        Some("Keep this record addressable.")
+    );
+    assert_eq!(record.workbench_url.as_deref(), Some(expected_url.as_str()));
+    assert!(graph::render_markdown(&dossier)
+        .contains(&format!("[Workbench constraint]({expected_url})")));
+}
+
+#[test]
+fn workbench_links_use_typed_uuid_routes_with_a_generic_fallback() {
+    let state = state_with_substrate("typed-workbench-links");
+    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")
+        .expect("write published HTTP address");
+    let cases = [
+        ("ArchitecturalDecision", "adrs"),
+        ("Requirement", "requirements"),
+        ("Lesson", "lessons"),
+        ("Constraint", "record"),
+    ];
+
+    for (kind, _) in cases {
+        let iri = record(&state, kind, &format!("{kind} link"));
+        link_public(&state, &iri, "concerns");
+    }
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+    for (kind, route) in cases {
+        let summary = dossier
+            .direct_records
+            .iter()
+            .find(|record| record.kind == kind)
+            .expect("typed record summary");
+        let uuid = summary.iri.rsplit('/').next().expect("record UUID");
+        let expected = format!("http://127.0.0.1:7474/#/{route}/{uuid}");
+        assert_eq!(summary.workbench_url.as_deref(), Some(expected.as_str()));
+    }
 }
 
 /// A minted entity with no direct record links intentionally produces silence.

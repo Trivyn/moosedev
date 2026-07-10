@@ -18,11 +18,13 @@ pub use meta::SubstrateMeta;
 pub use producer::{run_index, IndexReport};
 pub use resolver::{
     DefinitionEntry, Position, Resolution, ResolutionMode, SourceRange, Substrate, SubstrateStats,
+    STALE_CHECK_TTL,
 };
 
 pub const SUBSTRATE_DIR: &str = "substrate";
 pub const INDEX_FILE_NAME: &str = "index.scip";
 pub const INDEX_TMP_FILE_NAME: &str = "index.scip.tmp";
+pub const INDEX_LOG_FILE_NAME: &str = "index.log";
 pub const META_FILE_NAME: &str = "meta.json";
 
 pub fn substrate_dir(data_dir: &Path) -> PathBuf {
@@ -35,6 +37,10 @@ pub fn index_path(data_dir: &Path) -> PathBuf {
 
 pub fn index_tmp_path(data_dir: &Path) -> PathBuf {
     substrate_dir(data_dir).join(INDEX_TMP_FILE_NAME)
+}
+
+pub fn index_log_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(INDEX_LOG_FILE_NAME)
 }
 
 pub fn meta_path(data_dir: &Path) -> PathBuf {

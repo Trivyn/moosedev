@@ -41,6 +41,10 @@ pub struct RecordSummary {
     pub kind: String,
     /// Human-readable title, falling back to label/local IRI when needed.
     pub title: String,
+    /// Optional captured claim describing the record.
+    pub description: Option<String>,
+    /// Workbench deep link when the HTTP UI has published an address.
+    pub workbench_url: Option<String>,
     /// Lifecycle status; superseded records remain visible, deprecated records do not.
     pub status: String,
     /// RFC3339 capture timestamp, or empty when the record lacks one.
@@ -168,19 +172,13 @@ pub fn render_markdown(dossier: &Dossier) -> String {
     }
     out.push_str("\n**Records**\n");
     for record in &dossier.direct_records {
-        out.push_str(&format!(
-            "- [{}] {} - {}, {} (via {})\n",
-            record.kind, record.title, record.status, record.timestamp, record.predicate_local
-        ));
+        render_record_line(&mut out, record);
     }
     if let Some((_, label)) = &dossier.realizes {
         if !dossier.component_records.is_empty() {
             out.push_str(&format!("\n**Via component {label}**\n"));
             for record in &dossier.component_records {
-                out.push_str(&format!(
-                    "- [{}] {} - {}, {}\n",
-                    record.kind, record.title, record.status, record.timestamp
-                ));
+                render_record_line(&mut out, record);
             }
         }
     }
@@ -190,6 +188,17 @@ pub fn render_markdown(dossier: &Dossier) -> String {
         );
     }
     out
+}
+
+fn render_record_line(out: &mut String, record: &RecordSummary) {
+    let title = match &record.workbench_url {
+        Some(url) => format!("[{}]({url})", record.title),
+        None => record.title.clone(),
+    };
+    out.push_str(&format!(
+        "- [{}] {} - {}, {} (via {})\n",
+        record.kind, title, record.status, record.timestamp, record.predicate_local
+    ));
 }
 
 /// Convert the caller's selector into an existing CodeEntity IRI without minting.
@@ -438,11 +447,41 @@ fn summarize_record(
         iri: record_iri.to_string(),
         kind: local_name(&kind_iri).to_string(),
         title,
+        description: first_literal(&state.store, record_iri, &state.capture.description),
+        workbench_url: workbench_record_url(state, record_iri, local_name(&kind_iri)),
         status,
         timestamp: first_literal(&state.store, record_iri, &state.capture.timestamp)
             .unwrap_or_default(),
         predicate_local: predicate_local.to_string(),
     })
+}
+
+/// Return a fresh workbench deep link for a record when the HTTP UI is available.
+///
+/// The daemon rewrites `http.addr` every time it serves. Reading it for each
+/// summary avoids retaining stale addresses after a configuration change; a
+/// restart self-heals any address left behind by an older daemon.
+pub(crate) fn workbench_record_url(
+    state: &AppState,
+    record_iri: &str,
+    kind: &str,
+) -> Option<String> {
+    let addr =
+        std::fs::read_to_string(crate::runtime::http_addr_file_path_for(&state.data_dir)).ok()?;
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return None;
+    }
+    let route = match kind {
+        "ArchitecturalDecision" => "adrs",
+        "Requirement" => "requirements",
+        "Lesson" => "lessons",
+        _ => "record",
+    };
+    Some(format!(
+        "http://{addr}/#/{route}/{}",
+        local_name(record_iri)
+    ))
 }
 
 /// Keep dossier output stable and useful: constraints first, then decisions,

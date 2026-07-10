@@ -111,6 +111,49 @@ fn record_api_lesson(state: &AppState, title: &str) -> String {
 }
 
 #[tokio::test]
+async fn records_detail_returns_record_metadata_and_edges() {
+    let dir = temp_dir("record-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let decision = record_api_decision(&state, "Record detail decision");
+    let lesson = record_api_lesson(&state, "Record detail lesson");
+    graph::relate(&state, &decision, "yieldsLesson", &lesson).expect("link outgoing lesson");
+    graph::relate(&state, &lesson, "learnedFrom", &decision).expect("link incoming lesson");
+    let uuid = decision.rsplit('/').next().expect("record uuid");
+    let server = test_server(state);
+
+    let response = server.get(&format!("/api/v1/records/{uuid}")).await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["iri"], decision);
+    assert_eq!(body["kind"], "ArchitecturalDecision");
+    assert_eq!(body["title"], "Record detail decision");
+    assert_eq!(
+        body["description"],
+        "Decision description for Record detail decision"
+    );
+    assert_eq!(body["outgoing"][0]["predicate"], "yieldsLesson");
+    assert_eq!(body["outgoing"][0]["target_iri"], lesson);
+    assert_eq!(body["incoming"][0]["predicate"], "learnedFrom");
+    assert_eq!(body["incoming"][0]["source_iri"], lesson);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn records_detail_returns_not_found_for_unknown_uuid() {
+    let dir = temp_dir("record-detail-missing");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/records/not-a-record").await;
+
+    response.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn health_reports_project_graph_and_data_dir() {
     let dir = temp_dir("health");
     let state = AppState::bootstrap_with_llm_config(&dir, &ontology_dir(), unconfigured_llm())

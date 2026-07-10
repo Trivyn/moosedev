@@ -101,6 +101,32 @@ export interface LessonDetailResponse {
   markdown: string;
 }
 
+export interface RecordOutgoingEdge {
+  predicate: string;
+  target_iri: string;
+  target_label: string;
+  target_kind: string;
+}
+
+export interface RecordIncomingEdge {
+  predicate: string;
+  source_iri: string;
+  source_label: string;
+  source_kind: string;
+}
+
+export interface RecordDetailResponse {
+  iri: string;
+  kind: string;
+  title: string;
+  description: string | null;
+  status: string | null;
+  timestamp: string | null;
+  author: string | null;
+  outgoing: RecordOutgoingEdge[];
+  incoming: RecordIncomingEdge[];
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;

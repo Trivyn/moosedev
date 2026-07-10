@@ -89,12 +89,12 @@ pub struct FileDefinition {
     pub range: SourceRange,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Substrate {
     index: IngestedIndex,
     meta: SubstrateMeta,
-    /// Computed once at load time and copied into every resolution.
-    stale: bool,
+    /// Synthetic or live disk-backed staleness state.
+    staleness: Staleness,
 }
 
 impl Substrate {
@@ -114,7 +114,7 @@ impl Substrate {
         })?;
         let current_head = SubstrateMeta::current_head(repo_root);
         let stale = current_head != meta.indexed_commit;
-        Substrate::from_index(index, meta, stale)
+        Substrate::from_loaded_index(index, meta, stale, repo_root)
     }
 
     pub fn resolve(&self, relative_path: &str, pos: Position) -> Option<Resolution> {
@@ -159,7 +159,7 @@ impl Substrate {
             is_local: symbol.is_local,
             mode: ResolutionMode::Scip,
             range: entry.range,
-            stale: self.stale,
+            stale: self.is_stale(),
         })
     }
 
@@ -168,7 +168,30 @@ impl Substrate {
     }
 
     pub fn is_stale(&self) -> bool {
-        self.stale
+        let Some(repo_root) = &self.staleness.repo_root else {
+            return self.staleness.constructed_stale;
+        };
+
+        let mut cache = self
+            .staleness
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((checked_at, stale)) = *cache {
+            if checked_at.elapsed() < STALE_CHECK_TTL {
+                return stale;
+            }
+        }
+
+        let stale = SubstrateMeta::current_head(repo_root) != self.meta.indexed_commit;
+        *cache = Some((std::time::Instant::now(), stale));
+        stale
+    }
+
+    /// The repository that enables live staleness and disk reloads. Synthetic
+    /// test substrates intentionally have no root and remain fully in-memory.
+    pub fn repo_root(&self) -> Option<&Path> {
+        self.staleness.repo_root.as_deref()
     }
 
     pub fn stats(&self) -> SubstrateStats {
@@ -237,7 +260,54 @@ impl Substrate {
         stale: bool,
     ) -> Result<Substrate> {
         let index = scip::ingest(&index)?;
-        Ok(Substrate { index, meta, stale })
+        Ok(Substrate {
+            index,
+            meta,
+            staleness: Staleness::synthetic(stale),
+        })
+    }
+
+    fn from_loaded_index(
+        index: ::scip::types::Index,
+        meta: SubstrateMeta,
+        stale: bool,
+        repo_root: &Path,
+    ) -> Result<Substrate> {
+        let index = scip::ingest(&index)?;
+        Ok(Substrate {
+            index,
+            meta,
+            staleness: Staleness::disk_backed(repo_root, stale),
+        })
+    }
+}
+
+/// Interval between git HEAD checks for a disk-backed substrate.
+/// Public for integration tests that exercise the live-staleness cache.
+pub const STALE_CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[derive(Debug)]
+struct Staleness {
+    constructed_stale: bool,
+    repo_root: Option<std::path::PathBuf>,
+    cache: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
+}
+
+impl Staleness {
+    fn synthetic(constructed_stale: bool) -> Self {
+        Self {
+            constructed_stale,
+            repo_root: None,
+            cache: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn disk_backed(repo_root: &Path, constructed_stale: bool) -> Self {
+        Self {
+            constructed_stale,
+            repo_root: Some(repo_root.to_path_buf()),
+            cache: std::sync::Mutex::new(Some((std::time::Instant::now(), constructed_stale))),
+        }
     }
 }
 
@@ -469,6 +539,18 @@ mod tests {
                 .unwrap()
                 .is_definition
         );
+    }
+
+    #[test]
+    fn synthetic_substrate_preserves_constructed_staleness() {
+        let index = Index::new();
+
+        assert!(!Substrate::from_index(index.clone(), meta(), false)
+            .unwrap()
+            .is_stale());
+        assert!(Substrate::from_index(index, meta(), true)
+            .unwrap()
+            .is_stale());
     }
 
     #[test]

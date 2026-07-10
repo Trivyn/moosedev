@@ -110,6 +110,9 @@ pub struct AppState {
     /// Best-effort code substrate. Absent when no index has been built; position-
     /// based tools degrade with honest errors instead of blocking server startup.
     substrate: RwLock<Option<Arc<Substrate>>>,
+    /// Serializes disk-backed substrate reloads after `moosedev index` updates
+    /// the on-disk pair. The getter does no watcher or background work.
+    substrate_reload_lock: std::sync::Mutex<()>,
     /// Set true by any write that changes the project graph; drained by
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
@@ -213,6 +216,7 @@ impl AppState {
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
             substrate: RwLock::new(None),
+            substrate_reload_lock: std::sync::Mutex::new(()),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
             canonical_throttle: crate::canonical::WriteThrottle::default(),
@@ -239,12 +243,61 @@ impl AppState {
             .note_write(&self.store, &self.data_dir);
     }
 
-    /// Return the loaded code substrate, if startup or a test injected one.
+    /// Return the loaded code substrate, reloading a disk-backed one when the
+    /// completed on-disk metadata identifies a newer index. Synthetic test
+    /// substrates have no repository root and intentionally bypass this path.
     pub fn substrate(&self) -> Option<Arc<Substrate>> {
+        let substrate = self.current_substrate()?;
+        if substrate.repo_root().is_none() || !self.substrate_meta_changed(&substrate) {
+            return Some(substrate);
+        }
+
+        let _reload_guard = self
+            .substrate_reload_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A concurrent caller may have finished the reload while we waited.
+        let substrate = self.current_substrate()?;
+        let Some(repo_root) = substrate.repo_root().map(Path::to_path_buf) else {
+            return Some(substrate);
+        };
+        if !self.substrate_meta_changed(&substrate) {
+            return Some(substrate);
+        }
+
+        match Substrate::load(&self.data_dir, &repo_root) {
+            Ok(reloaded) => {
+                let definitions = reloaded.stats().definitions;
+                let indexed_at = reloaded.meta().indexed_at;
+                let reloaded = Arc::new(reloaded);
+                self.set_substrate(reloaded.clone());
+                tracing::info!(
+                    "substrate reloaded: {definitions} definition(s), indexed at {indexed_at}"
+                );
+                Some(reloaded)
+            }
+            Err(error) => {
+                tracing::warn!("substrate reload failed; serving previous substrate: {error}");
+                Some(substrate)
+            }
+        }
+    }
+
+    fn current_substrate(&self) -> Option<Arc<Substrate>> {
         self.substrate
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// A completed producer run writes metadata last. Unreadable metadata can
+    /// therefore be a partial rewrite; retain the known-good in-memory index.
+    fn substrate_meta_changed(&self, substrate: &Substrate) -> bool {
+        let Ok(on_disk) = crate::code::substrate::SubstrateMeta::load(&self.data_dir) else {
+            return false;
+        };
+        let loaded = substrate.meta();
+        on_disk.indexed_commit != loaded.indexed_commit || on_disk.indexed_at != loaded.indexed_at
     }
 
     /// Replace the current code substrate. Used by runtime startup and tests.
