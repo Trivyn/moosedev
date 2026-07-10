@@ -260,6 +260,38 @@ impl Substrate {
         definitions
     }
 
+    /// Returns whether the merged substrate contains an ingested document at
+    /// this exact repository-relative path.
+    pub fn covers_file(&self, relative_path: &str) -> bool {
+        self.index.files.contains_key(relative_path)
+    }
+
+    /// Lists each producer and its indexed document count in metadata order.
+    ///
+    /// The order is stable and reflects the producer order recorded during
+    /// indexing, which keeps user-facing coverage descriptions deterministic.
+    pub fn coverage_summary(&self) -> Vec<(String, usize)> {
+        self.meta
+            .producers
+            .iter()
+            .map(|producer| (producer.name.clone(), producer.documents))
+            .collect()
+    }
+
+    /// Formats the producer coverage summary shared by MCP dossier and
+    /// `link_code` replies, or `nothing indexed` when no producers ran.
+    pub fn describe_coverage(&self) -> String {
+        let summary = self.coverage_summary();
+        if summary.is_empty() {
+            return "nothing indexed".to_string();
+        }
+        summary
+            .into_iter()
+            .map(|(name, documents)| format!("{name} {documents} docs"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn definition_for_symbol(&self, symbol: &str) -> Option<DefinitionEntry> {
         self.index.symbols.iter().find_map(|data| {
             (data.symbol == symbol
@@ -1002,6 +1034,9 @@ mod tests {
         meta.save(&data_dir).unwrap();
 
         let substrate = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert!(substrate.covers_file("src/first.rs"));
+        assert!(substrate.covers_file("ui/src/second.rs"));
+        assert!(!substrate.covers_file("src/absent.rs"));
         assert_eq!(
             substrate
                 .resolve("src/first.rs", Position { line: 0, col: 0 })
@@ -1023,6 +1058,44 @@ mod tests {
             .unwrap();
         assert_eq!(second.file, "ui/src/second.rs");
         assert!(!second.is_public, "unknown producers are lazy-mint-only");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn coverage_summary_and_description_follow_producer_order() {
+        let data_dir = unique_temp_dir("coverage-summary");
+        let mut rust = producer_run("rust-analyzer", None);
+        rust.documents = 104;
+        let mut typescript = producer_run("scip-typescript", Some("ui/"));
+        typescript.documents = 39;
+        multi_meta(vec![rust, typescript]).save(&data_dir).unwrap();
+        write_index(&data_dir, "rust-analyzer", Index::new());
+        write_index(&data_dir, "scip-typescript", Index::new());
+
+        let substrate = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(
+            substrate.coverage_summary(),
+            vec![
+                ("rust-analyzer".to_string(), 104),
+                ("scip-typescript".to_string(), 39),
+            ]
+        );
+        assert_eq!(
+            substrate.describe_coverage(),
+            "rust-analyzer 104 docs, scip-typescript 39 docs"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn empty_coverage_description_is_explicit() {
+        let data_dir = unique_temp_dir("empty-coverage");
+        multi_meta(Vec::new()).save(&data_dir).unwrap();
+
+        let substrate = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(substrate.describe_coverage(), "nothing indexed");
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

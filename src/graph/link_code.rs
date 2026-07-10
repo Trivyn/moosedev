@@ -47,15 +47,21 @@ pub fn link_code(
             if *line == 0 || *col == 0 {
                 anyhow::bail!("code positions are 1-based; line and col must be greater than 0");
             }
-            let resolution = substrate
-                .resolve(
-                    file,
-                    Position {
-                        line: line - 1,
-                        col: col - 1,
-                    },
-                )
-                .ok_or_else(|| anyhow::anyhow!("no code entity at {file}:{line}:{col}"))?;
+            let resolution = substrate.resolve(
+                file,
+                Position {
+                    line: line - 1,
+                    col: col - 1,
+                },
+            );
+            let resolution = match resolution {
+                Some(resolution) => resolution,
+                None if !substrate.covers_file(file) => anyhow::bail!(
+                    "`{file}` is not in the code substrate (indexed: {}); cannot resolve a code entity here.",
+                    substrate.describe_coverage()
+                ),
+                None => anyhow::bail!("no code entity at {file}:{line}:{col}"),
+            };
             if resolution.is_local {
                 anyhow::bail!(
                     "resolved symbol is a local; locals are not stable cross-file identities, select the definition of a named item instead"

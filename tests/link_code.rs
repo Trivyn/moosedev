@@ -237,6 +237,26 @@ fn whitespace_position_writes_nothing() {
 }
 
 #[test]
+fn uncovered_file_reports_substrate_coverage_and_writes_nothing() {
+    let state = state_with_substrate("uncovered");
+    let decision = record(&state, "ArchitecturalDecision", "Uncovered file miss");
+    let count_before = project_quad_count(&state);
+    let selector = CodeSelector::Position {
+        file: "docs/absent.md".to_string(),
+        line: 1,
+        col: 1,
+    };
+
+    let err = graph::link_code(&state, &decision, "concerns", &selector, "tester")
+        .expect_err("uncovered file should miss");
+
+    assert!(err
+        .to_string()
+        .starts_with("`docs/absent.md` is not in the code substrate"));
+    assert_eq!(project_quad_count(&state), count_before);
+}
+
+#[test]
 fn local_symbol_position_writes_nothing() {
     let state = state_with_substrate("local");
     let decision = record(&state, "ArchitecturalDecision", "Local miss");

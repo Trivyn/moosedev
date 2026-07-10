@@ -514,6 +514,28 @@ async fn hover_is_silent_on_unlinked_and_tokenless() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn hover_is_silent_for_uncovered_file() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("uncovered-root", "    build_server();");
+    let ui = repo_root.join("ui/src");
+    std::fs::create_dir_all(&ui)?;
+    std::fs::write(ui.join("App.tsx"), "export function App() {}\n")?;
+    let data_dir = fresh_dir("uncovered-data");
+    let state = Arc::new(state_with_substrate("uncovered-state", 4));
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true).await?;
+    assert_null_hover(&client.hover(2, file_uri(&ui.join("App.tsx")), 0, 0).await?);
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
 async fn hover_utf16_conversion() -> anyhow::Result<()> {
     let _guard = ENV_LOCK.lock().expect("env lock poisoned");
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");

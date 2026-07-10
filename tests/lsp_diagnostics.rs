@@ -596,6 +596,32 @@ async fn no_records_publishes_empty() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn uncovered_file_publishes_empty() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-uncovered-root", "    build_server();");
+    let ui = repo_root.join("ui/src");
+    std::fs::create_dir_all(&ui)?;
+    std::fs::write(ui.join("App.tsx"), "export function App() {}\n")?;
+    let data_dir = fresh_dir("diag-uncovered-data");
+    let state = Arc::new(state_with_substrate("diag-uncovered-state", 4));
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&ui.join("App.tsx"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    let published = client.read_until_diagnostics(&uri).await?;
+
+    assert_eq!(published["params"]["diagnostics"], json!([]));
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
 async fn disable_flags_respected() -> anyhow::Result<()> {
     let _guard = ENV_LOCK.lock().expect("env lock poisoned");
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");

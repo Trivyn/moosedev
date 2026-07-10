@@ -807,7 +807,7 @@ impl MooseDevServer {
 
     /// Get the recorded knowledge directly linked to a CodeEntity.
     #[tool(
-        description = "Returns the recorded knowledge (decisions, constraints, lessons, requirements, and related records) directly linked to the code entity at a position, symbol, or IRI. Pass exactly one selector: `file` + 1-based `line` + 1-based `col`, `symbol`, or `iri`. When no recorded knowledge is directly linked, returns a clear no-recorded-knowledge reply; use `link_code` to attach records."
+        description = "Returns the recorded knowledge (decisions, constraints, lessons, requirements, and related records) directly linked to the code entity at a position, symbol, or IRI. Pass exactly one selector: `file` + 1-based `line` + 1-based `col`, `symbol`, or `iri`. Distinguishes a not-indexed file from covered-but-unlinked code. When no recorded knowledge is directly linked, returns a clear no-recorded-knowledge reply; use `link_code` to attach records."
     )]
     async fn get_entity_dossier(
         &self,
@@ -852,6 +852,7 @@ impl MooseDevServer {
             ));
         }
 
+        let position_file = position_supplied.then(|| file.clone().expect("validated file"));
         let target = if position_supplied {
             graph::DossierTarget::Position {
                 file: file.expect("validated file"),
@@ -866,9 +867,24 @@ impl MooseDevServer {
 
         match graph::get_entity_dossier(&self.state, &target) {
             Ok(Some(dossier)) => Ok(tool_ok(graph::render_markdown(&dossier))),
-            Ok(None) => Ok(tool_ok(
-                "No recorded knowledge is linked to this code; attach records with `link_code`.",
-            )),
+            Ok(None) => {
+                if let Some(file) = position_file {
+                    let Some(substrate) = self.state.substrate() else {
+                        return Ok(tool_ok(
+                            "code substrate unavailable; run `moosedev index` and restart the backend; records cannot be anchored here yet.",
+                        ));
+                    };
+                    if !substrate.covers_file(&file) {
+                        return Ok(tool_ok(format!(
+                            "`{file}` is not in the code substrate (indexed: {}); records cannot be anchored here yet.",
+                            substrate.describe_coverage()
+                        )));
+                    }
+                }
+                Ok(tool_ok(
+                    "No recorded knowledge is linked to this code; attach records with `link_code`.",
+                ))
+            }
             Err(e) => Ok(tool_error(e.to_string())),
         }
     }
