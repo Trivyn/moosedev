@@ -204,7 +204,7 @@ fn lazy_mint_private_function_and_link() {
     assert!(out.created);
     assert!(has_type(&state, &out.entity_iri, &terms.code_entity_class));
     assert_eq!(
-        literal_values(&state, &out.entity_iri, &terms.has_scip_symbol),
+        literal_values(&state, &out.entity_iri, &terms.has_substrate_symbol),
         vec![normalize(PRIVATE_SYMBOL)]
     );
     let predicate = state.resolve_object_property(&out.predicate_local).unwrap();

@@ -83,7 +83,7 @@ fn loads_ontologies_and_extracts_domain_vocabularies() {
         .map(|e| e.local_name.as_str())
         .collect();
     for expected in [
-        "hasScipSymbol",
+        "hasSubstrateSymbol",
         "hasEntityKind",
         "hasCodeName",
         "hasLogicalPath",

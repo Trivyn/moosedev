@@ -33,7 +33,7 @@
 shape:CodeEntityShape a sh:NodeShape ;
     sh:targetClass code:CodeEntity ;
     sh:property [
-        sh:path code:hasScipSymbol ;
+        sh:path code:hasSubstrateSymbol ;
         sh:datatype xsd:string ;
         sh:minCount 1 ;
         sh:maxCount 1

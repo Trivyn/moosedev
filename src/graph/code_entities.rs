@@ -19,7 +19,7 @@ use super::PROJECT_KG_GRAPH_IRI;
 #[derive(Debug, Clone)]
 pub struct CodeTerms {
     pub code_entity_class: String,
-    pub has_scip_symbol: String,
+    pub has_substrate_symbol: String,
     pub has_entity_kind: String,
     pub has_code_name: String,
     pub has_logical_path: String,
@@ -32,7 +32,7 @@ impl CodeTerms {
     pub fn resolve(state: &AppState) -> anyhow::Result<Self> {
         Ok(Self {
             code_entity_class: state.resolve_code_class("CodeEntity")?,
-            has_scip_symbol: state.resolve_code_datatype_property("hasScipSymbol")?,
+            has_substrate_symbol: state.resolve_code_datatype_property("hasSubstrateSymbol")?,
             has_entity_kind: state.resolve_code_datatype_property("hasEntityKind")?,
             has_code_name: state.resolve_code_datatype_property("hasCodeName")?,
             has_logical_path: state.resolve_code_datatype_property("hasLogicalPath")?,
@@ -99,14 +99,14 @@ pub struct EnsuredEntity {
     pub created: bool,
 }
 
-/// Scan CodeEntity `hasScipSymbol` literals in the project graph and return
+/// Scan CodeEntity `hasSubstrateSymbol` literals in the project graph and return
 /// normalized SCIP symbol -> subject IRI.
 pub fn entities_by_symbol(
     state: &AppState,
     terms: &CodeTerms,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let predicate = NamedNodeRef::new(&terms.has_scip_symbol)?;
+    let predicate = NamedNodeRef::new(&terms.has_substrate_symbol)?;
     let mut out = BTreeMap::new();
     for q in state.store.quads_for_pattern(
         None,
@@ -379,7 +379,7 @@ fn desired_literal_values(
 ) -> Vec<(String, Option<String>)> {
     vec![
         (
-            terms.has_scip_symbol.clone(),
+            terms.has_substrate_symbol.clone(),
             Some(entry.normalized_symbol.clone()),
         ),
         (
@@ -427,7 +427,7 @@ fn entity_for_symbol(
     normalized_symbol: &str,
 ) -> anyhow::Result<Option<String>> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let predicate = NamedNodeRef::new(&terms.has_scip_symbol)?;
+    let predicate = NamedNodeRef::new(&terms.has_substrate_symbol)?;
     let object = Literal::new_simple_literal(normalized_symbol);
     let mut hits = Vec::new();
     for q in state.store.quads_for_pattern(

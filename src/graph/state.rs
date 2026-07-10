@@ -689,9 +689,9 @@ mod tests {
         );
         assert_eq!(
             state
-                .resolve_code_datatype_property("hasScipSymbol")
+                .resolve_code_datatype_property("hasSubstrateSymbol")
                 .unwrap(),
-            format!("{CODE}hasScipSymbol")
+            format!("{CODE}hasSubstrateSymbol")
         );
         assert_eq!(
             state.resolve_object_property("realizes").unwrap(),

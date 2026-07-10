@@ -174,7 +174,7 @@ fn mint_twice_is_idempotent_and_validates() {
         .clone();
     assert!(has_edge(&state, &covered_iri, &terms.realizes, &component));
     assert_eq!(
-        literal_values(&state, &covered_iri, &terms.has_scip_symbol),
+        literal_values(&state, &covered_iri, &terms.has_substrate_symbol),
         vec![covered.normalized_symbol.clone()]
     );
     assert_eq!(
@@ -411,7 +411,7 @@ fn ensure_entity_reuses_existing_and_mints_private_symbols() {
         graph::ensure_entity(&state, &terms, &components, &private, "moosedev-mint").unwrap();
     assert!(ensured.created);
     assert_eq!(
-        literal_values(&state, &ensured.iri, &terms.has_scip_symbol),
+        literal_values(&state, &ensured.iri, &terms.has_substrate_symbol),
         vec![private.normalized_symbol]
     );
     assert_eq!(

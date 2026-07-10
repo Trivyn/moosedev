@@ -73,18 +73,19 @@ trivyn:confidence a owl:AnnotationProperty ;
 
 :CodeEntity a owl:Class ;
     rdfs:label "Code Entity" ;
-    skos:definition "A named, addressable source-code continuant — a module, function, method, type, trait, constant, or other declared symbol — identified by its normalized SCIP symbol and persisting through edits, renames, and moves. A referent that records are about, not itself an information record: it carries no author, timestamp, or lifecycle status. Nothing about it is anchored by line number." ;
+    skos:definition "A named, addressable source-code continuant — a module, function, method, type, trait, constant, or other declared symbol — identified by its substrate symbol (a normalized SCIP symbol, or a syntactic anchor for fallback-resolved languages) and persisting through edits, renames, and moves. A referent that records are about, not itself an information record: it carries no author, timestamp, or lifecycle status. Nothing about it is anchored by line number." ;
     trivyn:labelProperty :hasCodeName ;
     skos:historyNote "Derived from synthesis source 'CodeEntity'" ;
     rdfs:subClassOf se:Component {| skos:historyNote "Hand-curated 2026-07-08: ratified Component/Module lineage per AD b0d3e4d9; the generated arch:SystemComponent bridge (0.75) was overruled" |} .
 
 # Datatype Properties (all domain :CodeEntity, range xsd:string)
-:hasScipSymbol a owl:DatatypeProperty ;
-    rdfs:label "has SCIP symbol" ;
+:hasSubstrateSymbol a owl:DatatypeProperty ;
+    rdfs:label "has substrate symbol" ;
     rdfs:domain :CodeEntity ;
     rdfs:range xsd:string ;
-    skos:definition "The normalized SCIP symbol string that is the entity's identity key. The producer's version descriptor is elided (Constraint 00b3986e) so identity survives version bumps. Exactly one per entity; no two entities share one." ;
+    skos:definition "The substrate symbol string that is the entity's identity key. For SCIP-resolved entities: the normalized SCIP symbol, version descriptor elided (Constraint 00b3986e) so identity survives version bumps. For fallback-resolved entities: a syntactic anchor of the form ts:<lang>:<repo-relative-path>:<kind>:<qualified-name>. Exactly one per entity; no two entities share one." ;
     skos:historyNote "Hand-curated 2026-07-08 from generated 'hasSymbolPath' (ratified name, slice-2 Phase 0 worksheet)" ;
+    skos:editorialNote "Renamed from hasScipSymbol 2026-07-10 (slice-4 Phase 0): the tree-sitter fallback introduces non-SCIP identities and the identity property must not lie about its value space. Graph migrated via examples/migrate_substrate_symbol.rs." ;
     rdfs:subPropertyOf cco:ont00001765 {| trivyn:confidence "0.85"^^xsd:decimal ; trivyn:parentLabel "has text value" ; skos:historyNote "Aligned to has text value via embedding similarity" ; dcterms:created "2026-07-08T05:46:40Z"^^xsd:dateTime |} .
 
 :hasEntityKind a owl:DatatypeProperty ;
