@@ -54,6 +54,7 @@ fn def(
 ) -> DefinitionEntry {
     let symbol = format!("rust-analyzer cargo moosedev 0.6.3 {descriptor}");
     DefinitionEntry {
+        producer: "rust-analyzer".to_string(),
         normalized_symbol: symbols::normalize_symbol(&symbol).expect("valid scip symbol"),
         symbol,
         display_name: display_name.map(str::to_string),

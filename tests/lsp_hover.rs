@@ -228,18 +228,15 @@ fn info(
 }
 
 fn meta() -> SubstrateMeta {
-    SubstrateMeta {
-        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
-        indexed_commit: "abc123".to_string(),
-        indexed_at: DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
+    SubstrateMeta::single(
+        "rust-analyzer",
+        "abc123",
+        DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
             .unwrap()
             .with_timezone(&Utc),
-        producer: "rust-analyzer".to_string(),
-        producer_version: "1.0.0".to_string(),
-        mode: "scip".to_string(),
-        documents: 1,
-        occurrences: 4,
-    }
+        1,
+        4,
+    )
 }
 
 struct EnvRestore {

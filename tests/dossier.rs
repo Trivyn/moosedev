@@ -138,6 +138,7 @@ fn pre_mint_public(state: &AppState) -> String {
 fn def(descriptor: &str, file: &str, display_name: &str) -> DefinitionEntry {
     let symbol = format!("rust-analyzer cargo moosedev 0.6.3 {descriptor}");
     DefinitionEntry {
+        producer: "rust-analyzer".to_string(),
         normalized_symbol: symbols::normalize_symbol(&symbol).expect("valid scip symbol"),
         symbol,
         display_name: Some(display_name.to_string()),
@@ -671,16 +672,13 @@ fn info(
 
 /// Deterministic substrate metadata for synthetic indexes.
 fn meta() -> SubstrateMeta {
-    SubstrateMeta {
-        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
-        indexed_commit: "abc123".to_string(),
-        indexed_at: DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
+    SubstrateMeta::single(
+        "rust-analyzer",
+        "abc123",
+        DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
             .unwrap()
             .with_timezone(&Utc),
-        producer: "rust-analyzer".to_string(),
-        producer_version: "1.0.0".to_string(),
-        mode: "scip".to_string(),
-        documents: 1,
-        occurrences: 4,
-    }
+        1,
+        4,
+    )
 }

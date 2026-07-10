@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use super::meta::SubstrateMeta;
 use super::scip::{self, IngestedIndex, OccurrenceEntry, SymbolData};
 use super::symbols;
-use super::{index_path, meta_path};
+use super::{meta_path, producer_index_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
@@ -69,6 +69,8 @@ pub struct SubstrateStats {
 /// One workspace definition, enumerated for KG minting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionEntry {
+    /// Static registry name of the producer that emitted this definition.
+    pub producer: String,
     /// Raw SCIP symbol string.
     pub symbol: String,
     /// Version-normalized SCIP symbol string.
@@ -99,22 +101,37 @@ pub struct Substrate {
 
 impl Substrate {
     pub fn load(data_dir: &Path, repo_root: &Path) -> Result<Substrate> {
-        let path = index_path(data_dir);
-        let index = scip::read_index(&path).with_context(|| {
-            format!(
-                "failed to load substrate index {}; run `moosedev index`",
-                path.display()
-            )
-        })?;
         let meta = SubstrateMeta::load(data_dir).with_context(|| {
             format!(
                 "failed to load substrate metadata {}; run `moosedev index`",
                 meta_path(data_dir).display()
             )
         })?;
+        let mut merged = IngestedIndex::default();
+        for producer in &meta.producers {
+            let path = producer_index_path(data_dir, &producer.name);
+            let index = scip::read_index(&path).with_context(|| {
+                format!(
+                    "failed to load substrate index for producer `{}` at {}; run `moosedev index`",
+                    producer.name,
+                    path.display()
+                )
+            })?;
+            let ingested = scip::ingest(&index).with_context(|| {
+                format!(
+                    "failed to ingest substrate index for producer `{}`",
+                    producer.name
+                )
+            })?;
+            merged.merge(ingested, &producer.name, producer.path_prefix.as_deref())?;
+        }
         let current_head = SubstrateMeta::current_head(repo_root);
         let stale = current_head != meta.indexed_commit;
-        Substrate::from_loaded_index(index, meta, stale, repo_root)
+        Ok(Substrate {
+            index: merged,
+            meta,
+            staleness: Staleness::disk_backed(repo_root, stale),
+        })
     }
 
     pub fn resolve(&self, relative_path: &str, pos: Position) -> Option<Resolution> {
@@ -196,8 +213,8 @@ impl Substrate {
 
     pub fn stats(&self) -> SubstrateStats {
         SubstrateStats {
-            documents: self.index.documents,
-            occurrences: self.index.occurrences,
+            documents: self.meta.documents(),
+            occurrences: self.meta.occurrences(),
             definitions: self.index.definitions,
             symbols: self.index.symbols.len(),
         }
@@ -259,25 +276,20 @@ impl Substrate {
         meta: SubstrateMeta,
         stale: bool,
     ) -> Result<Substrate> {
-        let index = scip::ingest(&index)?;
+        let producer = meta
+            .producers
+            .first()
+            .context("synthetic substrate metadata has no producer")?;
+        let mut merged = IngestedIndex::default();
+        merged.merge(
+            scip::ingest(&index)?,
+            &producer.name,
+            producer.path_prefix.as_deref(),
+        )?;
         Ok(Substrate {
-            index,
+            index: merged,
             meta,
             staleness: Staleness::synthetic(stale),
-        })
-    }
-
-    fn from_loaded_index(
-        index: ::scip::types::Index,
-        meta: SubstrateMeta,
-        stale: bool,
-        repo_root: &Path,
-    ) -> Result<Substrate> {
-        let index = scip::ingest(&index)?;
-        Ok(Substrate {
-            index,
-            meta,
-            staleness: Staleness::disk_backed(repo_root, stale),
         })
     }
 }
@@ -318,16 +330,10 @@ fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
     let file = symbol.defined_in.clone()?;
     let normalized_symbol = symbols::normalize_symbol(&symbol.symbol)?;
     let signature = symbol.signature.clone();
-    // rust-analyzer renders Rust visibility as the signature prefix, so `pub`,
-    // `pub(crate)`, and `pub(super)` all match. A substring check would
-    // misclassify private items whose names or parameters contain "pub"
-    // (e.g. `fn ..._publishes_...()`). Items with no rendered visibility
-    // (trait/impl members) are treated as private; lazy minting covers them.
-    let is_public = signature
-        .as_deref()
-        .is_some_and(|text| text.starts_with("pub"));
+    let is_public = definition_is_public(&symbol.producer, signature.as_deref());
 
     Some(DefinitionEntry {
+        producer: symbol.producer.clone(),
         symbol: symbol.symbol.clone(),
         normalized_symbol,
         display_name: symbol.display_name.clone(),
@@ -337,6 +343,23 @@ fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
         is_module: symbols::is_module_symbol(&symbol.symbol),
         is_public,
     })
+}
+
+fn definition_is_public(producer: &str, signature: Option<&str>) -> bool {
+    match producer {
+        "rust-analyzer" => {
+            // Invariant: rust-analyzer renders Rust visibility as the signature
+            // prefix, so `pub`, `pub(crate)`, and `pub(super)` all match. A
+            // substring check would misclassify private items whose names or
+            // parameters contain "pub" (e.g. `fn ..._publishes_...()`). Items
+            // with no rendered visibility (trait/impl members) are treated as
+            // private; lazy minting covers them.
+            signature.is_some_and(|text| text.starts_with("pub"))
+        }
+        // Unknown producers remain lazy-mint-only until their visibility
+        // semantics have an explicit dispatch arm.
+        _ => false,
+    }
 }
 
 fn range_contains(range: SourceRange, pos: Position) -> bool {
@@ -363,16 +386,18 @@ fn range_len(range: SourceRange) -> (u32, u32, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use chrono::{DateTime, Utc};
     use protobuf::EnumOrUnknown;
-    use protobuf::MessageField;
+    use protobuf::{Message, MessageField};
     use scip::types::{
         symbol_information, Document, Index, Occurrence, PositionEncoding, Signature,
         SymbolInformation,
     };
 
     use super::{Position, SourceRange, Substrate, SubstrateMeta};
-    use crate::code::substrate::meta::CURRENT_SCHEMA_VERSION;
+    use crate::code::substrate::{producer_index_path, ProducerRun};
 
     #[test]
     fn position_boundaries_are_start_inclusive_end_exclusive() {
@@ -836,6 +861,149 @@ mod tests {
             .contains("unsupported SCIP position_encoding"));
     }
 
+    #[test]
+    fn load_merges_producers_with_prefix_and_isolated_symbol_tables() {
+        let data_dir = unique_temp_dir("merged-load");
+        let first_symbol = "rust-analyzer cargo first 1.0.0 first().";
+        let second_symbol = "other tool second 1.0.0 second().";
+        write_index(
+            &data_dir,
+            "first",
+            index_with_definition("src/first.rs", first_symbol),
+        );
+        write_index(
+            &data_dir,
+            "second",
+            index_with_definition("src/second.rs", second_symbol),
+        );
+        let meta = multi_meta(vec![
+            producer_run("first", None),
+            producer_run("second", Some("ui/")),
+        ]);
+        meta.save(&data_dir).unwrap();
+
+        let substrate = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(
+            substrate
+                .resolve("src/first.rs", Position { line: 0, col: 0 })
+                .unwrap()
+                .symbol,
+            first_symbol
+        );
+        assert_eq!(
+            substrate
+                .resolve("ui/src/second.rs", Position { line: 0, col: 0 })
+                .unwrap()
+                .symbol,
+            second_symbol
+        );
+        let second = substrate
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.producer == "second")
+            .unwrap();
+        assert_eq!(second.file, "ui/src/second.rs");
+        assert!(!second.is_public, "unknown producers are lazy-mint-only");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn load_rejects_re_rooted_path_collisions_with_both_producers() {
+        let data_dir = unique_temp_dir("path-collision");
+        write_index(
+            &data_dir,
+            "first",
+            index_with_definition("src/shared.rs", "rust-analyzer cargo first 1.0.0 first()."),
+        );
+        write_index(
+            &data_dir,
+            "second",
+            index_with_definition("src/shared.rs", "other tool second 1.0.0 second()."),
+        );
+        multi_meta(vec![
+            producer_run("first", None),
+            producer_run("second", None),
+        ])
+        .save(&data_dir)
+        .unwrap();
+
+        let error = Substrate::load(&data_dir, &data_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("first"), "{error}");
+        assert!(error.contains("second"), "{error}");
+        assert!(error.contains("src/shared.rs"), "{error}");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn load_rejects_listed_but_missing_index() {
+        let data_dir = unique_temp_dir("missing-listed-index");
+        multi_meta(vec![producer_run("missing", None)])
+            .save(&data_dir)
+            .unwrap();
+
+        let error = Substrate::load(&data_dir, &data_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+        assert!(error.contains("run `moosedev index`"), "{error}");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    fn write_index(data_dir: &Path, producer: &str, index: Index) {
+        let path = producer_index_path(data_dir, producer);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, index.write_to_bytes().unwrap()).unwrap();
+    }
+
+    fn index_with_definition(path: &str, symbol: &str) -> Index {
+        let mut index = Index::new();
+        let mut document = doc(path);
+        document.symbols.push(info(
+            symbol,
+            "item",
+            symbol_information::Kind::Function,
+            "pub fn item()",
+        ));
+        document.occurrences.push(occ(symbol, vec![0, 0, 4], 1));
+        index.documents.push(document);
+        index
+    }
+
+    fn producer_run(name: &str, path_prefix: Option<&str>) -> ProducerRun {
+        ProducerRun {
+            name: name.to_string(),
+            producer: name.to_string(),
+            producer_version: "1".to_string(),
+            mode: "scip".to_string(),
+            documents: 1,
+            occurrences: 1,
+            path_prefix: path_prefix.map(str::to_string),
+        }
+    }
+
+    fn multi_meta(producers: Vec<ProducerRun>) -> SubstrateMeta {
+        SubstrateMeta {
+            schema_version: crate::code::substrate::meta::CURRENT_SCHEMA_VERSION,
+            indexed_commit: "unknown".to_string(),
+            indexed_at: Utc::now(),
+            producers,
+        }
+    }
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "moosedev-substrate-resolver-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn substrate_with_occurrences(occurrences: Vec<Occurrence>) -> Substrate {
         let mut index = Index::new();
         let mut document = doc("src/lib.rs");
@@ -886,17 +1054,14 @@ mod tests {
     }
 
     fn meta() -> SubstrateMeta {
-        SubstrateMeta {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            indexed_commit: "abc123".to_string(),
-            indexed_at: DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
+        SubstrateMeta::single(
+            "rust-analyzer",
+            "abc123",
+            DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            producer: "rust-analyzer".to_string(),
-            producer_version: "1.0.0".to_string(),
-            mode: "scip".to_string(),
-            documents: 1,
-            occurrences: 1,
-        }
+            1,
+            1,
+        )
     }
 }

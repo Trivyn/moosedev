@@ -8,13 +8,36 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::meta_path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Deserialize)]
+struct SchemaHeader {
+    schema_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProducerRun {
+    /// Static registry name and on-disk index infix.
+    pub name: String,
+    /// Producer name from SCIP metadata, for diagnostics only.
+    pub producer: String,
+    /// Producer version from SCIP metadata, for diagnostics only.
+    pub producer_version: String,
+    /// Resolution mode represented by this producer output.
+    pub mode: String,
+    /// Number of SCIP documents accepted during validation.
+    pub documents: usize,
+    /// Number of SCIP occurrences accepted during validation.
+    pub occurrences: usize,
+    /// Optional prefix applied to document paths while loading.
+    pub path_prefix: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubstrateMeta {
@@ -24,19 +47,43 @@ pub struct SubstrateMeta {
     pub indexed_commit: String,
     /// Wall-clock time the producer output was accepted.
     pub indexed_at: DateTime<Utc>,
-    /// Producer name from SCIP metadata, for diagnostics only.
-    pub producer: String,
-    /// Producer version from SCIP metadata, for diagnostics only.
-    pub producer_version: String,
-    /// Resolution mode represented by this substrate, currently `"scip"`.
-    pub mode: String,
-    /// Number of SCIP documents accepted during validation.
-    pub documents: usize,
-    /// Number of SCIP occurrences accepted during validation.
-    pub occurrences: usize,
+    /// Successfully completed producer runs included in this substrate.
+    pub producers: Vec<ProducerRun>,
 }
 
 impl SubstrateMeta {
+    pub fn single(
+        name: impl Into<String>,
+        indexed_commit: impl Into<String>,
+        indexed_at: DateTime<Utc>,
+        documents: usize,
+        occurrences: usize,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            indexed_commit: indexed_commit.into(),
+            indexed_at,
+            producers: vec![ProducerRun {
+                producer: name.clone(),
+                name,
+                producer_version: "unknown".to_string(),
+                mode: "scip".to_string(),
+                documents,
+                occurrences,
+                path_prefix: None,
+            }],
+        }
+    }
+
+    pub fn documents(&self) -> usize {
+        self.producers.iter().map(|run| run.documents).sum()
+    }
+
+    pub fn occurrences(&self) -> usize {
+        self.producers.iter().map(|run| run.occurrences).sum()
+    }
+
     pub fn load(data_dir: &Path) -> Result<Self> {
         let path = meta_path(data_dir);
         let text = fs::read_to_string(&path).with_context(|| {
@@ -45,6 +92,15 @@ impl SubstrateMeta {
                 path.display()
             )
         })?;
+        let schema_version = serde_json::from_str::<SchemaHeader>(&text)
+            .ok()
+            .map(|header| header.schema_version);
+        if schema_version != Some(CURRENT_SCHEMA_VERSION) {
+            bail!(
+                "unsupported substrate metadata schema at {}; run `moosedev index`",
+                path.display()
+            );
+        }
         serde_json::from_str(&text).with_context(|| {
             format!(
                 "failed to parse substrate metadata at {}; run `moosedev index`",
@@ -91,21 +147,37 @@ mod tests {
     #[test]
     fn meta_round_trip() {
         let data_dir = unique_temp_dir("meta-round-trip");
-        let meta = SubstrateMeta {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            indexed_commit: "abc123".to_string(),
-            indexed_at: DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
+        let meta = SubstrateMeta::single(
+            "rust-analyzer",
+            "abc123",
+            DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            producer: "rust-analyzer".to_string(),
-            producer_version: "1.2.3".to_string(),
-            mode: "scip".to_string(),
-            documents: 2,
-            occurrences: 3,
-        };
+            2,
+            3,
+        );
 
         meta.save(&data_dir).unwrap();
         assert_eq!(SubstrateMeta::load(&data_dir).unwrap(), meta);
+        assert_eq!(meta.documents(), 2);
+        assert_eq!(meta.occurrences(), 3);
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn v1_metadata_requires_reindexing() {
+        let data_dir = unique_temp_dir("meta-v1");
+        let path = meta_path(&data_dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            r#"{"schema_version":1,"indexed_commit":"abc","indexed_at":"2026-07-07T01:02:03Z","producer":"rust-analyzer","producer_version":"1","mode":"scip","documents":1,"occurrences":1}"#,
+        )
+        .unwrap();
+
+        let error = SubstrateMeta::load(&data_dir).unwrap_err().to_string();
+        assert!(error.contains("run `moosedev index`"));
 
         let _ = fs::remove_dir_all(data_dir);
     }

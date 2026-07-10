@@ -577,6 +577,7 @@ mod tests {
 
     fn entry(symbol: &str, file: &str, is_module: bool, is_public: bool) -> DefinitionEntry {
         DefinitionEntry {
+            producer: "rust-analyzer".to_string(),
             symbol: symbol.to_string(),
             normalized_symbol: symbol.replace(" 0.6.3 ", " . "),
             display_name: Some("name".to_string()),

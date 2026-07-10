@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use moosedev::code::substrate::producer::noteworthy_diagnostics;
 use moosedev::code::substrate::{
-    index_log_path, index_path, run_index, Substrate, SubstrateMeta, STALE_CHECK_TTL,
+    index_log_path, producer_index_path, run_index, Substrate, SubstrateMeta, STALE_CHECK_TTL,
 };
 use moosedev::graph::AppState;
 use protobuf::{EnumOrUnknown, Message, MessageField};
@@ -55,7 +55,12 @@ fn git_repo(tag: &str) -> PathBuf {
     git(&repo_root, &["config", "user.name", "MOOSEDev tests"]);
     std::fs::write(repo_root.join("tracked.rs"), "pub fn tracked() {}\n")
         .expect("write tracked source");
-    git(&repo_root, &["add", "tracked.rs"]);
+    std::fs::write(
+        repo_root.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\n",
+    )
+    .expect("write Cargo manifest");
+    git(&repo_root, &["add", "tracked.rs", "Cargo.toml"]);
     git(&repo_root, &["commit", "-m", "initial"]);
     repo_root
 }
@@ -97,25 +102,22 @@ fn index_with_definitions(definitions: usize) -> Index {
 }
 
 fn write_substrate(data_dir: &Path, index: &Index, commit: &str, indexed_at: DateTime<Utc>) {
-    let path = index_path(data_dir);
+    let path = producer_index_path(data_dir, "rust-analyzer");
     std::fs::create_dir_all(path.parent().expect("substrate parent"))
         .expect("create substrate directory");
     std::fs::write(&path, index.write_to_bytes().expect("serialize SCIP index"))
         .expect("write SCIP index");
-    SubstrateMeta {
-        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
-        indexed_commit: commit.to_string(),
+    SubstrateMeta::single(
+        "rust-analyzer",
+        commit,
         indexed_at,
-        producer: "test".to_string(),
-        producer_version: "1".to_string(),
-        mode: "scip".to_string(),
-        documents: index.documents.len(),
-        occurrences: index
+        index.documents.len(),
+        index
             .documents
             .iter()
             .map(|document| document.occurrences.len())
             .sum(),
-    }
+    )
     .save(data_dir)
     .expect("write substrate metadata");
 }
@@ -169,17 +171,18 @@ fn app_state_reloads_completed_substrates_and_keeps_last_good_copy() {
     let reloaded = state.substrate().expect("reloaded substrate");
     assert_eq!(reloaded.stats().definitions, 2);
 
-    std::fs::write(index_path(&data_dir), b"not a SCIP index").expect("corrupt SCIP index");
-    let corrupt_meta = SubstrateMeta {
-        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
-        indexed_commit: head,
-        indexed_at: second_indexed_at + ChronoDuration::seconds(1),
-        producer: "test".to_string(),
-        producer_version: "1".to_string(),
-        mode: "scip".to_string(),
-        documents: 3,
-        occurrences: 3,
-    };
+    std::fs::write(
+        producer_index_path(&data_dir, "rust-analyzer"),
+        b"not a SCIP index",
+    )
+    .expect("corrupt SCIP index");
+    let corrupt_meta = SubstrateMeta::single(
+        "rust-analyzer",
+        head,
+        second_indexed_at + ChronoDuration::seconds(1),
+        3,
+        3,
+    );
     corrupt_meta.save(&data_dir).expect("bump corrupt metadata");
     let retained = state.substrate().expect("retained substrate");
     assert!(Arc::ptr_eq(&reloaded, &retained));
@@ -193,16 +196,7 @@ fn synthetic_substrate_injection_skips_disk_reload() {
     let substrate = Arc::new(
         Substrate::from_index(
             index_with_definitions(1),
-            SubstrateMeta {
-                schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
-                indexed_commit: "synthetic".to_string(),
-                indexed_at: Utc::now(),
-                producer: "test".to_string(),
-                producer_version: "1".to_string(),
-                mode: "scip".to_string(),
-                documents: 1,
-                occurrences: 1,
-            },
+            SubstrateMeta::single("rust-analyzer", "synthetic", Utc::now(), 1, 1),
             false,
         )
         .expect("build synthetic substrate"),
@@ -277,7 +271,10 @@ fn producer_logs_upstream_diagnostics_without_dumping_them() {
     let report = run_index(&repo_root, &data_dir).expect("fake producer index run");
     assert_eq!(report.definitions, 1);
     assert_eq!(noteworthy_diagnostics(&data_dir), Some(2));
-    assert!(index_path(&data_dir).is_file(), "index should be promoted");
+    assert!(
+        producer_index_path(&data_dir, "rust-analyzer").is_file(),
+        "index should be promoted"
+    );
     let log = std::fs::read_to_string(index_log_path(&data_dir)).expect("read producer log");
     assert!(log.contains("ERROR upstream issue"));
     assert!(log.contains("Duplicate symbol upstream issue"));

@@ -14,8 +14,8 @@ pub mod resolver;
 pub(crate) mod scip;
 pub mod symbols;
 
-pub use meta::SubstrateMeta;
-pub use producer::{run_index, IndexReport};
+pub use meta::{ProducerRun, SubstrateMeta};
+pub use producer::{registry, run_index, IndexReport, ProducerReport, ProducerSpec};
 pub use resolver::{
     DefinitionEntry, Position, Resolution, ResolutionMode, SourceRange, Substrate, SubstrateStats,
     STALE_CHECK_TTL,
@@ -37,6 +37,14 @@ pub fn index_path(data_dir: &Path) -> PathBuf {
 
 pub fn index_tmp_path(data_dir: &Path) -> PathBuf {
     substrate_dir(data_dir).join(INDEX_TMP_FILE_NAME)
+}
+
+pub fn producer_index_path(data_dir: &Path, producer: &str) -> PathBuf {
+    substrate_dir(data_dir).join(format!("index.{producer}.scip"))
+}
+
+pub fn producer_index_tmp_path(data_dir: &Path, producer: &str) -> PathBuf {
+    substrate_dir(data_dir).join(format!("index.{producer}.scip.tmp"))
 }
 
 pub fn index_log_path(data_dir: &Path) -> PathBuf {

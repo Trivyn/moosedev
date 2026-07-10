@@ -18,7 +18,7 @@ use scip::types::{
 
 use super::resolver::{Position, SourceRange};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IngestedIndex {
     /// Per-file occurrence tables keyed by SCIP `Document.relative_path`.
     pub(crate) files: HashMap<String, FileOccurrences>,
@@ -31,6 +31,8 @@ pub(crate) struct IngestedIndex {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileOccurrences {
+    /// Static registry name of the producer that emitted this document.
+    pub(crate) producer: String,
     /// Occurrences sorted by start/end range and symbol for deterministic lookup.
     pub(crate) occurrences: Vec<OccurrenceEntry>,
     /// Largest line span in this file, used to bound resolver backtracking.
@@ -62,6 +64,53 @@ pub(crate) struct SymbolData {
     pub(crate) defined_in: Option<String>,
     /// Local symbols are valid resolution results but not stable identities.
     pub(crate) is_local: bool,
+    /// Static registry name of the producer that emitted this symbol.
+    pub(crate) producer: String,
+}
+
+impl IngestedIndex {
+    pub(crate) fn merge(
+        &mut self,
+        mut other: Self,
+        producer: &str,
+        path_prefix: Option<&str>,
+    ) -> Result<()> {
+        let symbol_offset = self.symbols.len();
+        for symbol in &mut other.symbols {
+            symbol.producer = producer.to_string();
+            if let Some(path) = &mut symbol.defined_in {
+                *path = prefixed_path(path_prefix, path);
+            }
+        }
+
+        for (path, mut file) in other.files {
+            let path = prefixed_path(path_prefix, &path);
+            if let Some(existing) = self.files.get(&path) {
+                bail!(
+                    "substrate path collision at `{path}` between producers `{}` and `{producer}`",
+                    existing.producer
+                );
+            }
+            file.producer = producer.to_string();
+            for occurrence in &mut file.occurrences {
+                occurrence.symbol_id += symbol_offset;
+            }
+            self.files.insert(path, file);
+        }
+
+        self.symbols.extend(other.symbols);
+        self.documents += other.documents;
+        self.occurrences += other.occurrences;
+        self.definitions += other.definitions;
+        Ok(())
+    }
+}
+
+fn prefixed_path(prefix: Option<&str>, path: &str) -> String {
+    match prefix {
+        Some(prefix) => format!("{prefix}{path}"),
+        None => path.to_string(),
+    }
 }
 
 pub(crate) fn read_index(path: &Path) -> Result<Index> {
@@ -144,6 +193,7 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
         files.insert(
             document.relative_path.clone(),
             FileOccurrences {
+                producer: String::new(),
                 occurrences: entries,
                 max_line_span,
             },
@@ -244,6 +294,7 @@ fn intern_symbol(
                 signature,
                 defined_in: None,
                 is_local: is_local_symbol(entry.key()),
+                producer: String::new(),
             });
             entry.insert(id);
             id
@@ -267,6 +318,7 @@ fn intern_symbol_str(
                 signature: None,
                 defined_in: None,
                 is_local: is_local_symbol(entry.key()),
+                producer: String::new(),
             });
             entry.insert(id);
             id

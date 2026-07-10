@@ -752,6 +752,12 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
     println!("substrate index");
     println!("  commit:      {}", report.commit);
     println!("  duration:    {:.3}s", report.duration.as_secs_f64());
+    for producer in &report.producers {
+        println!(
+            "  {}: {} documents, {} occurrences",
+            producer.name, producer.documents, producer.occurrences
+        );
+    }
     println!("  documents:   {}", report.documents);
     println!("  occurrences: {}", report.occurrences);
     println!("  definitions: {}", report.definitions);
@@ -762,7 +768,7 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
     );
     println!(
         "  output:      {}",
-        substrate::index_path(data_dir).display()
+        substrate::substrate_dir(data_dir).display()
     );
     Ok(())
 }
