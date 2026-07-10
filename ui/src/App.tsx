@@ -3,12 +3,14 @@ import { Alert, Box, CircularProgress, Typography } from '@mui/material';
 import ArticleIcon from '@mui/icons-material/Article';
 import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
 import ChatIcon from '@mui/icons-material/Forum';
+import GavelIcon from '@mui/icons-material/Gavel';
 import ImportExportIcon from '@mui/icons-material/ImportExport';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import SchoolIcon from '@mui/icons-material/School';
 import AppShell, { PageKey } from './components/layout/AppShell';
 import AdrsPage from './pages/AdrsPage';
 import ChatPage from './pages/ChatPage';
+import ConstraintsPage from './pages/ConstraintsPage';
 import GraphTransferPage from './pages/GraphTransferPage';
 import LessonsPage from './pages/LessonsPage';
 import RequirementsPage from './pages/RequirementsPage';
@@ -16,7 +18,11 @@ import RecordPage from './pages/RecordPage';
 import SparqlPage from './pages/SparqlPage';
 import { api } from './api/client';
 import { HealthResponse } from './api/types';
-import { ArtifactKind, ArtifactTarget } from './components/artifacts/LinkedMarkdown';
+import {
+  artifactTargetForIri,
+  ArtifactKind,
+  ArtifactTarget,
+} from './components/artifacts/LinkedMarkdown';
 import { MooseThemeMode } from './styles/theme';
 
 interface AppProps {
@@ -32,7 +38,7 @@ export interface RecordRoute {
 type ArtifactRoute = RecordRoute & { kind: ArtifactKind };
 
 export function recordRouteFromHash(hash: string): RecordRoute | null {
-  const match = /^#\/(record|adrs|requirements|lessons)\/([^/]+)$/.exec(hash);
+  const match = /^#\/(record|adrs|requirements|lessons|constraints)\/([^/]+)$/.exec(hash);
   if (!match) {
     return null;
   }
@@ -54,6 +60,18 @@ export function recordUuidFromHash(hash: string): string | null {
 function uuidFromIri(iri: string): string | null {
   const uuid = iri.slice(Math.max(iri.lastIndexOf('/'), iri.lastIndexOf('#')) + 1);
   return uuid || null;
+}
+
+export function recordRouteForIri(iri: string): RecordRoute | null {
+  const uuid = uuidFromIri(iri);
+  if (!uuid) {
+    return null;
+  }
+  const artifact = artifactTargetForIri(iri);
+  if (artifact) {
+    return { kind: artifact.kind, uuid };
+  }
+  return iri.startsWith('https://moosedev.dev/kg/') ? { kind: 'record', uuid } : null;
 }
 
 function routeForArtifact(target: ArtifactTarget): ArtifactRoute | null {
@@ -102,12 +120,20 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
       icon: <AssignmentTurnedInIcon fontSize="small" />,
     },
     { key: 'lessons' as const, label: 'Lessons', icon: <SchoolIcon fontSize="small" /> },
+    { key: 'constraints' as const, label: 'Constraints', icon: <GavelIcon fontSize="small" /> },
     { key: 'sparql' as const, label: 'SPARQL', icon: <QueryStatsIcon fontSize="small" /> },
     { key: 'transfer' as const, label: 'Import / Export', icon: <ImportExportIcon fontSize="small" /> },
   ];
 
   const navigateArtifact = (target: ArtifactTarget) => {
     const route = routeForArtifact(target);
+    if (route) {
+      window.location.hash = hashForRoute(route);
+    }
+  };
+
+  const navigateRecord = (iri: string) => {
+    const route = recordRouteForIri(iri);
     if (route) {
       window.location.hash = hashForRoute(route);
     }
@@ -158,6 +184,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
         <RecordPage
           uuid={recordRoute.uuid}
           onNavigateArtifact={navigateArtifact}
+          onNavigateRecord={navigateRecord}
           onResolveArtifact={replaceLegacyRecordRoute}
         />
       ) : page === 'chat' ? (
@@ -166,16 +193,25 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
         <AdrsPage
           targetUuid={recordRoute?.kind === 'adrs' ? recordRoute.uuid : undefined}
           onNavigateArtifact={navigateArtifact}
+          onNavigateRecord={navigateRecord}
         />
       ) : page === 'requirements' ? (
         <RequirementsPage
           targetUuid={recordRoute?.kind === 'requirements' ? recordRoute.uuid : undefined}
           onNavigateArtifact={navigateArtifact}
+          onNavigateRecord={navigateRecord}
         />
       ) : page === 'lessons' ? (
         <LessonsPage
           targetUuid={recordRoute?.kind === 'lessons' ? recordRoute.uuid : undefined}
           onNavigateArtifact={navigateArtifact}
+          onNavigateRecord={navigateRecord}
+        />
+      ) : page === 'constraints' ? (
+        <ConstraintsPage
+          targetUuid={recordRoute?.kind === 'constraints' ? recordRoute.uuid : undefined}
+          onNavigateArtifact={navigateArtifact}
+          onNavigateRecord={navigateRecord}
         />
       ) : page === 'sparql' ? (
         <SparqlPage />

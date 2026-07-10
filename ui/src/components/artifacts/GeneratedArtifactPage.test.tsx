@@ -4,6 +4,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import GeneratedArtifactPage, { ArtifactSummaryBase } from './GeneratedArtifactPage';
 
+vi.mock('../graph/RecordNeighborhoodGraph', () => ({
+  default: ({
+    uuid,
+    onNavigateRecord,
+  }: {
+    uuid: string;
+    onNavigateRecord?: (iri: string) => void;
+  }) => (
+    <button onClick={() => onNavigateRecord?.('https://moosedev.dev/kg/Constraint/constraint-1')}>
+      Relationship graph for {uuid}
+    </button>
+  ),
+}));
+
 afterEach(cleanup);
 
 interface TestList {
@@ -36,11 +50,13 @@ describe('GeneratedArtifactPage direct links', () => {
       markdown: `Detail ${num}`,
     }));
     const onNavigateArtifact = vi.fn();
+    const onNavigateRecord = vi.fn();
 
     render(
       <GeneratedArtifactPage<ArtifactSummaryBase, TestList, null>
         targetUuid="adr-2"
         onNavigateArtifact={onNavigateArtifact}
+        onNavigateRecord={onNavigateRecord}
         artifactKind="adrs"
         title="ADRs"
         emptyText="Empty"
@@ -64,6 +80,12 @@ describe('GeneratedArtifactPage direct links', () => {
     expect(await screen.findByText('Detail 0002')).toBeInTheDocument();
     expect(loadDetail).toHaveBeenCalledTimes(1);
     expect(loadDetail).toHaveBeenCalledWith('0002');
+    expect(screen.getByText('Relationship graph for adr-2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Relationship graph for adr-2'));
+    expect(onNavigateRecord).toHaveBeenCalledWith(
+      'https://moosedev.dev/kg/Constraint/constraint-1',
+    );
 
     fireEvent.click(screen.getByText('First decision'));
 

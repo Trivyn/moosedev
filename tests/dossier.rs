@@ -209,7 +209,7 @@ fn record_summaries_include_description_and_workbench_link_when_published() {
         .expect("dossier");
     let record = dossier.direct_records.first().expect("constraint summary");
     let expected_url = format!(
-        "http://127.0.0.1:7474/#/record/{}",
+        "http://127.0.0.1:7474/#/constraints/{}",
         record.iri.rsplit('/').next().expect("record local name")
     );
 
@@ -231,7 +231,8 @@ fn workbench_links_use_typed_uuid_routes_with_a_generic_fallback() {
         ("ArchitecturalDecision", "adrs"),
         ("Requirement", "requirements"),
         ("Lesson", "lessons"),
-        ("Constraint", "record"),
+        ("Constraint", "constraints"),
+        ("Pattern", "record"),
     ];
 
     for (kind, _) in cases {

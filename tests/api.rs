@@ -110,6 +110,28 @@ fn record_api_lesson(state: &AppState, title: &str) -> String {
     .expect("record project lesson")
 }
 
+fn record_api_constraint(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("Constraint").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "Constraint".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (
+                    state.capture.description.clone(),
+                    format!("Constraint description for {title}"),
+                ),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record project constraint")
+}
+
 #[tokio::test]
 async fn records_detail_returns_record_metadata_and_edges() {
     let dir = temp_dir("record-detail");
@@ -616,6 +638,93 @@ async fn lessons_archive_downloads_zip_with_generated_files() {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut lesson, &mut text).expect("read lesson");
     assert!(text.contains("Lesson description for Archive Lesson"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn constraints_list_renders_project_constraints() {
+    let dir = temp_dir("constraints-list");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let constraint = record_api_constraint(&state, "API Constraint visible");
+    let decision = record_api_decision(&state, "Constrained ADR");
+    graph::relate(&state, &constraint, "constrains", &decision).expect("link constraint");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/constraints").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["graph_constraints"], 1);
+    assert_eq!(body["constraint_files"], 1);
+    assert_eq!(body["constraints"][0]["num"], "0001");
+    assert_eq!(body["constraints"][0]["title"], "API Constraint visible");
+    assert_eq!(
+        body["constraints"][0]["filename"],
+        "0001-api-constraint-visible.md"
+    );
+    assert_eq!(body["constraints"][0]["iri"], constraint);
+    assert_eq!(body["constraints"][0]["related_targets"], 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn constraints_detail_returns_generated_markdown() {
+    let dir = temp_dir("constraints-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_constraint(&state, "Detailed Constraint");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/constraints/0001").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["summary"]["filename"], "0001-detailed-constraint.md");
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains("Constraint description for Detailed Constraint"));
+
+    let missing = server.get("/api/v1/constraints/9999").await;
+    missing.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn constraints_archive_downloads_zip_with_generated_files() {
+    let dir = temp_dir("constraints-archive");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_constraint(&state, "Archive Constraint");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/constraints/archive.zip").await;
+
+    response.assert_status_ok();
+    assert_eq!(response.content_type(), "application/zip");
+    assert!(response
+        .header(CONTENT_DISPOSITION)
+        .to_str()
+        .expect("content-disposition is text")
+        .contains("attachment; filename=\"moosedev-constraints.zip\""));
+    assert_eq!(
+        response
+            .header(CONTENT_TYPE)
+            .to_str()
+            .expect("content-type is text"),
+        "application/zip"
+    );
+
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(response.as_bytes().as_ref())).expect("zip");
+    assert!(archive.by_name("0000-index.md").is_ok());
+    let mut constraint = archive
+        .by_name("0001-archive-constraint.md")
+        .expect("generated constraint file");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut constraint, &mut text).expect("read constraint");
+    assert!(text.contains("Constraint description for Archive Constraint"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

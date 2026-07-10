@@ -566,7 +566,7 @@ async fn constraint_diagnostic_links_to_workbench_with_description() -> anyhow::
     assert!(diagnostics[0]["codeDescription"]["href"]
         .as_str()
         .expect("workbench href")
-        .contains("/#/record/"));
+        .contains("/#/constraints/"));
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

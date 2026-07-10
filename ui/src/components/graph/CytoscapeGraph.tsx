@@ -20,9 +20,12 @@ interface GraphMenuState {
   targetId?: string;
 }
 
-interface CytoscapeGraphProps {
+export interface CytoscapeGraphProps {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  mode?: 'explore' | 'navigate';
+  focusNodeId?: string;
+  onNodeClick?: (node: GraphNode) => void;
 }
 
 interface LegendItem {
@@ -31,7 +34,13 @@ interface LegendItem {
   shape: 'ellipse' | 'round-rectangle' | 'tag' | 'diamond' | 'rectangle';
 }
 
-export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
+export default function CytoscapeGraph({
+  nodes,
+  edges,
+  mode = 'explore',
+  focusNodeId,
+  onNodeClick,
+}: CytoscapeGraphProps) {
   const theme = useTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
@@ -57,6 +66,7 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
     if (!containerRef.current) return;
     const elements: cytoscape.ElementDefinition[] = [
       ...nodes.map((node) => ({
+        classes: node.id === focusNodeId ? 'focus-node' : undefined,
         data: {
           id: node.id,
           label: node.label,
@@ -135,6 +145,13 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
           },
         },
         {
+          selector: 'node.focus-node',
+          style: {
+            'border-width': 4,
+            'border-color': theme.palette.secondary.main,
+          },
+        },
+        {
           selector: 'node.user-selected, edge.user-selected',
           style: {
             'border-width': 4,
@@ -197,21 +214,30 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
       });
     };
 
-    cy.on('tap', 'node, edge', (event) => selectElement(event.target));
+    if (mode === 'navigate') {
+      cy.on('tap', 'node', (event) => {
+        const node = nodeById.get(event.target.id());
+        if (node) onNodeClick?.(node);
+      });
+    } else {
+      cy.on('tap', 'node, edge', (event) => selectElement(event.target));
+    }
     cy.on('tap', (event) => {
       if (event.target === cy) setMenu(null);
     });
-    cy.on('cxttap', 'node', (event) => openMenu(event, 'node'));
-    cy.on('cxttap', 'edge', (event) => openMenu(event, 'edge'));
-    cy.on('cxttap', (event) => {
-      if (event.target === cy) openMenu(event, 'core');
-    });
+    if (mode === 'explore') {
+      cy.on('cxttap', 'node', (event) => openMenu(event, 'node'));
+      cy.on('cxttap', 'edge', (event) => openMenu(event, 'edge'));
+      cy.on('cxttap', (event) => {
+        if (event.target === cy) openMenu(event, 'core');
+      });
+    }
 
     return () => {
       cy.destroy();
       cyRef.current = null;
     };
-  }, [nodes, edges, theme]);
+  }, [nodes, edges, focusNodeId, mode, nodeById, onNodeClick, theme]);
 
   useEffect(() => {
     setSelectedNodeId((id) => (id && nodeById.has(id) ? id : null));
@@ -290,7 +316,7 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
   return (
     <Box sx={{ height: '100%', width: '100%', position: 'relative' }}>
       <Box ref={containerRef} sx={{ height: '100%', width: '100%' }} />
-      <Box
+      {mode === 'explore' && <Box
         aria-label="Graph node legend"
         sx={{
           position: 'absolute',
@@ -337,13 +363,13 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
             </Typography>
           </Box>
         ))}
-      </Box>
-      <GraphDetailsPanel node={selectedNode} edge={selectedEdge} onClose={() => {
+      </Box>}
+      {mode === 'explore' && <GraphDetailsPanel node={selectedNode} edge={selectedEdge} onClose={() => {
         cyRef.current?.elements().removeClass('user-selected');
         setSelectedNodeId(null);
         setSelectedEdgeId(null);
-      }} />
-      <Menu
+      }} />}
+      {mode === 'explore' && <Menu
         open={Boolean(menu)}
         onClose={closeMenu}
         anchorReference="anchorPosition"
@@ -361,7 +387,7 @@ export default function CytoscapeGraph({ nodes, edges }: CytoscapeGraphProps) {
         <MenuItem onClick={() => runLayout('dagre')}>Hierarchy Layout</MenuItem>
         <MenuItem onClick={() => runLayout('circle')}>Circle Layout</MenuItem>
         <MenuItem onClick={() => runLayout('grid')}>Grid Layout</MenuItem>
-      </Menu>
+      </Menu>}
     </Box>
   );
 }

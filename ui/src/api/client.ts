@@ -6,6 +6,8 @@ import {
   ChatSessionDetail,
   ChatSessionListResponse,
   ClarificationReply,
+  ConstraintDetailResponse,
+  ConstraintListResponse,
   GraphImportResponse,
   HealthResponse,
   LessonDetailResponse,
@@ -65,6 +67,10 @@ export const api = {
   listLessons: () => request<LessonListResponse>('/lessons'),
   getLesson: (num: string) => request<LessonDetailResponse>(`/lessons/${encodeURIComponent(num)}`),
   downloadLessonArchive: () => download('/lessons/archive.zip'),
+  listConstraints: () => request<ConstraintListResponse>('/constraints'),
+  getConstraint: (num: string) =>
+    request<ConstraintDetailResponse>(`/constraints/${encodeURIComponent(num)}`),
+  downloadConstraintArchive: () => download('/constraints/archive.zip'),
   record: (uuid: string) => request<RecordDetailResponse>(`/records/${encodeURIComponent(uuid)}`),
   chat: (payload: {
     session_id?: string;

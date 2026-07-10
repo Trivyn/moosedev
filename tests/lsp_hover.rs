@@ -456,7 +456,9 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
         "ArchitecturalDecision",
         "Runtime builder hover decision",
     );
+    let constraint = record(&state, "Constraint", "Runtime builder hover constraint");
     link_public(&state, &decision, 4);
+    link_public(&state, &constraint, 4);
     let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
 
     let mut client = direct_client(&socket).await?;
@@ -478,6 +480,8 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
     assert_eq!(hover_markdown(&response), expected);
     assert!(hover_markdown(&response).contains("Runtime builder hover decision"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/adrs/"));
+    assert!(hover_markdown(&response).contains("Runtime builder hover constraint"));
+    assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/constraints/"));
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

@@ -4,6 +4,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import RecordPage from './RecordPage';
 
+vi.mock('../components/graph/RecordNeighborhoodGraph', () => ({
+  default: ({ record }: { record: typeof response }) => (
+    <div>Relationship graph for {record.title}</div>
+  ),
+}));
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -29,7 +35,7 @@ const response = {
 };
 
 describe('RecordPage', () => {
-  it('renders record details and outgoing edges', async () => {
+  it('renders record details and its relationship graph', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, json: async () => response }),
@@ -39,9 +45,10 @@ describe('RecordPage', () => {
 
     expect(await screen.findByText('Keep local operation')).toBeInTheDocument();
     expect(screen.getByText('Constraint')).toBeInTheDocument();
-    expect(screen.getByText('Outgoing')).toBeInTheDocument();
-    expect(screen.getByText(/HTTP server/)).toBeInTheDocument();
-    expect(screen.getByText('constrains')).toBeInTheDocument();
+    expect(screen.getByText('Connections')).toBeInTheDocument();
+    expect(screen.getByText('Relationship graph for Keep local operation')).toBeInTheDocument();
+    expect(screen.queryByText('Outgoing')).not.toBeInTheDocument();
+    expect(screen.getByText('The server must stay local.')).toBeInTheDocument();
   });
 
   it('renders an error alert when fetching fails', async () => {

@@ -101,6 +101,36 @@ export interface LessonDetailResponse {
   markdown: string;
 }
 
+export interface ConstraintWarnings {
+  missing_description: string[];
+  unlinked_constraints: string[];
+}
+
+export interface ConstraintSummary {
+  num: string;
+  title: string;
+  status: string;
+  date: string;
+  author: string;
+  iri: string;
+  filename: string;
+  related_targets: number;
+}
+
+export interface ConstraintListResponse {
+  generated_at: string;
+  graph_constraints: number;
+  constraint_files: number;
+  index_filename: string;
+  warnings: ConstraintWarnings;
+  constraints: ConstraintSummary[];
+}
+
+export interface ConstraintDetailResponse {
+  summary: ConstraintSummary;
+  markdown: string;
+}
+
 export interface RecordOutgoingEdge {
   predicate: string;
   target_iri: string;

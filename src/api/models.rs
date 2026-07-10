@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::adrs::{AdrSummary, AdrWarnings};
+use crate::constraints::{ConstraintSummary, ConstraintWarnings};
 use crate::lessons::{LessonSummary, LessonWarnings};
 use crate::requirements::{RequirementSummary, RequirementWarnings};
 
@@ -66,6 +67,22 @@ pub struct RecordIncomingEdge {
     pub source_iri: String,
     pub source_label: String,
     pub source_kind: String,
+}
+
+#[derive(Serialize)]
+pub struct ConstraintListResponse {
+    pub generated_at: String,
+    pub graph_constraints: usize,
+    pub constraint_files: usize,
+    pub index_filename: String,
+    pub warnings: ConstraintWarnings,
+    pub constraints: Vec<ConstraintSummary>,
+}
+
+#[derive(Serialize)]
+pub struct ConstraintDetailResponse {
+    pub summary: ConstraintSummary,
+    pub markdown: String,
 }
 
 #[derive(Serialize)]

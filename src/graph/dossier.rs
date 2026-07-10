@@ -476,6 +476,7 @@ pub(crate) fn workbench_record_url(
         "ArchitecturalDecision" => "adrs",
         "Requirement" => "requirements",
         "Lesson" => "lessons",
+        "Constraint" => "constraints",
         _ => "record",
     };
     Some(format!(

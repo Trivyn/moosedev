@@ -7,6 +7,7 @@ import { ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
 interface RequirementsPageProps {
   targetUuid?: string;
   onNavigateArtifact?: (target: ArtifactTarget) => void;
+  onNavigateRecord?: (iri: string) => void;
 }
 
 function warningCount(warnings: RequirementWarnings) {
@@ -38,7 +39,11 @@ function RequirementListMeta(requirement: RequirementSummary) {
   );
 }
 
-export default function RequirementsPage({ targetUuid, onNavigateArtifact }: RequirementsPageProps) {
+export default function RequirementsPage({
+  targetUuid,
+  onNavigateArtifact,
+  onNavigateRecord,
+}: RequirementsPageProps) {
   return (
     <GeneratedArtifactPage<
       RequirementSummary,
@@ -47,6 +52,7 @@ export default function RequirementsPage({ targetUuid, onNavigateArtifact }: Req
     >
       targetUuid={targetUuid}
       onNavigateArtifact={onNavigateArtifact}
+      onNavigateRecord={onNavigateRecord}
       artifactKind="requirements"
       title="Requirements"
       emptyText="No requirements recorded."

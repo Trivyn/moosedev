@@ -15,6 +15,7 @@ import {
 import DownloadIcon from '@mui/icons-material/Download';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import LinkedMarkdown, { ArtifactTarget } from './LinkedMarkdown';
+import RecordNeighborhoodGraph from '../graph/RecordNeighborhoodGraph';
 
 export type ArtifactStatusColor = 'default' | 'primary' | 'success' | 'warning';
 
@@ -35,6 +36,7 @@ interface ArtifactDetail<TSummary extends ArtifactSummaryBase> {
 interface GeneratedArtifactPageProps<TSummary extends ArtifactSummaryBase, TList, TWarnings> {
   targetUuid?: string;
   onNavigateArtifact?: (target: ArtifactTarget) => void;
+  onNavigateRecord?: (iri: string) => void;
   artifactKind: ArtifactTarget['kind'];
   title: string;
   emptyText: string;
@@ -130,6 +132,7 @@ function ArtifactListItem<TSummary extends ArtifactSummaryBase>({
 export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBase, TList, TWarnings>({
   targetUuid,
   onNavigateArtifact,
+  onNavigateRecord,
   artifactKind,
   title,
   emptyText,
@@ -373,24 +376,34 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
               <CircularProgress size={22} />
             </Box>
           ) : detail ? (
-            <Box
-              sx={{
-                maxWidth: 920,
-                mx: 'auto',
-                overflowWrap: 'anywhere',
-                '& h1': { fontSize: 24, mt: 0 },
-                '& h2': { fontSize: 18, mt: 3 },
-                '& p, & li': { fontSize: 14, lineHeight: 1.65 },
-                '& code': {
-                  px: 0.5,
-                  py: 0.15,
-                  borderRadius: 0.5,
-                  bgcolor: 'action.hover',
-                  fontSize: '0.9em',
-                },
-              }}
-            >
-              <LinkedMarkdown markdown={detail.markdown} onNavigateArtifact={onNavigateArtifact} />
+            <Box sx={{ maxWidth: 1100, mx: 'auto' }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 650, mb: 1 }}>
+                Connections
+              </Typography>
+              <RecordNeighborhoodGraph
+                uuid={recordUuid(detail.summary)}
+                onNavigateRecord={onNavigateRecord}
+              />
+              <Divider sx={{ my: 2 }} />
+              <Box
+                sx={{
+                  maxWidth: 920,
+                  mx: 'auto',
+                  overflowWrap: 'anywhere',
+                  '& h1': { fontSize: 24, mt: 0 },
+                  '& h2': { fontSize: 18, mt: 3 },
+                  '& p, & li': { fontSize: 14, lineHeight: 1.65 },
+                  '& code': {
+                    px: 0.5,
+                    py: 0.15,
+                    borderRadius: 0.5,
+                    bgcolor: 'action.hover',
+                    fontSize: '0.9em',
+                  },
+                }}
+              >
+                <LinkedMarkdown markdown={detail.markdown} onNavigateArtifact={onNavigateArtifact} />
+              </Box>
             </Box>
           ) : (
             <Typography variant="body2" color="text.secondary">

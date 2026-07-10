@@ -1,5 +1,6 @@
 pub mod adrs;
 pub mod chat;
+pub mod constraints;
 pub mod export;
 pub mod health;
 pub mod lessons;
@@ -10,6 +11,7 @@ pub mod static_files;
 
 pub use adrs::*;
 pub use chat::*;
+pub use constraints::*;
 pub use export::*;
 pub use health::*;
 pub use lessons::*;
