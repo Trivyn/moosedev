@@ -6,12 +6,20 @@ import dagre from 'cytoscape-dagre';
 import fcose from 'cytoscape-fcose';
 import { GraphEdge, GraphNode } from '../../api/types';
 import GraphDetailsPanel from './GraphDetailsPanel';
+import { truncateLabel } from './graphUtils';
 
 cytoscape.use(dagre);
 cytoscape.use(fcose);
 
 // Cytoscape's default wheel zoom is conservative; this keeps graph exploration responsive.
 const WHEEL_SENSITIVITY = 0.45;
+const MAX_FIT_ZOOM = 1.5;
+
+function capFitZoom(cy: cytoscape.Core, center?: cytoscape.CollectionArgument) {
+  if (cy.zoom() <= MAX_FIT_ZOOM) return;
+  cy.zoom(MAX_FIT_ZOOM);
+  cy.center(center);
+}
 
 interface GraphMenuState {
   x: number;
@@ -69,7 +77,7 @@ export default function CytoscapeGraph({
         classes: node.id === focusNodeId ? 'focus-node' : undefined,
         data: {
           id: node.id,
-          label: node.label,
+          label: truncateLabel(node.label),
           type: node.type,
           properties: node.properties ?? [],
         },
@@ -79,7 +87,7 @@ export default function CytoscapeGraph({
           id: edge.id,
           source: edge.source,
           target: edge.target,
-          label: edge.label,
+          label: truncateLabel(edge.label),
           type: edge.type,
           predicate: edge.predicate,
           properties: edge.properties ?? [],
@@ -97,7 +105,7 @@ export default function CytoscapeGraph({
             'background-color': theme.palette.grey[500],
             label: 'data(label)',
             color: theme.palette.text.primary,
-            'font-size': '11px',
+            'font-size': '10px',
             'min-zoomed-font-size': 8,
             'text-wrap': 'wrap',
             'text-max-width': '120px',
@@ -187,7 +195,10 @@ export default function CytoscapeGraph({
       fit: true,
       padding: 35,
       animate: false,
+      nodeDimensionsIncludeLabels: true,
+      spacingFactor: 1.4,
     } as cytoscape.LayoutOptions).run();
+    capFitZoom(cy);
 
     const selectElement = (element: cytoscape.NodeSingular | cytoscape.EdgeSingular) => {
       cy.elements().removeClass('user-selected');
@@ -248,14 +259,17 @@ export default function CytoscapeGraph({
 
   const runLayout = (name: cytoscape.LayoutOptions['name']) => {
     closeMenu();
-    cyRef.current
-      ?.layout({
-        name,
-        fit: true,
-        padding: 35,
-        animate: false,
-      } as cytoscape.LayoutOptions)
-      .run();
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.layout({
+      name,
+      fit: true,
+      padding: 35,
+      animate: false,
+      nodeDimensionsIncludeLabels: true,
+      spacingFactor: 1.4,
+    } as cytoscape.LayoutOptions).run();
+    capFitZoom(cy);
   };
 
   const showAll = () => {
@@ -267,6 +281,7 @@ export default function CytoscapeGraph({
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
     cy.fit(undefined, 35);
+    capFitZoom(cy);
   };
 
   const hideSelected = () => {
@@ -286,6 +301,7 @@ export default function CytoscapeGraph({
     cy.elements().style('display', 'none');
     visible.style('display', 'element');
     cy.fit(visible, 35);
+    capFitZoom(cy, visible);
   };
 
   const hideHighDegreeNodes = () => {
@@ -302,7 +318,10 @@ export default function CytoscapeGraph({
 
   const fitGraph = () => {
     closeMenu();
-    cyRef.current?.fit(undefined, 35);
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.fit(undefined, 35);
+    capFitZoom(cy);
   };
 
   if (nodes.length === 0) {

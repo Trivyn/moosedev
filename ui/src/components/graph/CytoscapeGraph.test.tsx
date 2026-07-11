@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => {
     destroy: vi.fn(),
     elements: vi.fn(() => ({ removeClass: vi.fn(), style: vi.fn() })),
     fit: vi.fn(),
+    zoom: vi.fn(() => 1),
+    center: vi.fn(),
   };
   const factory = vi.fn((_options: unknown) => core);
   Object.assign(factory, { use: vi.fn() });
@@ -40,6 +42,29 @@ afterEach(() => {
 });
 
 describe('CytoscapeGraph interaction modes', () => {
+  it('truncates Cytoscape labels without mutating the input node', () => {
+    const label = 'A record title that is deliberately longer than forty-eight characters';
+    const node = { id: 'long-label', label, type: 'projectRecord' };
+    const original = { ...node };
+
+    render(<CytoscapeGraph nodes={[node]} edges={[]} />);
+
+    const options = mocks.factory.mock.calls.at(-1)?.[0] as { elements: Array<{ data: { id: string; label: string } }> } | undefined;
+    const mappedNode = options?.elements.find((element) => element.data.id === node.id);
+    expect(mappedNode?.data.label).toBe(`${Array.from(label).slice(0, 47).join('')}…`);
+    expect(Array.from(mappedNode?.data.label ?? '')).toHaveLength(48);
+    expect(node).toEqual(original);
+  });
+
+  it('includes label dimensions and extra spacing in the initial layout', () => {
+    render(<CytoscapeGraph nodes={nodes} edges={[]} />);
+
+    expect(mocks.core.layout).toHaveBeenCalledWith(expect.objectContaining({
+      nodeDimensionsIncludeLabels: true,
+      spacingFactor: 1.4,
+    }));
+  });
+
   it('retains selection and context-menu handlers in the default explore mode', () => {
     render(<CytoscapeGraph nodes={nodes} edges={[]} />);
 

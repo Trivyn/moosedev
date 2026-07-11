@@ -215,14 +215,7 @@ fn normalize_clarification_reply(
 }
 
 fn assist_level(value: u8) -> LlmAssistLevel {
-    match value {
-        0 => LlmAssistLevel::PureSymbolic,
-        2 => LlmAssistLevel::RelaxedExtraction,
-        3 => LlmAssistLevel::AssistedPlanning,
-        4 => LlmAssistLevel::AssistedValidation,
-        5 => LlmAssistLevel::FallbackExecutor,
-        _ => LlmAssistLevel::Standard,
-    }
+    LlmAssistLevel::from_u8(value).unwrap_or_default()
 }
 
 /// Return the materialized per-session named graph in the same SELECT-like shape

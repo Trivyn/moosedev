@@ -12,7 +12,7 @@ use moose::entity_index::EntityIndexCache;
 use moose::kg::{AssertionLiteral, DatatypeAssertion};
 use moose::moose_ontology::MooseOntologyCache;
 use moose::traits::{ChatConfig, EngineConfig};
-use moose::types::{CompactVocabulary, HybridConfig, LlmAssistLevel, WalkBudgets};
+use moose::types::{CompactVocabulary, FallbackPolicy, HybridConfig, LlmAssistLevel, WalkBudgets};
 use oxigraph::model::NamedNode;
 use oxigraph::store::Store;
 
@@ -190,6 +190,8 @@ impl AppState {
             discourse: None,
             moose_cache: moose_cache.clone(),
             llm_assist_level: assist_level_from_env(llm_configured),
+            // The env dial is the single control; level 2 stays opt-in there.
+            fallback_policy: FallbackPolicy::Allowed,
             response_cache: None,
             embedding_store: None,
             category_mappings: Default::default(),
@@ -619,8 +621,9 @@ impl AppState {
     }
 }
 
-/// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–5). Without an explicit
-/// provider config, assistance is pinned to pure symbolic regardless of env.
+/// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–2; legacy 3–5 accepted
+/// for one release via `LlmAssistLevel::from_u8`). Without an explicit provider
+/// config, assistance is pinned to pure symbolic regardless of env.
 fn assist_level_from_env(llm_configured: bool) -> LlmAssistLevel {
     assist_level_from_raw(
         std::env::var("MOOSEDEV_LLM_ASSIST_LEVEL").ok().as_deref(),
@@ -632,14 +635,9 @@ fn assist_level_from_raw(raw: Option<&str>, llm_configured: bool) -> LlmAssistLe
     if !llm_configured {
         return LlmAssistLevel::PureSymbolic;
     }
-    match raw.and_then(|s| s.trim().parse::<u8>().ok()) {
-        Some(0) => LlmAssistLevel::PureSymbolic,
-        Some(2) => LlmAssistLevel::RelaxedExtraction,
-        Some(3) => LlmAssistLevel::AssistedPlanning,
-        Some(4) => LlmAssistLevel::AssistedValidation,
-        Some(5) => LlmAssistLevel::FallbackExecutor,
-        _ => LlmAssistLevel::Standard,
-    }
+    raw.and_then(|s| s.trim().parse::<u8>().ok())
+        .and_then(LlmAssistLevel::from_u8)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -670,10 +668,10 @@ mod tests {
     }
 
     #[test]
-    fn assist_level_defaults_to_standard_when_provider_is_configured() {
+    fn assist_level_defaults_to_sensor_when_provider_is_configured() {
         assert!(matches!(
             assist_level_from_raw(None, true),
-            LlmAssistLevel::Standard
+            LlmAssistLevel::Sensor
         ));
         assert!(matches!(
             assist_level_from_raw(Some("0"), true),
@@ -681,7 +679,7 @@ mod tests {
         ));
         assert!(matches!(
             assist_level_from_raw(Some("5"), true),
-            LlmAssistLevel::FallbackExecutor
+            LlmAssistLevel::SensorWithFallback
         ));
     }
 
