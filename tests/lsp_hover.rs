@@ -267,11 +267,11 @@ async fn spawn_listener(
     repo_root: &Path,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(data_dir).context("create listener data dir")?;
-    let socket = lsp::spawn_lsp_listener_at(state, data_dir, repo_root.to_path_buf())
+    let listener = lsp::spawn_lsp_listener_at(state, data_dir, repo_root.to_path_buf())
         .await
         .expect("LSP listener should start");
-    wait_for_socket(&socket).await;
-    Ok(socket)
+    wait_for_socket(listener.socket()).await;
+    Ok(listener.socket().to_path_buf())
 }
 
 async fn wait_for_socket(socket: &Path) {

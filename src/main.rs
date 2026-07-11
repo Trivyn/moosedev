@@ -691,7 +691,7 @@ async fn main() -> anyhow::Result<()> {
             // Infallible: a UI bind failure must not abort the MCP backend. The
             // bound address (None if the UI is disabled/failed) drives --open.
             let http_addr = runtime::spawn_http_if_enabled(state.clone(), &data_dir).await;
-            let lsp_socket = moosedev::lsp::spawn_lsp_listener(state, &data_dir).await;
+            let lsp_listener = moosedev::lsp::spawn_lsp_listener(state, &data_dir).await;
             let pidfile = runtime::pidfile_path_for(&data_dir);
             std::fs::write(&pidfile, format!("{}\n", std::process::id()))
                 .map_err(|e| anyhow::anyhow!("write pidfile {}: {e}", pidfile.display()))?;
@@ -707,17 +707,21 @@ async fn main() -> anyhow::Result<()> {
                 "MOOSEDev backend startup: data_dir={}, socket={}, lsp_socket={}, pidfile={}",
                 data_dir.display(),
                 socket.display(),
-                lsp_socket
+                lsp_listener
                     .as_ref()
-                    .map(|path| path.display().to_string())
+                    .map(|listener| listener.socket().display().to_string())
                     .unwrap_or_else(|| "<disabled>".to_string()),
                 pidfile.display()
             );
             let result = runtime::serve_unix(server, &socket).await;
             let _ = std::fs::remove_file(&pidfile);
             let _ = std::fs::remove_file(runtime::http_addr_file_path_for(&data_dir));
-            if let Some(lsp_socket) = lsp_socket {
-                let _ = std::fs::remove_file(lsp_socket);
+            if let Some(lsp_listener) = lsp_listener {
+                // Published diagnostics are sticky in editors: retract them
+                // while the session sockets are still alive, or the squiggles
+                // outlive the daemon with no server behind them.
+                lsp_listener.shutdown_sessions().await;
+                let _ = std::fs::remove_file(lsp_listener.socket());
             }
             result
         }

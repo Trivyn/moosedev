@@ -282,12 +282,21 @@ async fn spawn_listener(
     data_dir: &Path,
     repo_root: &Path,
 ) -> anyhow::Result<PathBuf> {
+    let listener = spawn_listener_handle(state, data_dir, repo_root).await?;
+    Ok(listener.socket().to_path_buf())
+}
+
+async fn spawn_listener_handle(
+    state: Arc<AppState>,
+    data_dir: &Path,
+    repo_root: &Path,
+) -> anyhow::Result<lsp::LspListener> {
     std::fs::create_dir_all(data_dir).context("create listener data dir")?;
-    let socket = lsp::spawn_lsp_listener_at(state, data_dir, repo_root.to_path_buf())
+    let listener = lsp::spawn_lsp_listener_at(state, data_dir, repo_root.to_path_buf())
         .await
         .expect("LSP listener should start");
-    wait_for_socket(&socket).await;
-    Ok(socket)
+    wait_for_socket(listener.socket()).await;
+    Ok(listener)
 }
 
 async fn wait_for_socket(socket: &Path) {
@@ -676,6 +685,39 @@ async fn closed_documents_are_pruned_from_diagnostics_refresh() -> anyhow::Resul
         .await?
         .is_none());
     client.exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn daemon_shutdown_retracts_published_diagnostics() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-retract-root", "    build_server();");
+    let data_dir = fresh_dir("diag-retract-data");
+    let state = Arc::new(state_with_substrate("diag-retract-state", 4));
+    let constraint = record(&state, "Constraint", "Retracted on shutdown");
+    link_public(&state, &constraint, 4);
+    let listener = spawn_listener_handle(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(listener.socket()).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    assert_eq!(
+        diagnostics(&client.read_until_diagnostics(&uri).await?).len(),
+        1
+    );
+
+    listener.shutdown_sessions().await;
+
+    let retracted = client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(5))
+        .await?
+        .expect("shutdown should retract published diagnostics");
+    assert_eq!(retracted["params"]["diagnostics"], json!([]));
+
     let _ = std::fs::remove_dir_all(&data_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
     Ok(())

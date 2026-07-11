@@ -10,7 +10,8 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -34,6 +35,19 @@ use crate::graph::{
 
 const LSP_SOCKET_FILE_NAME: &str = "moosedev-lsp.sock";
 
+/// Internal notification injected into a session's message loop at daemon
+/// shutdown; never sent by editors (a client sending it merely retracts its
+/// own diagnostics and ends its session).
+const DAEMON_SHUTDOWN_METHOD: &str = "moosedev/daemonShutdown";
+
+/// Upper bound on waiting for busy sessions to queue their retractions.
+const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// After every session has queued its retractions, the per-session writer
+/// threads still have to drain them onto the sockets; local Unix-socket writes
+/// take microseconds, so this is pure margin.
+const WRITER_DRAIN_GRACE: Duration = Duration::from_millis(100);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionEncoding {
     Utf8,
@@ -48,6 +62,114 @@ struct LspSession {
     diagnostics: DiagnosticsConfig,
     open_docs: HashMap<String, String>,
     last_diagnostics_generation: Option<(usize, u64)>,
+    retracted: Arc<AtomicBool>,
+}
+
+/// Handle to a running Knowledge-LSP listener: the rendezvous socket path plus
+/// the live-session registry the daemon uses to retract published diagnostics
+/// before it exits.
+pub struct LspListener {
+    socket: PathBuf,
+    sessions: LspSessions,
+}
+
+impl LspListener {
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// Retract every session's published diagnostics and wait (bounded) for
+    /// the retractions to reach the editors. `publishDiagnostics` is sticky
+    /// client-side: a daemon that exits without retracting leaves squiggles
+    /// (and their hover message) alive in the editor with no server behind
+    /// them to answer hovers.
+    pub async fn shutdown_sessions(&self) {
+        self.sessions.retract_and_flush().await;
+    }
+}
+
+/// Registry of live sessions, shared by the accept loop and the shutdown path.
+#[derive(Clone, Default)]
+struct LspSessions(Arc<SessionsInner>);
+
+#[derive(Default)]
+struct SessionsInner {
+    next_id: AtomicU64,
+    hooks: Mutex<HashMap<u64, SessionHook>>,
+}
+
+struct SessionHook {
+    /// Injects the shutdown notification into the session's message loop;
+    /// returns false when the session's receiver is already gone.
+    notify: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Set by the session once its retractions are queued to the writer.
+    retracted: Arc<AtomicBool>,
+}
+
+impl LspSessions {
+    fn register(
+        &self,
+        notify: Box<dyn Fn() -> bool + Send + Sync>,
+        retracted: Arc<AtomicBool>,
+    ) -> SessionRegistration {
+        let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
+        self.lock_hooks().insert(id, SessionHook { notify, retracted });
+        SessionRegistration {
+            sessions: self.clone(),
+            id,
+        }
+    }
+
+    fn lock_hooks(&self) -> MutexGuard<'_, HashMap<u64, SessionHook>> {
+        self.0
+            .hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Notify every live session, wait until each has queued its retractions
+    /// (or ended), then leave a short grace for the writer threads to drain.
+    /// A session stuck in a long lookup past the timeout is abandoned — its
+    /// editor keeps stale squiggles, exactly the pre-retraction status quo.
+    async fn retract_and_flush(&self) {
+        let notified: Vec<(u64, Arc<AtomicBool>)> = self
+            .lock_hooks()
+            .iter()
+            .filter(|(_, hook)| (hook.notify)())
+            .map(|(id, hook)| (*id, hook.retracted.clone()))
+            .collect();
+        if notified.is_empty() {
+            return;
+        }
+
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_FLUSH_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            let pending = {
+                let hooks = self.lock_hooks();
+                notified.iter().any(|(id, retracted)| {
+                    !retracted.load(Ordering::Relaxed) && hooks.contains_key(id)
+                })
+            };
+            if !pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(WRITER_DRAIN_GRACE).await;
+    }
+}
+
+/// RAII deregistration so sessions that end on their own drop out of the
+/// shutdown fan-out.
+struct SessionRegistration {
+    sessions: LspSessions,
+    id: u64,
+}
+
+impl Drop for SessionRegistration {
+    fn drop(&mut self) {
+        self.sessions.lock_hooks().remove(&self.id);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -86,7 +208,7 @@ pub fn lsp_socket_path_for(data_dir: &Path) -> PathBuf {
 ///
 /// Infallible from the caller's perspective: LSP bind/accept failures are logged
 /// and never take down the MCP backend.
-pub async fn spawn_lsp_listener(state: Arc<AppState>, data_dir: &Path) -> Option<PathBuf> {
+pub async fn spawn_lsp_listener(state: Arc<AppState>, data_dir: &Path) -> Option<LspListener> {
     if lsp_disabled() {
         tracing::info!("MOOSEDev Knowledge-LSP disabled by MOOSEDEV_NO_LSP");
         return None;
@@ -108,7 +230,7 @@ pub async fn spawn_lsp_listener_at(
     state: Arc<AppState>,
     data_dir: &Path,
     repo_root: PathBuf,
-) -> Option<PathBuf> {
+) -> Option<LspListener> {
     if lsp_disabled() {
         tracing::info!("MOOSEDev Knowledge-LSP disabled by MOOSEDEV_NO_LSP");
         return None;
@@ -135,9 +257,18 @@ pub async fn spawn_lsp_listener_at(
         .ok()?;
 
     tracing::info!("MOOSEDev Knowledge-LSP serving on {}", path.display());
-    tokio::spawn(accept_lsp_sessions(listener, state, repo_root));
+    let sessions = LspSessions::default();
+    tokio::spawn(accept_lsp_sessions(
+        listener,
+        state,
+        repo_root,
+        sessions.clone(),
+    ));
 
-    Some(path)
+    Some(LspListener {
+        socket: path,
+        sessions,
+    })
 }
 
 fn lsp_disabled() -> bool {
@@ -148,7 +279,12 @@ fn lsp_disabled() -> bool {
 
 /// Accept LSP connections forever; per-session failures are logged and isolated
 /// from the daemon listener.
-async fn accept_lsp_sessions(listener: UnixListener, state: Arc<AppState>, repo_root: PathBuf) {
+async fn accept_lsp_sessions(
+    listener: UnixListener,
+    state: Arc<AppState>,
+    repo_root: PathBuf,
+    sessions: LspSessions,
+) {
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _addr)) => stream,
@@ -157,13 +293,18 @@ async fn accept_lsp_sessions(listener: UnixListener, state: Arc<AppState>, repo_
                 continue;
             }
         };
-        spawn_lsp_session_thread(state.clone(), repo_root.clone(), stream);
+        spawn_lsp_session_thread(state.clone(), repo_root.clone(), stream, sessions.clone());
     }
 }
 
 /// Convert one accepted tokio stream to blocking std I/O and hand it to a plain
 /// thread, matching lsp-server's synchronous transport model.
-fn spawn_lsp_session_thread(state: Arc<AppState>, repo_root: PathBuf, stream: UnixStream) {
+fn spawn_lsp_session_thread(
+    state: Arc<AppState>,
+    repo_root: PathBuf,
+    stream: UnixStream,
+    sessions: LspSessions,
+) {
     let Some(stream) = blocking_lsp_stream(stream) else {
         return;
     };
@@ -171,7 +312,7 @@ fn spawn_lsp_session_thread(state: Arc<AppState>, repo_root: PathBuf, stream: Un
     if let Err(e) = thread::Builder::new()
         .name("MooseDevLspSession".to_string())
         .spawn(move || {
-            if let Err(e) = run_session(state, repo_root, stream) {
+            if let Err(e) = run_session(state, repo_root, stream, sessions) {
                 tracing::warn!("Knowledge-LSP session ended with error: {e}");
             }
         })
@@ -199,8 +340,17 @@ fn run_session(
     state: Arc<AppState>,
     repo_root: PathBuf,
     stream: StdUnixStream,
+    sessions: LspSessions,
 ) -> anyhow::Result<()> {
-    let (connection, io_threads) = socket_connection(stream)?;
+    let (connection, inject, io_threads) = socket_connection(stream)?;
+    let retracted = Arc::new(AtomicBool::new(false));
+    let notify = Box::new(move || {
+        inject(Message::Notification(Notification::new(
+            DAEMON_SHUTDOWN_METHOD.to_string(),
+            serde_json::Value::Null,
+        )))
+    });
+    let _registration = sessions.register(notify, retracted.clone());
     let mut session = LspSession {
         state,
         connection,
@@ -209,6 +359,7 @@ fn run_session(
         diagnostics: DiagnosticsConfig::default(),
         open_docs: HashMap::new(),
         last_diagnostics_generation: None,
+        retracted,
     };
     session.initialize()?;
     session.run()?;
@@ -217,13 +368,23 @@ fn run_session(
     Ok(())
 }
 
+/// Injects a message into a session's incoming channel, as if the editor had
+/// sent it; returns false once the session's receiver is gone.
+type SessionInjector = Box<dyn Fn(Message) -> bool + Send + Sync>;
+
 /// Build the same channel-based transport shape as `Connection::stdio`, but on a
 /// blocking UnixStream accepted by the daemon listener.
-fn socket_connection(stream: StdUnixStream) -> io::Result<(Connection, SocketIoThreads)> {
+fn socket_connection(
+    stream: StdUnixStream,
+) -> io::Result<(Connection, SessionInjector, SocketIoThreads)> {
     let read_stream = stream.try_clone()?;
     let write_stream = stream;
     let (connection, io_connection) = Connection::memory();
 
+    let inject: SessionInjector = {
+        let sender = io_connection.sender.clone();
+        Box::new(move |msg| sender.send(msg).is_ok())
+    };
     let reader_sender = io_connection.sender.clone();
     let reader = thread::Builder::new()
         .name("MooseDevLspReader".to_string())
@@ -253,7 +414,7 @@ fn socket_connection(stream: StdUnixStream) -> io::Result<(Connection, SocketIoT
         })
         .map_err(io::Error::other)?;
 
-    Ok((connection, SocketIoThreads { reader, writer }))
+    Ok((connection, inject, SocketIoThreads { reader, writer }))
 }
 
 struct SocketIoThreads {
@@ -331,6 +492,10 @@ impl LspSession {
                     "textDocument/didClose" => self.handle_did_close(notification.params),
                     // Diagnostics are saved-state only; unsaved didChange text is ignored.
                     "textDocument/didChange" => {}
+                    DAEMON_SHUTDOWN_METHOD => {
+                        self.retract_published_diagnostics();
+                        break;
+                    }
                     "exit" => break,
                     _ => {}
                 },
@@ -363,6 +528,19 @@ impl LspSession {
         if let Some(uri) = notification_text_document_uri(&params) {
             self.open_docs.remove(uri.as_str());
         }
+    }
+
+    /// The daemon is exiting: publish an empty set for every open doc so the
+    /// editor does not keep this session's squiggles alive with no server
+    /// behind them. Best-effort — the process is going down either way.
+    fn retract_published_diagnostics(&self) {
+        for uri in self.open_docs.keys() {
+            let Ok(uri) = Uri::from_str(uri) else {
+                continue;
+            };
+            let _ = self.publish(uri, Vec::new());
+        }
+        self.retracted.store(true, Ordering::Relaxed);
     }
 
     fn knowledge_generation(&self) -> (usize, u64) {

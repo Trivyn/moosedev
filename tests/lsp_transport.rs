@@ -56,11 +56,11 @@ impl Drop for EnvRestore {
 
 async fn spawn_listener(data_dir: &Path) -> PathBuf {
     let state = AppState::bootstrap(data_dir, &ontology_dir()).expect("bootstrap app state");
-    let socket = lsp::spawn_lsp_listener(Arc::new(state), data_dir)
+    let listener = lsp::spawn_lsp_listener(Arc::new(state), data_dir)
         .await
         .expect("LSP listener should start");
-    wait_for_socket(&socket).await;
-    socket
+    wait_for_socket(listener.socket()).await;
+    listener.socket().to_path_buf()
 }
 
 // Polling keeps the in-process listener tests independent of daemon lifecycle
