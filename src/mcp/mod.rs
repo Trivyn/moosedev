@@ -874,7 +874,7 @@ impl MooseDevServer {
                             "code substrate unavailable; run `moosedev index` and restart the backend; records cannot be anchored here yet.",
                         ));
                     };
-                    if !substrate.covers_file(&file) {
+                    if !substrate.can_anchor(&file) {
                         return Ok(tool_ok(format!(
                             "`{file}` is not in the code substrate (indexed: {}); records cannot be anchored here yet.",
                             substrate.describe_coverage()

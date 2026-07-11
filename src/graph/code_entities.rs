@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 
-use crate::code::substrate::{symbols, DefinitionEntry};
+use crate::code::substrate::{symbols, DefinitionEntry, Substrate};
 use crate::provenance;
 
 use super::components::{best_component_for_path, ComponentEntry};
@@ -140,6 +140,7 @@ pub fn plan_mint(
     definitions: &[DefinitionEntry],
     terms: &CodeTerms,
     components: &[ComponentEntry],
+    substrate: Option<&Substrate>,
 ) -> anyhow::Result<MintPlan> {
     let (candidates, skipped_scope, skipped_tests) = mint_candidates(definitions);
     let (kept, collisions) = dedupe_collisions(candidates);
@@ -193,7 +194,20 @@ pub fn plan_mint(
 
     plan.orphaned = existing
         .into_iter()
-        .filter_map(|(symbol, iri)| (!substrate_symbols.contains(&symbol)).then_some((iri, symbol)))
+        .filter_map(|(symbol, iri)| {
+            if substrate_symbols.contains(&symbol) {
+                return None;
+            }
+            if symbol.starts_with("ts:") {
+                // Syntactic anchors are orphaned only when the substrate can
+                // positively prove their declaration or file is gone.
+                return substrate
+                    .and_then(|substrate| substrate.identity_alive(&symbol))
+                    .is_some_and(|alive| !alive)
+                    .then_some((iri, symbol));
+            }
+            Some((iri, symbol))
+        })
         .collect();
     Ok(plan)
 }
@@ -660,6 +674,23 @@ mod tests {
         );
         assert_eq!(skipped_scope, 0);
         assert_eq!(skipped_tests, skipped.len());
+    }
+
+    #[test]
+    fn syntactic_entries_remain_lazy_only() {
+        let mut syntactic = entry(
+            "ts:rust:src/fallback.rs:fn:private_helper",
+            "src/fallback.rs",
+            false,
+            false,
+        );
+        syntactic.producer = "tree-sitter".to_string();
+        syntactic.normalized_symbol = syntactic.symbol.clone();
+
+        let (kept, skipped_scope, skipped_tests) = mint_candidates(&[syntactic]);
+        assert!(kept.is_empty());
+        assert_eq!(skipped_scope, 1);
+        assert_eq!(skipped_tests, 0);
     }
 
     #[test]

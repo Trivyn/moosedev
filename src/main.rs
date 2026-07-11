@@ -795,7 +795,7 @@ async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
     let terms = graph::CodeTerms::resolve(&state)?;
     let components = graph::load_components(&state)?;
     let definitions = substrate.definitions();
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components)?;
+    let plan = graph::plan_mint(&state, &definitions, &terms, &components, Some(&substrate))?;
     report_mint_plan(&plan, &components);
 
     if !apply {

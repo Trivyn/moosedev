@@ -162,7 +162,14 @@ fn mint_public_entities(state: &AppState) {
     let terms = graph::CodeTerms::resolve(state).expect("code terms");
     let components = graph::load_components(state).expect("components");
     let definitions = substrate.definitions();
-    let plan = graph::plan_mint(state, &definitions, &terms, &components).expect("mint plan");
+    let plan = graph::plan_mint(
+        state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .expect("mint plan");
     graph::apply_mint(state, &plan, &terms).expect("apply mint");
 }
 

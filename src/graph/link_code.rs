@@ -56,7 +56,7 @@ pub fn link_code(
             );
             let resolution = match resolution {
                 Some(resolution) => resolution,
-                None if !substrate.covers_file(file) => anyhow::bail!(
+                None if !substrate.can_anchor(file) => anyhow::bail!(
                     "`{file}` is not in the code substrate (indexed: {}); cannot resolve a code entity here.",
                     substrate.describe_coverage()
                 ),

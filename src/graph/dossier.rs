@@ -74,6 +74,8 @@ pub struct Dossier {
     pub component_records: Vec<RecordSummary>,
     /// True when the loaded substrate was built from a different commit.
     pub substrate_stale: bool,
+    /// True when this entity is backed by a tree-sitter syntactic identity.
+    pub syntactic_anchor: bool,
     /// v2.1 seams; always empty in v2.0.
     pub judgments: Vec<String>,
     pub observations: Vec<String>,
@@ -107,6 +109,8 @@ pub fn get_entity_dossier(
         .unwrap_or_else(|| local_name(&entity_iri).to_string());
     let logical_path = first_literal(&state.store, &entity_iri, &terms.has_logical_path);
     let defined_in = first_literal(&state.store, &entity_iri, &terms.defined_in_path);
+    let syntactic_anchor = first_literal(&state.store, &entity_iri, &terms.has_substrate_symbol)
+        .is_some_and(|symbol| symbol.starts_with("ts:"));
     let realizes = first_realized_component(state, &terms, &entity_iri)?;
 
     let direct_records = direct_records_for_entity(state, &entity_iri)?;
@@ -138,6 +142,7 @@ pub fn get_entity_dossier(
         direct_records,
         component_records,
         substrate_stale: state.substrate().map(|s| s.is_stale()).unwrap_or(false),
+        syntactic_anchor,
         judgments: Vec::new(),
         observations: Vec::new(),
     }))
@@ -156,7 +161,14 @@ pub(crate) fn direct_records_for_entity(
 
 /// Render a stable Markdown view suitable for MCP and future hover surfaces.
 pub fn render_markdown(dossier: &Dossier) -> String {
-    let mut out = format!("### {} ({})\n", dossier.display_name, dossier.kind);
+    let marker = dossier
+        .syntactic_anchor
+        .then_some(" [syntactic anchor]")
+        .unwrap_or_default();
+    let mut out = format!(
+        "### {} ({}){}\n",
+        dossier.display_name, dossier.kind, marker
+    );
     if dossier.logical_path.is_some() || dossier.defined_in.is_some() {
         match (&dossier.logical_path, &dossier.defined_in) {
             (Some(path), Some(defined)) => {

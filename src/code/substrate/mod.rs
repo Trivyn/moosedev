@@ -13,6 +13,7 @@ pub mod producer;
 pub mod resolver;
 pub(crate) mod scip;
 pub mod symbols;
+pub(crate) mod treesitter;
 
 pub use meta::{ProducerRun, SubstrateMeta};
 pub use producer::{

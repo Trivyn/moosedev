@@ -218,7 +218,14 @@ fn declared_coverage_wires_through_to_mint_realizes() {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
 
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.create.len(), 1);
     assert!(plan.create[0].realizes.is_none());
     graph::apply_mint(&state, &plan, &terms).unwrap();
@@ -228,12 +235,26 @@ fn declared_coverage_wires_through_to_mint_realizes() {
 
     graph::declare_component_paths(&state, &component, &["src/code/".to_string()]).unwrap();
     let components = graph::load_components(&state).unwrap();
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.update.len(), 1);
     assert_eq!(plan.update[0].realizes.as_deref(), Some(component.as_str()));
 
     graph::apply_mint(&state, &plan, &terms).unwrap();
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.create.len(), 0);
     assert_eq!(plan.update.len(), 0);
     assert_eq!(plan.unchanged, 1);

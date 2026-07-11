@@ -38,6 +38,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 scip = "0.9"
 protobuf = "3.7"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
 dotenvy = "0.15"
 axum = { version = "0.8", features = ["tokio", "http1", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }

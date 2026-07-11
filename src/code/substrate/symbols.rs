@@ -12,6 +12,11 @@ use scip::types::descriptor;
 /// Returns None for local symbols and for symbols the SCIP grammar cannot
 /// parse (report, never guess).
 pub fn normalize_symbol(raw: &str) -> Option<String> {
+    // Tree-sitter identities are already versionless and self-describing, so
+    // Constraint 00b3986e is satisfied by preserving them verbatim.
+    if raw.starts_with("ts:") {
+        return Some(raw.to_string());
+    }
     if ::scip::symbol::is_local_symbol(raw) {
         return None;
     }
@@ -26,6 +31,9 @@ pub fn normalize_symbol(raw: &str) -> Option<String> {
 /// Human-readable descriptor path, e.g. "runtime::build_server", derived from
 /// the parsed descriptor names joined with "::".
 pub fn logical_path(raw: &str) -> Option<String> {
+    if raw.starts_with("ts:") {
+        return syntactic_parts(raw).map(|(_, path)| path.to_string());
+    }
     let symbol = parse_symbol(raw).ok()?;
     if symbol.descriptors.is_empty() {
         return None;
@@ -44,6 +52,10 @@ pub fn logical_path(raw: &str) -> Option<String> {
 /// The final descriptor name, suitable as a display label when a producer
 /// leaves `SymbolInformation.display_name` empty.
 pub fn last_descriptor_name(raw: &str) -> Option<String> {
+    if raw.starts_with("ts:") {
+        return syntactic_parts(raw)
+            .and_then(|(_, path)| path.rsplit("::").next().map(str::to_string));
+    }
     parse_symbol(raw)
         .ok()?
         .descriptors
@@ -68,12 +80,27 @@ pub(crate) fn is_top_level_declaration(raw: &str) -> bool {
 /// True when the symbol's last descriptor is a namespace, i.e. the symbol names
 /// a module.
 pub fn is_module_symbol(raw: &str) -> bool {
+    if raw.starts_with("ts:") {
+        return syntactic_parts(raw).is_some_and(|(kind, _)| kind == "mod");
+    }
     parse_symbol(raw).ok().and_then(|symbol| {
         symbol
             .descriptors
             .last()
             .and_then(|descriptor| descriptor.suffix.enum_value().ok())
     }) == Some(descriptor::Suffix::Namespace)
+}
+
+/// Parse the kind and qualified-name fields of a self-describing syntactic
+/// identity. `splitn` is load-bearing because qualified names contain `::`.
+fn syntactic_parts(raw: &str) -> Option<(&str, &str)> {
+    let mut parts = raw.splitn(5, ':');
+    (parts.next()? == "ts").then_some(())?;
+    let _language = parts.next()?;
+    let _path = parts.next()?;
+    let kind = parts.next()?;
+    let qualified_name = parts.next()?;
+    (!kind.is_empty() && !qualified_name.is_empty()).then_some((kind, qualified_name))
 }
 
 #[cfg(test)]
@@ -171,5 +198,20 @@ mod tests {
             logical_path(TS_FUNCTION).as_deref(),
             Some("src::pages::RecordPage.tsx::RecordPage")
         );
+    }
+
+    #[test]
+    fn syntactic_identities_bridge_symbol_helpers() {
+        let method = "ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render";
+        let module = "ts:rust:tests/fixtures/ts_fallback.rs:mod:outer::inner";
+
+        assert_eq!(normalize_symbol(method).as_deref(), Some(method));
+        assert_eq!(
+            logical_path(method).as_deref(),
+            Some("<Widget as Render>::render")
+        );
+        assert_eq!(last_descriptor_name(method).as_deref(), Some("render"));
+        assert!(!is_module_symbol(method));
+        assert!(is_module_symbol(module));
     }
 }

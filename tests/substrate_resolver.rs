@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use moosedev::code::substrate::{Position, Substrate, SubstrateMeta};
+use moosedev::code::substrate::{Position, ResolutionMode, Substrate, SubstrateMeta};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +100,46 @@ fn acceptance_40_positions() -> anyhow::Result<()> {
         "resolver acceptance passed {passed}/{} positions; expected at least 38",
         samples.len()
     );
+    Ok(())
+}
+
+#[test]
+fn acceptance_tree_sitter_fallback_positions() -> anyhow::Result<()> {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let data_dir = repo_root.join(".moosedev");
+    let meta_path = data_dir.join("substrate").join("meta.json");
+    if !meta_path.is_file() {
+        eprintln!(
+            "skipping tree-sitter resolver acceptance: {} is absent; run `moosedev index`",
+            meta_path.display()
+        );
+        return Ok(());
+    }
+    let substrate = Substrate::load(&data_dir, repo_root)?;
+    let samples: Vec<Sample> =
+        serde_json::from_str(include_str!("fixtures/resolver_sample_ts.json"))?;
+    assert_eq!(samples.len(), 10);
+
+    for sample in &samples {
+        let (line, col) = locate_position(repo_root, sample);
+        let resolution = substrate
+            .resolve(
+                &sample.path,
+                Position {
+                    line: line - 1,
+                    col: col - 1,
+                },
+            )
+            .unwrap_or_else(|| panic!("tree-sitter miss: {}", sample.note));
+        assert!(
+            resolution.symbol.ends_with(&sample.expect_symbol),
+            "{}: got {}",
+            sample.note,
+            resolution.symbol
+        );
+        assert_eq!(resolution.mode, ResolutionMode::TreeSitter);
+        assert_eq!(resolution.is_definition, sample.expect_definition);
+    }
     Ok(())
 }
 

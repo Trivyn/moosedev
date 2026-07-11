@@ -36,6 +36,20 @@ fn state_with_substrate(name: &str) -> AppState {
     state
 }
 
+fn state_with_tree_sitter_fixture(name: &str) -> AppState {
+    let state = bootstrap(name);
+    let repo_root = state.data_dir.join("fixture-repo");
+    let fixture_path = repo_root.join("tests/fixtures/ts_fallback.rs");
+    std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+    std::fs::write(&fixture_path, include_str!("fixtures/ts_fallback.rs")).unwrap();
+    state.set_substrate(Arc::new(
+        Substrate::from_index_rooted(Index::new(), meta(), false, repo_root)
+            .expect("rooted substrate"),
+    ));
+    seed_component(&state, "fixture component", "tests/fixtures/");
+    state
+}
+
 fn record(state: &AppState, kind: &str, title: &str) -> String {
     let class_iri = state.resolve_class(kind).expect("known class");
     graph::record_instance(
@@ -126,7 +140,14 @@ fn pre_mint_public(state: &AppState) -> String {
     let terms = graph::CodeTerms::resolve(state).unwrap();
     let components = graph::load_components(state).unwrap();
     let definitions = substrate.definitions();
-    let plan = graph::plan_mint(state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(state, &plan, &terms).unwrap();
     graph::entities_by_symbol(state, &terms).unwrap()[&normalize(PUBLIC_SYMBOL)].clone()
 }
@@ -311,6 +332,56 @@ fn normalized_symbol_selector_reuses_existing_entity() {
 
     assert!(!out.created);
     assert_eq!(out.entity_iri, entity_iri);
+}
+
+#[test]
+fn tree_sitter_position_mints_and_symbol_selector_deduplicates() {
+    let state = state_with_tree_sitter_fixture("tree-sitter");
+    let decision = record(&state, "ArchitecturalDecision", "Syntactic anchor decision");
+    let selector = CodeSelector::Position {
+        file: "tests/fixtures/ts_fallback.rs".to_string(),
+        line: 34,
+        col: 13,
+    };
+    let first = graph::link_code(&state, &decision, "concerns", &selector, "tester")
+        .expect("position should lazy-mint syntactic entity");
+    assert!(first.created);
+
+    let identity = "ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render";
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    assert_eq!(
+        literal_values(&state, &first.entity_iri, &terms.has_substrate_symbol),
+        vec![identity]
+    );
+    let second = graph::link_code(
+        &state,
+        &decision,
+        "concerns",
+        &CodeSelector::Symbol(identity.to_string()),
+        "tester",
+    )
+    .expect("live identity should resolve");
+    assert!(!second.created);
+    assert_eq!(second.entity_iri, first.entity_iri);
+    assert_eq!(graph::entities_by_symbol(&state, &terms).unwrap().len(), 1);
+}
+
+#[test]
+fn dead_tree_sitter_symbol_writes_nothing() {
+    let state = state_with_tree_sitter_fixture("dead-tree-sitter");
+    let decision = record(&state, "ArchitecturalDecision", "Dead anchor decision");
+    let before = project_quad_count(&state);
+    let dead = "ts:rust:tests/fixtures/ts_fallback.rs:fn:no_such_fn";
+    let error = graph::link_code(
+        &state,
+        &decision,
+        "concerns",
+        &CodeSelector::Symbol(dead.to_string()),
+        "tester",
+    )
+    .expect_err("dead identity must not mint");
+    assert!(error.to_string().contains("no workspace definition"));
+    assert_eq!(project_quad_count(&state), before);
 }
 
 #[test]

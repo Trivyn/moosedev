@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use chrono::Utc;
-use moosedev::code::substrate::{symbols, DefinitionEntry, Substrate};
+use chrono::{DateTime, Utc};
+use moosedev::code::substrate::{symbols, DefinitionEntry, Substrate, SubstrateMeta};
 use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
 use moosedev::validation;
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
+use scip::types::Index;
 
 const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
 
@@ -159,7 +160,14 @@ fn mint_twice_is_idempotent_and_validates() {
     );
     let definitions = vec![covered.clone(), unmapped.clone()];
 
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.create.len(), 2);
     assert_eq!(
         plan.create.iter().filter(|p| p.realizes.is_some()).count(),
@@ -194,7 +202,14 @@ fn mint_twice_is_idempotent_and_validates() {
     let report = validation::validate_project(&state).unwrap();
     assert!(report.conforms(), "{}", validation::format_report(&report));
 
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.create.len(), 0);
     assert_eq!(plan.update.len(), 0);
     assert_eq!(plan.orphaned.len(), 0);
@@ -230,14 +245,28 @@ fn lazy_minted_private_entity_is_not_reported_as_orphan() {
         false,
     );
     let definitions = vec![public, private.clone()];
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
     // Lazily mint the out-of-scope private definition, as link_code would.
     let ensured = graph::ensure_entity(&state, &terms, &components, &private, "tester").unwrap();
     assert!(ensured.created);
 
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.create.len(), 0);
     assert_eq!(plan.update.len(), 0);
     assert_eq!(
@@ -247,9 +276,66 @@ fn lazy_minted_private_entity_is_not_reported_as_orphan() {
     );
 
     // A symbol truly gone from the substrate is still reported.
-    let plan = graph::plan_mint(&state, &definitions[..1], &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions[..1],
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.orphaned.len(), 1);
     assert_eq!(plan.orphaned[0].1, private.normalized_symbol);
+}
+
+#[test]
+fn syntactic_entity_is_orphaned_only_when_the_substrate_proves_it_dead() {
+    let state = bootstrap("syntactic-orphan");
+    seed_component(&state, "fixture component", "tests/fixtures/");
+    let repo_root = state.data_dir.join("fixture-repo");
+    let fixture_path = repo_root.join("tests/fixtures/ts_fallback.rs");
+    std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+    std::fs::write(&fixture_path, include_str!("fixtures/ts_fallback.rs")).unwrap();
+    let substrate = Substrate::from_index_rooted(Index::new(), substrate_meta(), false, repo_root)
+        .expect("rooted substrate");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let components = graph::load_components(&state).unwrap();
+    let identity = "ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render";
+    let entry = DefinitionEntry {
+        producer: "tree-sitter".to_string(),
+        symbol: identity.to_string(),
+        normalized_symbol: identity.to_string(),
+        display_name: Some("render".to_string()),
+        kind: Some("fn".to_string()),
+        signature: None,
+        file: "tests/fixtures/ts_fallback.rs".to_string(),
+        is_module: false,
+        is_public: false,
+    };
+    graph::ensure_entity(&state, &terms, &components, &entry, "tester").unwrap();
+
+    let alive = graph::plan_mint(&state, &[], &terms, &components, Some(&substrate)).unwrap();
+    assert!(alive.orphaned.is_empty());
+
+    std::fs::remove_file(&fixture_path).unwrap();
+    let dead = graph::plan_mint(&state, &[], &terms, &components, Some(&substrate)).unwrap();
+    assert_eq!(dead.orphaned.len(), 1);
+    assert_eq!(dead.orphaned[0].1, identity);
+
+    let unverifiable = graph::plan_mint(&state, &[], &terms, &components, None).unwrap();
+    assert!(unverifiable.orphaned.is_empty());
+}
+
+fn substrate_meta() -> SubstrateMeta {
+    SubstrateMeta::single(
+        "rust-analyzer",
+        "abc123",
+        DateTime::parse_from_rfc3339("2026-07-07T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        0,
+        0,
+    )
 }
 
 #[test]
@@ -277,7 +363,14 @@ fn rename_reports_create_and_orphan_without_changing_other_iri() {
         true,
     );
     let definitions = vec![original.clone(), stable.clone()];
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
     let before = graph::entities_by_symbol(&state, &terms).unwrap();
     let stable_iri = before.get(&stable.normalized_symbol).unwrap().clone();
@@ -291,7 +384,14 @@ fn rename_reports_create_and_orphan_without_changing_other_iri() {
         false,
         true,
     );
-    let plan = graph::plan_mint(&state, &[renamed, stable.clone()], &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &[renamed, stable.clone()],
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
 
     assert_eq!(plan.create.len(), 1);
     assert_eq!(plan.orphaned.len(), 1);
@@ -320,14 +420,28 @@ fn update_path_replaces_defined_in_path_without_changing_iri() {
         false,
         true,
     );
-    let plan = graph::plan_mint(&state, &[original.clone()], &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &[original.clone()],
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
     let iri =
         graph::entities_by_symbol(&state, &terms).unwrap()[&original.normalized_symbol].clone();
 
     let mut moved = original.clone();
     moved.file = "src/server/runtime.rs".to_string();
-    let plan = graph::plan_mint(&state, &[moved], &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &[moved],
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     assert_eq!(plan.create.len(), 0);
     assert_eq!(plan.update.len(), 1);
     graph::apply_mint(&state, &plan, &terms).unwrap();
@@ -359,7 +473,14 @@ fn minted_entities_participate_in_relate_validation() {
         false,
         true,
     );
-    let plan = graph::plan_mint(&state, &[entry.clone()], &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &[entry.clone()],
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
     let entity_iri =
         graph::entities_by_symbol(&state, &terms).unwrap()[&entry.normalized_symbol].clone();
@@ -387,7 +508,14 @@ fn ensure_entity_reuses_existing_and_mints_private_symbols() {
         false,
         true,
     );
-    let plan = graph::plan_mint(&state, &[public.clone()], &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &[public.clone()],
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
     let existing_iri =
         graph::entities_by_symbol(&state, &terms).unwrap()[&public.normalized_symbol].clone();
@@ -440,7 +568,13 @@ fn repo_substrate_plan_counts_when_index_present() -> anyhow::Result<()> {
     let components = graph::load_components(&state)?;
     let terms = graph::CodeTerms::resolve(&state)?;
     let definitions = substrate.definitions();
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components)?;
+    let plan = graph::plan_mint(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )?;
 
     // Envelope for the dual-producer substrate: ~930 rust entities plus the
     // scip-typescript top-level surface of ui/ (~950; export-ness is not

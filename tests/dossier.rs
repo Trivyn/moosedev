@@ -44,6 +44,20 @@ fn state_with_substrate(name: &str) -> AppState {
     state
 }
 
+fn state_with_tree_sitter_fixture(name: &str) -> AppState {
+    let state = bootstrap(name);
+    let repo_root = state.data_dir.join("fixture-repo");
+    let fixture_path = repo_root.join("tests/fixtures/ts_fallback.rs");
+    std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+    std::fs::write(&fixture_path, include_str!("fixtures/ts_fallback.rs")).unwrap();
+    state.set_substrate(Arc::new(
+        Substrate::from_index_rooted(Index::new(), meta(), false, repo_root)
+            .expect("rooted substrate"),
+    ));
+    seed_component(&state, "fixture component", "tests/fixtures/");
+    state
+}
+
 /// Record a minimal typed knowledge node with title and accepted status.
 fn record(state: &AppState, kind: &str, title: &str) -> String {
     record_with_description(state, kind, title, None)
@@ -129,7 +143,14 @@ fn pre_mint_public(state: &AppState) -> String {
     let terms = graph::CodeTerms::resolve(state).unwrap();
     let components = graph::load_components(state).unwrap();
     let definitions = substrate.definitions();
-    let plan = graph::plan_mint(state, &definitions, &terms, &components).unwrap();
+    let plan = graph::plan_mint(
+        state,
+        &definitions,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(state, &plan, &terms).unwrap();
     graph::entities_by_symbol(state, &terms).unwrap()[&normalize(PUBLIC_SYMBOL)].clone()
 }
@@ -190,6 +211,43 @@ fn full_dossier_ordering_and_markdown() {
     assert!(markdown.contains("[Requirement]"));
     assert!(markdown.contains("- [Constraint] Runtime builder constraint -"));
     assert!(!markdown.contains("]("));
+    assert!(!markdown.contains("[syntactic anchor]"));
+}
+
+#[test]
+fn syntactic_anchor_marker_is_uniform_for_position_and_symbol_selectors() {
+    let state = state_with_tree_sitter_fixture("syntactic-marker");
+    let decision = record(&state, "ArchitecturalDecision", "Syntactic anchor decision");
+    let identity = "ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render";
+    graph::link_code(
+        &state,
+        &decision,
+        "concerns",
+        &CodeSelector::Position {
+            file: "tests/fixtures/ts_fallback.rs".to_string(),
+            line: 34,
+            col: 13,
+        },
+        "tester",
+    )
+    .expect("link syntactic entity");
+
+    let by_position = graph::get_entity_dossier(
+        &state,
+        &DossierTarget::Position {
+            file: "tests/fixtures/ts_fallback.rs".to_string(),
+            line: 34,
+            col: 13,
+        },
+    )
+    .unwrap()
+    .expect("position dossier");
+    let by_symbol = graph::get_entity_dossier(&state, &DossierTarget::Symbol(identity.to_string()))
+        .unwrap()
+        .expect("symbol dossier");
+    assert_eq!(by_position, by_symbol);
+    assert!(graph::render_markdown(&by_position).contains("[syntactic anchor]"));
+    assert!(graph::render_markdown(&by_symbol).contains("[syntactic anchor]"));
 }
 
 #[test]

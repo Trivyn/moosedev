@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use super::meta::SubstrateMeta;
 use super::scip::{self, IngestedIndex, OccurrenceEntry, SymbolData};
 use super::symbols;
+use super::treesitter::{parse_identity, TreeSitterFallback};
 use super::{meta_path, producer_index_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,6 +98,7 @@ pub struct Substrate {
     meta: SubstrateMeta,
     /// Synthetic or live disk-backed staleness state.
     staleness: Staleness,
+    syntactic: TreeSitterFallback,
 }
 
 impl Substrate {
@@ -131,11 +133,28 @@ impl Substrate {
             index: merged,
             meta,
             staleness: Staleness::disk_backed(repo_root, stale),
+            syntactic: TreeSitterFallback::new(),
         })
     }
 
     pub fn resolve(&self, relative_path: &str, pos: Position) -> Option<Resolution> {
-        let file = self.index.files.get(relative_path)?;
+        let Some(file) = self.index.files.get(relative_path) else {
+            let syntactic =
+                self.syntactic
+                    .resolve_position(self.repo_root()?, relative_path, pos)?;
+            // Every syntactic node modeled by the fallback is a declaration;
+            // arbitrary syntax nodes are intentionally never returned.
+            return Some(Resolution {
+                symbol: syntactic.identity,
+                display_name: Some(syntactic.name),
+                kind: Some(syntactic.kind),
+                is_definition: true,
+                is_local: false,
+                mode: ResolutionMode::TreeSitter,
+                range: syntactic.range,
+                stale: self.is_stale(),
+            });
+        };
         let occurrences = &file.occurrences;
         // Occurrences are sorted by start position during ingestion. `partition_point`
         // gives the first occurrence that cannot contain `pos` because it starts
@@ -266,6 +285,16 @@ impl Substrate {
         self.index.files.contains_key(relative_path)
     }
 
+    /// Whether a position in this path can be anchored semantically or by a
+    /// supported on-disk syntactic grammar.
+    pub fn can_anchor(&self, relative_path: &str) -> bool {
+        self.covers_file(relative_path)
+            || self.repo_root().is_some_and(|root| {
+                let relative = Path::new(relative_path);
+                TreeSitterFallback::supports_path(relative) && root.join(relative).is_file()
+            })
+    }
+
     /// Lists each producer and its indexed document count in metadata order.
     ///
     /// The order is stable and reflects the producer order recorded during
@@ -293,12 +322,37 @@ impl Substrate {
     }
 
     pub fn definition_for_symbol(&self, symbol: &str) -> Option<DefinitionEntry> {
+        if symbol.starts_with("ts:") {
+            let parsed = parse_identity(symbol)?;
+            if self.identity_alive(symbol) != Some(true) {
+                return None;
+            }
+            return Some(DefinitionEntry {
+                producer: "tree-sitter".to_string(),
+                symbol: symbol.to_string(),
+                normalized_symbol: symbol.to_string(),
+                display_name: symbols::last_descriptor_name(symbol),
+                kind: Some(parsed.kind.to_string()),
+                signature: None,
+                file: parsed.path.to_string(),
+                is_module: parsed.kind == "mod",
+                // Syntactic entries exist solely for lazy anchoring and must
+                // never enter the always-mint public surface.
+                is_public: false,
+            });
+        }
         self.index.symbols.iter().find_map(|data| {
             (data.symbol == symbol
                 || symbols::normalize_symbol(&data.symbol).as_deref() == Some(symbol))
             .then(|| definition_entry(data))
             .flatten()
         })
+    }
+
+    /// Check a self-describing syntactic identity against the current file.
+    /// `None` means this substrate cannot verify it.
+    pub fn identity_alive(&self, identity: &str) -> Option<bool> {
+        self.syntactic.identity_alive(self.repo_root()?, identity)
     }
 
     /// Public so integration tests and tooling can inject a synthetic substrate;
@@ -322,7 +376,20 @@ impl Substrate {
             index: merged,
             meta,
             staleness: Staleness::synthetic(stale),
+            syntactic: TreeSitterFallback::new(),
         })
+    }
+
+    /// Synthetic substrate with an on-disk root for fallback integration tests.
+    pub fn from_index_rooted(
+        index: ::scip::types::Index,
+        meta: SubstrateMeta,
+        stale: bool,
+        repo_root: impl AsRef<Path>,
+    ) -> Result<Substrate> {
+        let mut substrate = Self::from_index(index, meta, stale)?;
+        substrate.staleness = Staleness::disk_backed(repo_root.as_ref(), stale);
+        Ok(substrate)
     }
 }
 
@@ -438,7 +505,7 @@ mod tests {
         SymbolInformation, ToolInfo,
     };
 
-    use super::{Position, SourceRange, Substrate, SubstrateMeta};
+    use super::{Position, ResolutionMode, SourceRange, Substrate, SubstrateMeta};
     use crate::code::substrate::{producer_index_path, ProducerRun};
 
     #[test]
@@ -515,6 +582,34 @@ mod tests {
         assert!(substrate
             .resolve("missing.rs", Position { line: 3, col: 6 })
             .is_none());
+    }
+
+    #[test]
+    fn scip_covered_file_never_uses_syntactic_fallback() {
+        let symbol = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.occurrences.push(occ(symbol, vec![0, 3, 15], 1));
+        index.documents.push(document);
+
+        let root = std::env::temp_dir().join(format!(
+            "moosedev-covered-scip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/runtime.rs"), "fn build_server() {}\n").unwrap();
+        let substrate = Substrate::from_index_rooted(index, meta(), false, &root).unwrap();
+
+        let resolution = substrate
+            .resolve("src/runtime.rs", Position { line: 0, col: 4 })
+            .unwrap();
+        assert_eq!(resolution.mode, ResolutionMode::Scip);
+        assert_eq!(resolution.symbol, symbol);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
