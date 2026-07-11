@@ -2,6 +2,7 @@
 //! This module owns long-lived graph services and calls sibling modules only for focused primitives.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use moose::chat::session_db::SessionDb;
@@ -117,6 +118,8 @@ pub struct AppState {
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
     pub inferred_stale: std::sync::atomic::AtomicBool,
+    /// Monotonic signal for consumers that need to observe project-graph writes.
+    project_write_generation: AtomicU64,
     /// Keeps the committed canonical text (`kg.nq`) in step with project-graph
     /// writes: isolated captures export synchronously, bulk bursts coalesce to
     /// a single trailing export once the burst goes quiet.
@@ -219,6 +222,7 @@ impl AppState {
             substrate_reload_lock: std::sync::Mutex::new(()),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
+            project_write_generation: AtomicU64::new(0),
             canonical_throttle: crate::canonical::WriteThrottle::default(),
             enrich_lock: std::sync::Mutex::new(()),
         })
@@ -239,8 +243,14 @@ impl AppState {
     /// must never fail the symbolic write (invariant #1).
     pub fn note_project_write(&self) {
         self.mark_inferred_stale();
+        self.project_write_generation
+            .fetch_add(1, Ordering::Relaxed);
         self.canonical_throttle
             .note_write(&self.store, &self.data_dir);
+    }
+
+    pub fn project_write_generation(&self) -> u64 {
+        self.project_write_generation.load(Ordering::Relaxed)
     }
 
     /// Return the loaded code substrate, reloading a disk-backed one when the

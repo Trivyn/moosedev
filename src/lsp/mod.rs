@@ -4,6 +4,7 @@
 //! Unix socket. The daemon session shares the same [`AppState`] as MCP/HTTP, so
 //! editor hover can serve the same dossiers as the MCP tools.
 
+use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Component, Path, PathBuf};
@@ -11,6 +12,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
@@ -44,6 +46,8 @@ struct LspSession {
     encoding: SessionEncoding,
     repo_root: PathBuf,
     diagnostics: DiagnosticsConfig,
+    open_docs: HashMap<String, String>,
+    last_diagnostics_generation: Option<(usize, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -203,6 +207,8 @@ fn run_session(
         encoding: SessionEncoding::Utf16,
         repo_root,
         diagnostics: DiagnosticsConfig::default(),
+        open_docs: HashMap::new(),
+        last_diagnostics_generation: None,
     };
     session.initialize()?;
     session.run()?;
@@ -287,7 +293,19 @@ impl LspSession {
     }
 
     fn run(&mut self) -> anyhow::Result<()> {
-        while let Ok(msg) = self.connection.receiver.recv() {
+        loop {
+            let msg = match self
+                .connection
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+            {
+                Ok(msg) => msg,
+                Err(error) if error.is_timeout() => {
+                    self.refresh_if_state_changed()?;
+                    continue;
+                }
+                Err(_) => break,
+            };
             match msg {
                 Message::Request(req) => {
                     if self.connection.handle_shutdown(&req)? {
@@ -310,7 +328,9 @@ impl LspSession {
                     "textDocument/didOpen" | "textDocument/didSave" => {
                         self.handle_diagnostics_event(notification.params)?;
                     }
-                    "textDocument/didClose" | "textDocument/didChange" => {}
+                    "textDocument/didClose" => self.handle_did_close(notification.params),
+                    // Diagnostics are saved-state only; unsaved didChange text is ignored.
+                    "textDocument/didChange" => {}
                     "exit" => break,
                     _ => {}
                 },
@@ -320,7 +340,7 @@ impl LspSession {
         Ok(())
     }
 
-    fn handle_diagnostics_event(&self, params: serde_json::Value) -> anyhow::Result<()> {
+    fn handle_diagnostics_event(&mut self, params: serde_json::Value) -> anyhow::Result<()> {
         // Diagnostics are intentionally saved-state only: use the URI from the
         // event, but ignore any text payload the editor sends with didOpen/didSave.
         let Some(uri) = notification_text_document_uri(&params) else {
@@ -329,8 +349,47 @@ impl LspSession {
         let Some(rel_path) = repo_relative_path(&self.repo_root, &uri) else {
             return Ok(());
         };
+        let generation = self.knowledge_generation();
         let diagnostics = self.file_diagnostics(&rel_path);
-        self.publish(uri, diagnostics)
+        self.publish(uri.clone(), diagnostics)?;
+        self.open_docs.insert(uri.to_string(), rel_path);
+        if self.last_diagnostics_generation.is_none() {
+            self.last_diagnostics_generation = Some(generation);
+        }
+        Ok(())
+    }
+
+    fn handle_did_close(&mut self, params: serde_json::Value) {
+        if let Some(uri) = notification_text_document_uri(&params) {
+            self.open_docs.remove(uri.as_str());
+        }
+    }
+
+    fn knowledge_generation(&self) -> (usize, u64) {
+        let substrate = self
+            .state
+            .substrate()
+            .map_or(0, |substrate| Arc::as_ptr(&substrate) as usize);
+        (substrate, self.state.project_write_generation())
+    }
+
+    fn refresh_if_state_changed(&mut self) -> anyhow::Result<()> {
+        let generation = self.knowledge_generation();
+        if self.last_diagnostics_generation == Some(generation) {
+            return Ok(());
+        }
+
+        let open_docs: Vec<_> = self
+            .open_docs
+            .iter()
+            .map(|(uri, rel_path)| (uri.clone(), rel_path.clone()))
+            .collect();
+        for (uri, rel_path) in open_docs {
+            let diagnostics = self.file_diagnostics(&rel_path);
+            self.publish(Uri::from_str(&uri)?, diagnostics)?;
+        }
+        self.last_diagnostics_generation = Some(generation);
+        Ok(())
     }
 
     fn file_diagnostics(&self, rel_path: &str) -> Vec<Diagnostic> {

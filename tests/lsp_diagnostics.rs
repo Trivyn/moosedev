@@ -394,6 +394,17 @@ where
         .await
     }
 
+    async fn did_close(&mut self, uri: impl Into<String>) -> anyhow::Result<()> {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {
+                "textDocument": { "uri": uri.into() }
+            }
+        }))
+        .await
+    }
+
     async fn read_until_diagnostics(&mut self, uri: &str) -> anyhow::Result<Value> {
         for _ in 0..20 {
             let message = self.read().await?.expect("LSP message");
@@ -404,6 +415,17 @@ where
             }
         }
         anyhow::bail!("no publishDiagnostics for {uri}")
+    }
+
+    async fn read_until_diagnostics_timeout(
+        &mut self,
+        uri: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<Value>> {
+        match tokio::time::timeout(timeout, self.read_until_diagnostics(uri)).await {
+            Ok(result) => result.map(Some),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn shutdown_and_exit(&mut self) -> anyhow::Result<()> {
@@ -424,6 +446,15 @@ where
         }))
         .await?;
         Ok(())
+    }
+
+    async fn exit(&mut self) -> anyhow::Result<()> {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": null
+        }))
+        .await
     }
 }
 
@@ -483,6 +514,171 @@ fn assert_severity_ceiling(diagnostics: &[Value]) {
             "unexpected severity: {diagnostic}"
         );
     }
+}
+
+#[tokio::test]
+async fn diagnostics_republish_when_substrate_becomes_available() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-late-root", "    build_server();");
+    let data_dir = fresh_dir("diag-late-data");
+    let state = Arc::new(bootstrap("diag-late-state"));
+    seed_component(&state, "runtime component", "src/");
+    let constraint = record(&state, "Constraint", "Late substrate constraint");
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    assert_eq!(
+        client.read_until_diagnostics(&uri).await?["params"]["diagnostics"],
+        json!([])
+    );
+
+    state.set_substrate(Arc::new(synthetic_substrate(4)));
+    link_public(&state, &constraint, 4);
+    let republished = client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
+        .await?
+        .expect("diagnostics republished after late substrate");
+    assert!(diagnostics(&republished).iter().any(|diagnostic| {
+        diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Late substrate constraint"))
+    }));
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn diagnostics_republish_after_post_open_graph_write() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-write-root", "    build_server();");
+    let data_dir = fresh_dir("diag-write-data");
+    let state = Arc::new(state_with_substrate("diag-write-state", 4));
+    let initial = record(&state, "Constraint", "Initial constraint");
+    link_public(&state, &initial, 4);
+    let added = record(&state, "Constraint", "Post-open constraint");
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    assert_eq!(
+        diagnostics(&client.read_until_diagnostics(&uri).await?).len(),
+        1
+    );
+
+    link_public(&state, &added, 4);
+    // `link_public` calls the graph primitive directly; production MCP writes
+    // invoke the AppState post-write hook after that primitive succeeds.
+    state.note_project_write();
+    let republished = client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
+        .await?
+        .expect("diagnostics republished after graph write");
+    let republished = diagnostics(&republished);
+    assert_eq!(republished.len(), 2);
+    assert!(republished.iter().any(|diagnostic| {
+        diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Post-open constraint"))
+    }));
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn diagnostics_republish_after_substrate_swap() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-swap-root", "    build_server();");
+    let data_dir = fresh_dir("diag-swap-data");
+    let state = Arc::new(state_with_substrate("diag-swap-state", 4));
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    client.read_until_diagnostics(&uri).await?;
+
+    state.set_substrate(Arc::new(synthetic_substrate(4)));
+    assert!(client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
+        .await?
+        .is_some());
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unchanged_knowledge_generation_does_not_republish() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-idle-root", "    build_server();");
+    let data_dir = fresh_dir("diag-idle-data");
+    let state = Arc::new(state_with_substrate("diag-idle-state", 4));
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    client.read_until_diagnostics(&uri).await?;
+    state.set_substrate(Arc::new(synthetic_substrate(4)));
+    client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
+        .await?
+        .expect("diagnostics republished after generation change");
+
+    assert!(client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(3))
+        .await?
+        .is_none());
+    client.exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn closed_documents_are_pruned_from_diagnostics_refresh() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-close-root", "    build_server();");
+    let data_dir = fresh_dir("diag-close-data");
+    let state = Arc::new(state_with_substrate("diag-close-state", 4));
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    client.read_until_diagnostics(&uri).await?;
+    client.did_close(&uri).await?;
+    state.set_substrate(Arc::new(synthetic_substrate(4)));
+
+    assert!(client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(3))
+        .await?
+        .is_none());
+    client.exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
 }
 
 #[tokio::test]
