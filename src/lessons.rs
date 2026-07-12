@@ -79,6 +79,11 @@ pub struct LessonSummary {
     pub iri: String,
     pub filename: String,
     pub related_sources: usize,
+    /// Complete rendered detail content used by list clients for local search.
+    ///
+    /// Keeping relationship-derived Markdown here lets clients search the same
+    /// content they display without issuing one detail request per lesson.
+    pub search_text: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -105,6 +110,7 @@ impl LessonDocument {
             iri: self.iri.clone(),
             filename: self.filename.clone(),
             related_sources: self.related_sources,
+            search_text: self.markdown.clone(),
         }
     }
 }

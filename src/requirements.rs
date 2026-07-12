@@ -83,6 +83,11 @@ pub struct RequirementSummary {
     pub iri: String,
     pub filename: String,
     pub related_adrs: usize,
+    /// Complete rendered detail content used by list clients for local search.
+    ///
+    /// Keeping relationship-derived Markdown here lets clients search the same
+    /// content they display without issuing one detail request per requirement.
+    pub search_text: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -111,6 +116,7 @@ impl RequirementDocument {
             iri: self.iri.clone(),
             filename: self.filename.clone(),
             related_adrs: self.related_adrs,
+            search_text: self.markdown.clone(),
         }
     }
 }

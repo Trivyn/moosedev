@@ -74,6 +74,7 @@ fn adr_set_renders_stable_numbered_markdown_from_project_graph() {
     assert!(set.adrs[0]
         .markdown
         .contains("Decision body for First Decision"));
+    assert_eq!(set.summaries()[0].search_text, set.adrs[0].markdown);
     assert!(set
         .index_markdown
         .contains("[First Decision](0001-first-decision.md)"));

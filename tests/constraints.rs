@@ -113,6 +113,7 @@ fn constraint_set_renders_both_target_directions_without_duplicates() {
     assert!(set.constraints[0].markdown.contains("# CST-0001."));
     assert!(set.constraints[0].markdown.contains("Governed decision"));
     assert_eq!(set.constraints[0].markdown.matches(&target).count(), 1);
+    assert_eq!(set.summaries()[0].search_text, set.constraints[0].markdown);
     assert!(set.index_markdown.contains("| CST-0001 |"));
     assert!(set.warnings.unlinked_constraints.is_empty());
 

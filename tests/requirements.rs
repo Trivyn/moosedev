@@ -135,6 +135,7 @@ fn requirement_set_renders_related_adrs_from_project_graph() {
         .contains("Requirement body for Trace decisions to needs"));
     assert!(set.requirements[0].markdown.contains("- Addressed: Yes"));
     assert!(set.requirements[0].markdown.contains(&adr));
+    assert_eq!(set.summaries()[0].search_text, set.requirements[0].markdown);
     assert!(set
         .index_markdown
         .contains("[Trace decisions to needs](0001-trace-decisions-to-needs.md)"));

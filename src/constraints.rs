@@ -84,6 +84,11 @@ pub struct ConstraintSummary {
     pub iri: String,
     pub filename: String,
     pub related_targets: usize,
+    /// Complete rendered detail content used by list clients for local search.
+    ///
+    /// Keeping relationship-derived Markdown here lets clients search the same
+    /// content they display without issuing one detail request per constraint.
+    pub search_text: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -110,6 +115,7 @@ impl ConstraintDocument {
             iri: self.iri.clone(),
             filename: self.filename.clone(),
             related_targets: self.related_targets,
+            search_text: self.markdown.clone(),
         }
     }
 }

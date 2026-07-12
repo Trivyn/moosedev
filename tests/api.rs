@@ -383,6 +383,8 @@ async fn adrs_list_renders_project_decisions() {
     let dir = temp_dir("adrs-list");
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
     let iri = record_api_decision(&state, "API ADR visible");
+    let requirement = record_api_requirement(&state, "Searchable ADR requirement");
+    graph::relate(&state, &iri, "isMotivatedBy", &requirement).expect("link ADR requirement");
     let server = test_server(state);
 
     let response = server.get("/api/v1/adrs").await;
@@ -395,6 +397,10 @@ async fn adrs_list_renders_project_decisions() {
     assert_eq!(body["adrs"][0]["title"], "API ADR visible");
     assert_eq!(body["adrs"][0]["filename"], "0001-api-adr-visible.md");
     assert_eq!(body["adrs"][0]["iri"], iri);
+    assert!(body["adrs"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&requirement));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -482,6 +488,10 @@ async fn requirements_list_renders_project_requirements() {
     );
     assert_eq!(body["requirements"][0]["iri"], req);
     assert_eq!(body["requirements"][0]["related_adrs"], 1);
+    assert!(body["requirements"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&ad));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -572,6 +582,10 @@ async fn lessons_list_renders_project_lessons() {
     assert_eq!(body["lessons"][0]["filename"], "0001-api-lesson-visible.md");
     assert_eq!(body["lessons"][0]["iri"], lesson);
     assert_eq!(body["lessons"][0]["related_sources"], 1);
+    assert!(body["lessons"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&ad));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -665,6 +679,10 @@ async fn constraints_list_renders_project_constraints() {
     );
     assert_eq!(body["constraints"][0]["iri"], constraint);
     assert_eq!(body["constraints"][0]["related_targets"], 1);
+    assert!(body["constraints"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&decision));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -24,6 +24,8 @@ export interface AdrSummary {
   author: string;
   iri: string;
   filename: string;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface AdrListResponse {
@@ -55,6 +57,8 @@ export interface RequirementSummary {
   iri: string;
   filename: string;
   related_adrs: number;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface RequirementListResponse {
@@ -85,6 +89,8 @@ export interface LessonSummary {
   iri: string;
   filename: string;
   related_sources: number;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface LessonListResponse {
@@ -115,6 +121,8 @@ export interface ConstraintSummary {
   iri: string;
   filename: string;
   related_targets: number;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface ConstraintListResponse {

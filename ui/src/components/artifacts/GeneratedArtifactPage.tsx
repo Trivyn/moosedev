@@ -9,6 +9,7 @@ import {
   List,
   ListItemButton,
   Stack,
+  TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -26,6 +27,7 @@ export interface ArtifactSummaryBase {
   date: string;
   author: string;
   iri: string;
+  search_text: string;
 }
 
 interface ArtifactDetail<TSummary extends ArtifactSummaryBase> {
@@ -77,6 +79,25 @@ function artifactNumber(record: ArtifactSummaryBase, prefix?: string) {
 
 function recordUuid(record: ArtifactSummaryBase) {
   return record.iri.slice(Math.max(record.iri.lastIndexOf('/'), record.iri.lastIndexOf('#')) + 1);
+}
+
+/**
+ * Builds the client-side search haystack from the complete rendered artifact and
+ * its list metadata. Keeping this pure makes filtering consistent across every
+ * generated-artifact page without coupling it to an artifact-specific response.
+ */
+function artifactSearchText(record: ArtifactSummaryBase, prefix?: string) {
+  return [
+    artifactNumber(record, prefix),
+    record.title,
+    record.status,
+    record.date,
+    record.author,
+    record.iri,
+    record.search_text,
+  ]
+    .join('\n')
+    .toLocaleLowerCase();
 }
 
 function ArtifactListItem<TSummary extends ArtifactSummaryBase>({
@@ -160,8 +181,21 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const records = useMemo(() => (list ? recordsOf(list) : []), [list, recordsOf]);
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase();
+  // Filtering must not alter selection: a selected record may remain open while
+  // the user searches the sidebar for another artifact.
+  const filteredRecords = useMemo(
+    () =>
+      normalizedSearchQuery
+        ? records.filter((record) =>
+            artifactSearchText(record, recordPrefix).includes(normalizedSearchQuery),
+          )
+        : records,
+    [normalizedSearchQuery, recordPrefix, records],
+  );
   const selectedFromList = useMemo(
     () => records.find((record) => record.num === selectedNum) ?? null,
     [records, selectedNum],
@@ -311,6 +345,16 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
               </Tooltip>
             </Stack>
           </Stack>
+          <TextField
+            fullWidth
+            type="search"
+            size="small"
+            label="Search records"
+            placeholder="Search title or content"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            sx={{ mt: 1.5 }}
+          />
         </Box>
         {warnings && warningCount(warnings) > 0 && <Box sx={{ p: 1 }}>{renderWarningSummary(warnings)}</Box>}
         <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
@@ -318,9 +362,9 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
             <Box sx={{ height: '100%', display: 'grid', placeItems: 'center' }}>
               <CircularProgress size={22} />
             </Box>
-          ) : records.length ? (
+          ) : filteredRecords.length ? (
             <List disablePadding>
-              {records.map((record) => (
+              {filteredRecords.map((record) => (
                 <ArtifactListItem
                   key={record.num}
                   record={record}
@@ -337,7 +381,7 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
           ) : (
             <Box sx={{ p: 2 }}>
               <Typography variant="body2" color="text.secondary">
-                {emptyText}
+                {records.length ? `No records match “${searchQuery.trim()}”.` : emptyText}
               </Typography>
             </Box>
           )}

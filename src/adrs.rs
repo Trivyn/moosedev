@@ -79,6 +79,11 @@ pub struct AdrSummary {
     pub author: String,
     pub iri: String,
     pub filename: String,
+    /// Complete rendered detail content used by list clients for local search.
+    ///
+    /// Keeping relationship-derived Markdown here lets clients search the same
+    /// content they display without issuing one detail request per ADR.
+    pub search_text: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -103,6 +108,7 @@ impl AdrDocument {
             author: self.author.clone(),
             iri: self.iri.clone(),
             filename: self.filename.clone(),
+            search_text: self.markdown.clone(),
         }
     }
 }
