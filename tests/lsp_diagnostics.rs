@@ -414,6 +414,23 @@ where
         .await
     }
 
+    async fn code_lens(&mut self, uri: &str) -> anyhow::Result<Vec<Value>> {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": uri } }
+        }))
+        .await?;
+        for _ in 0..20 {
+            let message = self.read().await?.expect("codeLens response");
+            if message["id"] == json!(77) {
+                return Ok(message["result"].as_array().cloned().unwrap_or_default());
+            }
+        }
+        anyhow::bail!("no codeLens response for {uri}")
+    }
+
     async fn read_until_diagnostics(&mut self, uri: &str) -> anyhow::Result<Value> {
         for _ in 0..20 {
             let message = self.read().await?.expect("LSP message");
@@ -1084,5 +1101,41 @@ async fn repo_substrate_diagnostics_when_index_present() -> anyhow::Result<()> {
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn code_lens_shows_counts_and_hotspots() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("lens-root", "    build_server();");
+    let data_dir = fresh_dir("lens-data");
+    let state = Arc::new(state_with_substrate("lens-state", 4));
+    // build_server (public) gets a linked constraint; no_records (public) stays bare.
+    let constraint = record(&state, "Constraint", "Runtime builder must stay local");
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    let lenses = client.code_lens(&uri).await?;
+
+    let titles: Vec<String> = lenses
+        .iter()
+        .filter_map(|lens| lens["command"]["title"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("constraint")),
+        "documented public entity should carry a record-count badge: {titles:?}"
+    );
+    assert!(
+        titles.iter().any(|t| t.contains("no linked rationale")),
+        "undocumented public entity should carry a hotspot badge: {titles:?}"
+    );
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
     Ok(())
 }

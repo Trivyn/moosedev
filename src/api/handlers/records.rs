@@ -43,7 +43,7 @@ pub async fn get_record(
     }))
 }
 
-fn record_iri_for_uuid(state: &AppState, uuid: &str) -> Option<String> {
+pub(crate) fn record_iri_for_uuid(state: &AppState, uuid: &str) -> Option<String> {
     let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let rdf_type = NamedNodeRef::new_unchecked(moose::RDF_TYPE);
     let suffix = format!("/{uuid}");

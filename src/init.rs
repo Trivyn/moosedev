@@ -296,6 +296,9 @@ fn write_zed_settings(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
     let obj = root
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("{} must be a JSON object", path.display()))?;
+    // Zed defaults code lens off; enable it so MOOSEDev's ambient badges render.
+    // Respect an existing user preference if one is already set.
+    obj.entry("code_lens").or_insert_with(|| json!("on"));
     let lsp = obj
         .entry("lsp")
         .or_insert_with(|| json!({}))
@@ -927,6 +930,10 @@ mod tests {
         assert_eq!(
             settings["lsp"]["moosedev"]["initialization_options"]["diagnostics"]["staleRationale"],
             true
+        );
+        assert_eq!(
+            settings["code_lens"], "on",
+            "init should enable Zed code lens (off by default) so badges render"
         );
         assert_eq!(
             outcome_for(&report, ".zed/settings.json"),

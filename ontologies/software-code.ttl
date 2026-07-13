@@ -170,6 +170,53 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:historyNote "Hand-curated 2026-07-08 (ratified worksheet, AD 7079634f)" .
 
 # =============================================================================
+# Ratification queue — v2.1 ambient layer. A ProposedLink is a pending, human-
+# ratifiable proposal that record <subject> should link to the code entity named
+# by <targetSymbol> via <predicate>. It carries the proposed triple as LITERALS
+# (never the real link edge), so an unratified proposal is invisible to dossiers
+# and the why-coverage metric until accepted; acceptance materializes the real
+# edge via link_code, rejection only flips status. Deliberately NOT an
+# InformationRecord subclass (stays out of record listings + the ABox vector
+# index) and given NO SHACL shape (no relation-catalogue write path — the
+# proposal literals are written directly, not oriented through relate()).
+# =============================================================================
+
+:ProposedLink a owl:Class ;
+    rdfs:label "Proposed Link" ;
+    skos:definition "A pending, human-ratifiable proposal that an information record should link to a code entity via one of the intent/architecture link predicates. Carries the proposed triple (subject record, predicate local name, target substrate symbol, target path) as literals plus a lifecycle status; the real link edge exists only after ratification. Not an information record and not the link itself — a queue entry." ;
+    skos:historyNote "Introduced v2.1 (ambient layer + ratification inbox); first written by the citation-seed migration." .
+
+# Datatype Properties (all domain :ProposedLink, range xsd:string) — the proposed
+# triple stored as literals so no real link edge exists until acceptance.
+:proposesSubject a owl:DatatypeProperty ;
+    rdfs:label "proposes subject" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:string ;
+    skos:definition "The IRI (as a literal string, never an edge) of the information record the proposal would link from." ;
+    skos:historyNote "Introduced v2.1" .
+
+:proposesPredicate a owl:DatatypeProperty ;
+    rdfs:label "proposes predicate" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:string ;
+    skos:definition "The local name of the link predicate to assert on acceptance (e.g. 'concerns', 'satisfies')." ;
+    skos:historyNote "Introduced v2.1" .
+
+:proposesTargetSymbol a owl:DatatypeProperty ;
+    rdfs:label "proposes target symbol" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:string ;
+    skos:definition "The substrate symbol of the target code entity, resolved at HEAD; re-resolved via link_code on acceptance so a symbol that no longer exists fails honestly." ;
+    skos:historyNote "Introduced v2.1" .
+
+:proposesTargetPath a owl:DatatypeProperty ;
+    rdfs:label "proposes target path" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:string ;
+    skos:definition "The repo-relative path of the target entity's defining file, for display and the migration report." ;
+    skos:historyNote "Introduced v2.1" .
+
+# =============================================================================
 # Parked stratum classes — names ratified in the 2026-07-03 alignment pass
 # (AD b0d3e4d9); declared for name stability only. NO properties and NO shapes
 # until the owning stratum's machinery ships (judgments: v2.1 ratification

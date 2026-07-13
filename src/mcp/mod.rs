@@ -389,6 +389,36 @@ impl MooseDevServer {
         Ok(tool_ok("pong"))
     }
 
+    /// Report the pending ratification queue depth (read-only).
+    #[tool(
+        description = "Count the pending link proposals awaiting human ratification (proposed record→code-entity links, e.g. from the citation-seed migration). Read-only; returns the count plus a short preview. Ratify or reject them in the workbench Ratifications page."
+    )]
+    async fn pending_ratifications(&self) -> Result<CallToolResult, McpError> {
+        let proposals = match graph::list_proposals(&self.state, Some("proposed")) {
+            Ok(proposals) => proposals,
+            Err(e) => {
+                return Ok(tool_error(format!(
+                    "failed to read the ratification queue: {e}"
+                )))
+            }
+        };
+        if proposals.is_empty() {
+            return Ok(tool_ok("0 pending ratifications — the inbox is empty."));
+        }
+        let mut out = format!("{} pending ratification(s):\n", proposals.len());
+        for proposal in proposals.iter().take(10) {
+            out.push_str(&format!(
+                "  - {} → {} ({})\n",
+                proposal.subject_iri, proposal.target_symbol, proposal.target_path
+            ));
+        }
+        if proposals.len() > 10 {
+            out.push_str(&format!("  … and {} more\n", proposals.len() - 10));
+        }
+        out.push_str("Ratify or reject them in the workbench Ratifications page.");
+        Ok(tool_ok(out))
+    }
+
     /// Record a typed knowledge item into the durable project knowledge graph.
     #[tool(
         description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph. Inline `relations` can link the new record to existing typed graph nodes, including `concerns` edges to SystemComponent records. For an ArchitecturalDecision, capture its cluster in the SAME call: `alternatives_considered` (options you weighed and rejected) and `consequences` (trade-offs that result) are each minted as a typed node and linked — record what you actually weighed; omit when there is none (do not invent)."

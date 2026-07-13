@@ -12,10 +12,13 @@ import {
   HealthResponse,
   LessonDetailResponse,
   LessonListResponse,
+  ProposalActionResponse,
+  ProposalListResponse,
   QueryResponse,
   RecordDetailResponse,
   RequirementDetailResponse,
   RequirementListResponse,
+  WhyCoverageResponse,
 } from './types';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -107,5 +110,18 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: text,
+    }),
+  debt: () => request<WhyCoverageResponse>('/debt'),
+  listProposals: (status?: string) =>
+    request<ProposalListResponse>(
+      `/proposals${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+    ),
+  acceptProposal: (id: string) =>
+    request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/accept`, {
+      method: 'POST',
+    }),
+  rejectProposal: (id: string) =>
+    request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/reject`, {
+      method: 'POST',
     }),
 };

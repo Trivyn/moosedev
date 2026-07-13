@@ -18,10 +18,11 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::{
-    ClientCapabilities, CodeDescription, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent,
-    MarkupKind, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncOptions,
+    ClientCapabilities, CodeDescription, CodeLens, CodeLensOptions, Diagnostic,
+    DiagnosticSeverity, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, MarkupContent, MarkupKind, MessageType, NumberOrString,
+    Position, PositionEncodingKind, PublishDiagnosticsParams, Range, ServerCapabilities,
+    ShowMessageParams, TextDocumentSyncCapability, TextDocumentSyncOptions,
     TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
@@ -29,8 +30,8 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::code::substrate::SourceRange;
 use crate::graph::{
-    direct_records_for_entity, entities_by_symbol, get_entity_dossier, render_markdown, AppState,
-    CodeTerms, DossierTarget,
+    direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
+    pending_count, render_markdown, AppState, CodeTerms, DossierTarget, RecordSummary,
 };
 
 const LSP_SOCKET_FILE_NAME: &str = "moosedev-lsp.sock";
@@ -60,6 +61,10 @@ struct LspSession {
     encoding: SessionEncoding,
     repo_root: PathBuf,
     diagnostics: DiagnosticsConfig,
+    code_lens_enabled: bool,
+    nudge_enabled: bool,
+    /// Whether the pending-ratifications nudge has fired this session (once only).
+    nudged: bool,
     open_docs: HashMap<String, String>,
     last_diagnostics_generation: Option<(usize, u64)>,
     retracted: Arc<AtomicBool>,
@@ -189,10 +194,24 @@ impl Default for DiagnosticsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 struct InitializationOptions {
     #[serde(default)]
     diagnostics: DiagnosticsConfig,
+    #[serde(default = "true_bool", rename = "codeLens")]
+    code_lens: bool,
+    #[serde(default = "true_bool")]
+    nudge: bool,
+}
+
+impl Default for InitializationOptions {
+    fn default() -> Self {
+        Self {
+            diagnostics: DiagnosticsConfig::default(),
+            code_lens: true,
+            nudge: true,
+        }
+    }
 }
 
 fn true_bool() -> bool {
@@ -357,6 +376,9 @@ fn run_session(
         encoding: SessionEncoding::Utf16,
         repo_root,
         diagnostics: DiagnosticsConfig::default(),
+        code_lens_enabled: true,
+        nudge_enabled: true,
+        nudged: false,
         open_docs: HashMap::new(),
         last_diagnostics_generation: None,
         retracted,
@@ -442,7 +464,10 @@ impl LspSession {
         let (id, params) = self.connection.initialize_start()?;
         let params: InitializeParams = serde_json::from_value(params)?;
         self.encoding = negotiate_session_encoding(&params.capabilities);
-        self.diagnostics = diagnostics_config(params.initialization_options);
+        let options = parse_init_options(params.initialization_options);
+        self.diagnostics = options.diagnostics;
+        self.code_lens_enabled = options.code_lens;
+        self.nudge_enabled = options.nudge;
 
         let result = InitializeResult {
             capabilities: server_capabilities(self.encoding),
@@ -474,6 +499,8 @@ impl LspSession {
                     }
                     if req.method == "textDocument/hover" {
                         self.handle_hover(req.id, req.params)?;
+                    } else if req.method == "textDocument/codeLens" {
+                        self.handle_code_lens(req.id, req.params)?;
                     } else {
                         self.connection.sender.send(
                             Response::new_err(
@@ -508,6 +535,7 @@ impl LspSession {
     fn handle_diagnostics_event(&mut self, params: serde_json::Value) -> anyhow::Result<()> {
         // Diagnostics are intentionally saved-state only: use the URI from the
         // event, but ignore any text payload the editor sends with didOpen/didSave.
+        self.maybe_nudge();
         let Some(uri) = notification_text_document_uri(&params) else {
             return Ok(());
         };
@@ -528,6 +556,89 @@ impl LspSession {
         if let Some(uri) = notification_text_document_uri(&params) {
             self.open_docs.remove(uri.as_str());
         }
+    }
+
+    fn handle_code_lens(
+        &self,
+        id: lsp_server::RequestId,
+        params: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let lenses = self.code_lenses(params).unwrap_or_default();
+        self.connection
+            .sender
+            .send(Response::new_ok(id, lenses).into())?;
+        Ok(())
+    }
+
+    /// Badges above declarations: per-kind record counts where knowledge exists,
+    /// or a "no linked rationale" hotspot on an undocumented public entity. No
+    /// role badges in v2.1 (the judgment stratum ships in v2.2). Driven off the
+    /// same substrate + records the dossier uses (`is_debt_surface` shared with
+    /// the why-coverage metric), so the lens and the metric never disagree.
+    fn code_lenses(&self, params: serde_json::Value) -> Option<Vec<CodeLens>> {
+        if !self.code_lens_enabled {
+            return Some(Vec::new());
+        }
+        let uri = code_lens_uri(&params)?;
+        let rel_path = repo_relative_path(&self.repo_root, &uri)?;
+        let substrate = self.state.substrate()?;
+        let terms = CodeTerms::resolve(&self.state).ok()?;
+        let entities = entities_by_symbol(&self.state, &terms).ok()?;
+
+        let mut lenses = Vec::new();
+        for definition in substrate.definitions_in_file(&rel_path) {
+            let entity_iri = entities.get(&definition.entry.normalized_symbol);
+            let records = entity_iri
+                .and_then(|iri| direct_records_for_entity(&self.state, iri).ok())
+                .unwrap_or_default();
+            let title = if !records.is_empty() {
+                lens_count_title(&records)
+            } else if is_debt_surface(&definition.entry) {
+                "⚠ no linked rationale".to_string()
+            } else {
+                continue;
+            };
+            let Some(range) = self.diagnostic_range(&rel_path, definition.range) else {
+                continue;
+            };
+            lenses.push(CodeLens {
+                range,
+                command: Some(lsp_types::Command {
+                    title,
+                    command: "moosedev.openEntity".to_string(),
+                    arguments: entity_iri.map(|iri| vec![serde_json::Value::String(iri.clone())]),
+                }),
+                data: None,
+            });
+        }
+        Some(lenses)
+    }
+
+    /// Fire the pending-ratifications nudge once per session (an info message),
+    /// when the proposal queue is non-empty. Guarded so it never repeats.
+    fn maybe_nudge(&mut self) {
+        if self.nudged || !self.nudge_enabled {
+            return;
+        }
+        self.nudged = true;
+        let count = pending_count(&self.state).unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        let plural = if count == 1 { "" } else { "s" };
+        let message = format!(
+            "MOOSEDev: {count} pending link proposal{plural} awaiting ratification in the workbench inbox"
+        );
+        let _ = self.connection.sender.send(
+            Notification::new(
+                "window/showMessage".to_string(),
+                ShowMessageParams {
+                    typ: MessageType::INFO,
+                    message,
+                },
+            )
+            .into(),
+        );
     }
 
     /// The daemon is exiting: publish an empty set for every open doc so the
@@ -821,11 +932,51 @@ fn repo_relative_path(repo_root: &Path, uri: &lsp_types::Uri) -> Option<String> 
     )
 }
 
-fn diagnostics_config(options: Option<serde_json::Value>) -> DiagnosticsConfig {
+fn parse_init_options(options: Option<serde_json::Value>) -> InitializationOptions {
     options
         .and_then(|options| serde_json::from_value::<InitializationOptions>(options).ok())
-        .map(|options| options.diagnostics)
         .unwrap_or_default()
+}
+
+fn code_lens_uri(params: &serde_json::Value) -> Option<Uri> {
+    let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+    Uri::from_str(uri).ok()
+}
+
+/// Render a code-lens badge like "3 decisions · 1 constraint" from linked records.
+fn lens_count_title(records: &[RecordSummary]) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for record in records {
+        *counts.entry(record.kind.as_str()).or_default() += 1;
+    }
+    const ORDER: &[&str] = &["ArchitecturalDecision", "Constraint", "Lesson", "Requirement"];
+    let mut parts = Vec::new();
+    for kind in ORDER {
+        if let Some(n) = counts.remove(*kind) {
+            parts.push(format!("{n} {}", count_word(kind, n)));
+        }
+    }
+    for (kind, n) in counts {
+        parts.push(format!("{n} {}", count_word(kind, n)));
+    }
+    parts.join(" · ")
+}
+
+fn count_word(kind: &str, n: usize) -> String {
+    let pick = |singular: &str, plural: &str| {
+        if n == 1 {
+            singular.to_string()
+        } else {
+            plural.to_string()
+        }
+    };
+    match kind {
+        "ArchitecturalDecision" => pick("decision", "decisions"),
+        "Constraint" => pick("constraint", "constraints"),
+        "Lesson" => pick("lesson", "lessons"),
+        "Requirement" => pick("requirement", "requirements"),
+        other => other.to_string(),
+    }
 }
 
 fn notification_text_document_uri(params: &serde_json::Value) -> Option<Uri> {
@@ -1012,6 +1163,9 @@ fn server_capabilities(encoding: SessionEncoding) -> ServerCapabilities {
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         ..Default::default()
     }
 }
@@ -1122,23 +1276,29 @@ mod tests {
 
     #[test]
     fn diagnostics_config_defaults_on_absent_or_malformed_options() {
-        assert_eq!(diagnostics_config(None), DiagnosticsConfig::default());
         assert_eq!(
-            diagnostics_config(Some(serde_json::json!("not an object"))),
+            parse_init_options(None).diagnostics,
+            DiagnosticsConfig::default()
+        );
+        assert!(parse_init_options(None).code_lens);
+        assert!(parse_init_options(None).nudge);
+        assert_eq!(
+            parse_init_options(Some(serde_json::json!("not an object"))).diagnostics,
             DiagnosticsConfig::default()
         );
     }
 
     #[test]
     fn diagnostics_config_honors_false_and_ignores_unknown_keys() {
-        let config = diagnostics_config(Some(serde_json::json!({
+        let config = parse_init_options(Some(serde_json::json!({
             "diagnostics": {
                 "constraints": false,
                 "staleRationale": false,
                 "ignored": "value"
             },
             "other": true
-        })));
+        })))
+        .diagnostics;
 
         assert_eq!(
             config,

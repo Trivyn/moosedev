@@ -40,7 +40,11 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
             "/lessons/archive.zip",
             get(handlers::download_lesson_archive),
         )
-        .route("/lessons/{num}", get(handlers::get_lesson));
+        .route("/lessons/{num}", get(handlers::get_lesson))
+        .route("/debt", get(handlers::why_coverage))
+        .route("/proposals", get(handlers::list_proposals))
+        .route("/proposals/{id}/accept", post(handlers::accept_proposal))
+        .route("/proposals/{id}/reject", post(handlers::reject_proposal));
 
     Router::new()
         .nest("/api/v1", api)

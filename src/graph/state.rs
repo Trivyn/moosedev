@@ -702,6 +702,25 @@ mod tests {
             format!("{CODE}hasSubstrateSymbol")
         );
         assert_eq!(
+            state.resolve_code_class("ProposedLink").unwrap(),
+            format!("{CODE}ProposedLink")
+        );
+        assert!(
+            state.resolve_class("ProposedLink").is_err(),
+            "ProposedLink must stay out of architecture capture kinds"
+        );
+        for prop in [
+            "proposesSubject",
+            "proposesPredicate",
+            "proposesTargetSymbol",
+            "proposesTargetPath",
+        ] {
+            assert_eq!(
+                state.resolve_code_datatype_property(prop).unwrap(),
+                format!("{CODE}{prop}")
+            );
+        }
+        assert_eq!(
             state.resolve_object_property("realizes").unwrap(),
             format!("{CODE}realizes")
         );

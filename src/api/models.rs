@@ -86,6 +86,52 @@ pub struct ConstraintDetailResponse {
 }
 
 #[derive(Serialize)]
+pub struct WhyCoverageResponse {
+    pub components: Vec<ComponentCoverageDto>,
+    /// Public-surface definitions whose path maps to no component.
+    pub unmapped: usize,
+}
+
+#[derive(Serialize)]
+pub struct ComponentCoverageDto {
+    pub iri: Option<String>,
+    pub name: String,
+    pub numerator: usize,
+    pub denominator: usize,
+    /// Documented fraction, or null when the component owns no public surface.
+    pub coverage: Option<f64>,
+    pub undocumented: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ProposalListResponse {
+    pub proposals: Vec<ProposalDto>,
+}
+
+#[derive(Serialize)]
+pub struct ProposalDto {
+    /// Minted UUID (last IRI segment) — the id in accept/reject routes.
+    pub id: String,
+    pub iri: String,
+    pub label: String,
+    pub subject_iri: String,
+    pub predicate: String,
+    pub target_symbol: String,
+    pub target_path: String,
+    pub evidence: Option<String>,
+    pub status: String,
+}
+
+#[derive(Serialize)]
+pub struct ProposalActionResponse {
+    pub id: String,
+    pub status: String,
+    /// Set on accept: the code entity the materialized link points at.
+    pub entity_iri: Option<String>,
+    pub entity_name: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct RequirementListResponse {
     pub generated_at: String,
     pub graph_requirements: usize,

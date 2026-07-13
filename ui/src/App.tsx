@@ -5,13 +5,17 @@ import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
 import ChatIcon from '@mui/icons-material/Forum';
 import GavelIcon from '@mui/icons-material/Gavel';
 import ImportExportIcon from '@mui/icons-material/ImportExport';
+import InsightsIcon from '@mui/icons-material/Insights';
+import MoveToInboxIcon from '@mui/icons-material/MoveToInbox';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import SchoolIcon from '@mui/icons-material/School';
 import AppShell, { PageKey } from './components/layout/AppShell';
 import AdrsPage from './pages/AdrsPage';
 import ChatPage from './pages/ChatPage';
 import ConstraintsPage from './pages/ConstraintsPage';
+import DebtPage from './pages/DebtPage';
 import GraphTransferPage from './pages/GraphTransferPage';
+import RatificationsPage from './pages/RatificationsPage';
 import LessonsPage from './pages/LessonsPage';
 import RequirementsPage from './pages/RequirementsPage';
 import RecordPage from './pages/RecordPage';
@@ -121,6 +125,12 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
     },
     { key: 'lessons' as const, label: 'Lessons', icon: <SchoolIcon fontSize="small" /> },
     { key: 'constraints' as const, label: 'Constraints', icon: <GavelIcon fontSize="small" /> },
+    { key: 'debt' as const, label: 'Debt', icon: <InsightsIcon fontSize="small" /> },
+    {
+      key: 'ratifications' as const,
+      label: 'Ratifications',
+      icon: <MoveToInboxIcon fontSize="small" />,
+    },
     { key: 'sparql' as const, label: 'SPARQL', icon: <QueryStatsIcon fontSize="small" /> },
     { key: 'transfer' as const, label: 'Import / Export', icon: <ImportExportIcon fontSize="small" /> },
   ];
@@ -213,6 +223,10 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
           onNavigateArtifact={navigateArtifact}
           onNavigateRecord={navigateRecord}
         />
+      ) : page === 'debt' ? (
+        <DebtPage onNavigateRecord={navigateRecord} />
+      ) : page === 'ratifications' ? (
+        <RatificationsPage onNavigateRecord={navigateRecord} />
       ) : page === 'sparql' ? (
         <SparqlPage />
       ) : (

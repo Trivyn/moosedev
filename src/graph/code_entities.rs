@@ -555,7 +555,7 @@ fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, us
     (kept, skipped_scope, skipped_tests)
 }
 
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     let file_name = path.rsplit('/').next().unwrap_or(path);
     path.starts_with("tests/")
         || path

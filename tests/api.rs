@@ -10,9 +10,14 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum_test::TestServer;
 use chrono::Utc;
 use moosedev::api::routes::build_routes;
+use moosedev::code::substrate::{Substrate, SubstrateMeta};
 use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
 use moosedev::llm::LlmConfig;
 use oxigraph::model::{GraphName, Literal, NamedNode, Quad, Term};
+use protobuf::{EnumOrUnknown, MessageField};
+use scip::types::{
+    symbol_information, Document, Index, Occurrence, PositionEncoding, Signature, SymbolInformation,
+};
 use serde_json::{json, Value};
 
 const PROVENANCE_GRAPH_IRI: &str = "https://moosedev.dev/kg/provenance";
@@ -864,4 +869,134 @@ async fn static_fallback_explains_missing_embedded_frontend() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
+const ALPHA_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/alpha().";
+
+fn code_doc(path: &str) -> Document {
+    let mut d = Document::new();
+    d.relative_path = path.to_string();
+    d.position_encoding = EnumOrUnknown::new(PositionEncoding::UTF8CodeUnitOffsetFromLineStart);
+    d
+}
+
+fn add_public_fn(d: &mut Document, symbol: &str, name: &str) {
+    let mut info = SymbolInformation::new();
+    info.symbol = symbol.to_string();
+    info.display_name = name.to_string();
+    info.kind = EnumOrUnknown::new(symbol_information::Kind::Function);
+    let mut sig = Signature::new();
+    sig.text = format!("pub fn {name}()");
+    info.signature_documentation = MessageField::some(sig);
+    d.symbols.push(info);
+    let mut occ = Occurrence::new();
+    occ.symbol = symbol.to_string();
+    occ.range = vec![0, 0, 10];
+    occ.symbol_roles = 1;
+    occ.enclosing_range = vec![0, 0, 10];
+    d.occurrences.push(occ);
+}
+
+fn foo_substrate() -> Substrate {
+    let mut index = Index::new();
+    let mut module_doc = code_doc("src/foo/a.rs");
+    add_public_fn(&mut module_doc, ALPHA_RAW, "alpha");
+    index.documents.push(module_doc);
+    let meta = SubstrateMeta::single("rust-analyzer", "c0", Utc::now(), 1, 1);
+    Substrate::from_index(index, meta, false).expect("substrate")
+}
+
+fn record_component(state: &AppState, name: &str, covers: &str) -> String {
+    let class_iri = state.resolve_class("SystemComponent").unwrap();
+    let iri = graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "SystemComponent".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), name.to_string()),
+                (state.capture.title.clone(), name.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    let quad = Quad::new(
+        NamedNode::new(&iri).unwrap(),
+        NamedNode::new(COVERS_PATH).unwrap(),
+        Term::from(Literal::new_simple_literal(covers)),
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+    );
+    let mut txn = state.store.start_transaction().unwrap();
+    txn.insert(quad.as_ref());
+    txn.commit().unwrap();
+    iri
+}
+
+#[tokio::test]
+async fn debt_and_proposals_endpoints() {
+    let state = AppState::bootstrap(&temp_dir("debt"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(foo_substrate()));
+    record_component(&state, "foo", "src/foo/");
+    let subject = record_api_decision(&state, "cited decision");
+    graph::propose_link(
+        &state,
+        &subject,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "cited in prose",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+
+    let server = test_server(state);
+
+    // Debt: foo owns 1 public entity, 0 documented (the proposal must not count).
+    let debt = server.get("/api/v1/debt").await;
+    debt.assert_status_ok();
+    let body = debt.json::<Value>();
+    let row = body["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "foo")
+        .expect("foo component");
+    assert_eq!(row["denominator"], 1);
+    assert_eq!(row["numerator"], 0);
+
+    // Inbox lists the pending proposal.
+    let list = server.get("/api/v1/proposals?status=proposed").await;
+    list.assert_status_ok();
+    let proposals = list.json::<Value>();
+    let arr = proposals["proposals"].as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["predicate"], "concerns");
+    let id = arr[0]["id"].as_str().unwrap().to_string();
+
+    // Accept materializes the real link.
+    let accept = server.post(&format!("/api/v1/proposals/{id}/accept")).await;
+    accept.assert_status_ok();
+    assert_eq!(accept.json::<Value>()["status"], "accepted");
+
+    // Debt numerator now reflects the ratified link.
+    let debt2 = server.get("/api/v1/debt").await;
+    let body2 = debt2.json::<Value>();
+    let row2 = body2["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "foo")
+        .expect("foo component");
+    assert_eq!(row2["numerator"], 1);
+
+    // Unknown id → 404.
+    server
+        .post("/api/v1/proposals/nonexistent/accept")
+        .await
+        .assert_status_not_found();
 }

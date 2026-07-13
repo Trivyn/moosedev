@@ -9,6 +9,43 @@ export interface HealthResponse {
   llm_assist_level: string;
 }
 
+export interface ComponentCoverage {
+  iri: string | null;
+  name: string;
+  numerator: number;
+  denominator: number;
+  coverage: number | null;
+  undocumented: string[];
+}
+
+export interface WhyCoverageResponse {
+  components: ComponentCoverage[];
+  unmapped: number;
+}
+
+export interface Proposal {
+  id: string;
+  iri: string;
+  label: string;
+  subject_iri: string;
+  predicate: string;
+  target_symbol: string;
+  target_path: string;
+  evidence: string | null;
+  status: string;
+}
+
+export interface ProposalListResponse {
+  proposals: Proposal[];
+}
+
+export interface ProposalActionResponse {
+  id: string;
+  status: string;
+  entity_iri: string | null;
+  entity_name: string | null;
+}
+
 export interface AdrWarnings {
   missing_context: string[];
   missing_decision: string[];
