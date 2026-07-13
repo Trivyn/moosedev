@@ -278,6 +278,50 @@ fn anchor_scopes_gate_to_overlapping_definitions() {
 }
 
 #[test]
+fn ratified_criticality_high_gates_but_proposed_never_does() {
+    let f = setup("policy-criticality");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+    let high = graph::criticality_iri("high");
+    let judgment = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "hasCriticality",
+        &high,
+        0.6,
+        graph::ESCALATED,
+        "fan-in P92",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+
+    // Proposed judgments can never gate — no edge exists.
+    let decision = evaluate(&f.state, &f.repo_root, &edit(Some("alpha"))).expect("evaluate");
+    assert!(
+        matches!(decision, PolicyDecision::Allow),
+        "a proposed judgment must not gate"
+    );
+
+    // Ratify → the gate now asks, citing the accepted judgment node.
+    graph::accept_proposal(&f.state, &judgment, "james").unwrap();
+    let decision = evaluate(&f.state, &f.repo_root, &edit(Some("alpha"))).expect("evaluate");
+    let PolicyDecision::Gate {
+        disposition,
+        reason,
+        records,
+        entities,
+    } = decision
+    else {
+        panic!("expected a gate");
+    };
+    assert_eq!(disposition, GateDisposition::RequireRatification);
+    assert!(reason.contains("criticality: high (ratified judgment)"));
+    assert_eq!(records[0].iri, judgment, "cites the judgment node");
+    assert_eq!(records[0].kind, "Judgment");
+    assert_eq!(entities, vec![f.alpha.clone()]);
+}
+
+#[test]
 fn push_injects_hover_bytes_and_fires() {
     let f = setup("policy-push");
     graph::relate(&f.state, &f.constraint, "concerns", &f.alpha).expect("concerns edge");

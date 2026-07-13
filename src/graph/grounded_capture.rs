@@ -107,13 +107,14 @@ pub fn capture_decision_point(
     let substrate = state.substrate();
 
     for file in &files {
-        let module = substrate
-            .as_ref()
-            .and_then(|s| {
-                s.definitions_in_file(file)
-                    .into_iter()
-                    .find(|d| d.entry.is_module)
-            });
+        // Anchor at the file's OUTERMOST module (shortest symbol path) — not
+        // an inner `mod tests` that happens to appear first in file order.
+        let module = substrate.as_ref().and_then(|s| {
+            s.definitions_in_file(file)
+                .into_iter()
+                .filter(|d| d.entry.is_module)
+                .min_by_key(|d| d.entry.symbol.matches('/').count())
+        });
         match module {
             Some(def) => proposed_links.push(propose_link(
                 state,

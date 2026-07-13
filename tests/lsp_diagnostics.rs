@@ -1114,6 +1114,42 @@ async fn code_lens_shows_counts_and_hotspots() -> anyhow::Result<()> {
     // build_server (public) gets a linked constraint; no_records (public) stays bare.
     let constraint = record(&state, "Constraint", "Runtime builder must stay local");
     link_public(&state, &constraint, 4);
+
+    // Judgment badges: a proposed role renders `glue?`, a ratified
+    // criticality-high renders `critical` — both prefixed to the count badge.
+    graph::ensure_taxonomy_individuals(&state).unwrap();
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let entity = graph::entities_by_symbol(&state, &terms)
+        .unwrap()
+        .into_values()
+        .next()
+        .expect("build_server minted by link_code");
+    graph::propose_judgment(
+        &state,
+        &entity,
+        "playsRole",
+        &graph::role_iri("glue"),
+        0.6,
+        graph::AUTO_HELD,
+        "R3 glue: plumbing path",
+        "moosedev-classifier",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let high = graph::propose_judgment(
+        &state,
+        &entity,
+        "hasCriticality",
+        &graph::criticality_iri("high"),
+        0.6,
+        graph::ESCALATED,
+        "fan-in P92",
+        "moosedev-classifier",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    graph::accept_proposal(&state, &high, "james").unwrap();
+
     let socket = spawn_listener(state, &data_dir, &repo_root).await?;
     let uri = file_uri(&repo_root.join("src/runtime.rs"));
 
@@ -1132,6 +1168,16 @@ async fn code_lens_shows_counts_and_hotspots() -> anyhow::Result<()> {
     assert!(
         titles.iter().any(|t| t.contains("no linked rationale")),
         "undocumented public entity should carry a hotspot badge: {titles:?}"
+    );
+    assert!(
+        titles.iter().any(|t| t.contains("glue?")),
+        "proposed role renders provisional badge: {titles:?}"
+    );
+    assert!(
+        titles
+            .iter()
+            .any(|t| t.contains("critical") && !t.contains("critical?")),
+        "ratified criticality-high renders plain badge: {titles:?}"
     );
 
     client.shutdown_and_exit().await?;

@@ -30,6 +30,7 @@ pub async fn list_proposals(
             kind: match p.kind {
                 graph::ProposalKind::Link => "link".to_string(),
                 graph::ProposalKind::Record => "record".to_string(),
+                graph::ProposalKind::Judgment => "judgment".to_string(),
             },
             label: p.label,
             subject_iri: p.subject_iri,
@@ -37,6 +38,12 @@ pub async fn list_proposals(
             target_symbol: p.target_symbol,
             target_path: p.target_path,
             record_class: p.record_class,
+            target_iri: p.target_iri,
+            confidence: p.confidence,
+            escalation: p.escalation,
+            subject_name: p.subject_name,
+            subject_path: p.subject_path,
+            target_display: p.target_display,
             evidence: p.evidence,
             status: p.status,
         })
@@ -55,12 +62,42 @@ pub async fn accept_proposal(
     let (entity_iri, entity_name) = match outcome {
         graph::AcceptOutcome::Link(link) => (Some(link.entity_iri), Some(link.entity_name)),
         graph::AcceptOutcome::Record { .. } => (None, None),
+        graph::AcceptOutcome::Judgment { entity_iri, .. } => (Some(entity_iri), None),
     };
     Ok(Json(ProposalActionResponse {
         id: uuid,
         status: "accepted".to_string(),
         entity_iri,
         entity_name,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct RecategorizeRequest {
+    /// Corrected target local name (e.g. `boundary`, `standard`).
+    pub target: String,
+}
+
+/// `POST /api/v1/proposals/{id}/recategorize` — the human corrects a judgment's
+/// target: the classifier proposal is rejected (audit-preserved) and a
+/// human-authored judgment with the corrected target is materialized directly.
+pub async fn recategorize_proposal(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<String>,
+    Json(req): Json<RecategorizeRequest>,
+) -> Result<Json<ProposalActionResponse>, ApiError> {
+    let iri = resolve_proposal(&state, &uuid)?;
+    let outcome = graph::recategorize_judgment(&state, &iri, req.target.trim(), "workbench")
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let entity_iri = match outcome {
+        graph::AcceptOutcome::Judgment { entity_iri, .. } => Some(entity_iri),
+        _ => None,
+    };
+    Ok(Json(ProposalActionResponse {
+        id: uuid,
+        status: "recategorized".to_string(),
+        entity_iri,
+        entity_name: None,
     }))
 }
 

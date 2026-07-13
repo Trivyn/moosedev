@@ -266,14 +266,18 @@ struct GateCandidate {
     name: String,
 }
 
-/// Gate a proposed edit on the Constraints linked to the entities it touches.
+/// Gate a proposed edit on the Constraints linked to the entities it touches
+/// and their ratified criticality judgments.
 ///
-/// Semantics (v2.2, no role/criticality yet — AD `7dd7d3c6`):
+/// Semantics (AD `4d57fbad`, extended by the judgment stratum):
 /// - an `accepted` record linked by `violates` → `Deny` (the graph asserts an
 ///   actual violation);
 /// - an `accepted` Constraint linked by `constrains` → `RequireRatification`
 ///   (a ratified contract governs the entity; presence of a contract is not
 ///   proof the edit breaks it, so escalate to a human instead of hard-denying);
+/// - a RATIFIED criticality-high judgment → `RequireRatification` citing the
+///   judgment (spec §4.2: differential process on critical entities). Proposed
+///   judgments can never gate — no edge exists until a human accepts.
 /// - otherwise → `Allow`.
 fn gate_decision(
     state: &AppState,
@@ -284,6 +288,7 @@ fn gate_decision(
     anchor: Option<&str>,
 ) -> anyhow::Result<PolicyDecision> {
     let candidates = gate_candidates(state, repo_root, file, line, col, anchor)?;
+    let judgments = crate::graph::judgments_by_subject(state)?;
 
     // (entity iri, entity name, cited record) per gating link found.
     let mut deny: Vec<(String, String, RecordRef)> = Vec::new();
@@ -305,6 +310,27 @@ fn gate_decision(
                     record_ref(&record),
                 )),
                 _ => {}
+            }
+        }
+        // Ratified criticality-high gates; the accepted judgment node is the
+        // citation (it carries the ratification provenance).
+        if let Some(entity_judgments) = judgments.get(&candidate.iri) {
+            for judgment in entity_judgments {
+                if judgment.status == "accepted"
+                    && judgment.predicate_local == "hasCriticality"
+                    && judgment.target_local == "high"
+                {
+                    ratify.push((
+                        candidate.iri.clone(),
+                        candidate.name.clone(),
+                        RecordRef {
+                            iri: judgment.proposal_iri.clone(),
+                            kind: "Judgment".to_string(),
+                            title: "criticality: high (ratified judgment)".to_string(),
+                            workbench_url: None,
+                        },
+                    ));
+                }
             }
         }
     }

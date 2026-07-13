@@ -26,6 +26,12 @@ pub struct ComponentCoverage {
     pub numerator: usize,
     /// Total public-surface entities owned by this component.
     pub denominator: usize,
+    /// Core-surface subset (RATIFIED role core-algorithm|domain-logic) with
+    /// ≥1 linked rationale record. 0/0 until roles are ratified — additive,
+    /// never replacing the unweighted numbers (AD b6df1bf9's promised view).
+    pub core_numerator: usize,
+    /// Core-surface subset total.
+    pub core_denominator: usize,
     /// Names of the undocumented public-surface entities (auditable drill-down).
     pub undocumented: Vec<String>,
 }
@@ -72,6 +78,8 @@ pub fn compute_why_coverage(state: &AppState) -> anyhow::Result<WhyCoverage> {
                     name: c.name.clone(),
                     numerator: 0,
                     denominator: 0,
+                    core_numerator: 0,
+                    core_denominator: 0,
                     undocumented: Vec::new(),
                 },
             )
@@ -90,6 +98,18 @@ pub fn compute_why_coverage(state: &AppState) -> anyhow::Result<WhyCoverage> {
 
     let terms = CodeTerms::resolve(state)?;
     let entities = entities_by_symbol(state, &terms)?;
+    // Ratified core roles (accepted playsRole → core-algorithm|domain-logic);
+    // proposed judgments never move this metric.
+    let judgments = super::proposals::judgments_by_subject(state)?;
+    let is_core = |entity_iri: &str| {
+        judgments.get(entity_iri).is_some_and(|entity_judgments| {
+            entity_judgments.iter().any(|j| {
+                j.status == "accepted"
+                    && j.predicate_local == "playsRole"
+                    && matches!(j.target_local.as_str(), "core-algorithm" | "domain-logic")
+            })
+        })
+    };
     let mut unmapped = 0usize;
 
     for def in substrate.definitions() {
@@ -104,10 +124,18 @@ pub fn compute_why_coverage(state: &AppState) -> anyhow::Result<WhyCoverage> {
         let entry = acc.get_mut(&key).expect("every component was seeded above");
         entry.denominator += 1;
 
-        let documented = match entities.get(&def.normalized_symbol) {
+        let entity_iri = entities.get(&def.normalized_symbol);
+        let documented = match entity_iri {
             Some(iri) => !direct_records_for_entity(state, iri)?.is_empty(),
             None => false,
         };
+        let core = entity_iri.is_some_and(|iri| is_core(iri));
+        if core {
+            entry.core_denominator += 1;
+            if documented {
+                entry.core_numerator += 1;
+            }
+        }
         if documented {
             entry.numerator += 1;
         } else {
@@ -175,6 +203,8 @@ mod tests {
             name: "empty".to_string(),
             numerator: 0,
             denominator: 0,
+            core_numerator: 0,
+            core_denominator: 0,
             undocumented: Vec::new(),
         };
         assert_eq!(c.ratio(), None);

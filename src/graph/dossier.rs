@@ -15,6 +15,7 @@ use crate::code::substrate::Position;
 use super::capture::asserted_project_types;
 use super::code_entities::{entities_by_symbol, CodeTerms};
 use super::context::first_literal;
+use super::proposals::{judgments_for_entity, JudgmentSummary};
 use super::state::AppState;
 use super::util::local_name;
 use super::PROJECT_KG_GRAPH_IRI;
@@ -76,8 +77,9 @@ pub struct Dossier {
     pub substrate_stale: bool,
     /// True when this entity is backed by a tree-sitter syntactic identity.
     pub syntactic_anchor: bool,
-    /// v2.1 seams; always empty in v2.0.
-    pub judgments: Vec<String>,
+    /// Role/criticality judgments (proposed = advisory, accepted = ratified).
+    pub judgments: Vec<JudgmentSummary>,
+    /// Observation digest lines from the churn sidecar (derived, not knowledge).
     pub observations: Vec<String>,
 }
 
@@ -114,7 +116,12 @@ pub fn get_entity_dossier(
     let realizes = first_realized_component(state, &terms, &entity_iri)?;
 
     let direct_records = direct_records_for_entity(state, &entity_iri)?;
-    if direct_records.is_empty() {
+    // Silence-rule amendment (of AD 8f20452a): judgments count as direct
+    // knowledge — a ratified core role with zero records is exactly the
+    // hotspot a hover must surface. Observations alone never break silence
+    // (measurements are not knowledge).
+    let judgments = judgments_for_entity(state, &entity_iri)?;
+    if direct_records.is_empty() && judgments.is_empty() {
         return Ok(None);
     }
 
@@ -132,6 +139,21 @@ pub fn get_entity_dossier(
     };
     sort_records(&mut component_records);
 
+    // Observation digest: derived churn/authorship for the defining file.
+    let mut observations = Vec::new();
+    if let (Some(substrate), Some(file)) = (state.substrate(), defined_in.as_deref()) {
+        if let Some(churn) = substrate.churn_for_file(file) {
+            let window = substrate.churn_window_months().unwrap_or(24);
+            observations.push(format!(
+                "churn: {} commits/{window}mo · last {} · {} author(s) · top {:.0}%",
+                churn.commits,
+                churn.last_commit.get(..10).unwrap_or(&churn.last_commit),
+                churn.distinct_authors,
+                churn.top_author_share * 100.0
+            ));
+        }
+    }
+
     Ok(Some(Dossier {
         entity_iri,
         kind,
@@ -143,8 +165,8 @@ pub fn get_entity_dossier(
         component_records,
         substrate_stale: state.substrate().map(|s| s.is_stale()).unwrap_or(false),
         syntactic_anchor,
-        judgments: Vec::new(),
-        observations: Vec::new(),
+        judgments,
+        observations,
     }))
 }
 
@@ -182,9 +204,31 @@ pub fn render_markdown(dossier: &Dossier) -> String {
     if let Some((_, label)) = &dossier.realizes {
         out.push_str(&format!("Realizes component: {label}\n"));
     }
-    out.push_str("\n**Records**\n");
-    for record in &dossier.direct_records {
-        render_record_line(&mut out, record);
+
+    if !dossier.judgments.is_empty() {
+        out.push_str("\n**Judgments**\n");
+        for judgment in &dossier.judgments {
+            render_judgment_line(&mut out, judgment);
+        }
+        // §5.3 item 5: a ratified core/critical entity with no linked
+        // rationale is a comprehension-debt hotspot with an address.
+        let core_or_critical = dossier.judgments.iter().any(|j| {
+            j.status == "accepted"
+                && matches!(
+                    j.target_local.as_str(),
+                    "core-algorithm" | "domain-logic" | "high"
+                )
+        });
+        if core_or_critical && dossier.direct_records.is_empty() {
+            out.push_str("⚠ core entity — no linked rationale\n");
+        }
+    }
+
+    if !dossier.direct_records.is_empty() {
+        out.push_str("\n**Records**\n");
+        for record in &dossier.direct_records {
+            render_record_line(&mut out, record);
+        }
     }
     if let Some((_, label)) = &dossier.realizes {
         if !dossier.component_records.is_empty() {
@@ -194,12 +238,43 @@ pub fn render_markdown(dossier: &Dossier) -> String {
             }
         }
     }
+    if !dossier.observations.is_empty() {
+        out.push_str("\n**Observations**\n");
+        for observation in &dossier.observations {
+            out.push_str(&format!("- {observation}\n"));
+        }
+    }
     if dossier.substrate_stale {
         out.push_str(
             "\nwarning: substrate is stale; positions may have drifted, re-run `moosedev index`.\n",
         );
     }
     out
+}
+
+/// One judgment line: ratified plain with provenance, proposed visually
+/// distinct with confidence + disposition (spec §5.3: provisional judgments
+/// render as proposals).
+fn render_judgment_line(out: &mut String, judgment: &JudgmentSummary) {
+    let axis = match judgment.predicate_local.as_str() {
+        "playsRole" => "role",
+        "hasCriticality" => "criticality",
+        other => other,
+    };
+    if judgment.status == "accepted" {
+        let date = judgment.timestamp.get(..10).unwrap_or(&judgment.timestamp);
+        out.push_str(&format!(
+            "- {axis}: {} — proposed by {}, ratified {date}\n",
+            judgment.target_local, judgment.author
+        ));
+    } else {
+        let confidence = judgment.confidence.as_deref().unwrap_or("?");
+        let escalation = judgment.escalation.as_deref().unwrap_or("pending");
+        out.push_str(&format!(
+            "- {axis}: {}? (proposed, {confidence}, {escalation})\n",
+            judgment.target_local
+        ));
+    }
 }
 
 fn render_record_line(out: &mut String, record: &RecordSummary) {

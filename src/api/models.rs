@@ -100,6 +100,10 @@ pub struct ComponentCoverageDto {
     pub denominator: usize,
     /// Documented fraction, or null when the component owns no public surface.
     pub coverage: Option<f64>,
+    /// Core-surface subset (ratified core-algorithm/domain-logic roles) with
+    /// linked rationale — 0/0 until roles are ratified. Additive view.
+    pub core_numerator: usize,
+    pub core_denominator: usize,
     pub undocumented: Vec<String>,
 }
 
@@ -113,7 +117,8 @@ pub struct ProposalDto {
     /// Minted UUID (last IRI segment) — the id in accept/reject routes.
     pub id: String,
     pub iri: String,
-    /// `link` (pending record→entity edge) or `record` (proposed record).
+    /// `link` (pending record→entity edge), `record` (proposed record), or
+    /// `judgment` (pending entity→role/criticality edge).
     pub kind: String,
     pub label: String,
     pub subject_iri: String,
@@ -122,6 +127,18 @@ pub struct ProposalDto {
     pub target_path: String,
     /// Local class name for `record` entries (e.g. `ArchitecturalDecision`).
     pub record_class: Option<String>,
+    /// Role/criticality individual IRI, for `judgment` entries.
+    pub target_iri: String,
+    /// Classifier confidence literal, for `judgment` entries.
+    pub confidence: Option<String>,
+    /// `escalated` or `auto-held`, for `judgment` entries.
+    pub escalation: Option<String>,
+    /// Subject's human name: record title (`link`) or entity code name (`judgment`).
+    pub subject_name: String,
+    /// Subject entity defining file, for `judgment` entries.
+    pub subject_path: String,
+    /// Humanized target: logical path (`link`) or individual local name (`judgment`).
+    pub target_display: String,
     pub evidence: Option<String>,
     pub status: String,
 }

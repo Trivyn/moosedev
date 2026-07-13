@@ -99,6 +99,12 @@ pub struct Substrate {
     /// Synthetic or live disk-backed staleness state.
     staleness: Staleness,
     syntactic: TreeSitterFallback,
+    /// Optional churn/authorship sidecar (observation stratum, AD `8dd7da0c`).
+    /// Absent on installs indexed before the sidecar existed — every consumer
+    /// degrades to "no observations".
+    churn: Option<super::ChurnIndex>,
+    /// Lazy workspace-wide fan-in: normalized symbol → reference count.
+    reference_counts: std::sync::OnceLock<std::collections::HashMap<String, u32>>,
 }
 
 impl Substrate {
@@ -129,11 +135,15 @@ impl Substrate {
         }
         let current_head = SubstrateMeta::current_head(repo_root);
         let stale = current_head != meta.indexed_commit;
+        // Best-effort: a missing or unreadable sidecar never fails the load.
+        let churn = super::ChurnIndex::load(data_dir).unwrap_or_default();
         Ok(Substrate {
             index: merged,
             meta,
             staleness: Staleness::disk_backed(repo_root, stale),
             syntactic: TreeSitterFallback::new(),
+            churn,
+            reference_counts: std::sync::OnceLock::new(),
         })
     }
 
@@ -377,6 +387,53 @@ impl Substrate {
             meta,
             staleness: Staleness::synthetic(stale),
             syntactic: TreeSitterFallback::new(),
+            churn: None,
+            reference_counts: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Attach a churn sidecar to a synthetic substrate (test hook).
+    pub fn with_churn(mut self, churn: super::ChurnIndex) -> Substrate {
+        self.churn = Some(churn);
+        self
+    }
+
+    /// Churn/authorship metrics for one repo-relative file, when the sidecar
+    /// exists and saw commits for it in the window.
+    pub fn churn_for_file(&self, relative_path: &str) -> Option<&super::FileChurn> {
+        self.churn.as_ref()?.files.get(relative_path)
+    }
+
+    /// History window the churn sidecar covers, when loaded.
+    pub fn churn_window_months(&self) -> Option<u32> {
+        self.churn.as_ref().map(|c| c.window_months)
+    }
+
+    /// Workspace-wide fan-in per normalized symbol: every retained
+    /// non-definition occurrence of a non-local symbol (the raw material the
+    /// topology Constraint `720dcd1c` reserves — references, not text).
+    /// Computed once, lazily; the classifier's blast-radius signal.
+    pub fn reference_counts(&self) -> &std::collections::HashMap<String, u32> {
+        self.reference_counts.get_or_init(|| {
+            let mut counts = std::collections::HashMap::new();
+            for file in self.index.files.values() {
+                for occurrence in &file.occurrences {
+                    if scip::is_definition_role(occurrence.symbol_roles) {
+                        continue;
+                    }
+                    let Some(symbol) = self.index.symbols.get(occurrence.symbol_id) else {
+                        continue;
+                    };
+                    if symbol.is_local {
+                        continue;
+                    }
+                    let Some(normalized) = symbols::normalize_symbol(&symbol.symbol) else {
+                        continue;
+                    };
+                    *counts.entry(normalized).or_insert(0) += 1;
+                }
+            }
+            counts
         })
     }
 
@@ -582,6 +639,25 @@ mod tests {
         assert!(substrate
             .resolve("missing.rs", Position { line: 3, col: 6 })
             .is_none());
+    }
+
+    #[test]
+    fn reference_counts_exclude_definitions_and_locals() {
+        let symbol = "rust-analyzer cargo pkg 1.0.0 mod/f().";
+        let substrate = substrate_with_occurrences(vec![
+            occ(symbol, vec![0, 0, 5], 1), // definition role — not fan-in
+            occ(symbol, vec![1, 0, 5], 0), // reference
+            occ(symbol, vec![2, 0, 5], 0), // reference
+            occ("local 3", vec![3, 0, 5], 0), // local — not a stable identity
+        ]);
+
+        let counts = substrate.reference_counts();
+        assert_eq!(
+            counts.get("rust-analyzer cargo pkg . mod/f()."),
+            Some(&2),
+            "two references, version-normalized key"
+        );
+        assert_eq!(counts.len(), 1, "definitions and locals excluded");
     }
 
     #[test]

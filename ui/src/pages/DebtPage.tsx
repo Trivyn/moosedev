@@ -102,7 +102,12 @@ export default function DebtPage({ onNavigateRecord }: DebtPageProps) {
             <TableRow>
               <TableCell>Component</TableCell>
               <TableCell align="right">Documented</TableCell>
-              <TableCell sx={{ width: '45%' }}>Coverage</TableCell>
+              <TableCell align="right">
+                <Tooltip title="Entities with a RATIFIED core-algorithm/domain-logic role; 0/0 until roles are ratified in the inbox">
+                  <span>Core</span>
+                </Tooltip>
+              </TableCell>
+              <TableCell sx={{ width: '40%' }}>Coverage</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -131,6 +136,11 @@ export default function DebtPage({ onNavigateRecord }: DebtPageProps) {
                 >
                   <TableCell>{component.name}</TableCell>
                   <TableCell align="right">{cell}</TableCell>
+                  <TableCell align="right">
+                    {component.core_denominator > 0
+                      ? `${component.core_numerator} / ${component.core_denominator}`
+                      : '—'}
+                  </TableCell>
                   <TableCell>
                     {empty ? '—' : <CoverageBar ratio={coverageValue(component)} />}
                   </TableCell>

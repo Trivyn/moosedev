@@ -46,7 +46,11 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .route("/capture", post(handlers::capture_decision_point))
         .route("/proposals", get(handlers::list_proposals))
         .route("/proposals/{id}/accept", post(handlers::accept_proposal))
-        .route("/proposals/{id}/reject", post(handlers::reject_proposal));
+        .route("/proposals/{id}/reject", post(handlers::reject_proposal))
+        .route(
+            "/proposals/{id}/recategorize",
+            post(handlers::recategorize_proposal),
+        );
 
     Router::new()
         .nest("/api/v1", api)

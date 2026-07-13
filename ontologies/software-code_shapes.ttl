@@ -13,12 +13,16 @@
     owl:imports <https://trivyn.io/ontologies/software/code> .
 
 # =============================================================================
-# Hand-curated 2026-07-08 (v2 slice-2 Phase 0): v2.0 scope is CodeEntity only.
-# The parked stratum classes (CodeSnapshot, CodeRole, Criticality,
-# AttentionPolicy, Observation, AuthorshipProvenance, CodeFile) deliberately
-# have NO shapes: shape entries feed the relation catalogue, and their strata
-# must not gain write paths before their ratification/instrumentation
-# machinery ships (v2.1/v2.2).
+# Hand-curated 2026-07-08 (v2 slice-2 Phase 0): v2.0 scope was CodeEntity only.
+# The judgment-stratum slice un-parked CodeRole and Criticality: playsRole /
+# hasCriticality gained shape branches below, which is what admits CodeEntity
+# subjects for them through the relation catalogue — their write path is
+# accept-only (relate() runs when a human ratifies a judgment proposal; the
+# classifier itself writes only shapeless ProposedLink literals).
+# The still-parked classes (CodeSnapshot, AttentionPolicy, Observation,
+# AuthorshipProvenance, CodeFile) deliberately have NO shapes: shape entries
+# feed the relation catalogue, and their strata must not gain write paths
+# before their instrumentation machinery ships.
 #
 # Structure is machine-derived (never agent-written), so this shape validates
 # integrity — cardinality and datatype — not editorial completeness.
@@ -74,4 +78,14 @@ shape:CodeEntityShape a sh:NodeShape ;
     sh:property [
         sh:path arch:violates ;
         sh:class arch:Constraint
+    ] ;
+    sh:property [
+        sh:path code:playsRole ;
+        sh:class code:CodeRole ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:hasCriticality ;
+        sh:class code:Criticality ;
+        sh:maxCount 1
     ] .

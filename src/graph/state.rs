@@ -714,9 +714,29 @@ mod tests {
             "proposesPredicate",
             "proposesTargetSymbol",
             "proposesTargetPath",
+            "proposesTargetIri",
+            "hasConfidence",
+            "hasEscalation",
         ] {
             assert_eq!(
                 state.resolve_code_datatype_property(prop).unwrap(),
+                format!("{CODE}{prop}")
+            );
+        }
+        // Judgment-stratum classes and playing-relations (un-parked).
+        for class in ["CodeRole", "Criticality"] {
+            assert_eq!(
+                state.resolve_code_class(class).unwrap(),
+                format!("{CODE}{class}")
+            );
+            assert!(
+                state.resolve_class(class).is_err(),
+                "{class} must stay out of architecture capture kinds"
+            );
+        }
+        for prop in ["playsRole", "hasCriticality"] {
+            assert_eq!(
+                state.resolve_object_property(prop).unwrap(),
                 format!("{CODE}{prop}")
             );
         }

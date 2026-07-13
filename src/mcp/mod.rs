@@ -435,7 +435,7 @@ impl MooseDevServer {
 
     /// Report the pending ratification queue depth (read-only).
     #[tool(
-        description = "Count the pending link proposals awaiting human ratification (proposed record→code-entity links, e.g. from the citation-seed migration). Read-only; returns the count plus a short preview. Ratify or reject them in the workbench Ratifications page."
+        description = "Count the pending proposals awaiting human ratification (record→code-entity links and proposed records). Read-only; returns the count plus a short preview. Judgment proposals (role/criticality classifications) never count here — they wait quietly in the workbench inbox and are tallied separately. Ratify or reject in the workbench Ratifications page."
     )]
     async fn pending_ratifications(&self) -> Result<CallToolResult, McpError> {
         let proposals = match graph::list_proposals(&self.state, Some("proposed")) {
@@ -446,11 +446,25 @@ impl MooseDevServer {
                 )))
             }
         };
-        if proposals.is_empty() {
-            return Ok(tool_ok("0 pending ratifications — the inbox is empty."));
+        // Never-nudge: judgments wait quietly; only links + records demand.
+        let (judgments, nudging): (Vec<_>, Vec<_>) = proposals
+            .into_iter()
+            .partition(|p| p.kind == graph::ProposalKind::Judgment);
+        let judgment_note = if judgments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n({} judgment proposal(s) waiting quietly — browse them in the workbench inbox.)",
+                judgments.len()
+            )
+        };
+        if nudging.is_empty() {
+            return Ok(tool_ok(format!(
+                "0 pending ratifications — the inbox is empty.{judgment_note}"
+            )));
         }
-        let mut out = format!("{} pending ratification(s):\n", proposals.len());
-        for proposal in proposals.iter().take(10) {
+        let mut out = format!("{} pending ratification(s):\n", nudging.len());
+        for proposal in nudging.iter().take(10) {
             match proposal.kind {
                 graph::ProposalKind::Link => out.push_str(&format!(
                     "  - [link] {} → {} ({})\n",
@@ -461,12 +475,14 @@ impl MooseDevServer {
                     proposal.record_class.as_deref().unwrap_or("Record"),
                     proposal.label
                 )),
+                graph::ProposalKind::Judgment => unreachable!("partitioned out above"),
             }
         }
-        if proposals.len() > 10 {
-            out.push_str(&format!("  … and {} more\n", proposals.len() - 10));
+        if nudging.len() > 10 {
+            out.push_str(&format!("  … and {} more\n", nudging.len() - 10));
         }
         out.push_str("Ratify or reject them in the workbench Ratifications page.");
+        out.push_str(&judgment_note);
         Ok(tool_ok(out))
     }
 

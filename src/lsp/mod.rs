@@ -570,11 +570,14 @@ impl LspSession {
         Ok(())
     }
 
-    /// Badges above declarations: per-kind record counts where knowledge exists,
-    /// or a "no linked rationale" hotspot on an undocumented public entity. No
-    /// role badges in v2.1 (the judgment stratum ships in v2.2). Driven off the
-    /// same substrate + records the dossier uses (`is_debt_surface` shared with
-    /// the why-coverage metric), so the lens and the metric never disagree.
+    /// Badges above declarations: role/criticality judgment badges (ratified
+    /// plain, proposed suffixed `?`; criticality badged only when high — Zed
+    /// lens length discipline), per-kind record counts where knowledge exists,
+    /// and a hotspot flag on an undocumented public entity — upgraded to
+    /// "core entity" wording when a ratified judgment marks it core/critical
+    /// (spec §5.5). Driven off the same substrate + records the dossier uses
+    /// (`is_debt_surface` shared with the why-coverage metric), so the lens
+    /// and the metric never disagree.
     fn code_lenses(&self, params: serde_json::Value) -> Option<Vec<CodeLens>> {
         if !self.code_lens_enabled {
             return Some(Vec::new());
@@ -584,6 +587,7 @@ impl LspSession {
         let substrate = self.state.substrate()?;
         let terms = CodeTerms::resolve(&self.state).ok()?;
         let entities = entities_by_symbol(&self.state, &terms).ok()?;
+        let judgments = crate::graph::judgments_by_subject(&self.state).unwrap_or_default();
 
         let mut lenses = Vec::new();
         for definition in substrate.definitions_in_file(&rel_path) {
@@ -591,13 +595,30 @@ impl LspSession {
             let records = entity_iri
                 .and_then(|iri| direct_records_for_entity(&self.state, iri).ok())
                 .unwrap_or_default();
-            let title = if !records.is_empty() {
-                lens_count_title(&records)
+            let entity_judgments = entity_iri
+                .and_then(|iri| judgments.get(iri))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+
+            let mut parts = judgment_badges(entity_judgments);
+            let ratified_core = entity_judgments.iter().any(|j| {
+                j.status == "accepted"
+                    && matches!(
+                        j.target_local.as_str(),
+                        "core-algorithm" | "domain-logic" | "high"
+                    )
+            });
+            if !records.is_empty() {
+                parts.push(lens_count_title(&records));
+            } else if ratified_core {
+                parts.push("⚠ core entity — no linked rationale".to_string());
             } else if is_debt_surface(&definition.entry) {
-                "⚠ no linked rationale".to_string()
-            } else {
+                parts.push("⚠ no linked rationale".to_string());
+            }
+            if parts.is_empty() {
                 continue;
-            };
+            }
+            let title = parts.join(" · ");
             let Some(range) = self.diagnostic_range(&rel_path, definition.range) else {
                 continue;
             };
@@ -627,7 +648,7 @@ impl LspSession {
         }
         let plural = if count == 1 { "" } else { "s" };
         let message = format!(
-            "MOOSEDev: {count} pending link proposal{plural} awaiting ratification in the workbench inbox"
+            "MOOSEDev: {count} pending proposal{plural} awaiting ratification in the workbench inbox"
         );
         let _ = self.connection.sender.send(
             Notification::new(
@@ -931,6 +952,33 @@ fn code_lens_uri(params: &serde_json::Value) -> Option<Uri> {
 }
 
 /// Render a code-lens badge like "3 decisions · 1 constraint" from linked records.
+/// Short judgment badges for the lens title: role always (ratified plain,
+/// proposed `?`-suffixed), criticality only when high — lens space is scarce.
+fn judgment_badges(judgments: &[crate::graph::JudgmentSummary]) -> Vec<String> {
+    let mut badges = Vec::new();
+    for judgment in judgments {
+        let provisional = judgment.status != "accepted";
+        match judgment.predicate_local.as_str() {
+            "playsRole" => {
+                badges.push(if provisional {
+                    format!("{}?", judgment.target_local)
+                } else {
+                    judgment.target_local.clone()
+                });
+            }
+            "hasCriticality" if judgment.target_local == "high" => {
+                badges.push(if provisional {
+                    "critical?".to_string()
+                } else {
+                    "critical".to_string()
+                });
+            }
+            _ => {}
+        }
+    }
+    badges
+}
+
 fn lens_count_title(records: &[RecordSummary]) -> String {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for record in records {

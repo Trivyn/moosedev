@@ -233,6 +233,251 @@ fn proposed_link_is_invisible_until_accepted() {
     assert!(graph::accept_proposal(&f.state, &p, "tester").is_err());
 }
 
+fn has_edge(state: &AppState, subject: &str, predicate_local: &str, object: &str) -> bool {
+    let predicate = state.resolve_object_property(predicate_local).unwrap();
+    state
+        .store
+        .quads_for_pattern(
+            Some(NamedNode::new(subject).unwrap().as_ref().into()),
+            Some(NamedNodeRef::new(&predicate).unwrap()),
+            Some(NamedNodeRef::new(object).unwrap().into()),
+            Some(GraphNameRef::NamedNode(
+                NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap(),
+            )),
+        )
+        .next()
+        .is_some()
+}
+
+#[test]
+fn judgment_lifecycle_proposes_ratifies_and_rejects() {
+    let f = setup("judgment-lifecycle");
+    assert!(graph::ensure_taxonomy_individuals(&f.state).unwrap() > 0);
+    assert_eq!(
+        graph::ensure_taxonomy_individuals(&f.state).unwrap(),
+        0,
+        "taxonomy seeding is idempotent"
+    );
+
+    let role = graph::role_iri("boundary");
+    let p = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &role,
+        0.75,
+        graph::AUTO_HELD,
+        "R2 boundary: public + api path pattern",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+
+    // Advisory-until-ratified: no edge, no dossier records, no debt movement —
+    // and judgments never nudge.
+    assert!(!has_edge(&f.state, &f.alpha, "playsRole", &role));
+    assert!(!has_records(&f.state, &f.alpha));
+    assert_eq!(foo_numerator(&f.state), 0);
+    assert_eq!(
+        graph::pending_count(&f.state).unwrap(),
+        0,
+        "judgments (even pending) never count toward the nudge"
+    );
+    let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
+    assert_eq!(pending.len(), 1, "but they list in the inbox");
+    assert_eq!(pending[0].kind, graph::ProposalKind::Judgment);
+    assert_eq!(pending[0].subject_iri, f.alpha);
+    assert_eq!(pending[0].target_iri, role);
+    assert_eq!(pending[0].confidence.as_deref(), Some("0.75"));
+    assert_eq!(pending[0].escalation.as_deref(), Some("auto-held"));
+
+    // Ratify: exactly the playing-relation edge materializes (shape-validated).
+    let outcome = graph::accept_proposal(&f.state, &p, "james").unwrap();
+    assert!(matches!(outcome, graph::AcceptOutcome::Judgment { .. }));
+    assert!(has_edge(&f.state, &f.alpha, "playsRole", &role));
+    assert_eq!(
+        foo_numerator(&f.state),
+        0,
+        "a judgment is not a rationale record; why-coverage unmoved"
+    );
+    let judgments = graph::judgments_for_entity(&f.state, &f.alpha).unwrap();
+    assert_eq!(judgments.len(), 1);
+    assert_eq!(judgments[0].status, "accepted");
+    assert_eq!(judgments[0].target_local, "boundary");
+    assert_eq!(judgments[0].author, "moosedev-classifier");
+
+    // Post-accept the graph still conforms (the new shape branches hold).
+    let report = moosedev::validation::validate_project(&f.state).unwrap();
+    assert!(report.conforms(), "graph conforms after judgment accept");
+
+    // Re-accepting is guarded.
+    assert!(graph::accept_proposal(&f.state, &p, "james").is_err());
+
+    // The dossier now speaks (silence amendment: judgments count as direct
+    // knowledge) and renders the ratified judgment with provenance, plus the
+    // core-entity hotspot line since no rationale records are linked.
+    let dossier = graph::get_entity_dossier(&f.state, &DossierTarget::Iri(f.alpha.clone()))
+        .unwrap()
+        .expect("judgment-only entity produces a dossier");
+    assert_eq!(dossier.judgments.len(), 1);
+    let markdown = graph::render_markdown(&dossier);
+    assert!(markdown.contains("role: boundary — proposed by moosedev-classifier, ratified"));
+
+    // An escalated criticality judgment, rejected → no edge, gone from readers.
+    let crit = graph::criticality_iri("high");
+    let p2 = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "hasCriticality",
+        &crit,
+        0.6,
+        graph::ESCALATED,
+        "fan-in P92; accepted constrains link",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+    graph::reject_proposal(&f.state, &p2, "james").unwrap();
+    assert!(!has_edge(&f.state, &f.alpha, "hasCriticality", &crit));
+    let judgments = graph::judgments_for_entity(&f.state, &f.alpha).unwrap();
+    assert_eq!(judgments.len(), 1, "rejected judgments drop out of readers");
+}
+
+#[test]
+fn recategorize_rejects_classifier_target_and_ratifies_the_correction() {
+    let f = setup("judgment-recategorize");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+
+    // Classifier says core-algorithm; the human knows it's boundary.
+    let proposal = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &graph::role_iri("core-algorithm"),
+        0.6,
+        graph::ESCALATED,
+        "R4 core-algorithm: fan-in 19",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+
+    let outcome = graph::recategorize_judgment(&f.state, &proposal, "boundary", "james").unwrap();
+    let graph::AcceptOutcome::Judgment { target_iri, .. } = outcome else {
+        panic!("recategorize materializes a judgment");
+    };
+    assert_eq!(target_iri, graph::role_iri("boundary"));
+
+    // The corrected edge exists; the classifier's target never materialized.
+    assert!(has_edge(&f.state, &f.alpha, "playsRole", &graph::role_iri("boundary")));
+    assert!(!has_edge(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &graph::role_iri("core-algorithm")
+    ));
+
+    // One accepted human judgment visible; the original is rejected (audit) and
+    // its evidence survives inside the correction's trace.
+    let judgments = graph::judgments_for_entity(&f.state, &f.alpha).unwrap();
+    assert_eq!(judgments.len(), 1);
+    assert_eq!(judgments[0].status, "accepted");
+    assert_eq!(judgments[0].target_local, "boundary");
+    assert_eq!(judgments[0].author, "james");
+    let rejected = graph::list_proposals(&f.state, Some("rejected")).unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].iri, proposal);
+
+    // Wrong-axis target refused before any write; resolved entries refused too.
+    let p2 = graph::propose_judgment(
+        &f.state,
+        &f.beta,
+        "hasCriticality",
+        &graph::criticality_iri("high"),
+        0.6,
+        graph::ESCALATED,
+        "fan-in",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+    assert!(graph::recategorize_judgment(&f.state, &p2, "boundary", "james").is_err());
+    assert!(graph::recategorize_judgment(&f.state, &proposal, "glue", "james").is_err());
+}
+
+#[test]
+fn judgment_with_wrong_range_target_fails_honestly() {
+    let f = setup("judgment-range");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+
+    // Proposing an edge to a non-CodeRole target is possible (literals only)…
+    let p = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &f.constraint,
+        0.9,
+        graph::AUTO_HELD,
+        "bogus target",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+    // …but accept runs the shape-validated relate, which refuses it, and the
+    // judgment stays pending (honest skip, not a silent broken edge).
+    assert!(graph::accept_proposal(&f.state, &p, "james").is_err());
+    let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, "proposed");
+}
+
+#[test]
+fn duplicate_pending_link_proposals_are_not_minted() {
+    let f = setup("proposals-dedup");
+    let first = graph::propose_link(
+        &f.state,
+        &f.constraint,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "file changed at this decision point",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    // A repeated session capture proposes the identical link again…
+    let second = graph::propose_link(
+        &f.state,
+        &f.constraint,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "file changed at this decision point (again)",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    // …and gets the existing pending entry instead of a duplicate.
+    assert_eq!(first, second);
+    assert_eq!(graph::pending_count(&f.state).unwrap(), 1);
+
+    // Once resolved, an identical proposal may be minted again (a genuinely
+    // new capture after a rejection is new information).
+    graph::reject_proposal(&f.state, &first, "tester").unwrap();
+    let third = graph::propose_link(
+        &f.state,
+        &f.constraint,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "fresh capture",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    assert_ne!(first, third);
+}
+
 #[test]
 fn rejected_link_creates_no_edge() {
     let f = setup("proposals-reject");

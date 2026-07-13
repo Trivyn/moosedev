@@ -24,6 +24,8 @@ pub async fn why_coverage(
                 numerator: c.numerator,
                 denominator: c.denominator,
                 coverage,
+                core_numerator: c.core_numerator,
+                core_denominator: c.core_denominator,
                 undocumented: c.undocumented,
             }
         })

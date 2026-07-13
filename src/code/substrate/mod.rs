@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod churn;
 pub mod meta;
 pub mod producer;
 pub mod resolver;
@@ -15,6 +16,7 @@ pub(crate) mod scip;
 pub mod symbols;
 pub(crate) mod treesitter;
 
+pub use churn::{ChurnIndex, FileChurn};
 pub use meta::{ProducerRun, SubstrateMeta};
 pub use producer::{
     registry, run_index, IndexReport, ProducerReport, ProducerSpec, ProducerTarget,

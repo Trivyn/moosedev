@@ -335,7 +335,7 @@ fn accept_ratifies_record_in_place_and_link_materializes_edge() {
     let outcome = graph::accept_proposal(&f.state, &captured.record_iri, "tester").unwrap();
     match outcome {
         AcceptOutcome::Record { title, .. } => assert_eq!(title, "Split foo"),
-        AcceptOutcome::Link(_) => panic!("record entry must ratify as a record"),
+        other => panic!("record entry must ratify as a record, got {other:?}"),
     }
     assert_eq!(status_of(&f.state, &captured.record_iri), "accepted");
     let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();

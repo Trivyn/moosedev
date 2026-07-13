@@ -21,6 +21,17 @@ FILE=$(jq -r '.tool_input.file_path // empty' <<<"$INPUT" 2>/dev/null) || exit 0
 [ -n "$FILE" ] || exit 0
 REL="${FILE#"$DIR"/}"
 
+# Repeat suppression: pushing the same file's dossier on every touch is noise,
+# not knowledge — one push per file per 10 minutes.
+STAMP_DIR="$DIR/.moosedev/push-stamps"
+mkdir -p "$STAMP_DIR" 2>/dev/null || exit 0
+STAMP="$STAMP_DIR/$(printf '%s' "$REL" | cksum | cut -d' ' -f1)"
+NOW=$(date +%s)
+if [ -f "$STAMP" ]; then
+  read -r LAST_TS <"$STAMP" || true
+  if [ $((NOW - ${LAST_TS:-0})) -lt 600 ]; then exit 0; fi
+fi
+
 BODY=$(jq -cn --arg file "$REL" \
   '{host: "claude-code", kind: "entity_touched", file: $file}')
 VERDICT=$(curl -sS --max-time 5 -H 'Content-Type: application/json' \
@@ -28,9 +39,11 @@ VERDICT=$(curl -sS --max-time 5 -H 'Content-Type: application/json' \
 
 DECISION=$(jq -r '.decision // empty' <<<"$VERDICT" 2>/dev/null) || exit 0
 [ "$DECISION" = "inject" ] || exit 0
-DOSSIER=$(jq -r '.dossier_markdown // empty' <<<"$VERDICT")
+# Cap the payload: keep the entity-exact head, drop the long component tail.
+DOSSIER=$(jq -r '.dossier_markdown // empty' <<<"$VERDICT" | head -c 6000)
 [ -n "$DOSSIER" ] || exit 0
 
+printf '%s\n' "$NOW" >"$STAMP"
 jq -n --arg context "$DOSSIER" '{
   hookSpecificOutput: {
     hookEventName: "PostToolUse",

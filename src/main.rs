@@ -67,6 +67,10 @@ enum Mode {
     Mint {
         apply: bool,
     },
+    /// Plan/apply role/criticality judgment proposals from evidence.
+    Classify {
+        apply: bool,
+    },
     /// Resolve a source position through the code substrate.
     Resolve(ResolveArgs),
     /// Print the resolved `skills/` dir + the agent workflow docs it holds.
@@ -124,6 +128,10 @@ USAGE:
     moosedev index            Build the code substrate index (runs rust-analyzer scip)
     moosedev mint [--apply]   Mint CodeEntity continuants from the substrate
                               (dry-run unless --apply is present)
+    moosedev classify [--apply]
+                              Propose role/criticality judgments from evidence
+                              (dry-run unless --apply; nothing takes effect
+                              until ratified in the workbench inbox)
     moosedev resolve FILE LINE:COL
                               Resolve a source position to a code entity (debug)
     moosedev skills           List the shipped agent workflow docs (bootstrap, …)
@@ -190,6 +198,7 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
         Some("index") => parse_index(iter).map(|()| Mode::Index),
         Some("mint") => parse_mint(iter).map(|apply| Mode::Mint { apply }),
+        Some("classify") => parse_classify(iter).map(|apply| Mode::Classify { apply }),
         Some("resolve") => parse_resolve(iter).map(Mode::Resolve),
         Some("skills") => Ok(Mode::Skills),
         Some("--help" | "-h") => {
@@ -346,6 +355,21 @@ fn parse_mint<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<bool
             anyhow::bail!("unknown mint option {arg:?}; expected optional --apply");
         } else {
             anyhow::bail!("mint accepts only optional --apply; unexpected {arg:?}");
+        }
+    }
+    Ok(apply)
+}
+
+/// Parse `classify`'s single optional flag; dry-run unless `--apply`.
+fn parse_classify<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<bool> {
+    let mut apply = false;
+    for arg in iter {
+        if arg == "--apply" {
+            apply = true;
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown classify option {arg:?}; expected optional --apply");
+        } else {
+            anyhow::bail!("classify accepts only optional --apply; unexpected {arg:?}");
         }
     }
     Ok(apply)
@@ -747,6 +771,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Bootstrap(args) => temporal::run(args),
         Mode::Index => index_mode(&data_dir),
         Mode::Mint { apply } => mint_mode(&data_dir, apply).await,
+        Mode::Classify { apply } => classify_mode(&data_dir, apply).await,
         Mode::Resolve(args) => resolve_mode(&data_dir, args),
         Mode::Skills => skills_mode(),
         Mode::Stdio => {
@@ -771,6 +796,10 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
     println!("  documents:   {}", report.documents);
     println!("  occurrences: {}", report.occurrences);
     println!("  definitions: {}", report.definitions);
+    match report.churn_files {
+        Some(files) => println!("  churn:       {files} files (24-month window)"),
+        None => println!("  churn:       unavailable (see warnings)"),
+    }
     println!(
         "  index size:  {} bytes\n  {}",
         report.index_bytes,
@@ -833,6 +862,116 @@ async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// Plan or apply role/criticality judgment proposals from evidence.
+async fn classify_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let repo_root = std::env::current_dir()?;
+    let substrate = Substrate::load(data_dir, &repo_root)
+        .with_context(|| "load code substrate for classify; run `moosedev index` first")?;
+    let state = match runtime::build_state(data_dir, &ontology_dir()).await {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!(
+                "failed to open MOOSEDev state at {}: {e}\n\
+                 Stop the daemon first, for example: kill $(cat {}/moosedev-serve.pid)",
+                data_dir.display(),
+                data_dir.display()
+            );
+            return Err(e);
+        }
+    };
+
+    let plan = graph::plan_classify(&state, &substrate, &repo_root)?;
+    report_classify_plan(&plan);
+
+    if !apply {
+        println!("dry-run only; re-run with --apply");
+        return Ok(());
+    }
+
+    let outcome = graph::apply_classify(&state, &plan)?;
+    let validation_started = std::time::Instant::now();
+    moosedev::canonical::write_through(&state.store, data_dir)?;
+    let report = moosedev::validation::validate_project(&state)?;
+    println!("\n{}", moosedev::validation::format_report(&report));
+    println!(
+        "validate: {:.3}s",
+        validation_started.elapsed().as_secs_f64()
+    );
+    if !report.conforms() {
+        anyhow::bail!("post-classify validation failed");
+    }
+    println!(
+        "classify applied: {} taxonomy individual(s) seeded, {} judgment(s) proposed in {:.3}s\n\
+         Nothing takes effect until ratified — review in the workbench Ratifications page.",
+        outcome.taxonomy_created,
+        outcome.proposed,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Print the full-accounting classify report: every population entity lands in
+/// exactly one bucket; nothing is silently dropped.
+fn report_classify_plan(plan: &graph::ClassifyPlan) {
+    println!("classification plan (debt surface ∩ role-bearing kinds)");
+
+    let tally = |judgments: &[graph::PlannedJudgment]| {
+        let mut by_rule: std::collections::BTreeMap<String, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for judgment in judgments {
+            let entry = by_rule.entry(judgment.target_local.clone()).or_default();
+            entry.0 += 1;
+            if judgment.escalation == "escalated" {
+                entry.1 += 1;
+            }
+        }
+        by_rule
+    };
+
+    println!("  role judgments: {}", plan.role.len());
+    for (target, (count, escalated)) in tally(&plan.role) {
+        println!("    {target}: {count} ({escalated} escalated)");
+    }
+    println!(
+        "  criticality judgments (deviations from implicit standard): {}",
+        plan.criticality.len()
+    );
+    for (target, (count, escalated)) in tally(&plan.criticality) {
+        println!("    {target}: {count} ({escalated} escalated)");
+    }
+    println!(
+        "  unclassified (honest abstention, no node): {}",
+        plan.unclassified.len()
+    );
+    if !plan.excluded_by_kind.is_empty() {
+        let groups: Vec<String> = plan
+            .excluded_by_kind
+            .iter()
+            .map(|(kind, count)| format!("{kind} {count}"))
+            .collect();
+        println!("  excluded by kind: {}", groups.join(", "));
+    }
+    println!("  skipped (already judged): {}", plan.skipped_existing);
+    if !plan.missing_entities.is_empty() {
+        println!(
+            "  missing entities (run `moosedev mint --apply`): {}",
+            plan.missing_entities.len()
+        );
+    }
+    let total_nodes = plan.role.len() + plan.criticality.len();
+    println!(
+        "  projected kg.nq growth: ~{} quads across {} judgment node(s){}",
+        plan.projected_quads,
+        total_nodes,
+        if total_nodes > 500 {
+            "  ⚠ over 500 nodes — consider ratifying in batches"
+        } else {
+            ""
+        }
+    );
 }
 
 /// Print the human-facing dry-run/apply plan summary.

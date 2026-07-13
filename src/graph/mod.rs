@@ -10,6 +10,7 @@
 //! re-exports each submodule so the public `crate::graph::*` API remains stable.
 
 pub mod capture;
+pub mod classify;
 pub mod code_entities;
 pub mod components;
 pub mod context;
@@ -23,9 +24,11 @@ pub mod proposals;
 pub mod query;
 pub mod relations;
 pub mod state;
+pub mod taxonomy;
 pub mod util;
 
 pub use capture::*;
+pub use classify::*;
 pub use code_entities::*;
 pub use components::*;
 pub use context::*;
@@ -39,6 +42,7 @@ pub use proposals::*;
 pub use query::*;
 pub use relations::*;
 pub use state::*;
+pub use taxonomy::*;
 pub use util::*;
 
 /// Named graph holding recorded knowledge instances (the durable project KG).

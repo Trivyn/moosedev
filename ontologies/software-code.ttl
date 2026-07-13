@@ -169,22 +169,49 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:definition "Relates a pattern to a code entity that embodies it." ;
     skos:historyNote "Hand-curated 2026-07-08 (ratified worksheet, AD 7079634f)" .
 
+# Object Properties — judgment stratum playing-relations (spec §3.4). The edge
+# itself is plain and queryable; its lifecycle status, confidence, evidence,
+# and ratification provenance live on the resolved ProposedLink node that
+# proposed it (the reify-as-node discipline). Materialized only on human
+# acceptance — a proposed judgment has no edge. No owl:inverseOf on purpose:
+# a declared inverse would make enrichment materialize hub edges on the few
+# role/criticality individuals, one per accepted judgment, for a direction
+# nothing reads.
+:playsRole a owl:ObjectProperty ;
+    rdfs:label "plays role" ;
+    rdfs:domain :CodeEntity ;
+    rdfs:range :CodeRole ;
+    skos:definition "Relates a code entity to the anti-rigid functional role it plays (an entity IS a function and PLAYS core algorithm — never role-as-subclass). Human-ratified: asserted only by accepting a judgment proposal; the accepted proposal node carries the ratification provenance." ;
+    skos:historyNote "Introduced with the judgment stratum (role/criticality classifier slice); taxonomy per AD b5b4762b" .
+
+:hasCriticality a owl:ObjectProperty ;
+    rdfs:label "has criticality" ;
+    rdfs:domain :CodeEntity ;
+    rdfs:range :Criticality ;
+    skos:definition "Relates a code entity to its criticality — the cost of it being wrong, an axis orthogonal to role. Only deviations from the derived default (standard) are asserted; human-ratified via the judgment queue like playsRole." ;
+    skos:historyNote "Introduced with the judgment stratum (role/criticality classifier slice)" .
+
 # =============================================================================
-# Ratification queue — v2.1 ambient layer. A ProposedLink is a pending, human-
-# ratifiable proposal that record <subject> should link to the code entity named
-# by <targetSymbol> via <predicate>. It carries the proposed triple as LITERALS
-# (never the real link edge), so an unratified proposal is invisible to dossiers
-# and the why-coverage metric until accepted; acceptance materializes the real
-# edge via link_code, rejection only flips status. Deliberately NOT an
-# InformationRecord subclass (stays out of record listings + the ABox vector
-# index) and given NO SHACL shape (no relation-catalogue write path — the
-# proposal literals are written directly, not oriented through relate()).
+# Ratification queue — v2.1 ambient layer, extended by the judgment stratum.
+# A ProposedLink is a pending, human-ratifiable proposal for one edge. Two
+# kinds share the node shape: (a) record→entity links (v2.1: subject record +
+# predicate + target substrate symbol, materialized via link_code) and
+# (b) judgments (entity subject + playsRole/hasCriticality + proposesTargetIri
+# naming a role/criticality individual, plus confidence and escalation,
+# materialized via relate()). It carries the proposed triple as LITERALS
+# (never the real edge), so an unratified proposal is invisible to dossier
+# edges, the gate, and the why-coverage metric until accepted; rejection only
+# flips status. The resolved node is preserved as the edge's ratification
+# provenance. Deliberately NOT an InformationRecord subclass (stays out of
+# record listings + the ABox vector index) and given NO SHACL shape (no
+# relation-catalogue write path — the proposal literals are written directly,
+# not oriented through relate()).
 # =============================================================================
 
 :ProposedLink a owl:Class ;
     rdfs:label "Proposed Link" ;
-    skos:definition "A pending, human-ratifiable proposal that an information record should link to a code entity via one of the intent/architecture link predicates. Carries the proposed triple (subject record, predicate local name, target substrate symbol, target path) as literals plus a lifecycle status; the real link edge exists only after ratification. Not an information record and not the link itself — a queue entry." ;
-    skos:historyNote "Introduced v2.1 (ambient layer + ratification inbox); first written by the citation-seed migration." .
+    skos:definition "A pending, human-ratifiable proposal for one edge: an information record linking to a code entity (link kind), or a code entity playing a role / carrying a criticality (judgment kind). Carries the proposed triple as literals plus a lifecycle status; the real edge exists only after ratification, and the resolved node remains as its ratification provenance. Not an information record and not the edge itself — a queue entry." ;
+    skos:historyNote "Introduced v2.1 (ambient layer + ratification inbox); first written by the citation-seed migration. Extended to judgment proposals (proposesTargetIri/hasConfidence/hasEscalation) by the judgment-stratum slice." .
 
 # Datatype Properties (all domain :ProposedLink, range xsd:string) — the proposed
 # triple stored as literals so no real link edge exists until acceptance.
@@ -216,6 +243,27 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:definition "The repo-relative path of the target entity's defining file, for display and the migration report." ;
     skos:historyNote "Introduced v2.1" .
 
+:proposesTargetIri a owl:DatatypeProperty ;
+    rdfs:label "proposes target IRI" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:string ;
+    skos:definition "The IRI (as a literal string, never an edge) of the proposal's target individual — a CodeRole or Criticality — for judgment-kind proposals. Its presence is what distinguishes a judgment from a link proposal; acceptance materializes the edge via relate() with no symbol resolution." ;
+    skos:historyNote "Introduced by the judgment-stratum slice" .
+
+:hasConfidence a owl:DatatypeProperty ;
+    rdfs:label "has confidence" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:decimal ;
+    skos:definition "The classifier's confidence (0.0–1.0) in a judgment-kind proposal, from the emitting rule's calibrated constant. Advisory surfaces display it; it never gates." ;
+    skos:historyNote "Introduced by the judgment-stratum slice (confidence gate, Consequence be097082)" .
+
+:hasEscalation a owl:DatatypeProperty ;
+    rdfs:label "has escalation" ;
+    rdfs:domain :ProposedLink ;
+    rdfs:range xsd:string ;
+    skos:definition "The confidence-gate disposition of a judgment-kind proposal: 'escalated' (low confidence or high stakes — shown first in the inbox) or 'auto-held' (high confidence, low stakes — waits quietly). Inbox prominence only: no judgment proposal ever counts toward the pending-ratifications nudge." ;
+    skos:historyNote "Introduced by the judgment-stratum slice (never-nudge amendment of Consequence be097082, sanctioned 2026-07-13)" .
+
 # =============================================================================
 # Parked stratum classes — names ratified in the 2026-07-03 alignment pass
 # (AD b0d3e4d9); declared for name stability only. NO properties and NO shapes
@@ -237,13 +285,13 @@ trivyn:confidence a owl:AnnotationProperty ;
 :CodeRole a owl:Class ;
     rdfs:label "Code Role" ;
     skos:definition "An anti-rigid functional role played by a code entity within the system's logic (core algorithm, domain logic, boundary, glue, boilerplate, generated — taxonomy per AD b5b4762b). An entity IS a function and PLAYS a role; never role-as-subclass." ;
-    skos:historyNote "Derived from synthesis source 'CodeRole'; parked for v2.1 (the playing-relation must carry lifecycle status and ratification provenance — designed with the ratification inbox)" ;
+    skos:historyNote "Derived from synthesis source 'CodeRole'; UN-PARKED by the judgment-stratum slice: the playing-relation is playsRole, whose lifecycle status and ratification provenance live on the accepting ProposedLink node. Taxonomy individuals are deterministic project-graph instances (https://moosedev.dev/kg/CodeRole/<role>)" ;
     rdfs:subClassOf obo:BFO_0000023 {| trivyn:confidence "0.60"^^xsd:decimal ; trivyn:l0Category "role" ; trivyn:parentLabel "role" ; skos:historyNote "Aligned to role via embedding similarity" ; dcterms:created "2026-07-08T05:46:40Z"^^xsd:dateTime |} .
 
 :Criticality a owl:Class ;
     rdfs:label "Criticality" ;
     skos:definition "An axis orthogonal to role measuring the cost of a code entity being wrong." ;
-    skos:historyNote "Derived from synthesis source 'Criticality'; parked for v2.1" ;
+    skos:historyNote "Derived from synthesis source 'Criticality'; UN-PARKED by the judgment-stratum slice via hasCriticality (individuals high/standard/low; standard is the implicit derived default and never asserted)" ;
     rdfs:subClassOf obo:BFO_0000019 {| trivyn:confidence "0.60"^^xsd:decimal ; trivyn:l0Category "attribute" ; trivyn:parentLabel "quality" ; skos:historyNote "Aligned to quality via embedding similarity" ; dcterms:created "2026-07-08T05:46:40Z"^^xsd:dateTime |} .
 
 :AttentionPolicy a owl:Class ;

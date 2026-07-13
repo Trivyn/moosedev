@@ -124,4 +124,10 @@ export const api = {
     request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/reject`, {
       method: 'POST',
     }),
+  recategorizeProposal: (id: string, target: string) =>
+    request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/recategorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    }),
 };

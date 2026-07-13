@@ -142,6 +142,8 @@ pub struct IndexReport {
     pub index_bytes: u64,
     /// Per-producer accepted output, in registry order.
     pub producers: Vec<ProducerReport>,
+    /// Files covered by the churn sidecar, when extraction succeeded.
+    pub churn_files: Option<usize>,
     /// Producer failures excluded from the completed substrate.
     pub warnings: Vec<String>,
 }
@@ -218,6 +220,22 @@ pub fn run_index_with(
     meta.save(data_dir)
         .context("failed to write substrate metadata after SCIP index promotion")?;
 
+    // Observation sidecar (AD 8dd7da0c): best-effort — a non-git dir or a
+    // missing git binary degrades to "no churn", never a failed index.
+    let churn_files = match super::ChurnIndex::extract(repo_root, super::churn::DEFAULT_WINDOW_MONTHS)
+        .and_then(|index| {
+            let count = index.files.len();
+            index.save(data_dir)?;
+            Ok(count)
+        }) {
+        Ok(count) => Some(count),
+        Err(error) => {
+            let _ = std::fs::remove_file(super::churn::churn_path(data_dir));
+            warnings.push(format!("churn sidecar skipped: {error}"));
+            None
+        }
+    };
+
     Ok(IndexReport {
         commit,
         duration: started.elapsed(),
@@ -226,6 +244,7 @@ pub fn run_index_with(
         definitions: reports.iter().map(|report| report.definitions).sum(),
         index_bytes: reports.iter().map(|report| report.index_bytes).sum(),
         producers: reports,
+        churn_files,
         warnings,
     })
 }
@@ -599,7 +618,20 @@ mod tests {
 
         let report = run_index_with(&specs, &repo_root, &data_dir).unwrap();
         assert_eq!(report.producers.len(), 1);
-        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("producer `failed` failed"))
+                .count(),
+            1
+        );
+        // Non-git repo: churn extraction degrades to a warning, never a failure.
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("churn sidecar skipped")));
+        assert_eq!(report.churn_files, None);
         assert!(!failed_path.exists());
         assert_eq!(SubstrateMeta::load(&data_dir).unwrap().producers.len(), 1);
         let log = fs::read_to_string(index_log_path(&data_dir)).unwrap();

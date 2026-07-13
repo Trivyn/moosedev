@@ -15,6 +15,9 @@ export interface ComponentCoverage {
   numerator: number;
   denominator: number;
   coverage: number | null;
+  /** Core-surface subset (ratified core roles); 0/0 until roles are ratified. */
+  core_numerator: number;
+  core_denominator: number;
   undocumented: string[];
 }
 
@@ -26,8 +29,11 @@ export interface WhyCoverageResponse {
 export interface Proposal {
   id: string;
   iri: string;
-  /** 'link' (pending record → entity edge) or 'record' (proposed record). */
-  kind: 'link' | 'record';
+  /**
+   * 'link' (pending record → entity edge), 'record' (proposed record), or
+   * 'judgment' (pending entity → role/criticality edge).
+   */
+  kind: 'link' | 'record' | 'judgment';
   label: string;
   subject_iri: string;
   predicate: string;
@@ -35,6 +41,18 @@ export interface Proposal {
   target_path: string;
   /** Local class name for 'record' entries (e.g. ArchitecturalDecision). */
   record_class: string | null;
+  /** Role/criticality individual IRI, for 'judgment' entries. */
+  target_iri: string;
+  /** Classifier confidence literal (e.g. '0.75'), for 'judgment' entries. */
+  confidence: string | null;
+  /** 'escalated' or 'auto-held', for 'judgment' entries. */
+  escalation: string | null;
+  /** Subject's human name: record title ('link') or entity code name ('judgment'). */
+  subject_name: string;
+  /** Subject entity defining file, for 'judgment' entries. */
+  subject_path: string;
+  /** Humanized target: logical path ('link') or individual local name ('judgment'). */
+  target_display: string;
   evidence: string | null;
   status: string;
 }
