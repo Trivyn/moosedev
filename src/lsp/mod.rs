@@ -715,10 +715,23 @@ impl LspSession {
         DateTime::parse_from_rfc3339(timestamp).ok()
     }
 
-    fn publish(&self, uri: Uri, diagnostics: Vec<Diagnostic>) -> anyhow::Result<()> {
+    fn publish(&self, uri: Uri, mut diagnostics: Vec<Diagnostic>) -> anyhow::Result<()> {
         // Load-bearing severity ceiling: every diagnostics publish flows through
-        // this gate so v2.0 cannot accidentally emit Warning or Error.
+        // this gate so v2.0 cannot emit Warning or Error. Debug builds trip
+        // loudly; release builds drop the offender and warn rather than ship it,
+        // so the shipped binary enforces the ceiling and does not merely assert it.
         debug_assert!(diagnostics.iter().all(is_allowed_diagnostic_severity));
+        diagnostics.retain(|diagnostic| {
+            let allowed = is_allowed_diagnostic_severity(diagnostic);
+            if !allowed {
+                tracing::warn!(
+                    severity = ?diagnostic.severity,
+                    message = %diagnostic.message,
+                    "dropping diagnostic above the v2.0 Information ceiling"
+                );
+            }
+            allowed
+        });
         self.connection.sender.send(
             Notification::new(
                 "textDocument/publishDiagnostics".to_string(),
