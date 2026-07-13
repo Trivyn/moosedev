@@ -140,6 +140,49 @@ async fn dossier_and_link_code_distinguish_substrate_coverage() {
 }
 
 #[tokio::test]
+async fn evaluate_policy_tool_returns_verdict_json() {
+    let data_dir = fresh_data_dir("policy");
+    let socket = runtime::socket_path_for(&data_dir);
+    let backend = spawn_backend(build_server(&data_dir, true), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+
+    // Unconstrained edit → typed Allow verdict as JSON.
+    let allow = call_raw(
+        &client,
+        "evaluate_policy",
+        json!({
+            "host": "test-mcp",
+            "event": "edit_proposed",
+            "file": "src/runtime.rs",
+        }),
+    )
+    .await;
+    assert_ne!(allow.is_error, Some(true));
+    let verdict: Value =
+        serde_json::from_str(response_text(&allow)).expect("verdict is JSON");
+    assert_eq!(verdict["decision"], "allow");
+
+    // Unknown event kind → honest tool error, not a crash.
+    let bad = call_raw(
+        &client,
+        "evaluate_policy",
+        json!({"event": "telepathy", "file": "src/runtime.rs"}),
+    )
+    .await;
+    assert_eq!(bad.is_error, Some(true));
+    assert!(response_text(&bad).contains("unknown event kind"));
+
+    // Missing file for a gate event → honest tool error.
+    let missing = call_raw(&client, "evaluate_policy", json!({"event": "edit_proposed"})).await;
+    assert_eq!(missing.is_error, Some(true));
+    assert!(response_text(&missing).contains("requires `file`"));
+
+    backend.abort();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
 async fn dossier_position_reports_unavailable_substrate() {
     let data_dir = fresh_data_dir("unavailable");
     let socket = runtime::socket_path_for(&data_dir);

@@ -92,6 +92,7 @@ struct InitArgs {
     codex: bool,
     opencode: bool,
     zed: bool,
+    claude_hooks: bool,
     stdio: bool,
     binary: Option<PathBuf>,
     data_dir: Option<String>,
@@ -161,6 +162,7 @@ INIT OPTIONS:
                               instead of the default shared --connect config
     --codex                   Also write .codex/config.toml for the Codex CLI
     --opencode                Also install the opencode push plugin (.opencode/plugins/)
+    --claude-hooks            Also install the Claude Code gate/push/capture hooks (.claude/hooks/)
     --zed                     Also write project-local .zed/settings.json
     --binary PATH             Force this binary path in the config instead of
                               the auto-resolved command (bare `moosedev` on PATH,
@@ -398,6 +400,7 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
     let mut codex = false;
     let mut opencode = false;
     let mut zed = false;
+    let mut claude_hooks = false;
     let mut stdio = false;
     let mut binary = None;
     let mut data_dir = None;
@@ -412,6 +415,8 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
             opencode = true;
         } else if arg == "--zed" {
             zed = true;
+        } else if arg == "--claude-hooks" {
+            claude_hooks = true;
         } else if arg == "--stdio" {
             stdio = true;
         } else if let Some(value) = arg.strip_prefix("--binary=") {
@@ -443,6 +448,7 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
         codex,
         opencode,
         zed,
+        claude_hooks,
         stdio,
         binary,
         data_dir,
@@ -1256,6 +1262,7 @@ fn init_mode(args: InitArgs) -> anyhow::Result<()> {
         codex: args.codex,
         opencode: args.opencode,
         zed: args.zed,
+        claude_hooks: args.claude_hooks,
     };
     let report = init::init_project(&opts)?;
     print_init_report(&opts, &report, path_note.as_deref());

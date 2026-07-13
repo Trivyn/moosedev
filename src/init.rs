@@ -37,6 +37,9 @@ const MEMORY_END: &str = "moosedev:end -->";
 /// opencode targets local models that under-call MCP tools, so this proactively
 /// injects records into their context rather than relying on the model to pull.
 const OPENCODE_PLUGIN: &str = include_str!("../.opencode/plugins/moosedev-push.ts");
+const CLAUDE_GATE_HOOK: &str = include_str!("../.claude/hooks/moosedev-gate.sh");
+const CLAUDE_PUSH_HOOK: &str = include_str!("../.claude/hooks/moosedev-push.sh");
+const CLAUDE_CAPTURE_HOOK: &str = include_str!("../.claude/hooks/moosedev-capture.sh");
 
 /// Metadata for one agent skill file synthesised at `moosedev init` time from the
 /// shipped `skills/*.md` doc body plus a YAML frontmatter header that tells Claude
@@ -121,6 +124,9 @@ pub struct InitOptions {
     pub opencode: bool,
     /// Also write project-local Zed LSP settings.
     pub zed: bool,
+    /// Also install the Claude Code gate/push/capture hooks (`.claude/hooks/`
+    /// + a `hooks` block merged into `.claude/settings.json`).
+    pub claude_hooks: bool,
 }
 
 /// What happened to one artifact.
@@ -179,6 +185,9 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     }
     if opts.zed {
         write_zed_settings(opts, &mut report)?;
+    }
+    if opts.claude_hooks {
+        write_claude_hooks(opts, &mut report)?;
     }
     offer_post_commit_hook(opts, &mut report)?;
 
@@ -331,6 +340,131 @@ fn write_zed_settings(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
             Outcome::Created
         },
     ));
+    Ok(())
+}
+
+/// The three Claude Code active-agency hooks: event name, matcher, script.
+const CLAUDE_HOOKS: &[(&str, Option<&str>, &str, &str)] = &[
+    (
+        "PreToolUse",
+        Some("Edit|Write|MultiEdit|NotebookEdit"),
+        "moosedev-gate.sh",
+        CLAUDE_GATE_HOOK,
+    ),
+    (
+        "PostToolUse",
+        Some("Read|Edit|Write"),
+        "moosedev-push.sh",
+        CLAUDE_PUSH_HOOK,
+    ),
+    ("Stop", None, "moosedev-capture.sh", CLAUDE_CAPTURE_HOOK),
+];
+
+/// Install the Claude Code adapter: write the three hook scripts (executable)
+/// and merge their `hooks` registrations into `.claude/settings.json`, never
+/// clobbering existing user hooks (the merge only appends missing MOOSEDev
+/// groups). The scripts contain zero policy — they call the daemon over HTTP
+/// and translate its verdict into the Claude Code hook contract.
+fn write_claude_hooks(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    // 1. The scripts.
+    let hooks_dir = opts.target_dir.join(".claude/hooks");
+    std::fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("create {}", hooks_dir.display()))?;
+    for (_, _, script, content) in CLAUDE_HOOKS {
+        let path = hooks_dir.join(script);
+        if path.exists() && !opts.force {
+            report.entries.push(Entry::new(path, Outcome::Skipped));
+            continue;
+        }
+        let existed = path.exists();
+        std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+        set_executable(&path)?;
+        report.entries.push(Entry::new(
+            path,
+            if existed {
+                Outcome::Merged
+            } else {
+                Outcome::Created
+            },
+        ));
+    }
+
+    // 2. The settings registration.
+    let path = opts.target_dir.join(".claude/settings.json");
+    let existed = path.exists();
+    let mut root: Value = if existed {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "{} is not valid JSON — fix or move it, then re-run init",
+                path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} must be a JSON object", path.display()))?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} `hooks` must be an object", path.display()))?;
+
+    let mut changed = false;
+    for (event, matcher, script, _) in CLAUDE_HOOKS {
+        let groups = hooks
+            .entry(*event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("{} `hooks.{event}` must be an array", path.display()))?;
+        let already = groups.iter().any(|group| {
+            group["hooks"]
+                .as_array()
+                .is_some_and(|hooks| {
+                    hooks.iter().any(|h| {
+                        h["command"].as_str().is_some_and(|c| c.contains(script))
+                    })
+                })
+        });
+        if already {
+            continue;
+        }
+        let mut group = serde_json::Map::new();
+        if let Some(matcher) = matcher {
+            group.insert("matcher".to_string(), json!(matcher));
+        }
+        group.insert(
+            "hooks".to_string(),
+            json!([{
+                "type": "command",
+                "command": format!("\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/{script}"),
+            }]),
+        );
+        groups.push(Value::Object(group));
+        changed = true;
+    }
+
+    if !changed {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
+        return Ok(());
+    }
+    let serialized = format!("{}\n", serde_json::to_string_pretty(&root)?);
+    std::fs::write(&path, serialized).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    report.notes.push(
+        "Claude Code hooks installed: gate (PreToolUse), push (PostToolUse), capture (Stop). They need a running backend (`moosedev --serve`) plus `jq` and `curl`; without one they stay silent (fail-open)."
+            .to_string(),
+    );
     Ok(())
 }
 
@@ -697,6 +831,7 @@ mod tests {
             codex: false,
             opencode: false,
             zed: false,
+            claude_hooks: false,
         }
     }
 
@@ -971,6 +1106,98 @@ mod tests {
         assert_eq!(
             outcome_for(&report, ".zed/settings.json"),
             Some(&Outcome::Merged)
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn claude_hooks_created_fresh() {
+        let target = temp_project("hooks-fresh");
+        let mut o = opts(&target);
+        o.claude_hooks = true;
+        let report = init_project(&o).unwrap();
+
+        // The three scripts exist and are executable.
+        for script in [
+            "moosedev-gate.sh",
+            "moosedev-push.sh",
+            "moosedev-capture.sh",
+        ] {
+            let path = target.join(".claude/hooks").join(script);
+            assert!(path.is_file(), "{script} written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111, "{script} is executable");
+            }
+            assert_eq!(outcome_for(&report, script), Some(&Outcome::Created));
+        }
+
+        // The settings registration carries all three events.
+        let settings = read_json(&target.join(".claude/settings.json"));
+        let gate = settings["hooks"]["PreToolUse"][0].clone();
+        assert_eq!(gate["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+        assert!(gate["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("moosedev-gate.sh"));
+        assert!(settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("moosedev-push.sh"));
+        let stop = settings["hooks"]["Stop"][0].clone();
+        assert!(stop.get("matcher").is_none(), "Stop takes no matcher");
+        assert!(stop["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("moosedev-capture.sh"));
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn claude_hooks_merge_is_idempotent_and_preserves_user_hooks() {
+        let target = temp_project("hooks-merge");
+        let claude_dir = target.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"permissions":{"allow":["Bash(ls:*)"]},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-own-hook.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let mut o = opts(&target);
+        o.claude_hooks = true;
+        init_project(&o).unwrap();
+
+        let settings = read_json(&claude_dir.join("settings.json"));
+        // User content preserved; MOOSEDev group appended after it.
+        assert_eq!(settings["permissions"]["allow"][0], "Bash(ls:*)");
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "my-own-hook.sh"
+        );
+        assert!(settings["hooks"]["PreToolUse"][1]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("moosedev-gate.sh"));
+
+        // Re-running init adds nothing (idempotent merge).
+        let report = init_project(&o).unwrap();
+        let settings = read_json(&claude_dir.join("settings.json"));
+        assert_eq!(
+            settings["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            outcome_for(&report, ".claude/settings.json"),
+            Some(&Outcome::Skipped)
+        );
+        assert_eq!(
+            outcome_for(&report, "moosedev-gate.sh"),
+            Some(&Outcome::Skipped),
+            "existing scripts skipped without --force"
         );
 
         let _ = std::fs::remove_dir_all(&target);

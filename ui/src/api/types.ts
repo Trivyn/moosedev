@@ -26,11 +26,15 @@ export interface WhyCoverageResponse {
 export interface Proposal {
   id: string;
   iri: string;
+  /** 'link' (pending record → entity edge) or 'record' (proposed record). */
+  kind: 'link' | 'record';
   label: string;
   subject_iri: string;
   predicate: string;
   target_symbol: string;
   target_path: string;
+  /** Local class name for 'record' entries (e.g. ArchitecturalDecision). */
+  record_class: string | null;
   evidence: string | null;
   status: string;
 }

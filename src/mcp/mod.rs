@@ -306,6 +306,50 @@ pub struct GetEntityDossierArgs {
     pub iri: Option<String>,
 }
 
+/// Arguments for the `capture_decision_point` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CaptureDecisionPointArgs {
+    /// Repo-relative changed files (diff-derived by the host adapter).
+    pub files: Option<Vec<String>>,
+    /// The host's own summary text for the decision point — used as the title
+    /// seed; never an interrogated justification.
+    pub summary: Option<String>,
+    /// Optional existing Requirement (IRI or exact title) for `isMotivatedBy`.
+    /// An unresolvable value fails the capture; it is never invented.
+    pub requirement: Option<String>,
+    /// Optional substrate symbols the decision concerns; each is queued as its
+    /// own `concerns` link proposal.
+    pub entities: Option<Vec<String>>,
+    /// Host adapter identity for fire telemetry (defaults to "mcp").
+    pub host: Option<String>,
+    /// Optional author override (defaults to the MCP client name).
+    pub author: Option<String>,
+}
+
+/// Arguments for the `evaluate_policy` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EvaluatePolicyArgs {
+    /// Host adapter reporting the event (e.g. "claude-code", "opencode");
+    /// recorded in fire telemetry. Defaults to "mcp".
+    pub host: Option<String>,
+    /// Event kind: "entity_touched" (push), "edit_proposed" (gate), or
+    /// "decision_point" (capture).
+    pub event: String,
+    /// Repo-relative file the event concerns (entity_touched / edit_proposed).
+    pub file: Option<String>,
+    /// Optional 1-based line for a precise position.
+    pub line: Option<u32>,
+    /// Optional 1-based UTF-8 byte column for a precise position.
+    pub col: Option<u32>,
+    /// Optional edit-text anchor (e.g. an Edit tool's old_string), located in
+    /// the on-disk file to scope the gate to the definitions it overlaps.
+    pub anchor: Option<String>,
+    /// Changed files, for a decision_point event.
+    pub files: Option<Vec<String>>,
+    /// Host-provided summary text, for a decision_point event.
+    pub summary: Option<String>,
+}
+
 /// Arguments for the `get_provenance` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetProvenanceArgs {
@@ -407,15 +451,135 @@ impl MooseDevServer {
         }
         let mut out = format!("{} pending ratification(s):\n", proposals.len());
         for proposal in proposals.iter().take(10) {
-            out.push_str(&format!(
-                "  - {} → {} ({})\n",
-                proposal.subject_iri, proposal.target_symbol, proposal.target_path
-            ));
+            match proposal.kind {
+                graph::ProposalKind::Link => out.push_str(&format!(
+                    "  - [link] {} → {} ({})\n",
+                    proposal.subject_iri, proposal.target_symbol, proposal.target_path
+                )),
+                graph::ProposalKind::Record => out.push_str(&format!(
+                    "  - [record] {} \"{}\"\n",
+                    proposal.record_class.as_deref().unwrap_or("Record"),
+                    proposal.label
+                )),
+            }
         }
         if proposals.len() > 10 {
             out.push_str(&format!("  … and {} more\n", proposals.len() - 10));
         }
         out.push_str("Ratify or reject them in the workbench Ratifications page.");
+        Ok(tool_ok(out))
+    }
+
+    /// Evaluate one host event against the active-agency policy engine.
+    #[tool(
+        description = "Evaluate a host event against the graph-driven policy engine and return the typed verdict as JSON. Host adapters contain zero policy: report the event (`entity_touched` for push, `edit_proposed` for gate, `decision_point` for capture) and enact the returned decision (allow / inject / gate / capture_trigger). Gate verdicts cite the accepted Constraints that govern the touched entities. Read-only on the graph; acted decisions append fire telemetry to .moosedev/fires.jsonl."
+    )]
+    async fn evaluate_policy(
+        &self,
+        Parameters(args): Parameters<EvaluatePolicyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let host = args.host.unwrap_or_else(|| "mcp".to_string());
+        let event = match args.event.as_str() {
+            "entity_touched" => {
+                let Some(file) = args.file else {
+                    return Ok(tool_error("entity_touched requires `file`"));
+                };
+                crate::policy::PolicyEvent::EntityTouched {
+                    file,
+                    line: args.line,
+                    col: args.col,
+                }
+            }
+            "edit_proposed" => {
+                let Some(file) = args.file else {
+                    return Ok(tool_error("edit_proposed requires `file`"));
+                };
+                crate::policy::PolicyEvent::EditProposed {
+                    file,
+                    line: args.line,
+                    col: args.col,
+                    anchor: args.anchor,
+                }
+            }
+            "decision_point" => crate::policy::PolicyEvent::DecisionPoint {
+                files: args.files.unwrap_or_default(),
+                summary: args.summary,
+            },
+            other => {
+                return Ok(tool_error(format!(
+                    "unknown event kind {other:?}; use entity_touched, edit_proposed, or decision_point"
+                )))
+            }
+        };
+        let repo_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match crate::policy::evaluate_and_fire(&self.state, &repo_root, &event, &host) {
+            Ok(decision) => match serde_json::to_string_pretty(&decision) {
+                Ok(json) => Ok(tool_ok(json)),
+                Err(e) => Ok(tool_error(format!("failed to serialize decision: {e}"))),
+            },
+            Err(e) => Ok(tool_error(format!("policy evaluation failed: {e}"))),
+        }
+    }
+
+    /// Grounded capture at a decision point — proposed record + queued links.
+    #[tool(
+        description = "Grounded capture at a decision point (session end, checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the host's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
+    )]
+    async fn capture_decision_point(
+        &self,
+        Parameters(args): Parameters<CaptureDecisionPointArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let author = resolve_author(&args.author, &context);
+        let host = args.host.unwrap_or_else(|| "mcp".to_string());
+        let files = args.files.unwrap_or_default();
+        let entities = args.entities.unwrap_or_default();
+        let captured = match graph::capture_decision_point(
+            &self.state,
+            &files,
+            args.summary.as_deref(),
+            args.requirement.as_deref(),
+            &entities,
+            &author,
+            Utc::now(),
+        ) {
+            Ok(captured) => captured,
+            Err(e) => return Ok(tool_error(format!("grounded capture failed: {e}"))),
+        };
+
+        if let Err(e) = self.state.index_record(&captured.record_iri).await {
+            tracing::warn!("dense index update failed for {}: {e}", captured.record_iri);
+        }
+        crate::policy::fires::append_fire(
+            &self.state.data_dir,
+            &crate::policy::fires::FireEvent {
+                ts: Utc::now().to_rfc3339(),
+                verb: "capture",
+                host,
+                entity: None,
+                decision: "proposed".to_string(),
+                records_cited: vec![captured.record_iri.clone()],
+            },
+        );
+
+        let mut out = format!(
+            "Proposed ArchitecturalDecision \"{}\" → {}\n",
+            captured.title, captured.record_iri
+        );
+        if !captured.proposed_links.is_empty() {
+            out.push_str(&format!(
+                "Queued {} link proposal(s) for ratification.\n",
+                captured.proposed_links.len()
+            ));
+        }
+        if !captured.unanchored.is_empty() {
+            out.push_str(&format!(
+                "Not anchored in the substrate (no link queued): {}.\n",
+                captured.unanchored.join(", ")
+            ));
+        }
+        out.push_str("Ratify or reject in the workbench Ratifications page.");
         Ok(tool_ok(out))
     }
 

@@ -706,6 +706,12 @@ impl LspSession {
             .then(|| self.file_last_commit_instant(rel_path))
             .flatten();
 
+        // Message shaping and severity discipline are host-independent policy
+        // (spec §5.4); this session only attaches ranges and encoding.
+        let config = crate::policy::WarnConfig {
+            constraints: self.diagnostics.constraints,
+            stale_rationale: self.diagnostics.stale_rationale,
+        };
         let mut diagnostics = Vec::new();
         for definition in substrate.definitions_in_file(rel_path) {
             let Some(entity_iri) = entities.get(&definition.entry.normalized_symbol) else {
@@ -725,48 +731,29 @@ impl LspSession {
                 continue;
             };
 
-            if self.diagnostics.constraints {
-                for record in records.iter().filter(|record| record.kind == "Constraint") {
-                    let message = match &record.description {
-                        Some(description) => format!(
-                            "constrained by \"{}\": {}",
-                            record.title,
-                            description_claim(description)
-                        ),
-                        None => format!(
-                            "constrained by \"{}\" ({})",
-                            record.title,
-                            short_record_id(&record.iri)
-                        ),
-                    };
-                    let mut diagnostic = Diagnostic::new(
-                        range,
-                        Some(DiagnosticSeverity::INFORMATION),
-                        None,
-                        Some("moosedev".to_string()),
-                        message,
-                        None,
-                        None,
-                    );
-                    add_record_code(&mut diagnostic, record);
-                    diagnostics.push(diagnostic);
-                }
-            }
-
-            if self.diagnostics.stale_rationale {
-                if let Some(record) = stale_rationale_record(&records, file_commit) {
-                    let mut diagnostic = Diagnostic::new(
-                        range,
-                        Some(DiagnosticSeverity::HINT),
-                        None,
-                        Some("moosedev".to_string()),
-                        "rationale predates later changes to this file".to_string(),
-                        None,
-                        None,
-                    );
-                    add_record_code(&mut diagnostic, record);
-                    diagnostics.push(diagnostic);
-                }
+            for shaped in crate::policy::entity_diagnostics(
+                &records,
+                file_commit,
+                &config,
+                &definition.entry.normalized_symbol,
+            ) {
+                let severity = match shaped.severity.as_str() {
+                    "information" => DiagnosticSeverity::INFORMATION,
+                    "hint" => DiagnosticSeverity::HINT,
+                    // Policy never exceeds the ceiling; skip defensively if it did.
+                    _ => continue,
+                };
+                let mut diagnostic = Diagnostic::new(
+                    range,
+                    Some(severity),
+                    None,
+                    Some("moosedev".to_string()),
+                    shaped.message,
+                    None,
+                    None,
+                );
+                add_record_code(&mut diagnostic, &shaped.record);
+                diagnostics.push(diagnostic);
             }
         }
 
@@ -1085,55 +1072,17 @@ fn utf8_col_to_utf16_character(line: &str, byte_col: u32) -> u32 {
     line.encode_utf16().count() as u32
 }
 
-fn newest_record(records: &[crate::graph::RecordSummary]) -> Option<&crate::graph::RecordSummary> {
-    records
-        .iter()
-        .filter_map(|record| {
-            DateTime::parse_from_rfc3339(&record.timestamp)
-                .ok()
-                .map(|instant| (instant, record))
-        })
-        .max_by_key(|(instant, _)| *instant)
-        .map(|(_, record)| record)
-}
-
-fn stale_rationale_record(
-    records: &[crate::graph::RecordSummary],
-    file_commit: Option<DateTime<FixedOffset>>,
-) -> Option<&crate::graph::RecordSummary> {
-    let record = newest_record(records)?;
-    let instant = DateTime::parse_from_rfc3339(&record.timestamp).ok()?;
-    (instant < file_commit?).then_some(record)
-}
-
-fn description_claim(description: &str) -> String {
-    // First sentence or 140 chars, whichever ends first — a late first period
-    // must not produce a paragraph-length diagnostic message.
-    let capped = description.chars().take(140).collect::<String>();
-    match capped.find('.') {
-        Some(end) => capped[..=end].trim().to_string(),
-        None => capped.trim().to_string(),
-    }
-}
-
-fn add_record_code(diagnostic: &mut Diagnostic, record: &crate::graph::RecordSummary) {
+fn add_record_code(diagnostic: &mut Diagnostic, record: &crate::policy::RecordRef) {
     let Some(url) = &record.workbench_url else {
         return;
     };
     let Ok(href) = Uri::from_str(url) else {
         return;
     };
-    diagnostic.code = Some(NumberOrString::String(short_record_id(&record.iri)));
+    diagnostic.code = Some(NumberOrString::String(crate::policy::short_record_id(
+        &record.iri,
+    )));
     diagnostic.code_description = Some(CodeDescription { href });
-}
-
-fn short_record_id(iri: &str) -> String {
-    iri.rsplit(['/', '#'])
-        .next()
-        .unwrap_or(iri)
-        .chars()
-        .take(8)
-        .collect()
 }
 
 fn is_allowed_diagnostic_severity(diagnostic: &Diagnostic) -> bool {

@@ -1000,3 +1000,100 @@ async fn debt_and_proposals_endpoints() {
         .await
         .assert_status_not_found();
 }
+
+const ALPHA_NORM: &str = "rust-analyzer cargo testpkg . foo/alpha().";
+
+/// Like [`record_api_constraint`] but with an explicit `accepted` lifecycle
+/// status, which the policy gate requires before a Constraint governs an edit.
+fn record_accepted_constraint(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("Constraint").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "Constraint".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("record constraint")
+}
+
+#[tokio::test]
+async fn policy_endpoint_gates_pushes_and_fires() {
+    let data_dir = temp_dir("policy");
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(foo_substrate()));
+    record_component(&state, "foo", "src/foo/");
+
+    // Mint alpha and link an accepted Constraint to it.
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let components = graph::load_components(&state).unwrap();
+    let defs = state.substrate().unwrap().definitions();
+    let plan =
+        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    let alpha = graph::entities_by_symbol(&state, &terms)
+        .unwrap()
+        .get(ALPHA_NORM)
+        .expect("alpha minted")
+        .clone();
+    let constraint = record_accepted_constraint(&state, "alpha must stay stable");
+    graph::relate(&state, &constraint, "constrains", &alpha).expect("constrains edge");
+
+    let server = test_server(state);
+
+    // GATE: an edit against the constrained file escalates to ratification.
+    let gate = server
+        .post("/api/v1/policy")
+        .json(&json!({
+            "host": "test-http",
+            "kind": "edit_proposed",
+            "file": "src/foo/a.rs",
+        }))
+        .await;
+    gate.assert_status_ok();
+    let verdict = gate.json::<Value>();
+    assert_eq!(verdict["decision"], "gate");
+    assert_eq!(verdict["disposition"], "require_ratification");
+    assert!(verdict["reason"]
+        .as_str()
+        .unwrap()
+        .contains("alpha must stay stable"));
+    assert_eq!(verdict["records"][0]["iri"], constraint.as_str());
+    assert_eq!(verdict["entities"][0], alpha.as_str());
+
+    // PUSH: touching the file injects the linked knowledge.
+    let push = server
+        .post("/api/v1/policy")
+        .json(&json!({
+            "host": "test-http",
+            "kind": "entity_touched",
+            "file": "src/foo/a.rs",
+        }))
+        .await;
+    push.assert_status_ok();
+    let injected = push.json::<Value>();
+    assert_eq!(injected["decision"], "inject");
+    assert!(injected["dossier_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("alpha must stay stable"));
+
+    // Both acted decisions appended fire telemetry.
+    let fires =
+        std::fs::read_to_string(moosedev::policy::fires::fires_log_path_for(&data_dir)).unwrap();
+    let lines: Vec<Value> = fires
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["verb"], "gate");
+    assert_eq!(lines[1]["verb"], "push");
+    assert_eq!(lines[0]["host"], "test-http");
+}

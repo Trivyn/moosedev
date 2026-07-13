@@ -27,11 +27,16 @@ pub async fn list_proposals(
         .map(|p| ProposalDto {
             id: local_name(&p.iri).to_string(),
             iri: p.iri,
+            kind: match p.kind {
+                graph::ProposalKind::Link => "link".to_string(),
+                graph::ProposalKind::Record => "record".to_string(),
+            },
             label: p.label,
             subject_iri: p.subject_iri,
             predicate: p.predicate_local,
             target_symbol: p.target_symbol,
             target_path: p.target_path,
+            record_class: p.record_class,
             evidence: p.evidence,
             status: p.status,
         })
@@ -47,11 +52,15 @@ pub async fn accept_proposal(
     let iri = resolve_proposal(&state, &uuid)?;
     let outcome = graph::accept_proposal(&state, &iri, "workbench")
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let (entity_iri, entity_name) = match outcome {
+        graph::AcceptOutcome::Link(link) => (Some(link.entity_iri), Some(link.entity_name)),
+        graph::AcceptOutcome::Record { .. } => (None, None),
+    };
     Ok(Json(ProposalActionResponse {
         id: uuid,
         status: "accepted".to_string(),
-        entity_iri: Some(outcome.entity_iri),
-        entity_name: Some(outcome.entity_name),
+        entity_iri,
+        entity_name,
     }))
 }
 

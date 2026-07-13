@@ -42,6 +42,8 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         )
         .route("/lessons/{num}", get(handlers::get_lesson))
         .route("/debt", get(handlers::why_coverage))
+        .route("/policy", post(handlers::evaluate_policy))
+        .route("/capture", post(handlers::capture_decision_point))
         .route("/proposals", get(handlers::list_proposals))
         .route("/proposals/{id}/accept", post(handlers::accept_proposal))
         .route("/proposals/{id}/reject", post(handlers::reject_proposal));

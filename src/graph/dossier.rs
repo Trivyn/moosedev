@@ -214,7 +214,9 @@ fn render_record_line(out: &mut String, record: &RecordSummary) {
 }
 
 /// Convert the caller's selector into an existing CodeEntity IRI without minting.
-fn resolve_target_entity(
+/// Crate-visible so the policy engine can resolve gate candidates without the
+/// dossier's "no linked records → silence" behavior.
+pub(crate) fn resolve_target_entity(
     state: &AppState,
     terms: &CodeTerms,
     target: &DossierTarget,

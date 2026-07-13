@@ -113,11 +113,15 @@ pub struct ProposalDto {
     /// Minted UUID (last IRI segment) — the id in accept/reject routes.
     pub id: String,
     pub iri: String,
+    /// `link` (pending record→entity edge) or `record` (proposed record).
+    pub kind: String,
     pub label: String,
     pub subject_iri: String,
     pub predicate: String,
     pub target_symbol: String,
     pub target_path: String,
+    /// Local class name for `record` entries (e.g. `ArchitecturalDecision`).
+    pub record_class: Option<String>,
     pub evidence: Option<String>,
     pub status: String,
 }

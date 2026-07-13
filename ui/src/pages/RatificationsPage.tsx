@@ -82,9 +82,10 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
         Ratifications
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Proposed links awaiting review. Accept to materialize the record → entity link (it then
-        counts toward why-coverage); reject to decline (no edge is created; the proposal is
-        preserved for audit).
+        Proposed links and records awaiting review. Accepting a link materializes the record →
+        entity edge (it then counts toward why-coverage); accepting a record ratifies it into the
+        working set. Reject to decline — nothing is created, and the proposal is preserved for
+        audit.
       </Typography>
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
@@ -100,25 +101,50 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
           {proposals.map((proposal) => (
             <Card key={proposal.id} variant="outlined">
               <CardContent>
-                <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-                  <Chip size="small" color="primary" label={proposal.predicate} />
-                  <Typography variant="subtitle2" sx={{ fontFamily: 'monospace' }}>
-                    {proposal.target_symbol}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {proposal.target_path}
-                  </Typography>
-                </Stack>
-                <Typography variant="body2" sx={{ mb: 0.5 }}>
-                  <Box
-                    component="span"
-                    sx={{ color: 'primary.main', cursor: 'pointer' }}
-                    onClick={() => onNavigateRecord(proposal.subject_iri)}
-                  >
-                    record {shortIri(proposal.subject_iri)}
-                  </Box>{' '}
-                  would {proposal.predicate} this entity
-                </Typography>
+                {proposal.kind === 'record' ? (
+                  <>
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                      <Chip
+                        size="small"
+                        color="secondary"
+                        label={proposal.record_class ?? 'Record'}
+                      />
+                      <Typography variant="subtitle2">{proposal.label}</Typography>
+                    </Stack>
+                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                      <Box
+                        component="span"
+                        sx={{ color: 'primary.main', cursor: 'pointer' }}
+                        onClick={() => onNavigateRecord(proposal.iri)}
+                      >
+                        proposed record {shortIri(proposal.iri)}
+                      </Box>{' '}
+                      would join the working set
+                    </Typography>
+                  </>
+                ) : (
+                  <>
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                      <Chip size="small" color="primary" label={proposal.predicate} />
+                      <Typography variant="subtitle2" sx={{ fontFamily: 'monospace' }}>
+                        {proposal.target_symbol}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {proposal.target_path}
+                      </Typography>
+                    </Stack>
+                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                      <Box
+                        component="span"
+                        sx={{ color: 'primary.main', cursor: 'pointer' }}
+                        onClick={() => onNavigateRecord(proposal.subject_iri)}
+                      >
+                        record {shortIri(proposal.subject_iri)}
+                      </Box>{' '}
+                      would {proposal.predicate} this entity
+                    </Typography>
+                  </>
+                )}
                 {proposal.evidence && (
                   <Typography variant="caption" color="text.secondary">
                     {proposal.evidence}
