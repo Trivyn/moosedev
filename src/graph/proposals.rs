@@ -165,12 +165,15 @@ pub fn propose_link(
     when: DateTime<Utc>,
 ) -> anyhow::Result<String> {
     let terms = ProposalTerms::resolve(state)?;
-    if let Some(existing) = scan_link_proposals(state, Some(PROPOSED))?.into_iter().find(|p| {
-        p.kind == ProposalKind::Link
-            && p.subject_iri == subject_iri
-            && p.predicate_local == predicate_local
-            && p.target_symbol == target_symbol
-    }) {
+    if let Some(existing) = scan_link_proposals(state, Some(PROPOSED))?
+        .into_iter()
+        .find(|p| {
+            p.kind == ProposalKind::Link
+                && p.subject_iri == subject_iri
+                && p.predicate_local == predicate_local
+                && p.target_symbol == target_symbol
+        })
+    {
         return Ok(existing.iri);
     }
     let iri = mint_instance_iri("ProposedLink");
@@ -481,6 +484,20 @@ pub fn accept_proposal(
             let target_symbol = first_literal(&state.store, proposal_iri, &terms.target_symbol)
                 .ok_or_else(|| anyhow::anyhow!("proposal {proposal_iri} has no target symbol"))?;
 
+            // A link must not resurrect a record a human already declined: a
+            // rejected/deprecated subject would otherwise re-enter dossiers
+            // and why-coverage through the materialized edge.
+            let subject_status =
+                first_literal(&state.store, &subject, &state.capture.status).unwrap_or_default();
+            if subject_status.eq_ignore_ascii_case(REJECTED)
+                || subject_status.eq_ignore_ascii_case("deprecated")
+            {
+                anyhow::bail!(
+                    "cannot accept {proposal_iri}: its subject record {subject} is {subject_status}; \
+                     reject this link instead"
+                );
+            }
+
             let outcome = link_code(
                 state,
                 &subject,
@@ -575,8 +592,8 @@ pub fn recategorize_judgment(
     };
     super::taxonomy::ensure_taxonomy_individuals(state)?;
 
-    let old_evidence = first_literal(&state.store, proposal_iri, &state.capture.description)
-        .unwrap_or_default();
+    let old_evidence =
+        first_literal(&state.store, proposal_iri, &state.capture.description).unwrap_or_default();
     let evidence = format!(
         "recategorized by {agent} from '{old_target}' (classifier evidence: {old_evidence})"
     );
@@ -601,11 +618,23 @@ pub fn recategorize_judgment(
 /// Reject a pending queue entry: flip to rejected. A `Link` never creates an
 /// edge; a `Record` keeps its content. Both are preserved for audit
 /// (invariant #6), and the rejecter is stamped as edit provenance.
+///
+/// Rejecting a `Record` cascade-rejects its own pending link proposals: a
+/// declined record's links are dead by definition, and leaving them pending
+/// would let a later accept resurrect the record into dossiers.
 pub fn reject_proposal(state: &AppState, proposal_iri: &str, agent: &str) -> anyhow::Result<()> {
     let terms = ProposalTerms::resolve(state)?;
-    require_pending(state, proposal_iri, &terms)?;
+    let kind = require_pending(state, proposal_iri, &terms)?;
     set_status(state, proposal_iri, REJECTED)?;
     stamp_resolver(state, proposal_iri, agent);
+    if kind == ProposalKind::Record {
+        for dependent in scan_link_proposals(state, Some(PROPOSED))? {
+            if dependent.kind == ProposalKind::Link && dependent.subject_iri == proposal_iri {
+                set_status(state, &dependent.iri, REJECTED)?;
+                stamp_resolver(state, &dependent.iri, agent);
+            }
+        }
+    }
     state.note_project_write();
     Ok(())
 }
@@ -721,8 +750,7 @@ pub fn judgments_by_subject(
         };
         out.entry(subject).or_default().push(JudgmentSummary {
             proposal_iri: iri.to_string(),
-            predicate_local: first_literal(&state.store, iri, &terms.predicate)
-                .unwrap_or_default(),
+            predicate_local: first_literal(&state.store, iri, &terms.predicate).unwrap_or_default(),
             target_local: local_name(&target_iri).to_string(),
             status,
             confidence: first_literal(&state.store, iri, &terms.confidence),

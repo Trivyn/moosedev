@@ -98,7 +98,10 @@ pub fn capture_decision_point(
     let outcome = record_instance_with_relation_args(state, &input, &relations, author, when)?;
 
     if let Err(e) = provenance::record_provenance(&state.store, &outcome.iri, author) {
-        tracing::warn!("grounded capture: provenance stamp failed for {}: {e}", outcome.iri);
+        tracing::warn!(
+            "grounded capture: provenance stamp failed for {}: {e}",
+            outcome.iri
+        );
     }
 
     // Queue entity links as proposals — never real edges (D1 interlock).

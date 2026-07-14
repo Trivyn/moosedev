@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moosedev::code::substrate::{Substrate, SubstrateMeta};
-use moosedev::graph::{
-    self, AcceptOutcome, AppState, DossierTarget, ProposalKind, RecordInput,
-};
+use moosedev::graph::{self, AcceptOutcome, AppState, DossierTarget, ProposalKind, RecordInput};
 use moosedev::provenance;
 use oxigraph::model::{GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 use protobuf::{EnumOrUnknown, MessageField};
@@ -117,9 +115,7 @@ fn insert_quad(state: &AppState, subject: &str, predicate: &str, object: Term) {
         NamedNode::new(subject).unwrap(),
         NamedNode::new(predicate).unwrap(),
         object,
-        oxigraph::model::GraphName::NamedNode(
-            NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap(),
-        ),
+        oxigraph::model::GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
     );
     let mut txn = state.store.start_transaction().unwrap();
     txn.insert(quad.as_ref());
@@ -146,8 +142,14 @@ fn setup(tag: &str) -> Fixture {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
     let defs = state.substrate().unwrap().definitions();
-    let plan =
-        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
     let entities = graph::entities_by_symbol(&state, &terms).unwrap();
@@ -229,8 +231,8 @@ fn capture_is_proposed_only_with_provenance_and_queued_links() {
         literal_of(&f.state, &captured.record_iri, &f.state.capture.author).as_deref(),
         Some("tester")
     );
-    let prov = provenance::read_provenance(&f.state.store, &captured.record_iri)
-        .expect("read provenance");
+    let prov =
+        provenance::read_provenance(&f.state.store, &captured.record_iri).expect("read provenance");
     assert!(prov.is_some(), "capture stamps edit provenance");
 
     // One link proposal per changed file's module + one per named entity.
@@ -349,7 +351,11 @@ fn accept_ratifies_record_in_place_and_link_materializes_edge() {
     let outcome = graph::accept_proposal(&f.state, &alpha_link.iri, "tester").unwrap();
     assert!(matches!(outcome, AcceptOutcome::Link(_)));
     assert!(has_records(&f.state, &f.alpha), "edge materialized");
-    assert_eq!(foo_numerator(&f.state), 1, "debt moves on ratification only");
+    assert_eq!(
+        foo_numerator(&f.state),
+        1,
+        "debt moves on ratification only"
+    );
 
     // Re-accepting the record is a guarded error.
     assert!(graph::accept_proposal(&f.state, &captured.record_iri, "tester").is_err());
@@ -358,13 +364,21 @@ fn accept_ratifies_record_in_place_and_link_materializes_edge() {
 #[test]
 fn reject_keeps_record_out_of_every_surface() {
     let f = setup("gc-reject");
-    let captured = capture(&f.state, Some("Abandoned idea"), None, &[ALPHA_RAW.to_string()]);
+    let captured = capture(
+        &f.state,
+        Some("Abandoned idea"),
+        None,
+        &[ALPHA_RAW.to_string()],
+    );
 
     graph::reject_proposal(&f.state, &captured.record_iri, "tester").unwrap();
     assert_eq!(status_of(&f.state, &captured.record_iri), "rejected");
 
+    // Rejecting the record cascade-rejected its queued links: a declined
+    // record's links are dead and cannot resurrect it later.
     for link in &captured.proposed_links {
-        graph::reject_proposal(&f.state, link, "tester").unwrap();
+        assert_eq!(status_of(&f.state, link), "rejected", "cascade-rejected");
+        assert!(graph::accept_proposal(&f.state, link, "tester").is_err());
     }
     assert!(!has_records(&f.state, &f.alpha), "reject creates no edge");
     assert_eq!(foo_numerator(&f.state), 0);
@@ -384,7 +398,9 @@ fn cluster_satellites_are_never_queue_entries() {
 
     let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
     assert!(
-        pending.iter().all(|p| p.iri != alternative && p.iri != consequence),
+        pending
+            .iter()
+            .all(|p| p.iri != alternative && p.iri != consequence),
         "satellites must not appear in the queue"
     );
     assert_eq!(graph::pending_count(&f.state).unwrap(), 0);

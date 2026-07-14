@@ -419,15 +419,15 @@ fn write_claude_hooks(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
             .entry(*event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("{} `hooks.{event}` must be an array", path.display()))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("{} `hooks.{event}` must be an array", path.display())
+            })?;
         let already = groups.iter().any(|group| {
-            group["hooks"]
-                .as_array()
-                .is_some_and(|hooks| {
-                    hooks.iter().any(|h| {
-                        h["command"].as_str().is_some_and(|c| c.contains(script))
-                    })
-                })
+            group["hooks"].as_array().is_some_and(|hooks| {
+                hooks
+                    .iter()
+                    .any(|h| h["command"].as_str().is_some_and(|c| c.contains(script)))
+            })
         });
         if already {
             continue;
@@ -1186,10 +1186,7 @@ mod tests {
         // Re-running init adds nothing (idempotent merge).
         let report = init_project(&o).unwrap();
         let settings = read_json(&claude_dir.join("settings.json"));
-        assert_eq!(
-            settings["hooks"]["PreToolUse"].as_array().unwrap().len(),
-            2
-        );
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(
             outcome_for(&report, ".claude/settings.json"),
             Some(&Outcome::Skipped)

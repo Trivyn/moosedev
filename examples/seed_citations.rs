@@ -170,7 +170,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     canonical::write_through(&state.store, &args.data_dir)?;
-    println!("\nenqueued {enqueued} proposals at status=proposed — ratify them in the workbench inbox");
+    println!(
+        "\nenqueued {enqueued} proposals at status=proposed — ratify them in the workbench inbox"
+    );
     Ok(())
 }
 
@@ -296,7 +298,9 @@ fn resolve_token(token: &str, index: &SymbolIndex) -> Resolution {
             .is_some_and(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()))
             && token.contains(':');
         return if is_file_line {
-            Resolution::Skip("file:line — historical position; resolve symbols not lines".to_string())
+            Resolution::Skip(
+                "file:line — historical position; resolve symbols not lines".to_string(),
+            )
         } else {
             Resolution::Skip("file path — component-level (concerns handles this)".to_string())
         };
@@ -309,7 +313,9 @@ fn resolve_token(token: &str, index: &SymbolIndex) -> Resolution {
         let last = cleaned.rsplit("::").next().unwrap_or(cleaned);
         return match index.by_name.get(last) {
             Some(defs) if defs.len() == 1 => entity(&defs[0]),
-            Some(defs) => Resolution::Skip(format!("ambiguous: {} defs named `{last}`", defs.len())),
+            Some(defs) => {
+                Resolution::Skip(format!("ambiguous: {} defs named `{last}`", defs.len()))
+            }
             None => Resolution::Skip("no substrate match".to_string()),
         };
     }

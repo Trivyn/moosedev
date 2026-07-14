@@ -221,7 +221,7 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                     size="small"
                     variant="contained"
                     startIcon={<CheckIcon />}
-                    disabled={busy === proposal.id}
+                    disabled={busy !== null}
                     onClick={() => act(proposal.id, 'accept')}
                   >
                     Accept
@@ -231,7 +231,7 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                     variant="outlined"
                     color="inherit"
                     startIcon={<CloseIcon />}
-                    disabled={busy === proposal.id}
+                    disabled={busy !== null}
                     onClick={() => act(proposal.id, 'reject')}
                   >
                     Reject

@@ -154,9 +154,7 @@ fn setup(tag: &str) -> Fixture {
         NamedNode::new(&component).unwrap(),
         NamedNode::new(COVERS_PATH).unwrap(),
         Term::from(Literal::new_simple_literal("src/")),
-        oxigraph::model::GraphName::NamedNode(
-            NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap(),
-        ),
+        oxigraph::model::GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
     );
     let mut txn = state.store.start_transaction().unwrap();
     txn.insert(quad.as_ref());

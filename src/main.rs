@@ -883,6 +883,20 @@ async fn classify_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
         }
     };
 
+    // Judgments are durable graph writes; classifying from a stale index
+    // would attach them to obsolete entities using outdated fan-in/churn.
+    if substrate.is_stale() {
+        if apply {
+            anyhow::bail!(
+                "substrate is stale (indexed commit differs from HEAD); run `moosedev index` before `classify --apply`"
+            );
+        }
+        eprintln!(
+            "WARNING: substrate is stale (indexed commit differs from HEAD) — \
+             this plan reflects an outdated index; run `moosedev index` before applying."
+        );
+    }
+
     let plan = graph::plan_classify(&state, &substrate, &repo_root)?;
     report_classify_plan(&plan);
 
@@ -959,6 +973,11 @@ fn report_classify_plan(plan: &graph::ClassifyPlan) {
         println!(
             "  missing entities (run `moosedev mint --apply`): {}",
             plan.missing_entities.len()
+        );
+    }
+    if plan.churn_missing {
+        println!(
+            "  churn sidecar: MISSING — core-algorithm rule abstained (run `moosedev index` to build it)"
         );
     }
     let total_nodes = plan.role.len() + plan.criticality.len();

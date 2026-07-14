@@ -1035,8 +1035,14 @@ async fn policy_endpoint_gates_pushes_and_fires() {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
     let defs = state.substrate().unwrap().definitions();
-    let plan =
-        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
     let alpha = graph::entities_by_symbol(&state, &terms)
         .unwrap()

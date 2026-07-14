@@ -105,9 +105,7 @@ fn insert_quad(state: &AppState, subject: &str, predicate: &str, object: Term) {
         NamedNode::new(subject).unwrap(),
         NamedNode::new(predicate).unwrap(),
         object,
-        oxigraph::model::GraphName::NamedNode(
-            NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap(),
-        ),
+        oxigraph::model::GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
     );
     let mut txn = state.store.start_transaction().unwrap();
     txn.insert(quad.as_ref());
@@ -146,8 +144,14 @@ fn setup(tag: &str) -> Fixture {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
     let defs = state.substrate().unwrap().definitions();
-    let plan =
-        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
     let entities = graph::entities_by_symbol(&state, &terms).unwrap();
@@ -249,8 +253,7 @@ fn non_accepted_records_never_gate() {
     let draft = record(&f.state, "Constraint", "still a draft", "proposed");
     graph::relate(&f.state, &draft, "constrains", &f.alpha).expect("constrains edge");
 
-    let decision =
-        evaluate(&f.state, &f.repo_root, &edit(Some("alpha"))).expect("evaluate");
+    let decision = evaluate(&f.state, &f.repo_root, &edit(Some("alpha"))).expect("evaluate");
     assert!(
         matches!(decision, PolicyDecision::Allow),
         "a proposed-status record must not gate"

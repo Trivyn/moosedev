@@ -645,9 +645,9 @@ mod tests {
     fn reference_counts_exclude_definitions_and_locals() {
         let symbol = "rust-analyzer cargo pkg 1.0.0 mod/f().";
         let substrate = substrate_with_occurrences(vec![
-            occ(symbol, vec![0, 0, 5], 1), // definition role — not fan-in
-            occ(symbol, vec![1, 0, 5], 0), // reference
-            occ(symbol, vec![2, 0, 5], 0), // reference
+            occ(symbol, vec![0, 0, 5], 1),    // definition role — not fan-in
+            occ(symbol, vec![1, 0, 5], 0),    // reference
+            occ(symbol, vec![2, 0, 5], 0),    // reference
             occ("local 3", vec![3, 0, 5], 0), // local — not a stable identity
         ]);
 

@@ -155,8 +155,14 @@ fn why_coverage_counts_documented_public_surface() {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
     let defs = state.substrate().unwrap().definitions();
-    let plan =
-        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
     // Document alpha only: a Constraint concerns it.

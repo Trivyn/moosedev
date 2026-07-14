@@ -529,7 +529,10 @@ fn summarize_record(
         .unwrap_or_else(|| local_name(record_iri).to_string());
     let status = first_literal(&state.store, record_iri, &state.capture.status)
         .unwrap_or_else(|| "unknown".to_string());
-    if status.eq_ignore_ascii_case("deprecated") {
+    // Deprecated records are hidden history; rejected records were explicitly
+    // declined by a human and must never surface as documentation (or count
+    // toward why-coverage, which shares this oracle).
+    if status.eq_ignore_ascii_case("deprecated") || status.eq_ignore_ascii_case("rejected") {
         return None;
     }
     Some(RecordSummary {

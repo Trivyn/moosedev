@@ -211,6 +211,27 @@ pub fn run_index_with(
         );
     }
 
+    // Observation sidecar (AD 8dd7da0c): best-effort — a non-git dir or a
+    // missing git binary degrades to "no churn", never a failed index. Saved
+    // BEFORE meta.json: metadata is the completion marker the daemon's lazy
+    // reload watches, so everything the reload should pick up must already
+    // be on disk when it lands.
+    let churn_files =
+        match super::ChurnIndex::extract(repo_root, super::churn::DEFAULT_WINDOW_MONTHS).and_then(
+            |index| {
+                let count = index.files.len();
+                index.save(data_dir)?;
+                Ok(count)
+            },
+        ) {
+            Ok(count) => Some(count),
+            Err(error) => {
+                let _ = std::fs::remove_file(super::churn::churn_path(data_dir));
+                warnings.push(format!("churn sidecar skipped: {error}"));
+                None
+            }
+        };
+
     let meta = SubstrateMeta {
         schema_version: CURRENT_SCHEMA_VERSION,
         indexed_commit: commit.clone(),
@@ -219,22 +240,6 @@ pub fn run_index_with(
     };
     meta.save(data_dir)
         .context("failed to write substrate metadata after SCIP index promotion")?;
-
-    // Observation sidecar (AD 8dd7da0c): best-effort — a non-git dir or a
-    // missing git binary degrades to "no churn", never a failed index.
-    let churn_files = match super::ChurnIndex::extract(repo_root, super::churn::DEFAULT_WINDOW_MONTHS)
-        .and_then(|index| {
-            let count = index.files.len();
-            index.save(data_dir)?;
-            Ok(count)
-        }) {
-        Ok(count) => Some(count),
-        Err(error) => {
-            let _ = std::fs::remove_file(super::churn::churn_path(data_dir));
-            warnings.push(format!("churn sidecar skipped: {error}"));
-            None
-        }
-    };
 
     Ok(IndexReport {
         commit,

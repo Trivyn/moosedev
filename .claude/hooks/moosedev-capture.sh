@@ -19,7 +19,10 @@ ADDR_FILE="$DIR/.moosedev/http.addr"
 ADDR=$(cat "$ADDR_FILE" 2>/dev/null) || exit 0
 [ -n "$ADDR" ] || exit 0
 
-FILES=$(git -C "$DIR" diff --name-only HEAD 2>/dev/null | head -20)
+# Tracked changes AND untracked files: a session of purely new files is still
+# a decision point.
+FILES=$({ git -C "$DIR" diff --name-only HEAD 2>/dev/null; \
+          git -C "$DIR" ls-files --others --exclude-standard 2>/dev/null; } | sort -u | head -20)
 [ -n "$FILES" ] || exit 0
 
 # Debounce: one capture per change-set per 10 minutes.

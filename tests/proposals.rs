@@ -78,6 +78,10 @@ fn synthetic_substrate() -> Substrate {
 }
 
 fn record(state: &AppState, kind: &str, title: &str) -> String {
+    record_with_status(state, kind, title, "accepted")
+}
+
+fn record_with_status(state: &AppState, kind: &str, title: &str, status: &str) -> String {
     let class_iri = state.resolve_class(kind).expect("known class");
     graph::record_instance(
         state,
@@ -87,7 +91,7 @@ fn record(state: &AppState, kind: &str, title: &str) -> String {
             properties: vec![
                 (moose::RDFS_LABEL.to_string(), title.to_string()),
                 (state.capture.title.clone(), title.to_string()),
-                (state.capture.status.clone(), "accepted".to_string()),
+                (state.capture.status.clone(), status.to_string()),
             ],
         },
         "tester",
@@ -119,10 +123,10 @@ fn setup(tag: &str) -> Fixture {
     let state = AppState::bootstrap(&fresh_dir(tag), &ontology_dir()).expect("bootstrap");
     state.set_substrate(Arc::new(synthetic_substrate()));
 
-    let foo = record(&state, "SystemComponent", "foo");
+    let component = record(&state, "SystemComponent", "foo");
     insert_quad(
         &state,
-        &foo,
+        &component,
         COVERS_PATH,
         Literal::new_simple_literal("src/foo/").into(),
     );
@@ -130,8 +134,14 @@ fn setup(tag: &str) -> Fixture {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
     let defs = state.substrate().unwrap().definitions();
-    let plan =
-        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
     let entities = graph::entities_by_symbol(&state, &terms).unwrap();
@@ -225,7 +235,9 @@ fn proposed_link_is_invisible_until_accepted() {
     assert_eq!(foo_numerator(&f.state), 1, "accept documents alpha");
     assert_eq!(graph::pending_count(&f.state).unwrap(), 0);
     assert_eq!(
-        graph::list_proposals(&f.state, Some("accepted")).unwrap().len(),
+        graph::list_proposals(&f.state, Some("accepted"))
+            .unwrap()
+            .len(),
         1
     );
 
@@ -369,7 +381,12 @@ fn recategorize_rejects_classifier_target_and_ratifies_the_correction() {
     assert_eq!(target_iri, graph::role_iri("boundary"));
 
     // The corrected edge exists; the classifier's target never materialized.
-    assert!(has_edge(&f.state, &f.alpha, "playsRole", &graph::role_iri("boundary")));
+    assert!(has_edge(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &graph::role_iri("boundary")
+    ));
     assert!(!has_edge(
         &f.state,
         &f.alpha,
@@ -429,6 +446,73 @@ fn judgment_with_wrong_range_target_fails_honestly() {
     let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].status, "proposed");
+}
+
+#[test]
+fn rejected_records_can_never_become_documentation() {
+    let f = setup("proposals-rejected-subject");
+
+    // (a) Rejecting a captured record cascade-rejects its pending links, so a
+    // later accept cannot resurrect it into dossiers.
+    let record_iri = record_with_status(
+        &f.state,
+        "ArchitecturalDecision",
+        "captured decision",
+        "proposed",
+    );
+    let link = graph::propose_link(
+        &f.state,
+        &record_iri,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "file changed at this decision point",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    graph::reject_proposal(&f.state, &record_iri, "james").unwrap();
+    let rejected = graph::list_proposals(&f.state, Some("rejected")).unwrap();
+    assert!(
+        rejected.iter().any(|p| p.iri == link),
+        "rejecting the record cascade-rejects its pending links"
+    );
+    assert!(
+        graph::accept_proposal(&f.state, &link, "james").is_err(),
+        "the cascaded link is no longer pending"
+    );
+    assert!(!has_records(&f.state, &f.alpha));
+
+    // (b) A link whose subject was rejected out-of-band is refused at accept.
+    let dead = record_with_status(
+        &f.state,
+        "ArchitecturalDecision",
+        "declined elsewhere",
+        "rejected",
+    );
+    let orphan = graph::propose_link(
+        &f.state,
+        &dead,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "stale proposal",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    let err = graph::accept_proposal(&f.state, &orphan, "james").unwrap_err();
+    assert!(err.to_string().contains("rejected"), "{err}");
+    assert!(!has_records(&f.state, &f.alpha));
+
+    // (c) Even a materialized edge from a rejected record never renders as
+    // documentation or counts toward why-coverage.
+    graph::relate(&f.state, &dead, "concerns", &f.alpha).unwrap();
+    assert!(
+        !has_records(&f.state, &f.alpha),
+        "rejected records are invisible to dossiers"
+    );
+    assert_eq!(foo_numerator(&f.state), 0, "and to why-coverage");
 }
 
 #[test]

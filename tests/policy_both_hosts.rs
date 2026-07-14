@@ -127,9 +127,7 @@ fn constrained_state(data_dir: &Path) -> AppState {
         NamedNode::new(&component).unwrap(),
         NamedNode::new(COVERS_PATH).unwrap(),
         Term::from(Literal::new_simple_literal("src/foo/")),
-        oxigraph::model::GraphName::NamedNode(
-            NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap(),
-        ),
+        oxigraph::model::GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
     );
     let mut txn = state.store.start_transaction().unwrap();
     txn.insert(quad.as_ref());
@@ -138,8 +136,14 @@ fn constrained_state(data_dir: &Path) -> AppState {
     let terms = graph::CodeTerms::resolve(&state).unwrap();
     let components = graph::load_components(&state).unwrap();
     let defs = state.substrate().unwrap().definitions();
-    let plan =
-        graph::plan_mint(&state, &defs, &terms, &components, state.substrate().as_deref()).unwrap();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
     let alpha = graph::entities_by_symbol(&state, &terms)
@@ -278,7 +282,8 @@ async fn one_policy_drives_both_hosts() {
     let pending = call_raw(&client, "pending_ratifications", json!({})).await;
     let pending_text = response_text(&pending);
     assert!(
-        pending_text.contains("[record] ArchitecturalDecision \"scripted acceptance decision point\""),
+        pending_text
+            .contains("[record] ArchitecturalDecision \"scripted acceptance decision point\""),
         "the captured record sits in the queue: {pending_text}"
     );
 
@@ -307,7 +312,11 @@ async fn one_policy_drives_both_hosts() {
                 "opencode".to_string(),
                 "require_ratification".to_string()
             ),
-            ("push".to_string(), "opencode".to_string(), "inject".to_string()),
+            (
+                "push".to_string(),
+                "opencode".to_string(),
+                "inject".to_string()
+            ),
             (
                 "capture".to_string(),
                 "claude-code".to_string(),

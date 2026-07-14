@@ -527,8 +527,7 @@ impl MooseDevServer {
                 )))
             }
         };
-        let repo_root =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match crate::policy::evaluate_and_fire(&self.state, &repo_root, &event, &host) {
             Ok(decision) => match serde_json::to_string_pretty(&decision) {
                 Ok(json) => Ok(tool_ok(json)),
@@ -879,6 +878,17 @@ impl MooseDevServer {
             return Ok(tool_error(
                 "`predicate` must not be empty (an object-property local name, e.g. \"violates\")",
             ));
+        }
+        // Judgment predicates are ratification-only: a bare playsRole /
+        // hasCriticality edge would carry no proposal node (no confidence,
+        // no ratification provenance) and would be invisible to the dossier
+        // badges and the policy gate, which read judgment nodes.
+        if matches!(predicate.as_str(), "playsRole" | "hasCriticality") {
+            return Ok(tool_error(format!(
+                "{predicate:?} is ratification-only: judgments are proposed by `moosedev classify` \
+                 (or recategorized in the workbench) and materialize on human acceptance — never \
+                 asserted directly"
+            )));
         }
         match graph::relate(&self.state, &subject_iri, &predicate, &object_iri) {
             Ok(out) => {

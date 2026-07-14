@@ -18,12 +18,11 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::{
-    ClientCapabilities, CodeDescription, CodeLens, CodeLensOptions, Diagnostic,
-    DiagnosticSeverity, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, MarkupContent, MarkupKind, MessageType, NumberOrString,
-    Position, PositionEncodingKind, PublishDiagnosticsParams, Range, ServerCapabilities,
-    ShowMessageParams, TextDocumentSyncCapability, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Uri,
+    ClientCapabilities, CodeDescription, CodeLens, CodeLensOptions, Diagnostic, DiagnosticSeverity,
+    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    MarkupContent, MarkupKind, MessageType, NumberOrString, Position, PositionEncodingKind,
+    PublishDiagnosticsParams, Range, ServerCapabilities, ShowMessageParams,
+    TextDocumentSyncCapability, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -118,7 +117,8 @@ impl LspSessions {
         retracted: Arc<AtomicBool>,
     ) -> SessionRegistration {
         let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
-        self.lock_hooks().insert(id, SessionHook { notify, retracted });
+        self.lock_hooks()
+            .insert(id, SessionHook { notify, retracted });
         SessionRegistration {
             sessions: self.clone(),
             id,
@@ -984,7 +984,12 @@ fn lens_count_title(records: &[RecordSummary]) -> String {
     for record in records {
         *counts.entry(record.kind.as_str()).or_default() += 1;
     }
-    const ORDER: &[&str] = &["ArchitecturalDecision", "Constraint", "Lesson", "Requirement"];
+    const ORDER: &[&str] = &[
+        "ArchitecturalDecision",
+        "Constraint",
+        "Lesson",
+        "Requirement",
+    ];
     let mut parts = Vec::new();
     for kind in ORDER {
         if let Some(n) = counts.remove(*kind) {

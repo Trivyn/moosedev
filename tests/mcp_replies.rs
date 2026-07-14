@@ -159,8 +159,7 @@ async fn evaluate_policy_tool_returns_verdict_json() {
     )
     .await;
     assert_ne!(allow.is_error, Some(true));
-    let verdict: Value =
-        serde_json::from_str(response_text(&allow)).expect("verdict is JSON");
+    let verdict: Value = serde_json::from_str(response_text(&allow)).expect("verdict is JSON");
     assert_eq!(verdict["decision"], "allow");
 
     // Unknown event kind → honest tool error, not a crash.
@@ -174,9 +173,31 @@ async fn evaluate_policy_tool_returns_verdict_json() {
     assert!(response_text(&bad).contains("unknown event kind"));
 
     // Missing file for a gate event → honest tool error.
-    let missing = call_raw(&client, "evaluate_policy", json!({"event": "edit_proposed"})).await;
+    let missing = call_raw(
+        &client,
+        "evaluate_policy",
+        json!({"event": "edit_proposed"}),
+    )
+    .await;
     assert_eq!(missing.is_error, Some(true));
     assert!(response_text(&missing).contains("requires `file`"));
+
+    // Judgment predicates cannot bypass the ratification queue via relate: a
+    // bare edge would carry no provenance and be invisible to badges + gate.
+    for predicate in ["playsRole", "hasCriticality"] {
+        let bypass = call_raw(
+            &client,
+            "relate",
+            json!({
+                "subject_iri": "https://moosedev.dev/kg/CodeEntity/any",
+                "predicate": predicate,
+                "object_iri": "https://moosedev.dev/kg/CodeRole/boundary"
+            }),
+        )
+        .await;
+        assert_eq!(bypass.is_error, Some(true));
+        assert!(response_text(&bypass).contains("ratification-only"));
+    }
 
     backend.abort();
     let _ = std::fs::remove_dir_all(&data_dir);

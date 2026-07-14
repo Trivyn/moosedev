@@ -82,6 +82,9 @@ pub struct ClassifyPlan {
     pub taxonomy_to_seed: bool,
     /// Rough kg.nq growth: pending judgment nodes × quads per node.
     pub projected_quads: usize,
+    /// True when the churn sidecar is absent — churn-dependent rules (R4
+    /// core-algorithm) abstained rather than assume zero churn.
+    pub churn_missing: bool,
 }
 
 /// What `apply_classify` wrote.
@@ -96,8 +99,13 @@ struct Evidence<'a> {
     entry: &'a DefinitionEntry,
     fan_in: u32,
     fan_in_p90: u32,
+    /// `None` = no commits for the file within a PRESENT sidecar's window
+    /// (verified zero); meaningless when `churn_available` is false.
     churn_commits: Option<u32>,
     churn_median: u32,
+    /// Whether the churn sidecar exists at all. Absent sidecar ≠ zero churn:
+    /// rules that need churn evidence must abstain, never fabricate stability.
+    churn_available: bool,
     generated: bool,
     constrained: bool,
 }
@@ -158,8 +166,11 @@ pub fn plan_classify(
 
     for def in &population {
         let Some(entity_iri) = entities.get(&def.normalized_symbol) else {
-            plan.missing_entities
-                .push(def.display_name.clone().unwrap_or(def.normalized_symbol.clone()));
+            plan.missing_entities.push(
+                def.display_name
+                    .clone()
+                    .unwrap_or(def.normalized_symbol.clone()),
+            );
             continue;
         };
 
@@ -172,6 +183,7 @@ pub fn plan_classify(
             fan_in_p90,
             churn_commits: substrate.churn_for_file(&def.file).map(|c| c.commits),
             churn_median,
+            churn_available: substrate.churn_window_months().is_some(),
             generated: is_generated(repo_root, &def.file),
             constrained: has_accepted_constrains(state, entity_iri)?,
         };
@@ -183,8 +195,8 @@ pub fn plan_classify(
         let criticality = classify_criticality(&evidence);
         // High stakes: an accepted contract governs the entity, or the
         // classifier itself thinks it is critical.
-        let high_stakes = evidence.constrained
-            || matches!(&criticality, Some((local, ..)) if *local == "high");
+        let high_stakes =
+            evidence.constrained || matches!(&criticality, Some((local, ..)) if *local == "high");
 
         // Role axis — the full-accounting axis: every population entity lands
         // in exactly one of {role, unclassified, skipped_existing}.
@@ -227,8 +239,9 @@ pub fn plan_classify(
 
     plan.unclassified.sort();
     plan.missing_entities.sort();
-    plan.taxonomy_to_seed = state.resolve_code_class("CodeRole").is_ok()
-        && !taxonomy_seeded(state)?;
+    plan.churn_missing = substrate.churn_window_months().is_none();
+    plan.taxonomy_to_seed =
+        state.resolve_code_class("CodeRole").is_ok() && !taxonomy_seeded(state)?;
     // ~11 quads per judgment node (type, label, 6 literals, author, status, ts).
     plan.projected_quads = (plan.role.len() + plan.criticality.len()) * 11;
     Ok(plan)
@@ -270,12 +283,12 @@ fn classify_role(evidence: &Evidence) -> Option<(&'static str, f64, String)> {
     let generated_path =
         file.contains("/generated/") || file.contains(".pb.") || file.starts_with("dist/");
     if generated_path || evidence.generated {
-        let via = if generated_path { "path" } else { "file marker" };
-        return Some((
-            "generated",
-            0.95,
-            format!("R1 generated: {via} in {file}"),
-        ));
+        let via = if generated_path {
+            "path"
+        } else {
+            "file marker"
+        };
+        return Some(("generated", 0.95, format!("R1 generated: {via} in {file}")));
     }
 
     // R2 boundary: public surface in adapter/entry-point territory.
@@ -300,17 +313,22 @@ fn classify_role(evidence: &Evidence) -> Option<(&'static str, f64, String)> {
         return Some(("glue", 0.6, format!("R3 glue: plumbing path {file}")));
     }
 
-    // R4 core-algorithm: heavily referenced and stable.
-    let churn = evidence.churn_commits.unwrap_or(0);
-    if evidence.fan_in >= evidence.fan_in_p90 && churn <= evidence.churn_median {
-        return Some((
-            "core-algorithm",
-            0.6,
-            format!(
-                "R4 core-algorithm: fan-in {} (≥ P90 {}); churn {churn} commits/24mo (≤ median {})",
-                evidence.fan_in, evidence.fan_in_p90, evidence.churn_median
-            ),
-        ));
+    // R4 core-algorithm: heavily referenced and stable. Requires the churn
+    // sidecar: an absent sidecar is missing evidence, not zero churn — abstain
+    // rather than label a hot entity "stable" on fabricated data.
+    if evidence.churn_available {
+        // A file absent from a PRESENT sidecar had zero commits in the window.
+        let churn = evidence.churn_commits.unwrap_or(0);
+        if evidence.fan_in >= evidence.fan_in_p90 && churn <= evidence.churn_median {
+            return Some((
+                "core-algorithm",
+                0.6,
+                format!(
+                    "R4 core-algorithm: fan-in {} (≥ P90 {}); churn {churn} commits/24mo (≤ median {})",
+                    evidence.fan_in, evidence.fan_in_p90, evidence.churn_median
+                ),
+            ));
+        }
     }
 
     None // honest abstention — never a low-confidence guess
@@ -435,6 +453,7 @@ mod tests {
             fan_in_p90: 10,
             churn_commits: churn,
             churn_median: 5,
+            churn_available: true,
             generated: false,
             constrained,
         }
@@ -461,6 +480,16 @@ mod tests {
         let plain = entry("src/graph/dossier.rs", "Function");
         let e = evidence(&plain, 2, Some(9), false);
         assert!(classify_role(&e).is_none());
+
+        // Missing sidecar ≠ zero churn: a hot entity must not be labeled a
+        // stable core algorithm on fabricated evidence — abstain.
+        let hot = entry("src/graph/dossier.rs", "Function");
+        let mut e = evidence(&hot, 12, None, false);
+        e.churn_available = false;
+        assert!(
+            classify_role(&e).is_none(),
+            "R4 abstains without the churn sidecar"
+        );
     }
 
     #[test]
@@ -486,7 +515,11 @@ mod tests {
     fn confidence_gate_dispositions() {
         assert_eq!(disposition(0.75, false), AUTO_HELD);
         assert_eq!(disposition(0.75, true), ESCALATED, "high stakes escalates");
-        assert_eq!(disposition(0.5, false), ESCALATED, "low confidence escalates");
+        assert_eq!(
+            disposition(0.5, false),
+            ESCALATED,
+            "low confidence escalates"
+        );
         assert_eq!(disposition(0.6, false), AUTO_HELD, "0.6 is the floor");
     }
 
