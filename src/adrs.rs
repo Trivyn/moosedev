@@ -156,6 +156,65 @@ struct Row {
     ndesc: String,
 }
 
+/// Generation-keyed memo of the last rendered [`AdrSet`]. Rendering walks
+/// every decision's relationship neighborhood (~40ms per ADR), so the API
+/// routes serve the memoized set until a project-graph write bumps
+/// [`AppState::project_write_generation`] — the same invalidation signal the
+/// LSP diagnostics refresh trusts. A memo of a deterministic function keyed
+/// on the store's own write counter is a derived cache, not a second source
+/// of truth (Constraint 2ba76439 concerns surfaces growing their OWN brains).
+#[derive(Default)]
+pub struct AdrSetMemo {
+    inner: std::sync::Mutex<Option<(u64, AdrGenerationOptions, std::sync::Arc<AdrSet>)>>,
+}
+
+impl AdrSetMemo {
+    /// Run a generation bump while holding the same lock as cached reads, then
+    /// discard the old value. Once this returns, no reader can still obtain a
+    /// memo from before the bump.
+    pub(crate) fn invalidate(&self, bump_generation: impl FnOnce()) {
+        let mut memo = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        bump_generation();
+        *memo = None;
+    }
+}
+
+/// [`generate_adr_set`] behind the [`AdrSetMemo`]: warm reads clone the Arc;
+/// a stale or differently-parameterized memo regenerates under the lock
+/// (single-flight — concurrent requests wait rather than each re-rendering).
+pub fn generate_adr_set_cached(
+    state: &AppState,
+    options: AdrGenerationOptions,
+) -> anyhow::Result<std::sync::Arc<AdrSet>> {
+    let mut memo = state
+        .adr_memo
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        // Sample only after acquiring the memo lock. A writer may bump the
+        // generation while a reader waits here; reading it beforehand could
+        // make that reader return the old memo after the completed write.
+        let generation = state.project_write_generation();
+        if let Some((cached_generation, cached_options, set)) = memo.as_ref() {
+            if *cached_generation == generation && *cached_options == options {
+                return Ok(set.clone());
+            }
+        }
+        let set = std::sync::Arc::new(generate_adr_set(state, options.clone())?);
+        if state.project_write_generation() != generation {
+            // The graph changed during rendering; retry under the same
+            // single-flight lock rather than publish a set with a stale key.
+            continue;
+        }
+        *memo = Some((generation, options, set.clone()));
+        return Ok(set);
+    }
+}
+
 pub fn generate_adr_set(state: &AppState, options: AdrGenerationOptions) -> anyhow::Result<AdrSet> {
     if options.batch_size == 0 {
         anyhow::bail!("ADR generation batch size must be >= 1");
@@ -607,6 +666,8 @@ fn node_bullet(row: &Row) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::{mpsc, Arc};
 
     #[test]
     fn slugify_disambiguates_empty_and_repeated_titles() {
@@ -654,5 +715,46 @@ mod tests {
             render_status(&old, &clusters, &by_iri),
             "Superseded by [ADR-0002](0002-new.md)"
         );
+    }
+
+    #[test]
+    fn project_write_waits_for_memo_lock_and_invalidates_before_returning() {
+        let dir = std::env::temp_dir().join(format!(
+            "moosedev-adr-lock-race-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+        let state = Arc::new(AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap"));
+        let old = generate_adr_set_cached(&state, AdrGenerationOptions::default()).expect("prime");
+
+        let guard = state
+            .adr_memo
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_state = state.clone();
+        let writer = std::thread::spawn(move || {
+            writer_state.note_project_write();
+            done_tx.send(()).expect("announce completed write hook");
+        });
+
+        assert!(
+            done_rx.try_recv().is_err(),
+            "the write hook must synchronize with an in-flight memo read"
+        );
+        drop(guard);
+        writer.join().expect("writer thread");
+        done_rx.recv().expect("write hook completed");
+
+        let refreshed = generate_adr_set_cached(&state, AdrGenerationOptions::default())
+            .expect("cached generation after write");
+        assert!(
+            !Arc::ptr_eq(&old, &refreshed),
+            "no stale memo may survive after note_project_write returns"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

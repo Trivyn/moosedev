@@ -126,6 +126,13 @@ pub struct AppState {
     canonical_throttle: crate::canonical::WriteThrottle,
     /// Serializes enrichment so concurrent reads enrich at most once.
     enrich_lock: std::sync::Mutex<()>,
+    /// Serializes judgment-axis check-and-write transitions. Oxigraph
+    /// transactions make each individual write atomic, while this lock keeps
+    /// the exclusivity precondition and its write in one critical section.
+    judgment_write_lock: std::sync::Mutex<()>,
+    /// Memo of the last rendered ADR set, keyed on `project_write_generation`
+    /// (see [`crate::adrs::generate_adr_set_cached`]).
+    pub adr_memo: crate::adrs::AdrSetMemo,
 }
 
 impl AppState {
@@ -227,7 +234,15 @@ impl AppState {
             project_write_generation: AtomicU64::new(0),
             canonical_throttle: crate::canonical::WriteThrottle::default(),
             enrich_lock: std::sync::Mutex::new(()),
+            judgment_write_lock: std::sync::Mutex::new(()),
+            adr_memo: crate::adrs::AdrSetMemo::default(),
         })
+    }
+
+    pub(crate) fn lock_judgment_writes(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
+        self.judgment_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("judgment write lock poisoned"))
     }
 
     /// Mark the reasoner-materialized edges stale — call after any write that changes the
@@ -245,14 +260,16 @@ impl AppState {
     /// must never fail the symbolic write (invariant #1).
     pub fn note_project_write(&self) {
         self.mark_inferred_stale();
-        self.project_write_generation
-            .fetch_add(1, Ordering::Relaxed);
+        self.adr_memo.invalidate(|| {
+            self.project_write_generation
+                .fetch_add(1, Ordering::Release);
+        });
         self.canonical_throttle
             .note_write(&self.store, &self.data_dir);
     }
 
     pub fn project_write_generation(&self) -> u64 {
-        self.project_write_generation.load(Ordering::Relaxed)
+        self.project_write_generation.load(Ordering::Acquire)
     }
 
     /// Return the loaded code substrate, reloading a disk-backed one when the
