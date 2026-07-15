@@ -107,6 +107,10 @@ pub struct ProposalSummary {
     /// entity's code name for `Judgment` entries. A human triages by name,
     /// never by IRI.
     pub subject_name: String,
+    /// The subject record's claim (description snippet), for `Link` entries —
+    /// a ratifier judges "should this link exist" by what the record SAYS,
+    /// not by its title alone.
+    pub subject_description: Option<String>,
     /// The subject entity's defining file, for `Judgment` entries.
     pub subject_path: String,
     /// Humanized target: the logical path (e.g. `graph::proposals`) for `Link`
@@ -146,6 +150,64 @@ impl ProposalTerms {
             defined_in_path: state.resolve_code_datatype_property("definedInPath")?,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn judgment_proposal_quads(
+    state: &AppState,
+    terms: &ProposalTerms,
+    iri: &str,
+    entity_iri: &str,
+    predicate_local: &str,
+    target_iri: &str,
+    confidence: f64,
+    escalation: &str,
+    evidence: &str,
+    author: &str,
+    when: DateTime<Utc>,
+    status: &str,
+) -> anyhow::Result<Vec<Quad>> {
+    let node = NamedNode::new(iri)?;
+    let graph = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
+    let label = format!("{predicate_local} → {}", local_name(target_iri));
+    let timestamp = when.to_rfc3339();
+    let lit = |predicate: &str, value: &str| -> anyhow::Result<Quad> {
+        Ok(Quad::new(
+            node.clone(),
+            NamedNode::new(predicate)?,
+            Literal::new_simple_literal(value),
+            graph.clone(),
+        ))
+    };
+
+    Ok(vec![
+        Quad::new(
+            node.clone(),
+            NamedNode::new(moose::RDF_TYPE)?,
+            NamedNode::new(&terms.class)?,
+            graph.clone(),
+        ),
+        lit(moose::RDFS_LABEL, &label)?,
+        lit(&terms.subject, entity_iri)?,
+        lit(&terms.predicate, predicate_local)?,
+        lit(&terms.target_iri, target_iri)?,
+        Quad::new(
+            node.clone(),
+            NamedNode::new(&terms.confidence)?,
+            Literal::new_typed_literal(format!("{confidence:.2}"), NamedNode::new(XSD_DECIMAL)?),
+            graph.clone(),
+        ),
+        lit(&terms.escalation, escalation)?,
+        lit(&state.capture.description, evidence)?,
+        lit(&state.capture.author, author)?,
+        lit(&state.capture.status, status)?,
+        Quad::new(
+            NamedNode::new(iri)?,
+            NamedNode::new(&state.capture.timestamp)?,
+            Literal::new_typed_literal(&timestamp, NamedNode::new(XSD_DATETIME)?),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+        ),
+    ])
 }
 
 /// Enqueue a proposed link. Writes literals only — no real edge exists until
@@ -231,7 +293,10 @@ pub fn propose_link(
 /// Enqueue a proposed judgment: `entity --playsRole/hasCriticality--> target`
 /// with the classifier's confidence, escalation disposition, and rule-trace
 /// evidence. Literals only — the edge is materialized by [`accept_proposal`]
-/// via the shape-validated `relate`, never here.
+/// via the shape-validated `relate`, never here. Idempotent like
+/// [`propose_link`]: an identical (entity, predicate, target) proposal already
+/// PENDING returns its IRI instead of minting a duplicate (repeated classifier
+/// runs or editor invocations must not multiply queue entries).
 #[allow(clippy::too_many_arguments)]
 pub fn propose_judgment(
     state: &AppState,
@@ -248,50 +313,50 @@ pub fn propose_judgment(
         matches!(escalation, ESCALATED | AUTO_HELD),
         "escalation must be {ESCALATED:?} or {AUTO_HELD:?}, got {escalation:?}"
     );
+    let _guard = state.lock_judgment_writes()?;
     let terms = ProposalTerms::resolve(state)?;
+    if let Some(existing) = scan_link_proposals(state, Some(PROPOSED))?
+        .into_iter()
+        .find(|p| {
+            p.kind == ProposalKind::Judgment
+                && p.subject_iri == entity_iri
+                && p.predicate_local == predicate_local
+                && p.target_iri == target_iri
+        })
+    {
+        return Ok(existing.iri);
+    }
+    // Axis exclusivity at the writer (`maxCount 1`, enforced at every
+    // submission path — Lesson 18eb2f40): with the axis already carrying an
+    // accepted judgment, or a pending one with a DIFFERENT target, a second
+    // proposal could never be ratified — refuse instead of queueing dead
+    // entries. (An identical pending twin was returned above.)
+    if let Some(taken) = judgments_for_entity(state, entity_iri)?
+        .into_iter()
+        .find(|j| j.predicate_local == predicate_local)
+    {
+        anyhow::bail!(
+            "{entity_iri} already has a {predicate_local} judgment ({}, {}); \
+             accept, reject, or recategorize that entry instead",
+            taken.target_local,
+            taken.status
+        );
+    }
     let iri = mint_instance_iri("ProposedLink");
-    let node = NamedNode::new(&iri)?;
-    let graph = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
-    let label = format!("{predicate_local} → {}", local_name(target_iri));
-    let timestamp = when.to_rfc3339();
-
-    let lit = |predicate: &str, value: &str| -> anyhow::Result<Quad> {
-        Ok(Quad::new(
-            node.clone(),
-            NamedNode::new(predicate)?,
-            Literal::new_simple_literal(value),
-            graph.clone(),
-        ))
-    };
-
-    let quads = vec![
-        Quad::new(
-            node.clone(),
-            NamedNode::new(moose::RDF_TYPE)?,
-            NamedNode::new(&terms.class)?,
-            graph.clone(),
-        ),
-        lit(moose::RDFS_LABEL, &label)?,
-        lit(&terms.subject, entity_iri)?,
-        lit(&terms.predicate, predicate_local)?,
-        lit(&terms.target_iri, target_iri)?,
-        Quad::new(
-            node.clone(),
-            NamedNode::new(&terms.confidence)?,
-            Literal::new_typed_literal(format!("{confidence:.2}"), NamedNode::new(XSD_DECIMAL)?),
-            graph.clone(),
-        ),
-        lit(&terms.escalation, escalation)?,
-        lit(&state.capture.description, evidence)?,
-        lit(&state.capture.author, author)?,
-        lit(&state.capture.status, PROPOSED)?,
-        Quad::new(
-            node.clone(),
-            NamedNode::new(&state.capture.timestamp)?,
-            Literal::new_typed_literal(&timestamp, NamedNode::new(XSD_DATETIME)?),
-            graph.clone(),
-        ),
-    ];
+    let quads = judgment_proposal_quads(
+        state,
+        &terms,
+        &iri,
+        entity_iri,
+        predicate_local,
+        target_iri,
+        confidence,
+        escalation,
+        evidence,
+        author,
+        when,
+        PROPOSED,
+    )?;
 
     let mut txn = state
         .store
@@ -362,19 +427,23 @@ fn scan_link_proposals(
             first_literal(&state.store, &iri, &terms.target_symbol).unwrap_or_default();
         // Humanize both kinds: a triager needs names, never UUIDs or raw
         // SCIP symbols.
-        let (subject_name, subject_path, target_display) = match kind {
+        let (subject_name, subject_description, subject_path, target_display) = match kind {
             ProposalKind::Judgment => (
                 first_literal(&state.store, &subject_iri, &terms.has_code_name)
                     .unwrap_or_else(|| local_name(&subject_iri).to_string()),
+                None,
                 first_literal(&state.store, &subject_iri, &terms.defined_in_path)
                     .unwrap_or_default(),
                 local_name(&target_iri).to_string(),
             ),
             _ => (
-                // The subject of a link is a knowledge record: show its title.
+                // The subject of a link is a knowledge record: show its title
+                // and lead the ratifier with its claim.
                 first_literal(&state.store, &subject_iri, &state.capture.title)
                     .or_else(|| first_literal(&state.store, &subject_iri, moose::RDFS_LABEL))
                     .unwrap_or_else(|| local_name(&subject_iri).to_string()),
+                first_literal(&state.store, &subject_iri, &state.capture.description)
+                    .map(|d| snippet(&d, 280)),
                 String::new(),
                 crate::code::substrate::symbols::logical_path(&target_symbol)
                     .unwrap_or_else(|| target_symbol.clone()),
@@ -394,6 +463,7 @@ fn scan_link_proposals(
             confidence: first_literal(&state.store, &iri, &terms.confidence),
             escalation: first_literal(&state.store, &iri, &terms.escalation),
             subject_name,
+            subject_description,
             subject_path,
             target_display,
             evidence: first_literal(&state.store, &iri, &state.capture.description),
@@ -402,6 +472,17 @@ fn scan_link_proposals(
         });
     }
     Ok(out)
+}
+
+/// Char-boundary-safe snippet of a record description for inbox cards.
+fn snippet(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Every `InformationRecord` subclass instance sitting at status `proposed`.
@@ -443,6 +524,7 @@ fn scan_record_proposals(state: &AppState) -> anyhow::Result<Vec<ProposalSummary
             confidence: None,
             escalation: None,
             subject_name: String::new(),
+            subject_description: None,
             subject_path: String::new(),
             target_display: String::new(),
             evidence: first_literal(&state.store, &iri, &state.capture.description),
@@ -474,6 +556,7 @@ pub fn accept_proposal(
     proposal_iri: &str,
     agent: &str,
 ) -> anyhow::Result<AcceptOutcome> {
+    let _guard = state.lock_judgment_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     match require_pending(state, proposal_iri, &terms)? {
         ProposalKind::Link => {
@@ -484,17 +567,28 @@ pub fn accept_proposal(
             let target_symbol = first_literal(&state.store, proposal_iri, &terms.target_symbol)
                 .ok_or_else(|| anyhow::anyhow!("proposal {proposal_iri} has no target symbol"))?;
 
-            // A link must not resurrect a record a human already declined: a
-            // rejected/deprecated subject would otherwise re-enter dossiers
-            // and why-coverage through the materialized edge.
+            // A materialized edge puts the subject record into dossiers and
+            // why-coverage, so the subject must itself be ratified first: a
+            // rejected/deprecated record was declined or replaced, and a
+            // still-proposed one has not been judged — accepting its link
+            // would smuggle unratified knowledge past the inbox (amends
+            // Consequence 34b00cc0: ratification order is record-then-links,
+            // not the human's free choice). Records with no status literal
+            // (pre-lifecycle legacy) pass.
             let subject_status =
                 first_literal(&state.store, &subject, &state.capture.status).unwrap_or_default();
-            if subject_status.eq_ignore_ascii_case(REJECTED)
-                || subject_status.eq_ignore_ascii_case("deprecated")
-            {
+            if !subject_status.is_empty() && !super::lifecycle::in_working_set(&subject_status) {
+                let (status_phrase, guidance) = if subject_status.eq_ignore_ascii_case(PROPOSED) {
+                    (
+                        "still proposed".to_string(),
+                        "ratify the record first, then its links",
+                    )
+                } else {
+                    (subject_status, "reject this link instead")
+                };
                 anyhow::bail!(
-                    "cannot accept {proposal_iri}: its subject record {subject} is {subject_status}; \
-                     reject this link instead"
+                    "cannot accept {proposal_iri}: its subject record {subject} is {status_phrase}; \
+                     {guidance}"
                 );
             }
 
@@ -531,6 +625,27 @@ pub fn accept_proposal(
             let target_iri = first_literal(&state.store, proposal_iri, &terms.target_iri)
                 .ok_or_else(|| anyhow::anyhow!("judgment {proposal_iri} has no target IRI"))?;
 
+            // Keep the max-one judgment-axis invariant inside the same lock as
+            // materialization. This also protects stores containing legacy
+            // duplicate proposals that predate the writer-side exclusivity
+            // guard: once one is accepted, the others can only be rejected or
+            // recategorized.
+            if let Some(ratified) =
+                judgments_for_entity(state, &entity_iri)?
+                    .into_iter()
+                    .find(|j| {
+                        j.predicate_local == predicate_local
+                            && j.status == ACCEPTED
+                            && j.proposal_iri != proposal_iri
+                    })
+            {
+                anyhow::bail!(
+                    "{entity_iri} already has a ratified {predicate_local} judgment ({}); \
+                     reject or recategorize this entry instead",
+                    ratified.target_local
+                );
+            }
+
             // Shape-validated, idempotent; a wrong-range target fails here and
             // the judgment stays pending (honest skip).
             super::lifecycle::relate(state, &entity_iri, &predicate_local, &target_iri)
@@ -561,6 +676,7 @@ pub fn recategorize_judgment(
     new_target_local: &str,
     agent: &str,
 ) -> anyhow::Result<AcceptOutcome> {
+    let _guard = state.lock_judgment_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     let kind = require_pending(state, proposal_iri, &terms)?;
     anyhow::ensure!(
@@ -590,6 +706,25 @@ pub fn recategorize_judgment(
             super::taxonomy::CRITICALITY_LOCALS
         ),
     };
+    // Guards BEFORE any write: recategorizing to the proposal's own target is
+    // an accept, not a correction (and would trip over the dedup guard —
+    // reuse the original, accept it, then fail rejecting the accepted node);
+    // and an axis that already carries a ratified judgment cannot take a
+    // second edge (`maxCount 1`).
+    anyhow::ensure!(
+        new_target_local != old_target,
+        "{proposal_iri} already proposes '{old_target}'; accept it instead of recategorizing"
+    );
+    if let Some(ratified) = judgments_for_entity(state, &subject)?
+        .into_iter()
+        .find(|j| j.predicate_local == predicate && j.status == ACCEPTED)
+    {
+        anyhow::bail!(
+            "{subject} already has a ratified {predicate} judgment ({}); \
+             a second edge on the axis cannot be materialized",
+            ratified.target_local
+        );
+    }
     super::taxonomy::ensure_taxonomy_individuals(state)?;
 
     let old_evidence =
@@ -597,9 +732,23 @@ pub fn recategorize_judgment(
     let evidence = format!(
         "recategorized by {agent} from '{old_target}' (classifier evidence: {old_evidence})"
     );
-    // Human-authored: confidence 1.0; escalation is moot once accepted.
-    let corrected = propose_judgment(
+    // Prepare the complete correction before writing: reject every pending
+    // classifier judgment on the axis, mint the human judgment as accepted,
+    // and materialize its edge in one transaction. A validation or commit
+    // failure therefore leaves every original proposal pending.
+    let pending: Vec<ProposalSummary> = scan_link_proposals(state, Some(PROPOSED))?
+        .into_iter()
+        .filter(|p| {
+            p.kind == ProposalKind::Judgment
+                && p.subject_iri == subject
+                && p.predicate_local == predicate
+        })
+        .collect();
+    let corrected = mint_instance_iri("ProposedLink");
+    let corrected_quads = judgment_proposal_quads(
         state,
+        &terms,
+        &corrected,
         &subject,
         &predicate,
         &new_target_iri,
@@ -608,11 +757,76 @@ pub fn recategorize_judgment(
         &evidence,
         agent,
         Utc::now(),
+        ACCEPTED,
     )?;
-    let outcome = accept_proposal(state, &corrected, agent)
-        .with_context(|| format!("cannot materialize the recategorized judgment {corrected}"))?;
-    reject_proposal(state, proposal_iri, agent)?;
-    Ok(outcome)
+    let subject_node = NamedNode::new(&subject)?;
+    let target_node = NamedNode::new(&new_target_iri)?;
+    let predicate_iri = state.resolve_object_property(&predicate)?;
+    super::relations::validate_relation_endpoints(
+        state,
+        &subject_node,
+        &predicate_iri,
+        &target_node,
+    )
+    .with_context(|| format!("cannot materialize the recategorized judgment {corrected}"))?;
+    let edge = Quad::new(
+        subject_node,
+        NamedNode::new(&predicate_iri)?,
+        target_node,
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+    );
+    let project_graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let status_predicate = NamedNode::new(&state.capture.status)?;
+    let rejected_status = Literal::new_simple_literal(REJECTED);
+    let mut status_replacements = Vec::new();
+    for proposal in &pending {
+        let node = NamedNode::new(&proposal.iri)?;
+        let old: Vec<Quad> = state
+            .store
+            .quads_for_pattern(
+                Some(node.as_ref().into()),
+                Some(status_predicate.as_ref()),
+                None,
+                Some(GraphNameRef::NamedNode(project_graph)),
+            )
+            .collect::<Result<_, _>>()?;
+        let replacement = Quad::new(
+            node,
+            status_predicate.clone(),
+            rejected_status.clone(),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+        );
+        status_replacements.push((old, replacement));
+    }
+
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("recategorize judgment transaction: {e}"))?;
+    for (old, replacement) in &status_replacements {
+        for quad in old {
+            txn.remove(quad.as_ref());
+        }
+        txn.insert(replacement.as_ref());
+    }
+    for quad in &corrected_quads {
+        txn.insert(quad.as_ref());
+    }
+    txn.insert(edge.as_ref());
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("recategorize judgment commit: {e}"))?;
+
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+    for proposal in &pending {
+        stamp_resolver(state, &proposal.iri, agent);
+    }
+    stamp_resolver(state, &corrected, agent);
+    state.note_project_write();
+    Ok(AcceptOutcome::Judgment {
+        entity_iri: subject,
+        predicate_local: predicate,
+        target_iri: new_target_iri,
+    })
 }
 
 /// Reject a pending queue entry: flip to rejected. A `Link` never creates an
@@ -623,6 +837,7 @@ pub fn recategorize_judgment(
 /// declined record's links are dead by definition, and leaving them pending
 /// would let a later accept resurrect the record into dossiers.
 pub fn reject_proposal(state: &AppState, proposal_iri: &str, agent: &str) -> anyhow::Result<()> {
+    let _guard = state.lock_judgment_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     let kind = require_pending(state, proposal_iri, &terms)?;
     set_status(state, proposal_iri, REJECTED)?;

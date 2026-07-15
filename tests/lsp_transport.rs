@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -16,7 +16,7 @@ use tokio::io::{
 };
 use tokio::net::UnixStream;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_moosedev")
@@ -219,7 +219,7 @@ fn assert_hover_silent(response: &Value) {
 
 #[tokio::test]
 async fn initialize_negotiates_and_declares_capabilities() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let data_dir = fresh_data_dir("lsp-negotiate");
     let socket = spawn_listener(&data_dir).await;
@@ -231,6 +231,21 @@ async fn initialize_negotiates_and_declares_capabilities() -> anyhow::Result<()>
     assert_eq!(capabilities["textDocumentSync"]["openClose"], json!(true));
     assert_eq!(capabilities["textDocumentSync"]["save"], json!(true));
     assert_eq!(capabilities["positionEncoding"], json!("utf-8"));
+    assert_eq!(
+        capabilities["diagnosticProvider"]["identifier"],
+        json!("moosedev"),
+        "pull diagnostics declared: {capabilities}"
+    );
+    assert_eq!(
+        capabilities["codeActionProvider"],
+        json!(true),
+        "code actions declared: {capabilities}"
+    );
+    assert_eq!(
+        capabilities["executeCommandProvider"]["commands"],
+        json!(["moosedev.proposeLink", "moosedev.proposeJudgment"]),
+        "write-path commands declared: {capabilities}"
+    );
 
     assert_hover_silent(&client.hover(2).await?);
     client.shutdown_and_exit().await?;
@@ -243,7 +258,7 @@ async fn initialize_negotiates_and_declares_capabilities() -> anyhow::Result<()>
 
 #[tokio::test]
 async fn utf16_default_when_client_offers_nothing() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let data_dir = fresh_data_dir("lsp-utf16");
     let socket = spawn_listener(&data_dir).await;
@@ -260,7 +275,7 @@ async fn utf16_default_when_client_offers_nothing() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn shim_relays_end_to_end() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let data_dir = fresh_data_dir("lsp-shim");
     let socket = spawn_listener(&data_dir).await;
@@ -323,7 +338,7 @@ async fn shim_relays_end_to_end() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn unknown_request_gets_method_not_found() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let data_dir = fresh_data_dir("lsp-unknown");
     let socket = spawn_listener(&data_dir).await;

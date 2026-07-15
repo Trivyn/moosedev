@@ -18,19 +18,25 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::{
-    ClientCapabilities, CodeDescription, CodeLens, CodeLensOptions, Diagnostic, DiagnosticSeverity,
-    Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    MarkupContent, MarkupKind, MessageType, NumberOrString, Position, PositionEncodingKind,
-    PublishDiagnosticsParams, Range, ServerCapabilities, ShowMessageParams,
+    ClientCapabilities, CodeAction, CodeActionKind, CodeActionParams, CodeActionProviderCapability,
+    CodeDescription, CodeLens, CodeLensOptions, Diagnostic, DiagnosticOptions,
+    DiagnosticServerCapabilities, DiagnosticSeverity, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, DocumentDiagnosticReportResult, ExecuteCommandOptions,
+    ExecuteCommandParams, FullDocumentDiagnosticReport, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent, MarkupKind,
+    MessageType, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
+    RelatedFullDocumentDiagnosticReport, ServerCapabilities, ShowMessageParams,
     TextDocumentSyncCapability, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::code::substrate::SourceRange;
+use crate::code::substrate::symbols::logical_path;
+use crate::code::substrate::{DefinitionEntry, Position as SubstratePosition, SourceRange};
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
-    pending_count, render_markdown, AppState, CodeTerms, DossierTarget, RecordSummary,
+    pending_count, render_markdown, AppState, CodeTerms, DossierTarget, ProposalKind,
+    RecordSummary, CRITICALITY_LOCALS, ROLE_LOCALS,
 };
 
 const LSP_SOCKET_FILE_NAME: &str = "moosedev-lsp.sock";
@@ -64,6 +70,9 @@ struct LspSession {
     nudge_enabled: bool,
     /// Whether the pending-ratifications nudge has fired this session (once only).
     nudged: bool,
+    /// Author identity for editor-originated proposals, derived from the
+    /// client's `clientInfo.name` at initialize (e.g. `editor:neovim`).
+    author: String,
     open_docs: HashMap<String, String>,
     last_diagnostics_generation: Option<(usize, u64)>,
     retracted: Arc<AtomicBool>,
@@ -379,6 +388,7 @@ fn run_session(
         code_lens_enabled: true,
         nudge_enabled: true,
         nudged: false,
+        author: "editor".to_string(),
         open_docs: HashMap::new(),
         last_diagnostics_generation: None,
         retracted,
@@ -464,6 +474,7 @@ impl LspSession {
         let (id, params) = self.connection.initialize_start()?;
         let params: InitializeParams = serde_json::from_value(params)?;
         self.encoding = negotiate_session_encoding(&params.capabilities);
+        self.author = proposal_author(params.client_info.as_ref());
         let options = parse_init_options(params.initialization_options);
         self.diagnostics = options.diagnostics;
         self.code_lens_enabled = options.code_lens;
@@ -501,6 +512,12 @@ impl LspSession {
                         self.handle_hover(req.id, req.params)?;
                     } else if req.method == "textDocument/codeLens" {
                         self.handle_code_lens(req.id, req.params)?;
+                    } else if req.method == "textDocument/diagnostic" {
+                        self.handle_pull_diagnostics(req.id, req.params)?;
+                    } else if req.method == "textDocument/codeAction" {
+                        self.handle_code_action(req.id, req.params)?;
+                    } else if req.method == "workspace/executeCommand" {
+                        self.handle_execute_command(req.id, req.params)?;
                     } else {
                         self.connection.sender.send(
                             Response::new_err(
@@ -865,6 +882,386 @@ impl LspSession {
         Ok(())
     }
 
+    /// Pull diagnostics (LSP 3.17, `textDocument/diagnostic`): the same
+    /// per-file diagnostics the push path publishes, computed on demand.
+    /// Unresolvable URIs get an honest empty full report, never an error.
+    fn handle_pull_diagnostics(
+        &self,
+        id: lsp_server::RequestId,
+        params: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let mut items = serde_json::from_value::<DocumentDiagnosticParams>(params)
+            .ok()
+            .and_then(|params| repo_relative_path(&self.repo_root, &params.text_document.uri))
+            .map(|rel_path| self.file_diagnostics(&rel_path))
+            .unwrap_or_default();
+        // The same severity ceiling `publish` enforces guards this path.
+        items.retain(is_allowed_diagnostic_severity);
+        let report = DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+            RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items,
+                },
+            },
+        ));
+        self.connection
+            .sender
+            .send(Response::new_ok(id, report).into())?;
+        Ok(())
+    }
+
+    fn handle_code_action(
+        &self,
+        id: lsp_server::RequestId,
+        params: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let actions = self.code_actions(params).unwrap_or_default();
+        self.connection
+            .sender
+            .send(Response::new_ok(id, actions).into())?;
+        Ok(())
+    }
+
+    /// The lightbulb menu IS the picker (spec §5.6): every choice is a
+    /// fully-formed quickfix action carrying a `moosedev.propose*` command, so
+    /// no server→client prompt is ever needed. Selecting one files a proposal
+    /// into the ratification queue via `workspace/executeCommand` — the only
+    /// write path this session has (Constraint 2ba76439: no side doors).
+    /// Silence discipline mirrors hover: no resolution, a local symbol, or a
+    /// symbol without a workspace definition → no actions.
+    fn code_actions(&self, params: serde_json::Value) -> Option<Vec<CodeAction>> {
+        let params: CodeActionParams = serde_json::from_value(params).ok()?;
+        if !quickfix_requested(params.context.only.as_deref()) {
+            return Some(Vec::new());
+        }
+        let rel_path = repo_relative_path(&self.repo_root, &params.text_document.uri)?;
+        let position = params.range.start;
+        let col0 = utf8_col(
+            &self.repo_root,
+            &rel_path,
+            position.line,
+            position.character,
+            self.encoding,
+        )?;
+        let substrate = self.state.substrate()?;
+        let resolution = substrate.resolve(
+            &rel_path,
+            SubstratePosition {
+                line: position.line,
+                col: col0,
+            },
+        )?;
+        if resolution.is_local {
+            return Some(Vec::new());
+        }
+        // Link actions anchor to the workspace definition (accept re-resolves
+        // the symbol at HEAD and mints the entity lazily), so a definition is
+        // the floor for every action.
+        let definition = substrate.definition_for_symbol(&resolution.symbol)?;
+        let entity_name = definition
+            .display_name
+            .clone()
+            .unwrap_or_else(|| logical_path(&definition.symbol).unwrap_or_default());
+
+        let terms = CodeTerms::resolve(&self.state).ok()?;
+        let entity_iri = entities_by_symbol(&self.state, &terms)
+            .ok()?
+            .get(&definition.normalized_symbol)
+            .cloned();
+
+        let mut actions = self.link_actions(&definition, &entity_name, entity_iri.as_deref());
+        if let Some(entity_iri) = &entity_iri {
+            actions.extend(self.judgment_actions(entity_iri, &entity_name));
+        }
+        Some(actions)
+    }
+
+    /// "Link decision to this entity…" candidates: the top records the hybrid
+    /// seed relates to this entity's name + logical path, minus records already
+    /// linked to it and records with a pending link proposal for this symbol.
+    fn link_actions(
+        &self,
+        definition: &DefinitionEntry,
+        entity_name: &str,
+        entity_iri: Option<&str>,
+    ) -> Vec<CodeAction> {
+        const CANDIDATE_CAP: usize = 4;
+
+        let seed = format!(
+            "{} {}",
+            entity_name,
+            logical_path(&definition.symbol).unwrap_or_default()
+        );
+        let already_linked = entity_iri
+            .and_then(|iri| direct_records_for_entity(&self.state, iri).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| record.iri)
+            .collect::<std::collections::HashSet<_>>();
+        let pending = crate::graph::list_proposals(&self.state, Some("proposed"))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| {
+                p.kind == ProposalKind::Link
+                    && (p.target_symbol == definition.symbol
+                        || p.target_symbol == definition.normalized_symbol)
+            })
+            .map(|p| p.subject_iri)
+            .collect::<std::collections::HashSet<_>>();
+        let excluded = already_linked.union(&pending).cloned().collect();
+
+        let candidates = match crate::graph::link_candidates_excluding(
+            &self.state,
+            &seed,
+            CANDIDATE_CAP,
+            &excluded,
+        ) {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                tracing::warn!("Knowledge-LSP link-candidate search failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                let title = format!(
+                    "Link {} \"{}\" to {}",
+                    candidate.kind,
+                    truncate_title(&candidate.title, 60),
+                    entity_name
+                );
+                propose_action(
+                    title,
+                    "moosedev.proposeLink",
+                    serde_json::json!({
+                        "recordIri": candidate.iri,
+                        "predicate": "concerns",
+                        "targetSymbol": definition.symbol,
+                        "targetPath": definition.file,
+                        "entityName": entity_name,
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    /// "Propose role/criticality" actions for a minted entity. An axis with
+    /// any live judgment (proposed or ratified) is suppressed entirely —
+    /// `maxCount 1` makes a second edge unratifiable, and a pending twin
+    /// belongs in the inbox, not the lightbulb. `standard` criticality is the
+    /// implicit default and never offered.
+    fn judgment_actions(&self, entity_iri: &str, entity_name: &str) -> Vec<CodeAction> {
+        let judgments = crate::graph::judgments_by_subject(&self.state).unwrap_or_default();
+        let entity_judgments = judgments.get(entity_iri).map(Vec::as_slice).unwrap_or(&[]);
+        let axis_taken = |predicate: &str| {
+            entity_judgments
+                .iter()
+                .any(|j| j.predicate_local == predicate)
+        };
+
+        let mut actions = Vec::new();
+        if !axis_taken("playsRole") {
+            for role in ROLE_LOCALS {
+                actions.push(propose_action(
+                    format!("Propose role: {role} ({entity_name})"),
+                    "moosedev.proposeJudgment",
+                    serde_json::json!({
+                        "entityIri": entity_iri,
+                        "predicate": "playsRole",
+                        "targetLocal": role,
+                    }),
+                ));
+            }
+        }
+        if !axis_taken("hasCriticality") {
+            for criticality in CRITICALITY_LOCALS.iter().filter(|c| **c != "standard") {
+                actions.push(propose_action(
+                    format!("Propose criticality: {criticality} ({entity_name})"),
+                    "moosedev.proposeJudgment",
+                    serde_json::json!({
+                        "entityIri": entity_iri,
+                        "predicate": "hasCriticality",
+                        "targetLocal": criticality,
+                    }),
+                ));
+            }
+        }
+        actions
+    }
+
+    /// The session's ONLY write path (spec §7 grep-proof): every command files
+    /// a proposal into the ratification queue via `propose_link` /
+    /// `propose_judgment`; nothing here materializes an edge or accepts
+    /// anything. Argument violations are `InvalidParams` errors, never silent.
+    fn handle_execute_command(
+        &self,
+        id: lsp_server::RequestId,
+        params: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let outcome = serde_json::from_value::<ExecuteCommandParams>(params)
+            .map_err(|e| format!("malformed executeCommand params: {e}"))
+            .and_then(|params| self.execute_command(&params));
+        match outcome {
+            Ok(proposal_iri) => {
+                self.connection.sender.send(
+                    Response::new_ok(id, serde_json::json!({ "proposalIri": proposal_iri })).into(),
+                )?;
+                let _ = self.connection.sender.send(
+                    Notification::new(
+                        "window/showMessage".to_string(),
+                        ShowMessageParams {
+                            typ: MessageType::INFO,
+                            message:
+                                "MOOSEDev: filed for ratification — review in the workbench inbox"
+                                    .to_string(),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            Err(message) => {
+                self.connection
+                    .sender
+                    .send(Response::new_err(id, ErrorCode::InvalidParams as i32, message).into())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_command(&self, params: &ExecuteCommandParams) -> Result<String, String> {
+        let argument = params
+            .arguments
+            .first()
+            .ok_or_else(|| format!("{} requires arguments[0]", params.command))?;
+        match params.command.as_str() {
+            "moosedev.proposeLink" => self.propose_link_command(argument),
+            "moosedev.proposeJudgment" => self.propose_judgment_command(argument),
+            other => Err(format!("unknown command: {other}")),
+        }
+    }
+
+    fn propose_link_command(&self, argument: &serde_json::Value) -> Result<String, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LinkArgs {
+            record_iri: String,
+            predicate: String,
+            target_symbol: String,
+            target_path: String,
+        }
+        let args: LinkArgs = serde_json::from_value(argument.clone())
+            .map_err(|e| format!("malformed proposeLink arguments: {e}"))?;
+        // v2.3 offers `concerns` only — the general anchoring predicate the
+        // capture path uses; intent predicates need record-side context the
+        // editor menu does not have.
+        if args.predicate != "concerns" {
+            return Err(format!(
+                "proposeLink predicate must be \"concerns\", got {:?}",
+                args.predicate
+            ));
+        }
+        let record = oxigraph::model::NamedNode::new(&args.record_iri)
+            .map_err(|_| format!("recordIri is not a valid IRI: {}", args.record_iri))?;
+        crate::graph::require_information_record(&self.state, &record)
+            .map_err(|e| e.to_string())?;
+        // The target must resolve to a real workspace definition NOW — a bogus
+        // symbol (or a path contradicting its definition) would queue a
+        // proposal that can never be accepted.
+        let definition = self
+            .state
+            .substrate()
+            .and_then(|s| s.definition_for_symbol(&args.target_symbol))
+            .ok_or_else(|| {
+                format!(
+                    "targetSymbol has no workspace definition in the substrate: {}",
+                    args.target_symbol
+                )
+            })?;
+        if definition.file != args.target_path {
+            return Err(format!(
+                "targetPath {:?} does not match the symbol's defining file {:?}",
+                args.target_path, definition.file
+            ));
+        }
+        crate::graph::propose_link(
+            &self.state,
+            &args.record_iri,
+            &args.predicate,
+            &args.target_symbol,
+            &args.target_path,
+            &format!("proposed from an editor code action ({})", args.target_path),
+            &self.author,
+            chrono::Utc::now(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn propose_judgment_command(&self, argument: &serde_json::Value) -> Result<String, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct JudgmentArgs {
+            entity_iri: String,
+            predicate: String,
+            target_local: String,
+        }
+        let args: JudgmentArgs = serde_json::from_value(argument.clone())
+            .map_err(|e| format!("malformed proposeJudgment arguments: {e}"))?;
+        let target_iri = match args.predicate.as_str() {
+            "playsRole" if ROLE_LOCALS.contains(&args.target_local.as_str()) => {
+                crate::graph::role_iri(&args.target_local)
+            }
+            "hasCriticality"
+                if CRITICALITY_LOCALS.contains(&args.target_local.as_str())
+                    && args.target_local != "standard" =>
+            {
+                crate::graph::criticality_iri(&args.target_local)
+            }
+            "playsRole" | "hasCriticality" => {
+                return Err(format!(
+                    "{:?} is not a proposable {} target",
+                    args.target_local, args.predicate
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "proposeJudgment predicate must be playsRole or hasCriticality, got {other:?}"
+                ));
+            }
+        };
+        oxigraph::model::NamedNode::new(&args.entity_iri)
+            .map_err(|_| format!("entityIri is not a valid IRI: {}", args.entity_iri))?;
+        let terms = CodeTerms::resolve(&self.state).map_err(|e| e.to_string())?;
+        let minted = entities_by_symbol(&self.state, &terms)
+            .map_err(|e| e.to_string())?
+            .into_values()
+            .any(|iri| iri == args.entity_iri);
+        if !minted {
+            return Err(format!(
+                "entityIri is not a minted code entity: {}",
+                args.entity_iri
+            ));
+        }
+        // A human choosing from the menu is an assertion, not a guess:
+        // confidence 1.0, escalated for inbox prominence — but still a
+        // proposal the workbench ratifies (no auto-accept from the editor).
+        crate::graph::propose_judgment(
+            &self.state,
+            &args.entity_iri,
+            &args.predicate,
+            &target_iri,
+            1.0,
+            crate::graph::ESCALATED,
+            "asserted by a human from the editor",
+            &self.author,
+            chrono::Utc::now(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     fn handle_hover(
         &self,
         id: lsp_server::RequestId,
@@ -1138,6 +1535,61 @@ fn add_record_code(diagnostic: &mut Diagnostic, record: &crate::policy::RecordRe
     diagnostic.code_description = Some(CodeDescription { href });
 }
 
+/// Build one quickfix action whose command files a queue proposal. Quickfix —
+/// not a custom kind — so clients that filter with `context.only` keep it.
+fn propose_action(title: String, command: &str, arguments: serde_json::Value) -> CodeAction {
+    CodeAction {
+        title: title.clone(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        command: Some(lsp_types::Command {
+            title,
+            command: command.to_string(),
+            arguments: Some(vec![arguments]),
+        }),
+        ..Default::default()
+    }
+}
+
+/// LSP kind filtering: a `context.only` list admits quickfix actions when any
+/// requested kind is `quickfix` itself, a hierarchical prefix of it (`""`),
+/// or a sub-kind request we satisfy exactly. Absent `only` admits everything.
+fn quickfix_requested(only: Option<&[CodeActionKind]>) -> bool {
+    let Some(kinds) = only else {
+        return true;
+    };
+    kinds.iter().any(|kind| {
+        let kind = kind.as_str();
+        kind.is_empty() || kind == CodeActionKind::QUICKFIX.as_str()
+    })
+}
+
+fn truncate_title(title: &str, max_chars: usize) -> String {
+    if title.chars().count() <= max_chars {
+        return title.to_string();
+    }
+    let mut out: String = title.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Author string for editor-originated proposals: `editor:<client>` from the
+/// initialize `clientInfo`, slugified; bare `editor` when the client is
+/// anonymous. Provenance names the surface, never impersonates a human.
+fn proposal_author(client_info: Option<&lsp_types::ClientInfo>) -> String {
+    let Some(name) = client_info
+        .map(|info| info.name.trim())
+        .filter(|n| !n.is_empty())
+    else {
+        return "editor".to_string();
+    };
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("editor:{}", slug.trim_matches('-'))
+}
+
 fn is_allowed_diagnostic_severity(diagnostic: &Diagnostic) -> bool {
     matches!(
         diagnostic.severity,
@@ -1168,6 +1620,20 @@ fn server_capabilities(encoding: SessionEncoding) -> ServerCapabilities {
         code_lens_provider: Some(CodeLensOptions {
             resolve_provider: Some(false),
         }),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![
+                "moosedev.proposeLink".to_string(),
+                "moosedev.proposeJudgment".to_string(),
+            ],
+            work_done_progress_options: Default::default(),
+        }),
+        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
+            identifier: Some("moosedev".to_string()),
+            inter_file_dependencies: false,
+            workspace_diagnostics: false,
+            work_done_progress_options: Default::default(),
+        })),
         ..Default::default()
     }
 }
@@ -1198,6 +1664,52 @@ mod tests {
     use lsp_types::GeneralClientCapabilities;
 
     use super::*;
+
+    #[test]
+    fn proposal_author_slugifies_client_info() {
+        let info = |name: &str| lsp_types::ClientInfo {
+            name: name.to_string(),
+            version: None,
+        };
+        assert_eq!(proposal_author(None), "editor");
+        assert_eq!(proposal_author(Some(&info(""))), "editor");
+        assert_eq!(proposal_author(Some(&info("Neovim"))), "editor:neovim");
+        assert_eq!(
+            proposal_author(Some(&info("Visual Studio Code"))),
+            "editor:visual-studio-code"
+        );
+        assert_eq!(proposal_author(Some(&info("  Zed  "))), "editor:zed");
+    }
+
+    #[test]
+    fn quickfix_kind_filtering_follows_only_semantics() {
+        let kinds = |names: &[&str]| -> Vec<CodeActionKind> {
+            names
+                .iter()
+                .map(|n| CodeActionKind::from(n.to_string()))
+                .collect()
+        };
+        assert!(quickfix_requested(None));
+        assert!(quickfix_requested(Some(&kinds(&["quickfix"]))));
+        assert!(quickfix_requested(Some(&kinds(&[""]))));
+        assert!(quickfix_requested(Some(&kinds(&["refactor", "quickfix"]))));
+        assert!(!quickfix_requested(Some(&kinds(&["refactor"]))));
+        assert!(!quickfix_requested(Some(&kinds(&[
+            "source.organizeImports"
+        ]))));
+    }
+
+    #[test]
+    fn menu_titles_truncate_on_char_boundaries() {
+        assert_eq!(truncate_title("short", 60), "short");
+        let long = "x".repeat(80);
+        let truncated = truncate_title(&long, 60);
+        assert_eq!(truncated.chars().count(), 60);
+        assert!(truncated.ends_with('…'));
+        // Multi-byte input never splits a char.
+        let unicode = "é".repeat(80);
+        assert!(truncate_title(&unicode, 60).ends_with('…'));
+    }
 
     #[test]
     fn negotiation_selects_utf8_when_client_offers_utf8() {

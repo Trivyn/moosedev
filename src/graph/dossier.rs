@@ -183,10 +183,11 @@ pub(crate) fn direct_records_for_entity(
 
 /// Render a stable Markdown view suitable for MCP and future hover surfaces.
 pub fn render_markdown(dossier: &Dossier) -> String {
-    let marker = dossier
-        .syntactic_anchor
-        .then_some(" [syntactic anchor]")
-        .unwrap_or_default();
+    let marker = if dossier.syntactic_anchor {
+        " [syntactic anchor]"
+    } else {
+        ""
+    };
     let mut out = format!(
         "### {} ({}){}\n",
         dossier.display_name, dossier.kind, marker

@@ -1,7 +1,7 @@
 //! Knowledge-LSP publishDiagnostics integration tests.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -25,7 +25,7 @@ const MODULE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/";
 const PUBLIC_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
 const SECOND_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/no_records().";
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn ontology_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
@@ -431,6 +431,27 @@ where
         anyhow::bail!("no codeLens response for {uri}")
     }
 
+    async fn pull_diagnostics(&mut self, uri: &str) -> anyhow::Result<Value> {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": 88,
+            "method": "textDocument/diagnostic",
+            "params": { "textDocument": { "uri": uri } }
+        }))
+        .await?;
+        for _ in 0..20 {
+            let message = self.read().await?.expect("pull diagnostics response");
+            if message["id"] == json!(88) {
+                assert!(
+                    message.get("error").is_none(),
+                    "pull diagnostics error: {message}"
+                );
+                return Ok(message["result"].clone());
+            }
+        }
+        anyhow::bail!("no pull-diagnostics response for {uri}")
+    }
+
     async fn read_until_diagnostics(&mut self, uri: &str) -> anyhow::Result<Value> {
         for _ in 0..20 {
             let message = self.read().await?.expect("LSP message");
@@ -544,7 +565,7 @@ fn assert_severity_ceiling(diagnostics: &[Value]) {
 
 #[tokio::test]
 async fn diagnostics_republish_when_substrate_becomes_available() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-late-root", "    build_server();");
     let data_dir = fresh_dir("diag-late-data");
@@ -582,7 +603,7 @@ async fn diagnostics_republish_when_substrate_becomes_available() -> anyhow::Res
 
 #[tokio::test]
 async fn diagnostics_republish_after_post_open_graph_write() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-write-root", "    build_server();");
     let data_dir = fresh_dir("diag-write-data");
@@ -625,7 +646,7 @@ async fn diagnostics_republish_after_post_open_graph_write() -> anyhow::Result<(
 
 #[tokio::test]
 async fn diagnostics_republish_after_substrate_swap() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-swap-root", "    build_server();");
     let data_dir = fresh_dir("diag-swap-data");
@@ -652,7 +673,7 @@ async fn diagnostics_republish_after_substrate_swap() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn unchanged_knowledge_generation_does_not_republish() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-idle-root", "    build_server();");
     let data_dir = fresh_dir("diag-idle-data");
@@ -682,7 +703,7 @@ async fn unchanged_knowledge_generation_does_not_republish() -> anyhow::Result<(
 
 #[tokio::test]
 async fn closed_documents_are_pruned_from_diagnostics_refresh() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-close-root", "    build_server();");
     let data_dir = fresh_dir("diag-close-data");
@@ -709,7 +730,7 @@ async fn closed_documents_are_pruned_from_diagnostics_refresh() -> anyhow::Resul
 
 #[tokio::test]
 async fn daemon_shutdown_retracts_published_diagnostics() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-retract-root", "    build_server();");
     let data_dir = fresh_dir("diag-retract-data");
@@ -742,7 +763,7 @@ async fn daemon_shutdown_retracts_published_diagnostics() -> anyhow::Result<()> 
 
 #[tokio::test]
 async fn constrained_entity_gets_information() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-info-root", "    build_server();");
     let data_dir = fresh_dir("diag-info-data");
@@ -791,7 +812,7 @@ async fn constrained_entity_gets_information() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn constraint_diagnostic_links_to_workbench_with_description() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-link-root", "    build_server();");
     let data_dir = fresh_dir("diag-link-data");
@@ -835,7 +856,7 @@ async fn constraint_diagnostic_links_to_workbench_with_description() -> anyhow::
 
 #[tokio::test]
 async fn no_records_publishes_empty() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-empty-root", "    build_server();");
     let data_dir = fresh_dir("diag-empty-data");
@@ -859,7 +880,7 @@ async fn no_records_publishes_empty() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn uncovered_file_publishes_empty() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-uncovered-root", "    build_server();");
     let ui = repo_root.join("ui/src");
@@ -885,7 +906,7 @@ async fn uncovered_file_publishes_empty() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn disable_flags_respected() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-disable-root", "    build_server();");
     let data_dir = fresh_dir("diag-disable-data");
@@ -915,7 +936,7 @@ async fn disable_flags_respected() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn stale_rationale_hint_from_git() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
 
     let old = DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
@@ -1001,7 +1022,7 @@ fn run_git(repo_root: &Path, args: &[&str]) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn utf16_range_conversion() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-utf16-root", "é   build_server();");
     let data_dir = fresh_dir("diag-utf16-data");
@@ -1036,7 +1057,7 @@ async fn utf16_range_conversion() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn repo_substrate_diagnostics_when_index_present() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let substrate_data_dir = repo_root.join(".moosedev");
@@ -1106,7 +1127,7 @@ async fn repo_substrate_diagnostics_when_index_present() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn code_lens_shows_counts_and_hotspots() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("lens-root", "    build_server();");
     let data_dir = fresh_dir("lens-data");
@@ -1179,6 +1200,45 @@ async fn code_lens_shows_counts_and_hotspots() -> anyhow::Result<()> {
             .any(|t| t.contains("critical") && !t.contains("critical?")),
         "ratified criticality-high renders plain badge: {titles:?}"
     );
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pull_diagnostics_match_push_and_are_empty_for_unresolvable_uris() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("pull-root", "    build_server();");
+    let data_dir = fresh_dir("pull-data");
+    let state = Arc::new(state_with_substrate("pull-state", 4));
+    let constraint = record(&state, "Constraint", "Pull parity constraint");
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    let pushed = diagnostics(&client.read_until_diagnostics(&uri).await?);
+    assert!(!pushed.is_empty(), "fixture should push diagnostics");
+
+    // Pull returns a full report whose items are byte-identical to the push.
+    let report = client.pull_diagnostics(&uri).await?;
+    assert_eq!(report["kind"], json!("full"));
+    assert_eq!(
+        report["items"].as_array().expect("items array"),
+        &pushed,
+        "pull and push disagree on the same file"
+    );
+    assert_severity_ceiling(report["items"].as_array().unwrap());
+
+    // A URI outside the repo resolves to an honest empty report, not an error.
+    let outside = client.pull_diagnostics("file:///tmp/elsewhere.rs").await?;
+    assert_eq!(outside["kind"], json!("full"));
+    assert_eq!(outside["items"], json!([]));
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

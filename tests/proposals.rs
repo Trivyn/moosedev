@@ -6,7 +6,7 @@
 //! `rdf:type InformationRecord` onto a proposal from its reused arch predicates.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 use chrono::Utc;
 use moosedev::code::substrate::{Substrate, SubstrateMeta};
@@ -356,6 +356,140 @@ fn judgment_lifecycle_proposes_ratifies_and_rejects() {
 }
 
 #[test]
+fn propose_judgment_is_idempotent_against_pending_duplicates() {
+    let f = setup("judgment-dedup");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+
+    let role = graph::role_iri("boundary");
+    let propose = |author: &str| {
+        graph::propose_judgment(
+            &f.state,
+            &f.alpha,
+            "playsRole",
+            &role,
+            1.0,
+            graph::ESCALATED,
+            "asserted by a human from the editor",
+            author,
+            Utc::now(),
+        )
+        .unwrap()
+    };
+
+    // An identical pending (entity, predicate, target) returns the same node —
+    // regardless of who repeats it.
+    let first = propose("editor:neovim");
+    assert_eq!(propose("editor:neovim"), first);
+    assert_eq!(propose("moosedev-classifier"), first);
+    assert_eq!(
+        graph::list_proposals(&f.state, Some("proposed"))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A different target on the same axis is REFUSED while one is pending —
+    // `maxCount 1` means a second proposal could never be ratified, so the
+    // writer enforces axis exclusivity for every submission path.
+    let err = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &graph::role_iri("glue"),
+        1.0,
+        graph::ESCALATED,
+        "second opinion",
+        "editor:neovim",
+        Utc::now(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("already has a playsRole judgment"),
+        "axis guard names the conflict: {err}"
+    );
+    // A different AXIS is untouched by the guard.
+    graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "hasCriticality",
+        &graph::criticality_iri("high"),
+        1.0,
+        graph::ESCALATED,
+        "orthogonal axis",
+        "editor:neovim",
+        Utc::now(),
+    )
+    .unwrap();
+
+    // Once the pending twin is resolved, the axis is free again.
+    graph::reject_proposal(&f.state, &first, "james").unwrap();
+    let after_reject = propose("editor:neovim");
+    assert_ne!(after_reject, first);
+
+    // A RATIFIED judgment blocks the axis permanently (until superseded).
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+    graph::accept_proposal(&f.state, &after_reject, "james").unwrap();
+    let err = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &graph::role_iri("glue"),
+        1.0,
+        graph::ESCALATED,
+        "late second opinion",
+        "editor:neovim",
+        Utc::now(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("accepted"),
+        "ratified axis refuses new proposals: {err}"
+    );
+}
+
+#[test]
+fn concurrent_judgment_proposals_preserve_axis_exclusivity() {
+    let f = setup("judgment-concurrent-axis");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+    let entity = f.alpha.clone();
+    let state = Arc::new(f.state);
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for target in ["boundary", "glue"] {
+        let state = Arc::clone(&state);
+        let barrier = Arc::clone(&barrier);
+        let entity = entity.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            graph::propose_judgment(
+                &state,
+                &entity,
+                "playsRole",
+                &graph::role_iri(target),
+                0.75,
+                graph::AUTO_HELD,
+                "concurrent classifier result",
+                "moosedev-classifier",
+                Utc::now(),
+            )
+        }));
+    }
+    barrier.wait();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one target may claim a judgment axis: {results:?}"
+    );
+    let judgments = graph::judgments_for_entity(&state, &entity).unwrap();
+    assert_eq!(judgments.len(), 1);
+    assert_eq!(judgments[0].status, "proposed");
+}
+
+#[test]
 fn recategorize_rejects_classifier_target_and_ratifies_the_correction() {
     let f = setup("judgment-recategorize");
     graph::ensure_taxonomy_individuals(&f.state).unwrap();
@@ -423,6 +557,87 @@ fn recategorize_rejects_classifier_target_and_ratifies_the_correction() {
 }
 
 #[test]
+fn recategorize_guards_same_target_and_settles_the_axis_with_human_provenance() {
+    let f = setup("judgment-recat-guards");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+
+    let original = graph::propose_judgment(
+        &f.state,
+        &f.alpha,
+        "playsRole",
+        &graph::role_iri("boundary"),
+        0.75,
+        graph::AUTO_HELD,
+        "R2 boundary",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+
+    // Recategorizing to the proposal's own target is an accept, not a
+    // correction — refused BEFORE any write (the original stays pending;
+    // previously this accepted the original then errored rejecting it).
+    let err = graph::recategorize_judgment(&f.state, &original, "boundary", "james").unwrap_err();
+    assert!(
+        err.to_string().contains("accept it instead"),
+        "same-target recategorize refused with guidance: {err}"
+    );
+    let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
+    assert_eq!(pending.len(), 1, "nothing was mutated");
+    assert_eq!(pending[0].iri, original);
+
+    // Recategorizing settles the whole axis: the correction carries the
+    // HUMAN's provenance (never a reused pending twin's), and every other
+    // pending judgment on the axis is rejected alongside the original.
+    graph::recategorize_judgment(&f.state, &original, "glue", "james").unwrap();
+    let judgments = graph::judgments_for_entity(&f.state, &f.alpha).unwrap();
+    assert_eq!(judgments.len(), 1);
+    assert_eq!(judgments[0].target_local, "glue");
+    assert_eq!(judgments[0].status, "accepted");
+    assert_eq!(
+        judgments[0].author, "james",
+        "the correction is the human's"
+    );
+    assert_eq!(
+        graph::list_proposals(&f.state, Some("rejected"))
+            .unwrap()
+            .len(),
+        1,
+        "the classifier's original is rejected for audit"
+    );
+
+    // With the axis ratified, recategorizing anything onto it is refused
+    // before writes.
+    let crit = graph::propose_judgment(
+        &f.state,
+        &f.beta,
+        "playsRole",
+        &graph::role_iri("boundary"),
+        0.75,
+        graph::AUTO_HELD,
+        "R2 boundary",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+    graph::accept_proposal(&f.state, &crit, "james").unwrap();
+    // beta's axis is now ratified; a fresh proposal cannot even queue, so a
+    // recategorize can never race it (writer-level guard).
+    assert!(graph::propose_judgment(
+        &f.state,
+        &f.beta,
+        "playsRole",
+        &graph::role_iri("glue"),
+        1.0,
+        graph::ESCALATED,
+        "conflict",
+        "james",
+        Utc::now(),
+    )
+    .is_err());
+}
+
+#[test]
 fn judgment_with_wrong_range_target_fails_honestly() {
     let f = setup("judgment-range");
     graph::ensure_taxonomy_individuals(&f.state).unwrap();
@@ -446,6 +661,45 @@ fn judgment_with_wrong_range_target_fails_honestly() {
     let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].status, "proposed");
+}
+
+#[test]
+fn failed_recategorization_preserves_the_original_proposal() {
+    let f = setup("judgment-recategorize-rollback");
+    graph::ensure_taxonomy_individuals(&f.state).unwrap();
+
+    // Proposal nodes carry literals and can therefore contain a malformed
+    // subject imported from an older store. Recategorization must validate the
+    // corrected edge before its transaction rejects the original proposal.
+    let original = graph::propose_judgment(
+        &f.state,
+        &f.constraint,
+        "playsRole",
+        &graph::role_iri("boundary"),
+        0.75,
+        graph::AUTO_HELD,
+        "legacy malformed subject",
+        "moosedev-classifier",
+        Utc::now(),
+    )
+    .unwrap();
+
+    let err = graph::recategorize_judgment(&f.state, &original, "glue", "james").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("cannot materialize the recategorized judgment"),
+        "endpoint validation should be the induced failure: {err:#}"
+    );
+
+    let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
+    assert_eq!(pending.len(), 1, "no correction was partially inserted");
+    assert_eq!(pending[0].iri, original, "the original remains actionable");
+    assert!(
+        graph::list_proposals(&f.state, Some("rejected"))
+            .unwrap()
+            .is_empty(),
+        "failure must not settle the original proposal"
+    );
 }
 
 #[test]
@@ -513,6 +767,46 @@ fn rejected_records_can_never_become_documentation() {
         "rejected records are invisible to dossiers"
     );
     assert_eq!(foo_numerator(&f.state), 0, "and to why-coverage");
+
+    // (d) A link queued while its subject was current cannot reintroduce that
+    // record after it is superseded. The link remains pending for explicit
+    // rejection, but acceptance is refused by the subject's current status.
+    let stale = graph::propose_link(
+        &f.state,
+        &f.constraint,
+        "concerns",
+        BETA_RAW,
+        "src/foo/a.rs",
+        "queued before replacement",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    let constraint_class = f.state.resolve_class("Constraint").unwrap();
+    graph::supersede_decision(
+        &f.state,
+        &graph::SupersedeInput {
+            superseded_iri: f.constraint.clone(),
+            new: RecordInput {
+                class_iri: constraint_class,
+                class_local: "Constraint".to_string(),
+                properties: vec![(
+                    f.state.capture.title.clone(),
+                    "replacement constraint".to_string(),
+                )],
+            },
+            rationale: "the constraint changed".to_string(),
+        },
+        "james",
+        Utc::now(),
+    )
+    .unwrap();
+    let err = graph::accept_proposal(&f.state, &stale, "james").unwrap_err();
+    assert!(err.to_string().contains("superseded"), "{err}");
+    assert!(
+        !has_records(&f.state, &f.beta),
+        "a queued link must not revive superseded knowledge"
+    );
 }
 
 #[test]

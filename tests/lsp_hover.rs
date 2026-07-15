@@ -4,7 +4,7 @@
 //! client, proving that hover serves the same dossier Markdown as the graph API.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -31,7 +31,7 @@ const PUBLIC_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/build_se
 const PRIVATE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/private_helper().";
 const LOCAL_SYMBOL: &str = "local 0";
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn ontology_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
@@ -442,7 +442,7 @@ fn hover_markdown(response: &Value) -> &str {
 
 #[tokio::test]
 async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("utf8-root", "    build_server();");
     let data_dir = fresh_dir("utf8-data");
@@ -488,7 +488,7 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn hover_is_silent_on_unlinked_and_tokenless() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("silent-root", "    build_server();");
     let data_dir = fresh_dir("silent-data");
@@ -515,7 +515,7 @@ async fn hover_is_silent_on_unlinked_and_tokenless() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn hover_is_silent_for_uncovered_file() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("uncovered-root", "    build_server();");
     let ui = repo_root.join("ui/src");
@@ -537,7 +537,7 @@ async fn hover_is_silent_for_uncovered_file() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn hover_utf16_conversion() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("utf16-root", "é   build_server();");
     let data_dir = fresh_dir("utf16-data");
@@ -566,7 +566,7 @@ async fn hover_utf16_conversion() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn hover_outside_root_is_silent() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("outside-root", "    build_server();");
     let outside_root = synthetic_repo_root("outside-other", "    build_server();");
@@ -594,7 +594,7 @@ async fn hover_outside_root_is_silent() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn repo_substrate_hover_when_index_present() -> anyhow::Result<()> {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let substrate_data_dir = repo_root.join(".moosedev");
