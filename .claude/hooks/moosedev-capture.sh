@@ -1,16 +1,16 @@
 #!/bin/bash
-# MOOSEDev Stop-hook capture (v2.2 active-agency adapter for Claude Code).
+# MOOSEDev Stop-hook journal (v2.2 active-agency adapter for Claude Code).
 #
 # At a session checkpoint (the Stop event), reports the uncommitted changed
 # files PLUS the host's own summary — the assistant's final message from the
-# transcript (extract, never interrogate) — to the daemon's grounded-capture
-# surface, which mints a PROPOSED record for human ratification, never
-# auto-accepted. No extractable summary → NO capture: a files-only card
-# carries no decision content a ratifier can judge (the file list is
-# derivable from git), so the honest move is abstention. Debounced: skips
-# unless 10 minutes have passed since the last capture AND the change set
-# differs from the one already captured. Zero policy lives here; any failure
-# fails OPEN (exit 0, no output).
+# transcript (extract, never interrogate) — to the daemon's session-journal
+# surface. The daemon appends ONE fire-telemetry line and NEVER writes the
+# graph: a session's final message is a status report, not a decision
+# (Lesson 641c1811, AD 007dce15); records are minted only by deliberate
+# calls. No extractable summary → nothing to journal. Debounced: skips
+# unless 10 minutes have passed since the last journal entry AND the change
+# set differs from the one already journaled. Zero policy lives here; any
+# failure fails OPEN (exit 0, no output).
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || exit 0
@@ -29,13 +29,13 @@ ADDR=$(cat "$ADDR_FILE" 2>/dev/null) || exit 0
 [ -n "$ADDR" ] || exit 0
 
 # Tracked changes AND untracked files: a session of purely new files is still
-# a decision point.
+# a checkpoint worth journaling. .moosedev state (kg.nq re-exports) is not work.
 FILES=$({ git -C "$DIR" diff --name-only HEAD -- . ':(top,exclude).moosedev/**' 2>/dev/null; \
           git -C "$DIR" ls-files --others --exclude-standard -- . ':(top,exclude).moosedev/**' 2>/dev/null; } | sort -u | head -20)
 [ -n "$FILES" ] || exit 0
 
 # The host's own summary: the last assistant text in the transcript, with
-# useful multiline structure retained but capped. Nothing extractable → abstain.
+# useful multiline structure retained but capped. Nothing extractable → skip.
 SUMMARY=$(printf '%s' "$PAYLOAD" | jq -r \
   'select((.last_assistant_message // null) | type == "string") | .last_assistant_message' \
   2>/dev/null || true)
@@ -52,8 +52,7 @@ if [ -z "$SUMMARY" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
 fi
 # Remove leading/trailing blank lines, cap each line to keep pathological host
 # output bounded, then cap the whole summary without flattening bullets or
-# paragraphs. 2 KiB is enough for a useful checkpoint while remaining cheap to
-# inspect in the ratification inbox.
+# paragraphs. 2 KiB is enough for a useful journal line.
 SUMMARY=$(printf '%s\n' "$SUMMARY" | awk '
   BEGIN { started = 0; bytes = 0; cap = 2048 }
   {
@@ -77,7 +76,7 @@ SUMMARY=$(printf '%s\n' "$SUMMARY" | awk '
   }')
 [ -n "$SUMMARY" ] || exit 0
 
-# Debounce: one capture per change-set per 10 minutes.
+# Debounce: one journal entry per change-set per 10 minutes.
 STAMP="$DIR/.moosedev/capture.stamp"
 HASH=$(printf '%s' "$FILES" | cksum | cut -d' ' -f1)
 NOW=$(date +%s)
@@ -85,18 +84,13 @@ if [ -f "$STAMP" ]; then
   read -r LAST_HASH LAST_TS <"$STAMP" || true
   if [ "${LAST_HASH:-}" = "$HASH" ]; then exit 0; fi
   case "${LAST_TS:-}" in
-    ''|*[!0-9]*) LAST_TS="" ;;
+    ''|*[!0-9]*) ;;
     *) if [ $((NOW - LAST_TS)) -lt 600 ]; then exit 0; fi ;;
   esac
 fi
 
 BODY=$(printf '%s\n' "$FILES" | jq -cRn --arg summary "$SUMMARY" \
   '{host: "claude-code", summary: $summary, files: [inputs | select(length > 0)]}')
-case "${LAST_TS:-}" in
-  ''|*[!0-9]*) ;;
-  *) BODY=$(printf '%s' "$BODY" | jq -c --argjson since "$LAST_TS" \
-       '. + {since_unix_seconds: $since}') ;;
-esac
 # --fail: only a confirmed 2xx earns the debounce stamp — stamping an HTTP
 # error would suppress retries of this change set indefinitely.
 curl -sS --fail --max-time 10 -H 'Content-Type: application/json' \

@@ -326,10 +326,6 @@ pub struct CaptureDecisionPointArgs {
     pub host: Option<String>,
     /// Optional author override (defaults to the MCP client name).
     pub author: Option<String>,
-    /// Start of an automatic adapter's capture window, as Unix seconds. If the
-    /// same author already wrote a working-set InformationRecord after this
-    /// instant, capture abstains. Omit for deliberate/manual capture calls.
-    pub since_unix_seconds: Option<i64>,
 }
 
 /// Arguments for the `evaluate_policy` tool.
@@ -545,7 +541,7 @@ impl MooseDevServer {
 
     /// Grounded capture at a decision point — proposed record + queued links.
     #[tool(
-        description = "Grounded capture at a decision point (session end, checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the host's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Automatic adapters may pass `since_unix_seconds`; capture then ABSTAINS when the same author already wrote authoritative typed knowledge during that window. Omit the cutoff for a deliberate/manual capture. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
+        description = "DELIBERATE grounded capture at a decision point (episode end, acceptance checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the caller's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Call this only when you judge the session produced a real decision worth ratifying; automatic session-end adapters journal to fire telemetry via HTTP instead and never mint records. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
     )]
     async fn capture_decision_point(
         &self,
@@ -556,37 +552,6 @@ impl MooseDevServer {
         let host = args.host.unwrap_or_else(|| "mcp".to_string());
         let files = args.files.unwrap_or_default();
         let entities = args.entities.unwrap_or_default();
-        if let Some(seconds) = args.since_unix_seconds {
-            let Some(since) = chrono::DateTime::<Utc>::from_timestamp(seconds, 0) else {
-                return Ok(tool_error(format!(
-                    "since_unix_seconds is out of range: {seconds}"
-                )));
-            };
-            match graph::working_record_authored_since(&self.state, &author, since) {
-                Ok(Some(record_iri)) => {
-                    crate::policy::fires::append_fire(
-                        &self.state.data_dir,
-                        &crate::policy::fires::FireEvent {
-                            ts: Utc::now().to_rfc3339(),
-                            verb: "capture",
-                            host,
-                            entity: None,
-                            decision: "abstained".to_string(),
-                            records_cited: vec![record_iri.clone()],
-                        },
-                    );
-                    return Ok(tool_ok(format!(
-                        "Abstained from automatic capture: typed_record_already_authored ({record_iri})."
-                    )));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return Ok(tool_error(format!(
-                        "automatic capture abstention check failed: {e}"
-                    )))
-                }
-            }
-        }
         let captured = match graph::capture_decision_point(
             &self.state,
             &files,
@@ -612,6 +577,8 @@ impl MooseDevServer {
                 entity: None,
                 decision: "proposed".to_string(),
                 records_cited: vec![captured.record_iri.clone()],
+                summary: None,
+                files: Vec::new(),
             },
         );
 

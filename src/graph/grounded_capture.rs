@@ -1,5 +1,11 @@
 //! Grounded capture at decision points (v2.2 CAPTURE verb, AD `145af7e9`).
 //!
+//! DELIBERATE captures only: an agent (or human) explicitly invoking the MCP
+//! `capture_decision_point` tool. Automatic adapters (Stop hook, opencode
+//! push) journal to fire telemetry instead and never reach this module — a
+//! session's final message is a status report, not a decision (Lesson
+//! `641c1811`, AD `007dce15`).
+//!
 //! Extracts a **proposed** `ArchitecturalDecision` from what actually happened —
 //! the host's own summary text plus the diff-derived changed-file list — never
 //! from interrogating an LLM into justifying itself. The record is minted at
@@ -17,16 +23,12 @@
 //! names a Requirement that resolves, and omitted otherwise — never invented.
 
 use chrono::{DateTime, Utc};
-use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 
 use crate::provenance;
 
-use super::capture::{record_instance_with_relation_args, require_information_record, RecordInput};
-use super::context::first_literal;
-use super::lifecycle::in_working_set;
+use super::capture::{record_instance_with_relation_args, RecordInput};
 use super::proposals::propose_link;
 use super::state::AppState;
-use super::PROJECT_KG_GRAPH_IRI;
 
 /// What one decision-point capture wrote — reported in full, no silent drops.
 #[derive(Debug, Clone)]
@@ -39,66 +41,6 @@ pub struct GroundedCapture {
     /// Changed files (or `symbol:` selectors) that could not be anchored in
     /// the substrate — reported so the caller can say so, never dropped.
     pub unanchored: Vec<String>,
-}
-
-/// Find the newest authoritative typed record written by `author` after
-/// `since`. Automatic grounded captures are always `proposed`, so the
-/// working-set predicate is the symbolic discriminator: a deliberate capture
-/// path already produced usable knowledge and the safety net should abstain.
-///
-/// Malformed legacy timestamps are ignored rather than turning a best-effort
-/// safety net into a write outage. Ties are broken by IRI for deterministic
-/// behavior across store iteration orders.
-pub fn working_record_authored_since(
-    state: &AppState,
-    author: &str,
-    since: DateTime<Utc>,
-) -> anyhow::Result<Option<String>> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let timestamp = NamedNodeRef::new(&state.capture.timestamp)?;
-    let mut newest: Option<(DateTime<Utc>, String)> = None;
-
-    for quad in state
-        .store
-        .quads_for_pattern(
-            None,
-            Some(timestamp),
-            None,
-            Some(GraphNameRef::NamedNode(graph)),
-        )
-        .flatten()
-    {
-        let oxigraph::model::NamedOrBlankNode::NamedNode(subject) = quad.subject else {
-            continue;
-        };
-        let Term::Literal(literal) = quad.object else {
-            continue;
-        };
-        let Ok(when) = DateTime::parse_from_rfc3339(literal.value()) else {
-            continue;
-        };
-        let when = when.with_timezone(&Utc);
-        if when <= since || require_information_record(state, &subject).is_err() {
-            continue;
-        }
-        if first_literal(&state.store, subject.as_str(), &state.capture.author).as_deref()
-            != Some(author)
-        {
-            continue;
-        }
-        let status = first_literal(&state.store, subject.as_str(), &state.capture.status)
-            .unwrap_or_default();
-        if !in_working_set(&status) {
-            continue;
-        }
-
-        let candidate = (when, subject.as_str().to_string());
-        if newest.as_ref().is_none_or(|current| candidate > *current) {
-            newest = Some(candidate);
-        }
-    }
-
-    Ok(newest.map(|(_, iri)| iri))
 }
 
 /// Capture one decision point as a `proposed` record plus queued links.

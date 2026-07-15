@@ -1,10 +1,14 @@
 //! `POST /api/v1/policy` and `POST /api/v1/capture` — thin adapters over
-//! `policy::evaluate_and_fire` and `graph::capture_decision_point`.
+//! `policy::evaluate_and_fire` and the fire-telemetry journal.
 //!
 //! `/policy` returns the same [`PolicyDecision`] JSON the MCP `evaluate_policy`
 //! tool returns, so every host surface sees one verdict format. `/capture` is
-//! the grounded-capture surface for shell-hook adapters (Claude Code), which
-//! speak HTTP rather than a bidirectional MCP pipe.
+//! the automatic session-checkpoint surface for shell-hook adapters (Claude
+//! Code, opencode), which speak HTTP rather than a bidirectional MCP pipe. It
+//! journals to `fires.jsonl` and NEVER writes the graph: a session's final
+//! message is a status report, not a decision (Lesson `641c1811`), so only
+//! deliberate calls (`record_important_decision`, the MCP
+//! `capture_decision_point` tool) mint records — AD `007dce15`.
 
 use std::sync::Arc;
 
@@ -14,7 +18,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::api::error::ApiError;
-use crate::graph::{self, AppState};
+use crate::graph::AppState;
 use crate::policy::fires::{append_fire, FireEvent};
 use crate::policy::{evaluate_and_fire, PolicyDecision, PolicyEvent};
 
@@ -44,7 +48,9 @@ pub async fn evaluate_policy(
     Ok(Json(decision))
 }
 
-/// Request body for `POST /api/v1/capture` — a grounded decision point.
+/// Request body for `POST /api/v1/capture` — an automatic session checkpoint.
+/// Unknown fields (e.g. the retired `since_unix_seconds`, `requirement`) are
+/// ignored so older deployed adapters keep working.
 #[derive(Deserialize)]
 pub struct CaptureRequest {
     #[serde(default = "default_host")]
@@ -52,78 +58,29 @@ pub struct CaptureRequest {
     #[serde(default)]
     pub files: Vec<String>,
     pub summary: Option<String>,
-    /// Existing Requirement (IRI or exact title) for `isMotivatedBy`;
-    /// unresolvable values fail the capture — never invented.
-    pub requirement: Option<String>,
-    #[serde(default)]
-    pub entities: Vec<String>,
-    /// Author to attribute; defaults to the host identity.
-    pub author: Option<String>,
-    /// Start of the adapter's automatic-capture window. When the same author
-    /// already wrote authoritative typed knowledge after this Unix timestamp,
-    /// the safety-net capture abstains without judging message content.
-    pub since_unix_seconds: Option<i64>,
 }
 
 #[derive(Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum CaptureResponse {
-    Captured {
-        record_iri: String,
-        title: String,
-        status: String,
-        proposed_links: Vec<String>,
-        unanchored: Vec<String>,
-    },
-    Abstained {
-        reason: &'static str,
-        record_iri: String,
-    },
+pub struct CaptureResponse {
+    pub outcome: &'static str,
 }
 
-/// Grounded capture: mint a `proposed` record + queued links, fire telemetry.
+/// Automatic session checkpoint: append one journal line to `fires.jsonl`.
+/// Never writes the graph — deliberate capture is the only minting path.
 pub async fn capture_decision_point(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CaptureRequest>,
 ) -> Result<Json<CaptureResponse>, ApiError> {
-    let author = req.author.clone().unwrap_or_else(|| req.host.clone());
-    if let Some(seconds) = req.since_unix_seconds {
-        let since = chrono::DateTime::<Utc>::from_timestamp(seconds, 0).ok_or_else(|| {
-            ApiError::bad_request(format!("since_unix_seconds is out of range: {seconds}"))
-        })?;
-        if let Some(record_iri) = graph::working_record_authored_since(&state, &author, since)
-            .map_err(|e| ApiError::internal(e.to_string()))?
-        {
-            append_fire(
-                &state.data_dir,
-                &FireEvent {
-                    ts: Utc::now().to_rfc3339(),
-                    verb: "capture",
-                    host: req.host,
-                    entity: None,
-                    decision: "abstained".to_string(),
-                    records_cited: vec![record_iri.clone()],
-                },
-            );
-            return Ok(Json(CaptureResponse::Abstained {
-                reason: "typed_record_already_authored",
-                record_iri,
-            }));
-        }
-    }
-    let captured = graph::capture_decision_point(
-        &state,
-        &req.files,
-        req.summary.as_deref(),
-        req.requirement.as_deref(),
-        &req.entities,
-        &author,
-        Utc::now(),
-    )
-    .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    if let Err(e) = state.index_record(&captured.record_iri).await {
-        tracing::warn!("dense index update failed for {}: {e}", captured.record_iri);
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if summary.is_none() && req.files.is_empty() {
+        return Err(ApiError::bad_request(
+            "nothing to journal: no summary and no changed files",
+        ));
     }
     append_fire(
         &state.data_dir,
@@ -132,16 +89,13 @@ pub async fn capture_decision_point(
             verb: "capture",
             host: req.host,
             entity: None,
-            decision: "proposed".to_string(),
-            records_cited: vec![captured.record_iri.clone()],
+            decision: "journaled".to_string(),
+            records_cited: vec![],
+            summary,
+            files: req.files,
         },
     );
-
-    Ok(Json(CaptureResponse::Captured {
-        record_iri: captured.record_iri,
-        title: captured.title,
-        status: "proposed".to_string(),
-        proposed_links: captured.proposed_links,
-        unanchored: captured.unanchored,
+    Ok(Json(CaptureResponse {
+        outcome: "journaled",
     }))
 }

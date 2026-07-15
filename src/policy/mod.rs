@@ -202,6 +202,8 @@ pub fn evaluate_and_fire(
                 entity: entities.first().cloned(),
                 decision: enacted.to_string(),
                 records_cited: records.iter().map(|r| r.iri.clone()).collect(),
+                summary: None,
+                files: Vec::new(),
             },
         );
     }

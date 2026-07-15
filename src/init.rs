@@ -1047,7 +1047,7 @@ mod tests {
         let plugin =
             std::fs::read_to_string(target.join(".opencode/plugins/moosedev-push.ts")).unwrap();
         assert!(plugin.contains("MOOSEDEV_DATA_DIR"));
-        assert!(plugin.contains("since_unix_seconds: captureWindowStartedAtSeconds"));
+        assert!(plugin.contains("journalCheckpoint(root, files, warnOnce)"));
         assert!(plugin.contains("isMooseDevStatePath(file)"));
         let _ = std::fs::remove_dir_all(&target);
     }
@@ -1139,7 +1139,8 @@ mod tests {
 
         let capture =
             std::fs::read_to_string(target.join(".claude/hooks/moosedev-capture.sh")).unwrap();
-        assert!(capture.contains("since_unix_seconds"));
+        assert!(!capture.contains("since_unix_seconds"));
+        assert!(capture.contains("api/v1/capture"));
         assert!(capture.contains("exclude).moosedev/**"));
 
         // The settings registration carries all three events.

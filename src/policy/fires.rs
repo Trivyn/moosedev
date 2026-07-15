@@ -31,10 +31,18 @@ pub struct FireEvent {
     /// Primary CodeEntity IRI the decision was about, when one resolved.
     pub entity: Option<String>,
     /// Enacted decision: `inject`, `deny`, `require_ratification`, `proposed`,
-    /// or a traceable non-action such as automatic-capture `abstained`.
+    /// or `journaled` for an automatic session checkpoint.
     pub decision: String,
     /// IRIs of the knowledge records the decision cited.
     pub records_cited: Vec<String>,
+    /// Automatic-capture journal payload: the host's session-end summary.
+    /// Journal entries live HERE, never in the graph — a session's final
+    /// message is a status report, not a decision (Lesson `641c1811`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Automatic-capture journal payload: the changed files at the checkpoint.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 /// Path of the fire log for a data dir (mirrors the `http.addr` path helper).

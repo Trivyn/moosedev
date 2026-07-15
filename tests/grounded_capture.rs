@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use moosedev::code::substrate::{Substrate, SubstrateMeta};
 use moosedev::graph::{self, AcceptOutcome, AppState, DossierTarget, ProposalKind, RecordInput};
 use moosedev::provenance;
@@ -223,98 +223,6 @@ fn capture(
         Utc::now(),
     )
     .expect("capture decision point")
-}
-
-#[test]
-fn automatic_capture_abstains_only_for_newer_same_author_working_records() {
-    let f = setup("gc-abstention");
-    let cutoff = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-
-    // None of these is an authoritative capture by this adapter in the window.
-    record_at(
-        &f.state,
-        "Lesson",
-        "Equal boundary",
-        "accepted",
-        "claude-code",
-        cutoff,
-    );
-    record_at(
-        &f.state,
-        "Constraint",
-        "Different author",
-        "accepted",
-        "other-agent",
-        cutoff + TimeDelta::seconds(9),
-    );
-    for (status, seconds) in [("proposed", 6), ("rejected", 7), ("superseded", 8)] {
-        record_at(
-            &f.state,
-            "ArchitecturalDecision",
-            &format!("Ignored {status}"),
-            status,
-            "claude-code",
-            cutoff + TimeDelta::seconds(seconds),
-        );
-    }
-    assert_eq!(
-        graph::working_record_authored_since(&f.state, "claude-code", cutoff).unwrap(),
-        None
-    );
-
-    let older_match = record_at(
-        &f.state,
-        "Lesson",
-        "Deliberate lesson",
-        "accepted",
-        "claude-code",
-        cutoff + TimeDelta::seconds(1),
-    );
-    let newest_match = record_at(
-        &f.state,
-        "Requirement",
-        "Deliberate requirement",
-        "accepted",
-        "claude-code",
-        cutoff + TimeDelta::seconds(2),
-    );
-    assert_ne!(older_match, newest_match);
-    assert_eq!(
-        graph::working_record_authored_since(&f.state, "claude-code", cutoff).unwrap(),
-        Some(newest_match)
-    );
-}
-
-#[test]
-fn automatic_capture_abstention_tie_break_is_deterministic() {
-    let f = setup("gc-abstention-tie");
-    let cutoff = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let when = cutoff + TimeDelta::seconds(1);
-    let a = record_at(
-        &f.state,
-        "Lesson",
-        "Tie A",
-        "accepted",
-        "opencode-moosedev",
-        when,
-    );
-    let b = record_at(
-        &f.state,
-        "Lesson",
-        "Tie B",
-        "accepted",
-        "opencode-moosedev",
-        when,
-    );
-    let expected = std::cmp::max(a, b);
-    assert_eq!(
-        graph::working_record_authored_since(&f.state, "opencode-moosedev", cutoff).unwrap(),
-        Some(expected)
-    );
 }
 
 #[test]

@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { createInterface } from "node:readline"
 
 // MOOSEDev active-agency adapter for opencode (v2.2).
@@ -13,8 +15,10 @@ import { createInterface } from "node:readline"
 //            degrading to a warning note when no prompt fires (spec §4.1:
 //            gate where blocking exists, warn-and-inject where only
 //            observation exists).
-//   - CAPTURE session.idle with fresh edits → capture_decision_point queues a
-//            proposed record for human ratification (debounced).
+//   - CAPTURE session.idle with fresh edits → one journal line in the
+//            daemon's fire telemetry (`POST /api/v1/capture`, debounced).
+//            NEVER a graph record: automatic checkpoints are status, not
+//            decisions (Lesson 641c1811, AD 007dce15).
 // If the daemon is unreachable the plugin fails OPEN (edits proceed, one
 // warning) — a memory sidecar must never brick the host.
 
@@ -110,7 +114,6 @@ export async function MooseDevPush(input: PluginInput) {
   const gateNotices: string[] = []
   const editedFiles = new Set<string>()
   let lastCaptureAt = 0
-  let captureWindowStartedAtSeconds = Math.floor(Date.now() / 1000)
   const warned = new Set<string>()
 
   function warnOnce(key: string, message: string) {
@@ -254,7 +257,7 @@ export async function MooseDevPush(input: PluginInput) {
       if (paths.length > 0) addWorkingPaths(toolInput.sessionID, paths)
     },
 
-    // CAPTURE — accumulate edited files; capture at idle checkpoints, debounced.
+    // CAPTURE — accumulate edited files; journal at idle checkpoints, debounced.
     event: async ({ event }: { event: HostEvent }) => {
       if (event.type === "file.edited") {
         const file = normalizeProjectPath(String(event.properties?.file || ""), root)
@@ -265,16 +268,11 @@ export async function MooseDevPush(input: PluginInput) {
       const now = Date.now()
       if (now - lastCaptureAt < CAPTURE_MIN_INTERVAL_MS) return
       const files = [...editedFiles]
-      const result = await callTool(
-        "capture_decision_point",
-        { host: HOST, files, since_unix_seconds: captureWindowStartedAtSeconds },
-        warnOnce,
-      )
-      // A captured or abstained MCP result is a successful checkpoint. Failures
-      // retain both the window and file set so the next idle event can retry.
-      if (!result) return
+      const journaled = await journalCheckpoint(root, files, warnOnce)
+      // Only a confirmed journal write clears the file set — failures retain
+      // it so the next idle event can retry.
+      if (!journaled) return
       lastCaptureAt = now
-      captureWindowStartedAtSeconds = Math.floor(Date.now() / 1000)
       for (const file of files) editedFiles.delete(file)
     },
 
@@ -413,6 +411,41 @@ function pushRecent(set: string[], value: string) {
   if (existing >= 0) set.splice(existing, 1)
   set.unshift(value)
   if (set.length > MAX_WORKING_SET) set.length = MAX_WORKING_SET
+}
+
+/// Journal one automatic session checkpoint to the daemon's fire telemetry
+/// (`POST /api/v1/capture`). Never writes the graph — deliberate capture is
+/// the only record-minting path. Returns true only on a confirmed 2xx.
+async function journalCheckpoint(
+  root: string,
+  files: string[],
+  warnOnce: (key: string, message: string) => void,
+): Promise<boolean> {
+  const dataDir = process.env.MOOSEDEV_DATA_DIR || ".moosedev"
+  let addr: string
+  try {
+    addr = readFileSync(join(root, dataDir, "http.addr"), "utf8").trim()
+  } catch {
+    warnOnce("journal-addr", "no MOOSEDev http.addr; session checkpoint not journaled")
+    return false
+  }
+  if (!addr) return false
+  try {
+    const response = await fetch(`http://${addr}/api/v1/capture`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: HOST, files }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) {
+      warnOnce("journal-http", `session checkpoint journal failed: HTTP ${response.status}`)
+      return false
+    }
+    return true
+  } catch (error) {
+    warnOnce("journal-http", `session checkpoint journal failed: ${error}`)
+    return false
+  }
 }
 
 /// Spawn `moosedev --connect`, call one MCP tool, return its text content.
