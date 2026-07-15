@@ -42,6 +42,7 @@ pub async fn list_proposals(
             confidence: p.confidence,
             escalation: p.escalation,
             subject_name: p.subject_name,
+            subject_description: p.subject_description,
             subject_path: p.subject_path,
             target_display: p.target_display,
             evidence: p.evidence,

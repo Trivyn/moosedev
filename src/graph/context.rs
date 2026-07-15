@@ -1,6 +1,8 @@
 //! Relevant-context retrieval, exact record resolution, and bounded graph expansion.
 //! Retrieval remains symbolic-first, with dense vectors only as a fallback seed/ranking channel.
 
+use std::collections::HashSet;
+
 use moose::embeddings::retrieval_embed_query;
 use moose::entity_index::DEFAULT_DENSE_FLOOR;
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
@@ -9,7 +11,7 @@ use oxigraph::store::Store;
 use super::capture::{
     asserted_project_types, class_label_mirror_property_iri, require_information_record,
 };
-use super::lifecycle::is_retired;
+use super::lifecycle::{in_working_set, is_retired};
 use super::state::AppState;
 use super::util::{any_subclass_of, local_name};
 use super::PROJECT_KG_GRAPH_IRI;
@@ -23,12 +25,13 @@ pub struct ContextItem {
 }
 
 impl ContextItem {
-    /// True when this record has been retired from the current working set
-    /// (for example lifecycle status `superseded` or `deprecated`).
+    /// True when this record is outside the authoritative working set:
+    /// retired (`superseded`/`deprecated`), declined (`rejected`), or not yet
+    /// ratified (`proposed` — inbox material, never recall material).
     pub fn is_historical(&self) -> bool {
         self.properties
             .iter()
-            .any(|(k, v)| k == "hasLifecycleStatus" && is_retired(v))
+            .any(|(k, v)| k == "hasLifecycleStatus" && !in_working_set(v))
     }
 }
 
@@ -111,9 +114,12 @@ pub fn relevant_context(
 
     // Default to the *current* working set: hide superseded/deprecated records
     // (history is one hop away — `include_history` lists them, and each current
-    // item still surfaces its `supersedes` link + rationale). Filtering after the
-    // fetch means a page can return fewer than `limit` items when history exists;
-    // acceptable for v1's data volumes.
+    // item still surfaces its `supersedes` link + rationale) AND unratified or
+    // declined ones — a `proposed` record lives in the ratification inbox and a
+    // `rejected` one was expressly declined; neither may reach an agent as
+    // authoritative recall. Filtering after the fetch means a page can return
+    // fewer than `limit` items when history exists; acceptable for v1's data
+    // volumes.
     if !include_history {
         items.retain(|item| !item.is_historical());
     }
@@ -188,6 +194,97 @@ pub fn relevant_context(
     }
 
     Ok(items)
+}
+
+/// A rationale record offered as a "Link decision to this entity…" candidate.
+#[derive(Debug, Clone)]
+pub struct LinkCandidate {
+    pub iri: String,
+    /// Local class name (e.g. `ArchitecturalDecision`).
+    pub kind: String,
+    pub title: String,
+}
+
+/// Record kinds an editor code action may offer as link candidates: the
+/// rationale-bearing classes a `concerns` edge from a code entity means
+/// something for.
+const LINKABLE_KINDS: &[&str] = &[
+    "ArchitecturalDecision",
+    "Constraint",
+    "Lesson",
+    "Requirement",
+];
+
+/// Top candidate records for linking to a code entity, ranked by the same
+/// hybrid BM25F⊕dense seed [`relevant_context`] uses — seeded with the
+/// entity's display name + logical path rather than a human topic. No
+/// relational expansion: the editor menu wants the few best anchors, not a
+/// neighborhood. Retired and rejected records are never offered (a link to
+/// them could not be ratified).
+pub fn link_candidates(
+    state: &AppState,
+    seed: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<LinkCandidate>> {
+    link_candidates_excluding(state, seed, limit, &HashSet::new())
+}
+
+/// [`link_candidates`] with caller-specific exclusions applied before the
+/// result limit. LSP callers use this for records already linked to the entity
+/// or already represented by a pending proposal.
+pub fn link_candidates_excluding(
+    state: &AppState,
+    seed: &str,
+    limit: usize,
+    excluded: &HashSet<String>,
+) -> anyhow::Result<Vec<LinkCandidate>> {
+    let seed = seed.trim();
+    if seed.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let class_iris = LINKABLE_KINDS
+        .iter()
+        .map(|kind| state.resolve_class(kind))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let data_graphs = [PROJECT_KG_GRAPH_IRI.to_string()];
+    let text_fields = [
+        (moose::RDFS_LABEL, 2.0_f32),
+        (state.capture.description.as_str(), 1.0_f32),
+    ];
+    // Moose scores the complete class-scoped set internally. Supplying its
+    // finite cardinality retains every ranked hit for eligibility filtering
+    // without an unbounded limit sentinel.
+    let ranked_limit = count_instances(&state.store, &class_iris);
+    let candidates = state
+        .entity_index
+        .search_records_hybrid(
+            seed,
+            &class_iris,
+            &state.store,
+            &data_graphs,
+            &text_fields,
+            ranked_limit,
+            &state.instance_store,
+            dense_floor(),
+        )
+        .into_iter()
+        .filter(|hit| !excluded.contains(&hit.iri))
+        .filter(|hit| {
+            // Working-set only: a proposed record cannot be linked-to yet
+            // (link accept requires a ratified subject), and rejected/retired
+            // records were declined or replaced.
+            let status = first_literal(&state.store, &hit.iri, &state.capture.status);
+            status.as_deref().is_none_or(in_working_set)
+        })
+        .map(|hit| LinkCandidate {
+            title: first_literal(&state.store, &hit.iri, moose::RDFS_LABEL)
+                .unwrap_or_else(|| local_name(&hit.iri).to_string()),
+            kind: local_name(&hit.class_iri).to_string(),
+            iri: hit.iri,
+        })
+        .take(limit)
+        .collect();
+    Ok(candidates)
 }
 
 /// Bounds for relational expansion in [`relevant_context`] (Constraint aa8b3fa3):
@@ -495,6 +592,31 @@ pub(crate) fn list_instances(
         }
     }
     out
+}
+
+fn count_instances(store: &Store, class_iris: &[String]) -> usize {
+    let rdf_type = NamedNodeRef::new_unchecked(moose::RDF_TYPE);
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut subjects = HashSet::new();
+    for class_iri in class_iris {
+        let Ok(class) = NamedNodeRef::new(class_iri) else {
+            continue;
+        };
+        for quad in store
+            .quads_for_pattern(
+                None,
+                Some(rdf_type),
+                Some(class.into()),
+                Some(GraphNameRef::NamedNode(graph)),
+            )
+            .flatten()
+        {
+            if let oxigraph::model::NamedOrBlankNode::NamedNode(subject) = &quad.subject {
+                subjects.insert(subject.as_str().to_string());
+            }
+        }
+    }
+    subjects.len()
 }
 
 /// Fetch an instance's label, literal properties, and relations from the project

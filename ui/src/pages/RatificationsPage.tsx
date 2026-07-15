@@ -201,21 +201,30 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                   <Chip size="small" color="secondary" label={proposal.record_class ?? 'Record'} />
                   <Typography variant="subtitle2">{proposal.label}</Typography>
                 </Stack>
-                <Typography variant="body2" sx={{ mb: 0.5 }}>
+                {proposal.evidence && (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{
+                      display: '-webkit-box',
+                      WebkitLineClamp: 3,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {proposal.evidence}
+                  </Typography>
+                )}
+                <Typography variant="body2" sx={{ mt: 0.5 }}>
                   <Box
                     component="span"
                     sx={{ color: 'primary.main', cursor: 'pointer' }}
                     onClick={() => onNavigateRecord(proposal.iri)}
                   >
-                    proposed record {shortIri(proposal.iri)}
+                    view full record
                   </Box>{' '}
-                  would join the working set
+                  — accepting ratifies it into the working set
                 </Typography>
-                {proposal.evidence && (
-                  <Typography variant="caption" color="text.secondary">
-                    {proposal.evidence}
-                  </Typography>
-                )}
                 <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
                   <Button
                     size="small"
@@ -278,6 +287,21 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                     Reject all
                   </Button>
                 </Stack>
+                {group[0].subject_description && (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                      mt: 0.5,
+                    }}
+                  >
+                    {group[0].subject_description}
+                  </Typography>
+                )}
                 <Stack spacing={0.5} sx={{ mt: 1 }}>
                   {group.map((link) => (
                     <Stack

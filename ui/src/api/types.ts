@@ -49,6 +49,8 @@ export interface Proposal {
   escalation: string | null;
   /** Subject's human name: record title ('link') or entity code name ('judgment'). */
   subject_name: string;
+  /** Subject record's claim (description snippet), for 'link' entries. */
+  subject_description: string | null;
   /** Subject entity defining file, for 'judgment' entries. */
   subject_path: string;
   /** Humanized target: logical path ('link') or individual local name ('judgment'). */

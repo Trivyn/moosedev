@@ -2,12 +2,17 @@
 //! list-all returns them as structured items and a topic filters by label.
 //! Symbolic — no LLM, fully hermetic.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::Utc;
 use moosedev::graph::{self, AppState, RecordInput};
 
 fn record(state: &AppState, class_iri: &str, title: &str) {
+    let _ = record_with_status(state, class_iri, title, "accepted");
+}
+
+fn record_with_status(state: &AppState, class_iri: &str, title: &str, status: &str) -> String {
     graph::record_instance(
         state,
         &RecordInput {
@@ -15,13 +20,13 @@ fn record(state: &AppState, class_iri: &str, title: &str) {
             class_local: "ArchitecturalDecision".to_string(),
             properties: vec![
                 (moose::RDFS_LABEL.to_string(), title.to_string()),
-                (state.capture.status.clone(), "accepted".to_string()),
+                (state.capture.status.clone(), status.to_string()),
             ],
         },
         "test-agent",
         Utc::now(),
     )
-    .expect("record decision");
+    .expect("record decision")
 }
 
 #[test]
@@ -66,6 +71,125 @@ fn relevant_context_lists_all_and_filters_by_topic() {
         none.is_empty(),
         "topic sharing no term with any record should return nothing; got {:?}",
         none.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unratified_and_declined_records_never_reach_authoritative_recall() {
+    let dir = std::env::temp_dir().join(format!("moosedev-context-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    record(&state, &class_iri, "Ratified quokka decision");
+    let _ = record_with_status(&state, &class_iri, "Pending quokka capture", "proposed");
+    let _ = record_with_status(&state, &class_iri, "Declined quokka idea", "rejected");
+    let _ = record_with_status(&state, &class_iri, "Old quokka approach", "superseded");
+
+    // Default recall = the ratified working set only: a proposed record lives
+    // in the inbox and a rejected one was declined — neither may influence an
+    // agent as recorded truth. Both list-all and topic search filter.
+    for topic in [None, Some("quokka")] {
+        let items = graph::relevant_context(&state, topic, 10, false).expect("recall");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["Ratified quokka decision"],
+            "topic {topic:?} must return only ratified knowledge"
+        );
+    }
+
+    // include_history opts into everything outside the working set.
+    let all = graph::relevant_context(&state, None, 10, true).expect("history");
+    assert_eq!(
+        all.len(),
+        4,
+        "history includes proposed/rejected/superseded"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn link_candidate_limit_is_applied_after_lifecycle_filtering() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-link-candidates-ws-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+
+    // These exact, term-heavy matches outrank the valid fallback, but none is
+    // eligible for an editor link. They must not consume the result limit.
+    for index in 0..8 {
+        let _ = record_with_status(
+            &state,
+            &class_iri,
+            &format!("build_server build_server build_server pending {index}"),
+            "proposed",
+        );
+    }
+    let valid = record_with_status(
+        &state,
+        &class_iri,
+        "build_server accepted fallback decision",
+        "accepted",
+    );
+
+    let candidates = graph::link_candidates(&state, "build_server", 1).expect("candidates");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| &candidate.iri)
+            .collect::<Vec<_>>(),
+        vec![&valid],
+        "bounded ineligible top hits must not hide a valid lower-ranked record"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn link_candidate_limit_is_applied_after_caller_exclusions() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-link-candidate-exclusions-ws-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+
+    let mut excluded = HashSet::new();
+    for index in 0..8 {
+        excluded.insert(record_with_status(
+            &state,
+            &class_iri,
+            &format!("parse_config parse_config parse_config linked {index}"),
+            "accepted",
+        ));
+    }
+    let valid = record_with_status(
+        &state,
+        &class_iri,
+        "parse_config accepted fallback decision",
+        "accepted",
+    );
+
+    let candidates =
+        graph::link_candidates_excluding(&state, "parse_config", 1, &excluded).expect("candidates");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| &candidate.iri)
+            .collect::<Vec<_>>(),
+        vec![&valid],
+        "already-linked or pending top hits must not hide an eligible lower-ranked record"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

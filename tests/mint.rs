@@ -422,7 +422,7 @@ fn update_path_replaces_defined_in_path_without_changing_iri() {
     );
     let plan = graph::plan_mint(
         &state,
-        &[original.clone()],
+        std::slice::from_ref(&original),
         &terms,
         &components,
         state.substrate().as_deref(),
@@ -475,7 +475,7 @@ fn minted_entities_participate_in_relate_validation() {
     );
     let plan = graph::plan_mint(
         &state,
-        &[entry.clone()],
+        std::slice::from_ref(&entry),
         &terms,
         &components,
         state.substrate().as_deref(),
@@ -510,7 +510,7 @@ fn ensure_entity_reuses_existing_and_mints_private_symbols() {
     );
     let plan = graph::plan_mint(
         &state,
-        &[public.clone()],
+        std::slice::from_ref(&public),
         &terms,
         &components,
         state.substrate().as_deref(),

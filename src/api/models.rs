@@ -135,6 +135,8 @@ pub struct ProposalDto {
     pub escalation: Option<String>,
     /// Subject's human name: record title (`link`) or entity code name (`judgment`).
     pub subject_name: String,
+    /// Subject record's claim (description snippet), for `link` entries.
+    pub subject_description: Option<String>,
     /// Subject entity defining file, for `judgment` entries.
     pub subject_path: String,
     /// Humanized target: logical path (`link`) or individual local name (`judgment`).
