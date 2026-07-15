@@ -59,15 +59,26 @@ pub struct CaptureRequest {
     pub entities: Vec<String>,
     /// Author to attribute; defaults to the host identity.
     pub author: Option<String>,
+    /// Start of the adapter's automatic-capture window. When the same author
+    /// already wrote authoritative typed knowledge after this Unix timestamp,
+    /// the safety-net capture abstains without judging message content.
+    pub since_unix_seconds: Option<i64>,
 }
 
 #[derive(Serialize)]
-pub struct CaptureResponse {
-    pub record_iri: String,
-    pub title: String,
-    pub status: String,
-    pub proposed_links: Vec<String>,
-    pub unanchored: Vec<String>,
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CaptureResponse {
+    Captured {
+        record_iri: String,
+        title: String,
+        status: String,
+        proposed_links: Vec<String>,
+        unanchored: Vec<String>,
+    },
+    Abstained {
+        reason: &'static str,
+        record_iri: String,
+    },
 }
 
 /// Grounded capture: mint a `proposed` record + queued links, fire telemetry.
@@ -76,6 +87,30 @@ pub async fn capture_decision_point(
     Json(req): Json<CaptureRequest>,
 ) -> Result<Json<CaptureResponse>, ApiError> {
     let author = req.author.clone().unwrap_or_else(|| req.host.clone());
+    if let Some(seconds) = req.since_unix_seconds {
+        let since = chrono::DateTime::<Utc>::from_timestamp(seconds, 0).ok_or_else(|| {
+            ApiError::bad_request(format!("since_unix_seconds is out of range: {seconds}"))
+        })?;
+        if let Some(record_iri) = graph::working_record_authored_since(&state, &author, since)
+            .map_err(|e| ApiError::internal(e.to_string()))?
+        {
+            append_fire(
+                &state.data_dir,
+                &FireEvent {
+                    ts: Utc::now().to_rfc3339(),
+                    verb: "capture",
+                    host: req.host,
+                    entity: None,
+                    decision: "abstained".to_string(),
+                    records_cited: vec![record_iri.clone()],
+                },
+            );
+            return Ok(Json(CaptureResponse::Abstained {
+                reason: "typed_record_already_authored",
+                record_iri,
+            }));
+        }
+    }
     let captured = graph::capture_decision_point(
         &state,
         &req.files,
@@ -102,7 +137,7 @@ pub async fn capture_decision_point(
         },
     );
 
-    Ok(Json(CaptureResponse {
+    Ok(Json(CaptureResponse::Captured {
         record_iri: captured.record_iri,
         title: captured.title,
         status: "proposed".to_string(),

@@ -30,7 +30,8 @@ pub struct FireEvent {
     pub host: String,
     /// Primary CodeEntity IRI the decision was about, when one resolved.
     pub entity: Option<String>,
-    /// Enacted decision: `inject`, `deny`, `require_ratification`, `proposed`.
+    /// Enacted decision: `inject`, `deny`, `require_ratification`, `proposed`,
+    /// or a traceable non-action such as automatic-capture `abstained`.
     pub decision: String,
     /// IRIs of the knowledge records the decision cited.
     pub records_cited: Vec<String>,

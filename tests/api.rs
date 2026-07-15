@@ -1103,3 +1103,91 @@ async fn policy_endpoint_gates_pushes_and_fires() {
     assert_eq!(lines[1]["verb"], "push");
     assert_eq!(lines[0]["host"], "test-http");
 }
+
+#[tokio::test]
+async fn automatic_capture_abstains_after_same_author_typed_write() {
+    let dir = temp_dir("capture-abstains");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let deliberate = record_api_lesson(&state, "Already captured deliberately");
+    let cutoff = Utc::now().timestamp() - 60;
+    let server = test_server(state);
+
+    let response = server
+        .post("/api/v1/capture")
+        .json(&json!({
+            "host": "claude-code",
+            "author": "test-agent",
+            "summary": "Mechanical Stop status",
+            "files": ["src/lib.rs"],
+            "since_unix_seconds": cutoff
+        }))
+        .await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["outcome"], "abstained");
+    assert_eq!(body["reason"], "typed_record_already_authored");
+    assert_eq!(body["record_iri"], deliberate);
+    let proposals = server.get("/api/v1/proposals?status=proposed").await;
+    proposals.assert_status_ok();
+    assert!(proposals.json::<Value>()["proposals"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let fires = std::fs::read_to_string(moosedev::policy::fires::fires_log_path_for(&dir))
+        .expect("abstention fire");
+    let event: Value = serde_json::from_str(fires.lines().last().unwrap()).unwrap();
+    assert_eq!(event["decision"], "abstained");
+    assert_eq!(event["records_cited"][0], deliberate);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn capture_without_cutoff_preserves_manual_behavior_and_invalid_cutoff_rejects() {
+    let dir = temp_dir("capture-manual");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_decision(
+        &state,
+        "Existing knowledge does not suppress manual capture",
+    );
+    let server = test_server(state);
+
+    let captured = server
+        .post("/api/v1/capture")
+        .json(&json!({
+            "host": "manual-test",
+            "summary": "A deliberate checkpoint",
+            "files": ["src/lib.rs"]
+        }))
+        .await;
+    captured.assert_status_ok();
+    let body = captured.json::<Value>();
+    assert_eq!(body["outcome"], "captured");
+    assert_eq!(body["status"], "proposed");
+    let proposals = server.get("/api/v1/proposals?status=proposed").await;
+    proposals.assert_status_ok();
+    assert_eq!(
+        proposals.json::<Value>()["proposals"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let invalid = server
+        .post("/api/v1/capture")
+        .json(&json!({
+            "host": "manual-test",
+            "summary": "Invalid window",
+            "since_unix_seconds": i64::MAX
+        }))
+        .await;
+    invalid.assert_status_bad_request();
+    assert!(invalid
+        .text()
+        .contains("since_unix_seconds is out of range"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

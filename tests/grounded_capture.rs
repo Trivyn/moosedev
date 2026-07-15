@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, TimeDelta, Utc};
 use moosedev::code::substrate::{Substrate, SubstrateMeta};
 use moosedev::graph::{self, AcceptOutcome, AppState, DossierTarget, ProposalKind, RecordInput};
 use moosedev::provenance;
@@ -92,6 +92,17 @@ fn synthetic_substrate() -> Substrate {
 }
 
 fn record(state: &AppState, kind: &str, title: &str, status: &str) -> String {
+    record_at(state, kind, title, status, "tester", Utc::now())
+}
+
+fn record_at(
+    state: &AppState,
+    kind: &str,
+    title: &str,
+    status: &str,
+    author: &str,
+    when: DateTime<Utc>,
+) -> String {
     let class_iri = state.resolve_class(kind).expect("known class");
     graph::record_instance(
         state,
@@ -104,8 +115,8 @@ fn record(state: &AppState, kind: &str, title: &str, status: &str) -> String {
                 (state.capture.status.clone(), status.to_string()),
             ],
         },
-        "tester",
-        Utc::now(),
+        author,
+        when,
     )
     .expect("record instance")
 }
@@ -212,6 +223,98 @@ fn capture(
         Utc::now(),
     )
     .expect("capture decision point")
+}
+
+#[test]
+fn automatic_capture_abstains_only_for_newer_same_author_working_records() {
+    let f = setup("gc-abstention");
+    let cutoff = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    // None of these is an authoritative capture by this adapter in the window.
+    record_at(
+        &f.state,
+        "Lesson",
+        "Equal boundary",
+        "accepted",
+        "claude-code",
+        cutoff,
+    );
+    record_at(
+        &f.state,
+        "Constraint",
+        "Different author",
+        "accepted",
+        "other-agent",
+        cutoff + TimeDelta::seconds(9),
+    );
+    for (status, seconds) in [("proposed", 6), ("rejected", 7), ("superseded", 8)] {
+        record_at(
+            &f.state,
+            "ArchitecturalDecision",
+            &format!("Ignored {status}"),
+            status,
+            "claude-code",
+            cutoff + TimeDelta::seconds(seconds),
+        );
+    }
+    assert_eq!(
+        graph::working_record_authored_since(&f.state, "claude-code", cutoff).unwrap(),
+        None
+    );
+
+    let older_match = record_at(
+        &f.state,
+        "Lesson",
+        "Deliberate lesson",
+        "accepted",
+        "claude-code",
+        cutoff + TimeDelta::seconds(1),
+    );
+    let newest_match = record_at(
+        &f.state,
+        "Requirement",
+        "Deliberate requirement",
+        "accepted",
+        "claude-code",
+        cutoff + TimeDelta::seconds(2),
+    );
+    assert_ne!(older_match, newest_match);
+    assert_eq!(
+        graph::working_record_authored_since(&f.state, "claude-code", cutoff).unwrap(),
+        Some(newest_match)
+    );
+}
+
+#[test]
+fn automatic_capture_abstention_tie_break_is_deterministic() {
+    let f = setup("gc-abstention-tie");
+    let cutoff = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let when = cutoff + TimeDelta::seconds(1);
+    let a = record_at(
+        &f.state,
+        "Lesson",
+        "Tie A",
+        "accepted",
+        "opencode-moosedev",
+        when,
+    );
+    let b = record_at(
+        &f.state,
+        "Lesson",
+        "Tie B",
+        "accepted",
+        "opencode-moosedev",
+        when,
+    );
+    let expected = std::cmp::max(a, b);
+    assert_eq!(
+        graph::working_record_authored_since(&f.state, "opencode-moosedev", cutoff).unwrap(),
+        Some(expected)
+    );
 }
 
 #[test]
@@ -359,6 +462,41 @@ fn accept_ratifies_record_in_place_and_link_materializes_edge() {
 
     // Re-accepting the record is a guarded error.
     assert!(graph::accept_proposal(&f.state, &captured.record_iri, "tester").is_err());
+}
+
+#[test]
+fn link_accept_requires_a_ratified_subject_record() {
+    let f = setup("gc-order");
+    let captured = capture(
+        &f.state,
+        Some("Order matters"),
+        None,
+        &[ALPHA_RAW.to_string()],
+    );
+    // Files queue before entities; pick the alpha ENTITY link explicitly.
+    let link = graph::list_proposals(&f.state, Some("proposed"))
+        .unwrap()
+        .into_iter()
+        .find(|p| p.target_symbol == ALPHA_RAW)
+        .expect("alpha link queued")
+        .iri;
+
+    // Accepting a link while its subject record is still proposed would
+    // smuggle unratified knowledge into dossiers and why-coverage.
+    let err = graph::accept_proposal(&f.state, &link, "tester").unwrap_err();
+    assert!(
+        err.to_string().contains("still proposed"),
+        "refusal names the cause: {err}"
+    );
+    assert!(!has_records(&f.state, &f.alpha), "no edge materialized");
+    assert_eq!(foo_numerator(&f.state), 0);
+    assert_eq!(status_of(&f.state, &link), "proposed", "link stays pending");
+
+    // Ratify the record → the same link now accepts.
+    graph::accept_proposal(&f.state, &captured.record_iri, "tester").unwrap();
+    graph::accept_proposal(&f.state, &link, "tester").unwrap();
+    assert!(has_records(&f.state, &f.alpha));
+    assert_eq!(foo_numerator(&f.state), 1);
 }
 
 #[test]

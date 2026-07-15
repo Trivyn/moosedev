@@ -212,8 +212,10 @@ pub struct GetRelevantContextArgs {
     pub topic: Option<String>,
     /// Maximum number of items to return (default 10).
     pub limit: Option<usize>,
-    /// Include superseded/deprecated records too. Defaults to false — only the
-    /// current working set is returned, with each item's supersedes link shown.
+    /// Include records outside the working set too (superseded, deprecated,
+    /// rejected, and still-proposed ones). Defaults to false — only ratified
+    /// current knowledge is returned, with each item's supersedes link shown;
+    /// pending proposals live in `pending_ratifications`, not here.
     pub include_history: Option<bool>,
 }
 
@@ -324,6 +326,10 @@ pub struct CaptureDecisionPointArgs {
     pub host: Option<String>,
     /// Optional author override (defaults to the MCP client name).
     pub author: Option<String>,
+    /// Start of an automatic adapter's capture window, as Unix seconds. If the
+    /// same author already wrote a working-set InformationRecord after this
+    /// instant, capture abstains. Omit for deliberate/manual capture calls.
+    pub since_unix_seconds: Option<i64>,
 }
 
 /// Arguments for the `evaluate_policy` tool.
@@ -539,7 +545,7 @@ impl MooseDevServer {
 
     /// Grounded capture at a decision point — proposed record + queued links.
     #[tool(
-        description = "Grounded capture at a decision point (session end, checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the host's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
+        description = "Grounded capture at a decision point (session end, checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the host's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Automatic adapters may pass `since_unix_seconds`; capture then ABSTAINS when the same author already wrote authoritative typed knowledge during that window. Omit the cutoff for a deliberate/manual capture. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
     )]
     async fn capture_decision_point(
         &self,
@@ -550,6 +556,37 @@ impl MooseDevServer {
         let host = args.host.unwrap_or_else(|| "mcp".to_string());
         let files = args.files.unwrap_or_default();
         let entities = args.entities.unwrap_or_default();
+        if let Some(seconds) = args.since_unix_seconds {
+            let Some(since) = chrono::DateTime::<Utc>::from_timestamp(seconds, 0) else {
+                return Ok(tool_error(format!(
+                    "since_unix_seconds is out of range: {seconds}"
+                )));
+            };
+            match graph::working_record_authored_since(&self.state, &author, since) {
+                Ok(Some(record_iri)) => {
+                    crate::policy::fires::append_fire(
+                        &self.state.data_dir,
+                        &crate::policy::fires::FireEvent {
+                            ts: Utc::now().to_rfc3339(),
+                            verb: "capture",
+                            host,
+                            entity: None,
+                            decision: "abstained".to_string(),
+                            records_cited: vec![record_iri.clone()],
+                        },
+                    );
+                    return Ok(tool_ok(format!(
+                        "Abstained from automatic capture: typed_record_already_authored ({record_iri})."
+                    )));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Ok(tool_error(format!(
+                        "automatic capture abstention check failed: {e}"
+                    )))
+                }
+            }
+        }
         let captured = match graph::capture_decision_point(
             &self.state,
             &files,
@@ -730,7 +767,7 @@ impl MooseDevServer {
 
     /// Record a new decision that supersedes an existing one, preserving history.
     #[tool(
-        description = "Record a NEW knowledge item that supersedes an existing one when a prior decision/requirement/constraint/lesson changes. The replacement is recorded with the SAME knowledge class as the superseded item (type-preserving). Links new -supersedes-> old, captures WHY it changed as a linked Rationale, and marks the old item 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the item being replaced as `superseded_iri`."
+        description = "Record a NEW knowledge item that supersedes an existing one when a prior decision/requirement/constraint/lesson changes. The replacement is recorded with the SAME knowledge class as the superseded item (type-preserving). Atomically links new -supersedes-> old and old -isSupersededBy-> new, captures WHY it changed as a linked Rationale, and marks the old item 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the item being replaced as `superseded_iri`."
     )]
     async fn supersede_decision(
         &self,

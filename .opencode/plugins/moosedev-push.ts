@@ -110,6 +110,7 @@ export async function MooseDevPush(input: PluginInput) {
   const gateNotices: string[] = []
   const editedFiles = new Set<string>()
   let lastCaptureAt = 0
+  let captureWindowStartedAtSeconds = Math.floor(Date.now() / 1000)
   const warned = new Set<string>()
 
   function warnOnce(key: string, message: string) {
@@ -257,16 +258,24 @@ export async function MooseDevPush(input: PluginInput) {
     event: async ({ event }: { event: HostEvent }) => {
       if (event.type === "file.edited") {
         const file = normalizeProjectPath(String(event.properties?.file || ""), root)
-        if (file) editedFiles.add(file)
+        if (file && !isMooseDevStatePath(file)) editedFiles.add(file)
         return
       }
       if (event.type !== "session.idle" || editedFiles.size === 0) return
       const now = Date.now()
       if (now - lastCaptureAt < CAPTURE_MIN_INTERVAL_MS) return
-      lastCaptureAt = now
       const files = [...editedFiles]
-      editedFiles.clear()
-      await callTool("capture_decision_point", { host: HOST, files }, warnOnce)
+      const result = await callTool(
+        "capture_decision_point",
+        { host: HOST, files, since_unix_seconds: captureWindowStartedAtSeconds },
+        warnOnce,
+      )
+      // A captured or abstained MCP result is a successful checkpoint. Failures
+      // retain both the window and file set so the next idle event can retry.
+      if (!result) return
+      lastCaptureAt = now
+      captureWindowStartedAtSeconds = Math.floor(Date.now() / 1000)
+      for (const file of files) editedFiles.delete(file)
     },
 
     "experimental.chat.system.transform": async (
@@ -395,6 +404,10 @@ function normalizeProjectPath(raw: string, root: string): string | undefined {
   return path.replace(/\/+/g, "/")
 }
 
+function isMooseDevStatePath(path: string): boolean {
+  return path === ".moosedev" || path.startsWith(".moosedev/")
+}
+
 function pushRecent(set: string[], value: string) {
   const existing = set.indexOf(value)
   if (existing >= 0) set.splice(existing, 1)
@@ -485,6 +498,11 @@ async function callTool(
       return undefined
     }
 
+    if (isToolError(result.result)) {
+      warnOnce(`tool-result-error-${name}`, `${name} returned an error result; skipping.`)
+      return undefined
+    }
+
     return extractTextContent(result.result)
   } catch (error) {
     warnOnce("mcp-error", `MOOSEDev call failed; skipping. ${shorten(error instanceof Error ? error.message : String(error))}`)
@@ -498,6 +516,12 @@ type JsonRpcResponse = {
   id?: number
   result?: unknown
   error?: { message?: string }
+}
+
+function isToolError(result: unknown): boolean {
+  return Boolean(
+    result && typeof result === "object" && (result as Record<string, unknown>).isError === true,
+  )
 }
 
 function request(
