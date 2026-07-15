@@ -287,15 +287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-buffer"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -518,12 +509,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -575,15 +560,6 @@ name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "cpufeatures"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
 ]
@@ -669,15 +645,6 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
-]
-
-[[package]]
-name = "crypto-common"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
-dependencies = [
- "hybrid-array",
 ]
 
 [[package]]
@@ -784,7 +751,7 @@ version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
- "const-oid 0.9.6",
+ "const-oid",
  "pem-rfc7468",
  "zeroize",
 ]
@@ -849,21 +816,10 @@ version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer 0.10.4",
- "const-oid 0.9.6",
- "crypto-common 0.1.7",
+ "block-buffer",
+ "const-oid",
+ "crypto-common",
  "subtle",
-]
-
-[[package]]
-name = "digest"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
-dependencies = [
- "block-buffer 0.12.1",
- "const-oid 0.10.2",
- "crypto-common 0.2.2",
 ]
 
 [[package]]
@@ -1663,7 +1619,7 @@ version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
- "digest 0.10.7",
+ "digest",
 ]
 
 [[package]]
@@ -1719,15 +1675,6 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
-name = "hybrid-array"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
-dependencies = [
- "typenum",
-]
 
 [[package]]
 name = "hyper"
@@ -2219,17 +2166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
 dependencies = [
  "cfg-if",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "md-5"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
-dependencies = [
- "cfg-if",
- "digest 0.11.3",
+ "digest",
 ]
 
 [[package]]
@@ -2396,7 +2333,7 @@ dependencies = [
  "scip",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2",
  "sqlx",
  "tokio",
  "tower-http",
@@ -2678,8 +2615,8 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxigraph"
-version = "0.5.7"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+version = "0.5.9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
@@ -2689,13 +2626,14 @@ dependencies = [
  "oxrdfio",
  "oxrocksdb-sys",
  "oxsdatatypes",
+ "rand 0.8.6",
  "rand 0.9.4",
  "rustc-hash",
- "siphasher 1.0.3",
+ "siphasher",
  "sparesults",
  "spareval",
  "spargebra",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2716,57 +2654,57 @@ checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
 [[package]]
 name = "oxjsonld"
 version = "0.2.5"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "json-event-parser",
  "oxiri",
  "oxrdf",
  "ryu-js",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "oxrdf"
 version = "0.3.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "hex",
  "oxilangtag",
  "oxiri",
  "oxsdatatypes",
- "rand 0.9.4",
- "sha2 0.11.0",
- "thiserror 2.0.18",
+ "rand 0.8.6",
+ "sha2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "oxrdfio"
 version = "0.2.5"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "oxjsonld",
  "oxrdf",
  "oxrdfxml",
  "oxttl",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "oxrdfxml"
 version = "0.2.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
  "quick-xml",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "oxrocksdb-sys"
-version = "0.5.7"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+version = "0.5.9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "bindgen",
  "cc",
@@ -2775,21 +2713,21 @@ dependencies = [
 [[package]]
 name = "oxsdatatypes"
 version = "0.2.2"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "oxttl"
 version = "0.2.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "memchr",
  "oxilangtag",
  "oxiri",
  "oxrdf",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2916,7 +2854,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c00cf8b9eafe68dde5e9eaa2cef8ee84a9336a47d566ec55ca16589633b65af7"
 dependencies = [
- "siphasher 0.3.11",
+ "siphasher",
 ]
 
 [[package]]
@@ -3469,8 +3407,8 @@ version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
 dependencies = [
- "const-oid 0.9.6",
- "digest 0.10.7",
+ "const-oid",
+ "digest",
  "num-bigint-dig",
  "num-integer",
  "num-traits",
@@ -3789,19 +3727,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha1"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.0",
- "digest 0.11.3",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
@@ -3811,19 +3738,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha2"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.0",
- "digest 0.11.3",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
@@ -3863,7 +3779,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
- "digest 0.10.7",
+ "digest",
  "rand_core 0.6.4",
 ]
 
@@ -3878,12 +3794,6 @@ name = "siphasher"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
-
-[[package]]
-name = "siphasher"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "slab"
@@ -3933,57 +3843,57 @@ dependencies = [
 [[package]]
 name = "sparesults"
 version = "0.3.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "json-event-parser",
  "memchr",
  "oxrdf",
  "quick-xml",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "spareval"
 version = "0.2.6"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "hex",
  "json-event-parser",
- "md-5 0.11.0",
+ "md-5",
  "oxiri",
  "oxrdf",
  "oxsdatatypes",
- "rand 0.9.4",
+ "rand 0.8.6",
  "regex",
  "rustc-hash",
- "sha1 0.11.0",
- "sha2 0.11.0",
+ "sha1",
+ "sha2",
  "sparesults",
  "spargebra",
  "sparopt",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "spargebra"
 version = "0.4.6"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
  "peg",
- "rand 0.9.4",
- "thiserror 2.0.18",
+ "rand 0.8.6",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "sparopt"
 version = "0.3.6"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?branch=main#92f650da7b2a9a4b176b890d1bceedd6e0c661f9"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
 dependencies = [
  "oxrdf",
- "rand 0.9.4",
+ "rand 0.8.6",
  "spargebra",
 ]
 
@@ -4056,7 +3966,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2",
  "smallvec",
  "thiserror 2.0.18",
  "tokio",
@@ -4093,7 +4003,7 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2",
  "sqlx-core",
  "sqlx-mysql",
  "sqlx-postgres",
@@ -4115,7 +4025,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "crc",
- "digest 0.10.7",
+ "digest",
  "dotenvy",
  "either",
  "futures-channel",
@@ -4128,15 +4038,15 @@ dependencies = [
  "hmac",
  "itoa",
  "log",
- "md-5 0.10.6",
+ "md-5",
  "memchr",
  "once_cell",
  "percent-encoding",
  "rand 0.8.6",
  "rsa",
  "serde",
- "sha1 0.10.6",
- "sha2 0.10.9",
+ "sha1",
+ "sha2",
  "smallvec",
  "sqlx-core",
  "stringprep",
@@ -4167,13 +4077,13 @@ dependencies = [
  "home",
  "itoa",
  "log",
- "md-5 0.10.6",
+ "md-5",
  "memchr",
  "once_cell",
  "rand 0.8.6",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2",
  "smallvec",
  "sqlx-core",
  "stringprep",

@@ -8,6 +8,7 @@ Usage:
   python run.py --arm B2             # run a single arm
 """
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 from pathlib import Path
 import time
+import urllib.request
 import uuid
 
 import config
@@ -30,6 +32,43 @@ from grade_code import grade_patch
 CODE_TASK_TYPES = {"constraint_code"}
 TREE_TASK_TYPES = {"constraint_code", "context_qa"}  # task types that get a materialized code tree
 GIT_ID = ["-c", "user.email=bench@local", "-c", "user.name=bench"]
+
+
+def trial_identity(data_dir: str, expected_pid: int | None = None,
+                   expected_binary_sha256: str | None = None) -> dict:
+    """Fingerprint and verify the harness-owned trial backend."""
+    addr_path = Path(data_dir) / "http.addr"
+    addr = addr_path.read_text().strip()
+    if not addr:
+        raise RuntimeError(f"empty MOOSEDev HTTP address file: {addr_path}")
+    with urllib.request.urlopen(f"http://{addr}/api/v1/health", timeout=5) as response:
+        health = json.load(response)
+    version = health.get("version")
+    if health.get("status") != "ok" or not version:
+        raise RuntimeError(f"invalid MOOSEDev health response: {health!r}")
+
+    if expected_pid is not None:
+        pid_path = Path(data_dir) / "moosedev-serve.pid"
+        try:
+            running_pid = int(pid_path.read_text().strip())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"invalid MOOSEDev daemon pid file: {pid_path}") from exc
+        if running_pid != expected_pid:
+            raise RuntimeError(
+                f"health endpoint belongs to daemon pid {running_pid}, expected {expected_pid}"
+            )
+
+    binary = Path(config.MOOSEDEV_BIN).resolve(strict=True)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    if expected_binary_sha256 is not None and digest != expected_binary_sha256:
+        raise RuntimeError(
+            "configured MOOSEDev binary changed after the trial daemon was started"
+        )
+    return {
+        "trial_epoch": f"{version}+{digest[:12]}",
+        "moosedev_version": version,
+        "moosedev_binary_sha256": digest,
+    }
 
 
 def load_task(corpus: str, task_id: str) -> dict:
@@ -282,7 +321,8 @@ def codex_mcp_overrides(arm: str, corpus: str, mode: str) -> list:
 
 def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "tooluse",
              agent: str = None, variant: str = None, prompt_prefix: str = "",
-             backend: str = "opencode", month: str = None) -> dict:
+             backend: str = "opencode", month: str = None, trial_epoch: str = None,
+             moosedev_version: str = None, moosedev_binary_sha256: str = None) -> dict:
     task = load_task(corpus, task_id)
     is_code = task["type"] in CODE_TASK_TYPES
     run_id = f"{corpus}_{task_id}_{arm}_{mode}_{(agent or 'build')}_{uuid.uuid4().hex[:8]}"
@@ -378,6 +418,11 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         # longitudinal trial dimension: the checkpoint month (override) or the run's own month.
         # `corpus` already identifies the project (trivyn-trial / moose-trial), so no separate field.
         "month": month or time.strftime("%Y-%m", time.gmtime(t0)),
+        # A trial epoch fingerprints the implementation under test while the probes, gold answers,
+        # judge, and kill thresholds remain frozen. Non-trial runs leave these fields null.
+        "trial_epoch": trial_epoch,
+        "moosedev_version": moosedev_version,
+        "moosedev_binary_sha256": moosedev_binary_sha256,
         "capability_class": task.get("capability_class"),  # grouping key for capability_qa rows
         "hop_count": task.get("hop_count"), "arm": arm, "mode": mode, "agent_model": model,
         "backend": backend,
@@ -413,7 +458,27 @@ def main():
     ap.add_argument("--variant", default=None, help="reasoning effort, e.g. high|max (opencode) | low|medium (codex)")
     ap.add_argument("--prompt-prefix", default="", help="diagnostic: text prepended to the task prompt")
     ap.add_argument("--month", default=None, help="trial month label YYYY-MM (default: the run's month)")
+    ap.add_argument("--trial-epoch", default=None, help="versioned trial implementation epoch")
+    ap.add_argument("--moosedev-version", default=None, help="running backend health version")
+    ap.add_argument("--moosedev-binary-sha256", default=None, help="SHA-256 of the trial binary")
+    ap.add_argument("--print-trial-identity", metavar="DATA_DIR",
+                    help="print epoch, health version, and binary SHA-256, then exit")
+    ap.add_argument("--trial-daemon-pid", type=int,
+                    help="expected harness-owned daemon PID for identity verification")
+    ap.add_argument("--expected-binary-sha256",
+                    help="binary digest captured immediately before daemon startup")
     args = ap.parse_args()
+
+    if args.print_trial_identity:
+        identity = trial_identity(args.print_trial_identity, args.trial_daemon_pid,
+                                  args.expected_binary_sha256)
+        print("\t".join(identity[k] for k in (
+            "trial_epoch", "moosedev_version", "moosedev_binary_sha256")))
+        return
+
+    supplied_identity = (args.trial_epoch, args.moosedev_version, args.moosedev_binary_sha256)
+    if any(supplied_identity) and not all(supplied_identity):
+        ap.error("--trial-epoch, --moosedev-version, and --moosedev-binary-sha256 must be supplied together")
 
     model = args.model or ("gpt-5.5" if args.backend == "codex" else config.AGENT_MODEL)
     arms = [args.arm] if args.arm else config.ARMS
@@ -422,7 +487,8 @@ def main():
         print(f"\n=== running {arm} ({args.mode}, backend={args.backend}, model={model}) ===", flush=True)
         try:
             row = run_cell(args.corpus, args.task, arm, model, args.mode, args.agent,
-                           args.variant, args.prompt_prefix, args.backend, args.month)
+                           args.variant, args.prompt_prefix, args.backend, args.month,
+                           args.trial_epoch, args.moosedev_version, args.moosedev_binary_sha256)
         except Exception as e:  # one arm's failure must not abort the rest of the matrix
             print(f"  ARM FAILED: {type(e).__name__}: {e}", flush=True)
             continue

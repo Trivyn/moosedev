@@ -102,14 +102,14 @@ test = true
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.
 # Required because oxigraph types (Store, NamedNode, …) cross MOOSE's public API and
 # must be the SAME crate version in both moose and moosedev.
-oxigraph     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-oxjsonld     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-oxrdf        = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-oxrdfio      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-oxrdfxml     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-oxsdatatypes = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-oxttl        = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-sparesults   = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-spareval     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-spargebra    = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
-sparopt      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", branch = "main" }
+oxigraph     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+oxjsonld     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+oxrdf        = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+oxrdfio      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+oxrdfxml     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+oxsdatatypes = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+oxttl        = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+sparesults   = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+spareval     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+spargebra    = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }
+sparopt      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9" }

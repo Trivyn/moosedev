@@ -379,9 +379,7 @@ fn parse_resolve<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<R
     let mut file = None;
     let mut line = None;
     let mut col = None;
-    let mut args = iter.peekable();
-
-    while let Some(arg) = args.next() {
+    for arg in iter {
         if arg.starts_with('-') {
             anyhow::bail!("unknown resolve option {arg:?}");
         } else if file.is_none() {
