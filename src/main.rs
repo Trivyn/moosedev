@@ -15,6 +15,8 @@
 //! - `--connect [SOCKET]`: run as a thin proxy — relay this process's stdio to a
 //!   running backend, auto-spawning a detached backend when none is listening.
 //!   This is what each MCP client spawns.
+//! - `lsp`: run as a thin Knowledge-LSP shim — relay editor stdio to the
+//!   daemon-owned LSP socket.
 //! - `--status [SOCKET]`: report backend + web UI status without opening the
 //!   store (socket-only liveness probe).
 //! - `ui [SOCKET]`: open the backend's web UI in a browser, auto-spawning a
@@ -26,8 +28,10 @@
 //! `MOOSEDEV_NO_AUTOSPAWN=1` to make `--connect` require a pre-running backend.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use anyhow::Context;
+use moosedev::code::substrate::{self, Position, ResolutionMode, Substrate};
 use moosedev::export::{export_graph, ExportFormat, ExportScope};
 use moosedev::graph;
 use moosedev::graph_import::{import_graph as import_rdf_graph, ImportFormat, ImportMode};
@@ -44,6 +48,8 @@ enum Mode {
         open: bool,
     },
     Connect(Option<PathBuf>),
+    /// Relay editor stdio to the daemon-owned Knowledge-LSP socket.
+    Lsp,
     /// Report backend + web UI status without opening the store (socket-only).
     Status(Option<PathBuf>),
     /// Open the running backend's web UI in a browser (auto-spawning if needed).
@@ -55,6 +61,18 @@ enum Mode {
     Init(InitArgs),
     /// Temporal git-walk bootstrap: replay trunk history into the graph.
     Bootstrap(temporal::BootstrapArgs),
+    /// Build the code substrate index.
+    Index,
+    /// Plan/apply CodeEntity minting from the code substrate.
+    Mint {
+        apply: bool,
+    },
+    /// Plan/apply role/criticality judgment proposals from evidence.
+    Classify {
+        apply: bool,
+    },
+    /// Resolve a source position through the code substrate.
+    Resolve(ResolveArgs),
     /// Print the resolved `skills/` dir + the agent workflow docs it holds.
     Skills,
 }
@@ -77,9 +95,17 @@ struct InitArgs {
     force: bool,
     codex: bool,
     opencode: bool,
+    zed: bool,
+    claude_hooks: bool,
     stdio: bool,
     binary: Option<PathBuf>,
     data_dir: Option<String>,
+}
+
+struct ResolveArgs {
+    file: PathBuf,
+    line: u32,
+    col: u32,
 }
 
 const USAGE: &str = "\
@@ -91,6 +117,7 @@ USAGE:
                               Run the shared backend on a Unix socket; --open
                               launches the web UI in a browser once it is up
     moosedev --connect [SOCK] Proxy stdio to a backend; auto-spawn if needed
+    moosedev lsp              Proxy editor stdio to the daemon Knowledge-LSP
     moosedev --status [SOCK]  Report backend + web UI status (no store lock)
     moosedev ui [SOCK]        Open the backend's web UI in a browser (auto-spawn)
     moosedev export [PATH]    Export the graph; no running backend required
@@ -98,6 +125,15 @@ USAGE:
     moosedev init [DIR]       Configure DIR (default .) to use MOOSEDev as memory
     moosedev bootstrap --temporal
                               Replay git history into the graph (per-commit dates)
+    moosedev index            Build the code substrate index (runs rust-analyzer scip)
+    moosedev mint [--apply]   Mint CodeEntity continuants from the substrate
+                              (dry-run unless --apply is present)
+    moosedev classify [--apply]
+                              Propose role/criticality judgments from evidence
+                              (dry-run unless --apply; nothing takes effect
+                              until ratified in the workbench inbox)
+    moosedev resolve FILE LINE:COL
+                              Resolve a source position to a code entity (debug)
     moosedev skills           List the shipped agent workflow docs (bootstrap, …)
     moosedev --help           Show this help
 
@@ -107,7 +143,8 @@ The web UI binds an ephemeral loopback port by default (discoverable via
 or MOOSEDEV_NO_HTTP=1 to disable it.
 Configuration: repo-root .env plus environment variables. Explicit environment
 values win. Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
-MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_AUTOSPAWN.
+MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_LSP,
+MOOSEDEV_NO_AUTOSPAWN.
 LLM assistance is disabled unless MOOSEDEV_LLM_BASE_URL is explicitly set;
 then MOOSEDEV_LLM_API_KEY, MOOSEDEV_LLM_MODEL, and MOOSEDEV_LLM_ASSIST_LEVEL
 configure the provider and assist level.
@@ -124,11 +161,17 @@ IMPORT OPTIONS:
     --mode patch|replace      Patch inserts missing quads; replace fully restores
                               the selected scope (default: patch)
 
+RESOLVE:
+    Input positions are 1-based. Columns are UTF-8 byte columns.
+    MOOSEDEV_SCIP_PRODUCER overrides the SCIP producer binary used by index.
+
 INIT OPTIONS:
     --stdio                   Generate a bare-stdio MCP config (single client)
                               instead of the default shared --connect config
     --codex                   Also write .codex/config.toml for the Codex CLI
     --opencode                Also install the opencode push plugin (.opencode/plugins/)
+    --claude-hooks            Also install the Claude Code gate/push/capture hooks (.claude/hooks/)
+    --zed                     Also write project-local .zed/settings.json
     --binary PATH             Force this binary path in the config instead of
                               the auto-resolved command (bare `moosedev` on PATH,
                               else this executable's absolute path)
@@ -146,21 +189,33 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         None => Ok(Mode::Stdio),
         Some("--serve") => parse_serve(iter),
         Some("--connect") => Ok(Mode::Connect(parse_optional_path(&mut iter, "--connect")?)),
+        Some("lsp") => parse_no_args(iter, "lsp").map(|()| Mode::Lsp),
         Some("--status") => Ok(Mode::Status(parse_optional_path(&mut iter, "--status")?)),
         Some("ui") => Ok(Mode::Ui(parse_optional_path(&mut iter, "ui")?)),
         Some("export") => parse_export(iter).map(Mode::Export),
         Some("import") => parse_import(iter).map(Mode::Import),
         Some("init") => parse_init(iter).map(Mode::Init),
         Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
+        Some("index") => parse_index(iter).map(|()| Mode::Index),
+        Some("mint") => parse_mint(iter).map(|apply| Mode::Mint { apply }),
+        Some("classify") => parse_classify(iter).map(|apply| Mode::Classify { apply }),
+        Some("resolve") => parse_resolve(iter).map(Mode::Resolve),
         Some("skills") => Ok(Mode::Skills),
         Some("--help" | "-h") => {
             println!("{USAGE}");
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, skills, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, lsp, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
         ),
     }
+}
+
+fn parse_no_args<'a>(mut iter: impl Iterator<Item = &'a String>, mode: &str) -> anyhow::Result<()> {
+    if let Some(extra) = iter.next() {
+        anyhow::bail!("{mode} accepts no arguments; unexpected {extra:?}");
+    }
+    Ok(())
 }
 
 /// Parse `--serve`'s arguments: an optional socket path and an optional `--open`
@@ -283,6 +338,82 @@ fn parse_import<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Im
     })
 }
 
+fn parse_index<'a>(mut iter: impl Iterator<Item = &'a String>) -> anyhow::Result<()> {
+    if let Some(extra) = iter.next() {
+        anyhow::bail!("index accepts no arguments; unexpected {extra:?}");
+    }
+    Ok(())
+}
+
+/// Parse `mint`'s single optional flag; the command is dry-run unless `--apply`.
+fn parse_mint<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<bool> {
+    let mut apply = false;
+    for arg in iter {
+        if arg == "--apply" {
+            apply = true;
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown mint option {arg:?}; expected optional --apply");
+        } else {
+            anyhow::bail!("mint accepts only optional --apply; unexpected {arg:?}");
+        }
+    }
+    Ok(apply)
+}
+
+/// Parse `classify`'s single optional flag; dry-run unless `--apply`.
+fn parse_classify<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<bool> {
+    let mut apply = false;
+    for arg in iter {
+        if arg == "--apply" {
+            apply = true;
+        } else if arg.starts_with('-') {
+            anyhow::bail!("unknown classify option {arg:?}; expected optional --apply");
+        } else {
+            anyhow::bail!("classify accepts only optional --apply; unexpected {arg:?}");
+        }
+    }
+    Ok(apply)
+}
+
+fn parse_resolve<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<ResolveArgs> {
+    let mut file = None;
+    let mut line = None;
+    let mut col = None;
+    for arg in iter {
+        if arg.starts_with('-') {
+            anyhow::bail!("unknown resolve option {arg:?}");
+        } else if file.is_none() {
+            file = Some(PathBuf::from(arg.as_str()));
+        } else if line.is_none() {
+            if let Some((line_value, col_value)) = arg.split_once(':') {
+                line = Some(parse_positive_position("line", line_value)?);
+                col = Some(parse_positive_position("column", col_value)?);
+            } else {
+                line = Some(parse_positive_position("line", arg)?);
+            }
+        } else if col.is_none() {
+            col = Some(parse_positive_position("column", arg)?);
+        } else {
+            anyhow::bail!("resolve accepts FILE LINE:COL or FILE LINE COL; unexpected {arg:?}");
+        }
+    }
+
+    let file = file.ok_or_else(|| anyhow::anyhow!("resolve requires FILE LINE:COL"))?;
+    let line = line.ok_or_else(|| anyhow::anyhow!("resolve requires FILE LINE:COL"))?;
+    let col = col.ok_or_else(|| anyhow::anyhow!("resolve requires FILE LINE:COL"))?;
+    Ok(ResolveArgs { file, line, col })
+}
+
+fn parse_positive_position(name: &str, value: &str) -> anyhow::Result<u32> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("{name} must be a positive integer, got {value:?}"))?;
+    if parsed == 0 {
+        anyhow::bail!("{name} must be 1-based, got 0");
+    }
+    Ok(parsed)
+}
+
 /// Parse `init`'s arguments: an optional target dir plus flags. Mirrors the
 /// long/`=` option style of [`parse_export`]/[`parse_import`].
 fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<InitArgs> {
@@ -290,6 +421,8 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
     let mut force = false;
     let mut codex = false;
     let mut opencode = false;
+    let mut zed = false;
+    let mut claude_hooks = false;
     let mut stdio = false;
     let mut binary = None;
     let mut data_dir = None;
@@ -302,6 +435,10 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
             codex = true;
         } else if arg == "--opencode" {
             opencode = true;
+        } else if arg == "--zed" {
+            zed = true;
+        } else if arg == "--claude-hooks" {
+            claude_hooks = true;
         } else if arg == "--stdio" {
             stdio = true;
         } else if let Some(value) = arg.strip_prefix("--binary=") {
@@ -332,6 +469,8 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
         force,
         codex,
         opencode,
+        zed,
+        claude_hooks,
         stdio,
         binary,
         data_dir,
@@ -564,6 +703,11 @@ async fn main() -> anyhow::Result<()> {
             let socket = prepare_socket(sock, &data_dir)?;
             runtime::connect_unix(&socket, &data_dir).await
         }
+        Mode::Lsp => {
+            let mcp_socket = prepare_socket(None, &data_dir)?;
+            let lsp_socket = moosedev::lsp::lsp_socket_path_for(&data_dir);
+            runtime::connect_lsp_unix(&lsp_socket, &mcp_socket, &data_dir).await
+        }
         Mode::Serve { socket: sock, open } => {
             let socket = prepare_socket(sock, &data_dir)?;
             // Probe before the (expensive) bootstrap: a same-data-dir conflict
@@ -574,7 +718,8 @@ async fn main() -> anyhow::Result<()> {
             let server = moosedev::mcp::MooseDevServer::new(state.clone());
             // Infallible: a UI bind failure must not abort the MCP backend. The
             // bound address (None if the UI is disabled/failed) drives --open.
-            let http_addr = runtime::spawn_http_if_enabled(state, &data_dir).await;
+            let http_addr = runtime::spawn_http_if_enabled(state.clone(), &data_dir).await;
+            let lsp_listener = moosedev::lsp::spawn_lsp_listener(state, &data_dir).await;
             let pidfile = runtime::pidfile_path_for(&data_dir);
             std::fs::write(&pidfile, format!("{}\n", std::process::id()))
                 .map_err(|e| anyhow::anyhow!("write pidfile {}: {e}", pidfile.display()))?;
@@ -587,14 +732,25 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             tracing::info!(
-                "MOOSEDev backend startup: data_dir={}, socket={}, pidfile={}",
+                "MOOSEDev backend startup: data_dir={}, socket={}, lsp_socket={}, pidfile={}",
                 data_dir.display(),
                 socket.display(),
+                lsp_listener
+                    .as_ref()
+                    .map(|listener| listener.socket().display().to_string())
+                    .unwrap_or_else(|| "<disabled>".to_string()),
                 pidfile.display()
             );
             let result = runtime::serve_unix(server, &socket).await;
             let _ = std::fs::remove_file(&pidfile);
             let _ = std::fs::remove_file(runtime::http_addr_file_path_for(&data_dir));
+            if let Some(lsp_listener) = lsp_listener {
+                // Published diagnostics are sticky in editors: retract them
+                // while the session sockets are still alive, or the squiggles
+                // outlive the daemon with no server behind them.
+                lsp_listener.shutdown_sessions().await;
+                let _ = std::fs::remove_file(lsp_listener.socket());
+            }
             result
         }
         // --status / ui are socket-only: they connect (or auto-spawn) but never
@@ -611,12 +767,382 @@ async fn main() -> anyhow::Result<()> {
         Mode::Import(args) => import_mode(&data_dir, args),
         Mode::Init(args) => init_mode(args),
         Mode::Bootstrap(args) => temporal::run(args),
+        Mode::Index => index_mode(&data_dir),
+        Mode::Mint { apply } => mint_mode(&data_dir, apply).await,
+        Mode::Classify { apply } => classify_mode(&data_dir, apply).await,
+        Mode::Resolve(args) => resolve_mode(&data_dir, args),
         Mode::Skills => skills_mode(),
         Mode::Stdio => {
             let server = runtime::build_server(&data_dir, &ontology_dir()).await?;
             runtime::serve_stdio(server).await
         }
     }
+}
+
+fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
+    let repo_root = std::env::current_dir()?;
+    let report = substrate::producer::run_index(&repo_root, data_dir)?;
+    println!("substrate index");
+    println!("  commit:      {}", report.commit);
+    println!("  duration:    {:.3}s", report.duration.as_secs_f64());
+    for producer in &report.producers {
+        println!(
+            "  {}: {} documents, {} occurrences",
+            producer.name, producer.documents, producer.occurrences
+        );
+    }
+    println!("  documents:   {}", report.documents);
+    println!("  occurrences: {}", report.occurrences);
+    println!("  definitions: {}", report.definitions);
+    match report.churn_files {
+        Some(files) => println!("  churn:       {files} files (24-month window)"),
+        None => println!("  churn:       unavailable (see warnings)"),
+    }
+    println!(
+        "  index size:  {} bytes\n  {}",
+        report.index_bytes,
+        substrate::producer::diagnostic_summary(data_dir)
+    );
+    println!(
+        "  output:      {}",
+        substrate::substrate_dir(data_dir).display()
+    );
+    Ok(())
+}
+
+/// Plan or apply CodeEntity minting from the previously built code substrate.
+async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let repo_root = std::env::current_dir()?;
+    let substrate = Substrate::load(data_dir, &repo_root)
+        .with_context(|| "load code substrate for mint; run `moosedev index` first")?;
+    let state = match runtime::build_state(data_dir, &ontology_dir()).await {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!(
+                "failed to open MOOSEDev state at {}: {e}\n\
+                 Stop the daemon first, for example: kill $(cat {}/moosedev-serve.pid)",
+                data_dir.display(),
+                data_dir.display()
+            );
+            return Err(e);
+        }
+    };
+
+    let terms = graph::CodeTerms::resolve(&state)?;
+    let components = graph::load_components(&state)?;
+    let definitions = substrate.definitions();
+    let plan = graph::plan_mint(&state, &definitions, &terms, &components, Some(&substrate))?;
+    report_mint_plan(&plan, &components);
+
+    if !apply {
+        println!("dry-run only; re-run with --apply");
+        return Ok(());
+    }
+
+    let outcome = graph::apply_mint(&state, &plan, &terms)?;
+    let validation_started = std::time::Instant::now();
+    state.ensure_enriched();
+    moosedev::canonical::write_through(&state.store, data_dir)?;
+    let report = moosedev::validation::validate_project(&state)?;
+    println!("\n{}", moosedev::validation::format_report(&report));
+    println!(
+        "enrich+validate: {:.3}s",
+        validation_started.elapsed().as_secs_f64()
+    );
+    if !report.conforms() {
+        anyhow::bail!("post-mint validation failed");
+    }
+    println!(
+        "mint applied: created {}, updated {} in {:.3}s",
+        outcome.created.len(),
+        outcome.updated,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Plan or apply role/criticality judgment proposals from evidence.
+async fn classify_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let repo_root = std::env::current_dir()?;
+    let substrate = Substrate::load(data_dir, &repo_root)
+        .with_context(|| "load code substrate for classify; run `moosedev index` first")?;
+    let state = match runtime::build_state(data_dir, &ontology_dir()).await {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!(
+                "failed to open MOOSEDev state at {}: {e}\n\
+                 Stop the daemon first, for example: kill $(cat {}/moosedev-serve.pid)",
+                data_dir.display(),
+                data_dir.display()
+            );
+            return Err(e);
+        }
+    };
+
+    // Judgments are durable graph writes; classifying from a stale index
+    // would attach them to obsolete entities using outdated fan-in/churn.
+    if substrate.is_stale() {
+        if apply {
+            anyhow::bail!(
+                "substrate is stale (indexed commit differs from HEAD); run `moosedev index` before `classify --apply`"
+            );
+        }
+        eprintln!(
+            "WARNING: substrate is stale (indexed commit differs from HEAD) — \
+             this plan reflects an outdated index; run `moosedev index` before applying."
+        );
+    }
+
+    let plan = graph::plan_classify(&state, &substrate, &repo_root)?;
+    report_classify_plan(&plan);
+
+    if !apply {
+        println!("dry-run only; re-run with --apply");
+        return Ok(());
+    }
+
+    let outcome = graph::apply_classify(&state, &plan)?;
+    let validation_started = std::time::Instant::now();
+    moosedev::canonical::write_through(&state.store, data_dir)?;
+    let report = moosedev::validation::validate_project(&state)?;
+    println!("\n{}", moosedev::validation::format_report(&report));
+    println!(
+        "validate: {:.3}s",
+        validation_started.elapsed().as_secs_f64()
+    );
+    if !report.conforms() {
+        anyhow::bail!("post-classify validation failed");
+    }
+    println!(
+        "classify applied: {} taxonomy individual(s) seeded, {} judgment(s) proposed in {:.3}s\n\
+         Nothing takes effect until ratified — review in the workbench Ratifications page.",
+        outcome.taxonomy_created,
+        outcome.proposed,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Print the full-accounting classify report: every population entity lands in
+/// exactly one bucket; nothing is silently dropped.
+fn report_classify_plan(plan: &graph::ClassifyPlan) {
+    println!("classification plan (debt surface ∩ role-bearing kinds)");
+
+    let tally = |judgments: &[graph::PlannedJudgment]| {
+        let mut by_rule: std::collections::BTreeMap<String, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for judgment in judgments {
+            let entry = by_rule.entry(judgment.target_local.clone()).or_default();
+            entry.0 += 1;
+            if judgment.escalation == "escalated" {
+                entry.1 += 1;
+            }
+        }
+        by_rule
+    };
+
+    println!("  role judgments: {}", plan.role.len());
+    for (target, (count, escalated)) in tally(&plan.role) {
+        println!("    {target}: {count} ({escalated} escalated)");
+    }
+    println!(
+        "  criticality judgments (deviations from implicit standard): {}",
+        plan.criticality.len()
+    );
+    for (target, (count, escalated)) in tally(&plan.criticality) {
+        println!("    {target}: {count} ({escalated} escalated)");
+    }
+    println!(
+        "  unclassified (honest abstention, no node): {}",
+        plan.unclassified.len()
+    );
+    if !plan.excluded_by_kind.is_empty() {
+        let groups: Vec<String> = plan
+            .excluded_by_kind
+            .iter()
+            .map(|(kind, count)| format!("{kind} {count}"))
+            .collect();
+        println!("  excluded by kind: {}", groups.join(", "));
+    }
+    println!("  skipped (already judged): {}", plan.skipped_existing);
+    if !plan.missing_entities.is_empty() {
+        println!(
+            "  missing entities (run `moosedev mint --apply`): {}",
+            plan.missing_entities.len()
+        );
+    }
+    if plan.churn_missing {
+        println!(
+            "  churn sidecar: MISSING — core-algorithm rule abstained (run `moosedev index` to build it)"
+        );
+    }
+    let total_nodes = plan.role.len() + plan.criticality.len();
+    println!(
+        "  projected kg.nq growth: ~{} quads across {} judgment node(s){}",
+        plan.projected_quads,
+        total_nodes,
+        if total_nodes > 500 {
+            "  ⚠ over 500 nodes — consider ratifying in batches"
+        } else {
+            ""
+        }
+    );
+}
+
+/// Print the human-facing dry-run/apply plan summary.
+fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]) {
+    let component_names = components
+        .iter()
+        .filter_map(|component| {
+            component
+                .iri
+                .as_ref()
+                .map(|iri| (iri.as_str(), component.name.as_str()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for planned in &plan.create {
+        report_planned_entity("CREATE", planned, &component_names);
+    }
+    for planned in &plan.update {
+        report_planned_entity("UPDATE", planned, &component_names);
+    }
+
+    if !plan.collisions.is_empty() {
+        println!("collisions:");
+        for collision in &plan.collisions {
+            println!(
+                "  {} kept {} dropped {}",
+                collision.normalized_symbol,
+                collision.kept_file,
+                collision.dropped.join(", ")
+            );
+        }
+    }
+    if !plan.unmapped_paths.is_empty() {
+        println!("unmapped paths:");
+        for path in &plan.unmapped_paths {
+            println!("  {path}");
+        }
+    }
+    if !plan.orphaned.is_empty() {
+        println!("orphaned entities:");
+        for (iri, symbol) in &plan.orphaned {
+            println!("  {symbol} {iri}");
+        }
+    }
+
+    println!(
+        "summary: create={} update={} unchanged={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={}",
+        plan.create.len(),
+        plan.update.len(),
+        plan.unchanged,
+        plan.skipped_scope,
+        plan.skipped_tests,
+        plan.collisions.len(),
+        plan.unmapped_paths.len(),
+        plan.orphaned.len()
+    );
+}
+
+/// Print one planned create/update line, including the component link if present.
+fn report_planned_entity(
+    action: &str,
+    planned: &graph::PlannedEntity,
+    component_names: &std::collections::BTreeMap<&str, &str>,
+) {
+    print!(
+        "{} {} {} ({})",
+        action,
+        planned.display_kind(),
+        planned.display_name(),
+        planned.entry.file
+    );
+    if let Some(component_iri) = planned.realizes.as_deref() {
+        let name = component_names
+            .get(component_iri)
+            .copied()
+            .unwrap_or(component_iri);
+        print!(" -> realizes {name}");
+    }
+    println!();
+}
+
+fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
+    let repo_root = std::env::current_dir()?;
+    let substrate = Substrate::load(data_dir, &repo_root)?;
+    let relative_path = normalize_resolve_path(&repo_root, &args.file);
+    let pos = Position {
+        line: args.line - 1,
+        col: args.col - 1,
+    };
+
+    let Some(resolution) = substrate.resolve(&relative_path, pos) else {
+        eprintln!(
+            "no entity at {}:{}:{}",
+            args.file.display(),
+            args.line,
+            args.col
+        );
+        std::process::exit(1);
+    };
+
+    let role = if resolution.is_definition {
+        "definition"
+    } else {
+        "reference"
+    };
+    let mode = match resolution.mode {
+        ResolutionMode::Scip => "scip",
+        ResolutionMode::TreeSitter => "tree-sitter",
+    };
+    println!("symbol:         {}", resolution.symbol);
+    println!(
+        "display name:   {}",
+        resolution.display_name.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "kind:           {}",
+        resolution.kind.as_deref().unwrap_or("<none>")
+    );
+    println!("role:           {role}");
+    println!(
+        "local:          {}",
+        if resolution.is_local { "yes" } else { "no" }
+    );
+    println!(
+        "range:          {}:{}-{}:{}",
+        resolution.range.start.line + 1,
+        resolution.range.start.col + 1,
+        resolution.range.end.line + 1,
+        resolution.range.end.col + 1
+    );
+    println!("mode:           {mode}");
+    println!("indexed commit: {}", substrate.meta().indexed_commit);
+    println!("stale:          {}", resolution.stale);
+    Ok(())
+}
+
+fn normalize_resolve_path(repo_root: &Path, file: &Path) -> String {
+    let normalized_separators = file.to_string_lossy().replace('\\', "/");
+    let path = Path::new(&normalized_separators);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(repo_root).unwrap_or(path)
+    } else {
+        path
+    };
+
+    relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::ParentDir => Some("..".to_string()),
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn export_mode(data_dir: &Path, args: ExportArgs) -> anyhow::Result<()> {
@@ -816,7 +1342,9 @@ fn skills_dir() -> Option<PathBuf> {
 /// holds, with absolute paths a user can hand straight to their coding agent.
 fn skills_mode() -> anyhow::Result<()> {
     let Some(dir) = skills_dir() else {
-        anyhow::bail!("no skills/ dir found next to the binary (set MOOSEDEV_SKILLS_DIR to override)");
+        anyhow::bail!(
+            "no skills/ dir found next to the binary (set MOOSEDEV_SKILLS_DIR to override)"
+        );
     };
     println!("MOOSEDev skills: {}", dir.display());
     let mut names: Vec<_> = std::fs::read_dir(&dir)
@@ -889,6 +1417,8 @@ fn init_mode(args: InitArgs) -> anyhow::Result<()> {
         force: args.force,
         codex: args.codex,
         opencode: args.opencode,
+        zed: args.zed,
+        claude_hooks: args.claude_hooks,
     };
     let report = init::init_project(&opts)?;
     print_init_report(&opts, &report, path_note.as_deref());
@@ -988,6 +1518,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_lsp_accepts_no_args() {
+        assert!(matches!(parse_mode(&argv(&["lsp"])).unwrap(), Mode::Lsp));
+        assert!(parse_mode(&argv(&["lsp", "extra"])).is_err());
+    }
+
+    #[test]
     fn parse_import_requires_path_and_accepts_options() {
         assert!(parse_mode(&argv(&["import"])).is_err());
 
@@ -1009,6 +1545,74 @@ mod tests {
                 assert_eq!(args.mode, ImportMode::Replace);
             }
             _ => panic!("expected import mode"),
+        }
+    }
+
+    #[test]
+    fn parse_index_accepts_no_args_and_rejects_extras() {
+        assert!(matches!(
+            parse_mode(&argv(&["index"])).unwrap(),
+            Mode::Index
+        ));
+        assert!(parse_mode(&argv(&["index", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_mint_accepts_optional_apply_and_rejects_extras() {
+        assert!(matches!(
+            parse_mode(&argv(&["mint"])).unwrap(),
+            Mode::Mint { apply: false }
+        ));
+        assert!(matches!(
+            parse_mode(&argv(&["mint", "--apply"])).unwrap(),
+            Mode::Mint { apply: true }
+        ));
+        assert!(parse_mode(&argv(&["mint", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_resolve_accepts_line_col_pair() {
+        match parse_mode(&argv(&["resolve", "src/main.rs", "144:4"])).unwrap() {
+            Mode::Resolve(args) => {
+                assert_eq!(args.file, PathBuf::from("src/main.rs"));
+                assert_eq!(args.line, 144);
+                assert_eq!(args.col, 4);
+            }
+            _ => panic!("expected resolve mode"),
+        }
+    }
+
+    #[test]
+    fn parse_resolve_accepts_split_line_col() {
+        match parse_mode(&argv(&["resolve", "src/main.rs", "144", "4"])).unwrap() {
+            Mode::Resolve(args) => {
+                assert_eq!(args.file, PathBuf::from("src/main.rs"));
+                assert_eq!(args.line, 144);
+                assert_eq!(args.col, 4);
+            }
+            _ => panic!("expected resolve mode"),
+        }
+    }
+
+    #[test]
+    fn parse_resolve_rejects_zero_and_garbage() {
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "0:4"])).is_err());
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "144:0"])).is_err());
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "abc:4"])).is_err());
+        assert!(parse_mode(&argv(&["resolve", "src/main.rs", "144", "garbage"])).is_err());
+    }
+
+    #[test]
+    fn normalize_resolve_path_accepts_debug_cli_path_forms() {
+        let repo_root = std::env::current_dir().unwrap();
+        let cases = [
+            PathBuf::from("./src/runtime.rs"),
+            repo_root.join("src/runtime.rs"),
+            PathBuf::from("src\\runtime.rs"),
+        ];
+
+        for path in cases {
+            assert_eq!(normalize_resolve_path(&repo_root, &path), "src/runtime.rs");
         }
     }
 

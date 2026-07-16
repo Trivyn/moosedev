@@ -5,8 +5,9 @@ import GeneratedArtifactPage from '../components/artifacts/GeneratedArtifactPage
 import { ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
 
 interface AdrsPageProps {
-  targetIri?: string;
+  targetUuid?: string;
   onNavigateArtifact?: (target: ArtifactTarget) => void;
+  onNavigateRecord?: (iri: string) => void;
 }
 
 function warningCount(warnings: AdrWarnings) {
@@ -29,11 +30,13 @@ function WarningSummary({ warnings }: { warnings: AdrWarnings }) {
   return parts.length ? <Alert severity="warning">{parts.join(', ')}</Alert> : null;
 }
 
-export default function AdrsPage({ targetIri, onNavigateArtifact }: AdrsPageProps) {
+export default function AdrsPage({ targetUuid, onNavigateArtifact, onNavigateRecord }: AdrsPageProps) {
   return (
     <GeneratedArtifactPage<AdrSummary, Awaited<ReturnType<typeof api.listAdrs>>, AdrWarnings>
-      targetIri={targetIri}
+      targetUuid={targetUuid}
       onNavigateArtifact={onNavigateArtifact}
+      onNavigateRecord={onNavigateRecord}
+      artifactKind="adrs"
       title="ADRs"
       emptyText="No architectural decisions recorded."
       selectText="Select an ADR."

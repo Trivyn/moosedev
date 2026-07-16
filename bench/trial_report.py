@@ -19,6 +19,11 @@ from mcp_client import call_tool
 PROJECT_GRAPH = "https://moosedev.dev/kg/project"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 FIRE_THRESHOLD = 4  # PRIMARY kill: fewer than this many fires/project/month (sustained) by end of month 2
+LEGACY_EPOCH = "legacy-unversioned"
+
+
+def _epoch(row: dict) -> str:
+    return row.get("trial_epoch") or LEGACY_EPOCH
 
 
 def _sparql(data_dir: str, query: str) -> str:
@@ -54,12 +59,17 @@ def main() -> None:
     a = ap.parse_args()
     data_dir = config.CORPORA[a.corpus]["data_dir"]
 
-    # 1. PROBE GAPS by month: by[month][task][arm] = judge_score
+    # 1. PROBE GAPS by month and implementation epoch. Never pair arms across builds.
     jp = config.corpus_runs_path(a.corpus) / "runs_judged.jsonl"
     judged = [json.loads(l) for l in open(jp) if l.strip()] if jp.exists() else []
-    by = collections.defaultdict(lambda: collections.defaultdict(dict))
+    by = collections.defaultdict(
+        lambda: collections.defaultdict(lambda: collections.defaultdict(dict)))
+    epoch_meta = collections.defaultdict(set)
     for r in judged:
-        by[r["month"]][r["task_id"]][r["arm"]] = r["judge_score"]
+        epoch = _epoch(r)
+        by[r["month"]][epoch][r["task_id"]][r["arm"]] = r["judge_score"]
+        epoch_meta[(r["month"], epoch)].add(
+            (r.get("moosedev_version"), r.get("moosedev_binary_sha256")))
 
     months = sorted(m for m in by if m)
     month_mean_gap = {}
@@ -67,14 +77,34 @@ def main() -> None:
     if not months:
         print("  (no judged probe data yet — author probes + run a month)")
     for m in months:
-        gaps = []
-        for task, arms in sorted(by[m].items()):
-            if "B0" in arms and "B2" in arms:
-                g = arms["B2"] - arms["B0"]
-                gaps.append(g)
-                print(f"  {m}  {task:<30} B0={arms['B0']:.2f}  B2={arms['B2']:.2f}  gap={g:+.2f}")
-        month_mean_gap[m] = sum(gaps) / len(gaps) if gaps else 0.0
-        print(f"  {m}  >>> MEAN GAP = {month_mean_gap[m]:+.2f}  (n={len(gaps)} probes)")
+        epochs = sorted(by[m])
+        if len(epochs) > 1:
+            print(f"  !! {m} contains multiple trial epochs; results are shown separately and not pooled")
+        only_epoch_gaps = None
+        for epoch in epochs:
+            meta = sorted(epoch_meta[(m, epoch)], key=lambda x: (x[0] or "", x[1] or ""))
+            version, digest = meta[-1] if meta else (None, None)
+            detail = "legacy rows without a recorded build fingerprint" if epoch == LEGACY_EPOCH else (
+                f"version={version or 'unknown'} sha256={(digest or 'unknown')[:12]}")
+            print(f"  --- {m} / epoch={epoch} ({detail}) ---")
+            gaps = []
+            for task, arms in sorted(by[m][epoch].items()):
+                if "B0" in arms and "B2" in arms:
+                    g = arms["B2"] - arms["B0"]
+                    gaps.append(g)
+                    print(f"  {m}  {task:<30} B0={arms['B0']:.2f}  "
+                          f"B2={arms['B2']:.2f}  gap={g:+.2f}")
+            mean = sum(gaps) / len(gaps) if gaps else None
+            if mean is None:
+                print(f"  {m}  >>> EPOCH MEAN GAP = (no paired probes)")
+            else:
+                print(f"  {m}  >>> EPOCH MEAN GAP = {mean:+.2f}  (n={len(gaps)} probes)")
+            if len(epochs) == 1:
+                only_epoch_gaps = gaps
+        # Preserve one pre-registered longitudinal series. A mixed-epoch month is descriptive only;
+        # silently pooling it would manufacture a comparison the frozen contract never specified.
+        month_mean_gap[m] = (sum(only_epoch_gaps) / len(only_epoch_gaps)
+                             if only_epoch_gaps else None)
 
     # 2. GRAPH-ASSIST TALLY (fires + misses) by month
     fires, misses = fire_tally(data_dir)
@@ -87,15 +117,17 @@ def main() -> None:
 
     # 3. KILL-CONDITION CHECK (Constraint 75b0cf14)
     print(f"\n=== kill-condition check (Constraint 75b0cf14) ===")
-    base = month_mean_gap.get(months[0]) if months else None
-    print(f"  month-0 baseline mean gap: {base:+.2f}" if base is not None else "  month-0 baseline: (no data yet)")
+    base_month = months[0] if months else None
+    base = month_mean_gap.get(base_month) if base_month else None
+    print(f"  month-0 baseline ({base_month}) mean gap: {base:+.2f}" if base is not None
+          else "  month-0 baseline: (no unambiguous paired data; it is not reset at a later epoch)")
     if fires:
         latest_fm = sorted(fires)[-1]
         flag = "ABANDON-RISK" if fires[latest_fm] < FIRE_THRESHOLD else "ok"
         print(f"  PRIMARY (engagement): latest-month fires={fires[latest_fm]} vs threshold {FIRE_THRESHOLD} -> {flag}")
     else:
         print(f"  PRIMARY (engagement): no fires recorded -> watch (threshold {FIRE_THRESHOLD}/month by end of month 2)")
-    if len(months) >= 3 and base is not None:
+    if len(months) >= 3 and base is not None and month_mean_gap.get(months[-1]) is not None:
         latest = month_mean_gap[months[-1]]
         flag = "ABANDON-RISK (not widening)" if latest <= base else "widening — ok"
         print(f"  SECONDARY (signal): month-0 gap {base:+.2f} -> latest {latest:+.2f} -> {flag}")

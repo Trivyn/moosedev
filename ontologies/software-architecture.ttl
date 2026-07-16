@@ -244,8 +244,8 @@ trivyn:confidence a owl:AnnotationProperty ;
 :concerns a owl:ObjectProperty ;
     rdfs:label "concerns" ;
     rdfs:domain :InformationRecord ;
-    rdfs:range :SystemComponent ;
-    skos:definition "Relates an information record to the system component it affects or describes.".
+    dcam:rangeIncludes :SystemComponent, <https://trivyn.io/ontologies/software/code#CodeEntity> ;
+    skos:definition "Relates an information record to the system component or code entity it affects or describes. Range widened to code entities 2026-07-08 (v2 intent links, AD 7079634f).".
 :isMotivatedBy a owl:ObjectProperty ;
     rdfs:label "isMotivatedBy" ;
     rdfs:domain :ArchitecturalDecision ;
@@ -280,8 +280,8 @@ trivyn:confidence a owl:AnnotationProperty ;
 :constrains a owl:ObjectProperty ;
     rdfs:label "constrains" ;
     rdfs:domain :Constraint ;
-    dcam:rangeIncludes :SystemComponent, :ArchitecturalDecision ;
-    skos:definition "Relates a constraint to the design it restricts.".
+    dcam:rangeIncludes :SystemComponent, :ArchitecturalDecision, <https://trivyn.io/ontologies/software/code#CodeEntity> ;
+    skos:definition "Relates a constraint to the design it restricts. Range widened to code entities 2026-07-08 (v2 intent links, AD 7079634f).".
 :learnedFrom a owl:ObjectProperty ;
     rdfs:label "learnedFrom" ;
     rdfs:domain :Lesson ;
@@ -290,9 +290,9 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:altLabel "learned from".
 :violates a owl:ObjectProperty ;
     rdfs:label "violates" ;
-    rdfs:domain :AntiPattern ;
+    dcam:domainIncludes :AntiPattern, <https://trivyn.io/ontologies/software/code#CodeEntity> ;
     rdfs:range :Constraint ;
-    skos:definition "Relates an AntiPattern to the Constraint it fails to satisfy.".
+    skos:definition "Relates an AntiPattern or code entity to the Constraint it fails to satisfy. Domain widened to code entities 2026-07-08 (v2 intent links, AD 7079634f).".
 :motivates a owl:ObjectProperty ;
       rdfs:label "motivates" ;
       owl:inverseOf :isMotivatedBy ;
@@ -303,9 +303,9 @@ trivyn:confidence a owl:AnnotationProperty ;
 :isConcernedBy a owl:ObjectProperty ;
       rdfs:label "is concerned by" ;
       owl:inverseOf :concerns ;
-      rdfs:domain :SystemComponent ;
+      dcam:domainIncludes :SystemComponent, <https://trivyn.io/ontologies/software/code#CodeEntity> ;
       rdfs:range :InformationRecord ;
-      skos:definition "Relates a system component to an information record that affects or describes it." ;
+      skos:definition "Relates a system component or code entity to an information record that affects or describes it." ;
       skos:altLabel "is affected by" .
 
 :isRationaleFor a owl:ObjectProperty ;
@@ -342,9 +342,9 @@ trivyn:confidence a owl:AnnotationProperty ;
 :isConstrainedBy a owl:ObjectProperty ;
       rdfs:label "is constrained by" ;
       owl:inverseOf :constrains ;
-      dcam:domainIncludes :SystemComponent, :ArchitecturalDecision ;
+      dcam:domainIncludes :SystemComponent, :ArchitecturalDecision, <https://trivyn.io/ontologies/software/code#CodeEntity> ;
       rdfs:range :Constraint ;
-      skos:definition "Relates a system component or architectural decision to a constraint that restricts it." .
+      skos:definition "Relates a system component, architectural decision, or code entity to a constraint that restricts it." .
 
 :yieldsLesson a owl:ObjectProperty ;
       rdfs:label "yields lesson" ;
@@ -358,8 +358,8 @@ trivyn:confidence a owl:AnnotationProperty ;
       rdfs:label "is violated by" ;
       owl:inverseOf :violates ;
       rdfs:domain :Constraint ;
-      rdfs:range :AntiPattern ;
-      skos:definition "Relates a constraint to an anti-pattern that fails to satisfy it." .
+      dcam:rangeIncludes :AntiPattern, <https://trivyn.io/ontologies/software/code#CodeEntity> ;
+      skos:definition "Relates a constraint to an anti-pattern or code entity that fails to satisfy it." .
 
 # Competency questions this ontology was built to answer (synthesis).
 <https://trivyn.io/ontologies/software/architecture#>

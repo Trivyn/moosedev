@@ -86,6 +86,7 @@ fn lesson_set_renders_learned_from_sources() {
         .markdown
         .contains("Lesson body for Keep handlers thin"));
     assert!(set.lessons[0].markdown.contains(&adr));
+    assert_eq!(set.summaries()[0].search_text, set.lessons[0].markdown);
     assert!(set
         .index_markdown
         .contains("[Keep handlers thin](0001-keep-handlers-thin.md)"));

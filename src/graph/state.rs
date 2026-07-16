@@ -2,7 +2,8 @@
 //! This module owns long-lived graph services and calls sibling modules only for focused primitives.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use moose::chat::session_db::SessionDb;
 use moose::embeddings::vec_store::VecStore;
@@ -11,10 +12,11 @@ use moose::entity_index::EntityIndexCache;
 use moose::kg::{AssertionLiteral, DatatypeAssertion};
 use moose::moose_ontology::MooseOntologyCache;
 use moose::traits::{ChatConfig, EngineConfig};
-use moose::types::{CompactVocabulary, HybridConfig, LlmAssistLevel, WalkBudgets};
+use moose::types::{CompactVocabulary, FallbackPolicy, HybridConfig, LlmAssistLevel, WalkBudgets};
 use oxigraph::model::NamedNode;
 use oxigraph::store::Store;
 
+use crate::code::substrate::Substrate;
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::ontology::{self, MooseDevOntologyResolver};
 
@@ -84,6 +86,9 @@ pub struct AppState {
     pub instance_store: Arc<InstanceVecStore>,
     pub moose_cache: Arc<MooseOntologyCache>,
     pub arch_vocab: CompactVocabulary,
+    /// Code vocabulary kept separate so code classes stay out of capture kinds,
+    /// the dense instance index, and `get_relevant_context` seeding.
+    pub code_vocab: CompactVocabulary,
     pub capture: CapturePredicates,
     /// Object-property domain/range table from the SHACL shapes, built once at
     /// bootstrap. The legality source for relation writes (`relate` + inline
@@ -103,16 +108,32 @@ pub struct AppState {
     pub session_db: Option<Arc<SessionDb>>,
     /// Data dir (the persistent KG store and the built vector DB live here).
     pub data_dir: PathBuf,
+    /// Best-effort code substrate. Absent when no index has been built; position-
+    /// based tools degrade with honest errors instead of blocking server startup.
+    substrate: RwLock<Option<Arc<Substrate>>>,
+    /// Serializes disk-backed substrate reloads after `moosedev index` updates
+    /// the on-disk pair. The getter does no watcher or background work.
+    substrate_reload_lock: std::sync::Mutex<()>,
     /// Set true by any write that changes the project graph; drained by
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
     pub inferred_stale: std::sync::atomic::AtomicBool,
+    /// Monotonic signal for consumers that need to observe project-graph writes.
+    project_write_generation: AtomicU64,
     /// Keeps the committed canonical text (`kg.nq`) in step with project-graph
     /// writes: isolated captures export synchronously, bulk bursts coalesce to
     /// a single trailing export once the burst goes quiet.
     canonical_throttle: crate::canonical::WriteThrottle,
     /// Serializes enrichment so concurrent reads enrich at most once.
     enrich_lock: std::sync::Mutex<()>,
+    /// Serializes ratification-queue check-and-write transitions. Oxigraph
+    /// transactions make each individual write atomic, while this lock keeps
+    /// proposal deduplication, judgment-axis exclusivity, and queue lifecycle
+    /// preconditions in the same critical section as their writes.
+    proposal_write_lock: std::sync::Mutex<()>,
+    /// Memo of the last rendered ADR set, keyed on `project_write_generation`
+    /// (see [`crate::adrs::generate_adr_set_cached`]).
+    pub adr_memo: crate::adrs::AdrSetMemo,
 }
 
 impl AppState {
@@ -155,8 +176,9 @@ impl AppState {
         std::env::set_var("MOOSE_ONTOLOGY_DIR", ontology_dir);
         let moose_cache =
             moose::initialize(&store).map_err(|e| anyhow::anyhow!("moose::initialize: {e:?}"))?;
-        let arch_vocab = ontology::load_ontologies(&store, ontology_dir)?;
-        let capture = CapturePredicates::resolve(&arch_vocab)?;
+        let ontology::DomainVocabularies { arch, code } =
+            ontology::load_ontologies(&store, ontology_dir)?;
+        let capture = CapturePredicates::resolve(&arch)?;
         let catalogue = build_relation_catalogue(&store);
         let entity_index = Arc::new(EntityIndexCache::new(64));
 
@@ -176,6 +198,8 @@ impl AppState {
             discourse: None,
             moose_cache: moose_cache.clone(),
             llm_assist_level: assist_level_from_env(llm_configured),
+            // The env dial is the single control; level 2 stays opt-in there.
+            fallback_policy: FallbackPolicy::Allowed,
             response_cache: None,
             embedding_store: None,
             category_mappings: Default::default(),
@@ -192,7 +216,8 @@ impl AppState {
             // keeps that store coherent thereafter.
             instance_store: Arc::new(InstanceVecStore::ephemeral()),
             moose_cache,
-            arch_vocab,
+            arch_vocab: arch,
+            code_vocab: code,
             capture,
             catalogue,
             engine_config,
@@ -203,11 +228,22 @@ impl AppState {
             session_db: None,
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
+            substrate: RwLock::new(None),
+            substrate_reload_lock: std::sync::Mutex::new(()),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
+            project_write_generation: AtomicU64::new(0),
             canonical_throttle: crate::canonical::WriteThrottle::default(),
             enrich_lock: std::sync::Mutex::new(()),
+            proposal_write_lock: std::sync::Mutex::new(()),
+            adr_memo: crate::adrs::AdrSetMemo::default(),
         })
+    }
+
+    pub(crate) fn lock_proposal_writes(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
+        self.proposal_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("proposal write lock poisoned"))
     }
 
     /// Mark the reasoner-materialized edges stale — call after any write that changes the
@@ -225,8 +261,95 @@ impl AppState {
     /// must never fail the symbolic write (invariant #1).
     pub fn note_project_write(&self) {
         self.mark_inferred_stale();
+        self.adr_memo.invalidate(|| {
+            self.project_write_generation
+                .fetch_add(1, Ordering::Release);
+        });
         self.canonical_throttle
             .note_write(&self.store, &self.data_dir);
+    }
+
+    pub fn project_write_generation(&self) -> u64 {
+        self.project_write_generation.load(Ordering::Acquire)
+    }
+
+    /// Return the loaded code substrate, reloading a disk-backed one when the
+    /// completed on-disk metadata identifies a newer index. Synthetic test
+    /// substrates have no repository root and intentionally bypass this path.
+    pub fn substrate(&self) -> Option<Arc<Substrate>> {
+        let substrate = self.current_substrate()?;
+        if substrate.repo_root().is_none() || !self.substrate_meta_changed(&substrate) {
+            return Some(substrate);
+        }
+
+        let _reload_guard = self
+            .substrate_reload_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A concurrent caller may have finished the reload while we waited.
+        let substrate = self.current_substrate()?;
+        let Some(repo_root) = substrate.repo_root().map(Path::to_path_buf) else {
+            return Some(substrate);
+        };
+        if !self.substrate_meta_changed(&substrate) {
+            return Some(substrate);
+        }
+
+        match Substrate::load(&self.data_dir, &repo_root) {
+            Ok(reloaded) => {
+                let definitions = reloaded.stats().definitions;
+                let indexed_at = reloaded.meta().indexed_at;
+                let reloaded = Arc::new(reloaded);
+                self.set_substrate(reloaded.clone());
+                tracing::info!(
+                    "substrate reloaded: {definitions} definition(s), indexed at {indexed_at}"
+                );
+                Some(reloaded)
+            }
+            Err(error) => {
+                tracing::warn!("substrate reload failed; serving previous substrate: {error}");
+                Some(substrate)
+            }
+        }
+    }
+
+    fn current_substrate(&self) -> Option<Arc<Substrate>> {
+        self.substrate
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// A completed producer run writes metadata last. Unreadable metadata can
+    /// therefore be a partial rewrite; retain the known-good in-memory index.
+    fn substrate_meta_changed(&self, substrate: &Substrate) -> bool {
+        let Ok(on_disk) = crate::code::substrate::SubstrateMeta::load(&self.data_dir) else {
+            return false;
+        };
+        let loaded = substrate.meta();
+        on_disk.indexed_commit != loaded.indexed_commit || on_disk.indexed_at != loaded.indexed_at
+    }
+
+    /// Replace the current code substrate. Used by runtime startup and tests.
+    pub fn set_substrate(&self, substrate: Arc<Substrate>) {
+        *self
+            .substrate
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(substrate);
+    }
+
+    /// Best-effort load of the code substrate from disk. Missing or invalid
+    /// indexes are normal before `moosedev index`; callers should surface
+    /// substrate absence at tool-use time.
+    pub fn load_substrate(&self, repo_root: &Path) {
+        match Substrate::load(&self.data_dir, repo_root) {
+            Ok(substrate) => {
+                let definitions = substrate.stats().definitions;
+                self.set_substrate(Arc::new(substrate));
+                tracing::info!("MOOSEDev: loaded code substrate ({definitions} definition(s))");
+            }
+            Err(e) => tracing::info!("MOOSEDev: code substrate unavailable: {e}"),
+        }
     }
 
     /// Lazily re-run GROWL enrichment when a prior write invalidated the materialized
@@ -482,15 +605,43 @@ impl AppState {
         })
     }
 
+    /// Resolve a code-domain class by local-name lookup in the loaded code
+    /// vocabulary. Kept separate from [`Self::resolve_class`] so capture kinds
+    /// and the dense instance index remain architecture-scoped.
+    pub fn resolve_code_class(&self, local: &str) -> anyhow::Result<String> {
+        iri_by_local_name(&self.code_vocab.classes, local).ok_or_else(|| {
+            anyhow::anyhow!("unknown code class {local:?}: not a class in the code ontology")
+        })
+    }
+
+    /// Resolve a code-domain datatype property by local name.
+    pub fn resolve_code_datatype_property(&self, local: &str) -> anyhow::Result<String> {
+        datatype_property_iri(&self.code_vocab, local).map_err(|_| {
+            anyhow::anyhow!(
+                "unknown code datatype property {local:?}: not a datatype property in the code ontology"
+            )
+        })
+    }
+
     /// Resolve a relation local name (e.g. "supersedes", "hasRationale") to its
-    /// full IRI from the loaded architecture vocabulary.
+    /// full IRI from the loaded vocabularies, checking architecture first and
+    /// then the code domain for code-side intent links.
     pub fn resolve_object_property(&self, local: &str) -> anyhow::Result<String> {
-        object_property_iri(&self.arch_vocab, local)
+        if let Ok(iri) = object_property_iri(&self.arch_vocab, local) {
+            return Ok(iri);
+        }
+        if let Ok(iri) = object_property_iri(&self.code_vocab, local) {
+            return Ok(iri);
+        }
+        anyhow::bail!(
+            "unknown relation {local:?}: not an object property in the architecture or code ontology"
+        )
     }
 }
 
-/// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–5). Without an explicit
-/// provider config, assistance is pinned to pure symbolic regardless of env.
+/// LLM assist level from `MOOSEDEV_LLM_ASSIST_LEVEL` (0–2; legacy 3–5 accepted
+/// for one release via `LlmAssistLevel::from_u8`). Without an explicit provider
+/// config, assistance is pinned to pure symbolic regardless of env.
 fn assist_level_from_env(llm_configured: bool) -> LlmAssistLevel {
     assist_level_from_raw(
         std::env::var("MOOSEDEV_LLM_ASSIST_LEVEL").ok().as_deref(),
@@ -502,19 +653,25 @@ fn assist_level_from_raw(raw: Option<&str>, llm_configured: bool) -> LlmAssistLe
     if !llm_configured {
         return LlmAssistLevel::PureSymbolic;
     }
-    match raw.and_then(|s| s.trim().parse::<u8>().ok()) {
-        Some(0) => LlmAssistLevel::PureSymbolic,
-        Some(2) => LlmAssistLevel::RelaxedExtraction,
-        Some(3) => LlmAssistLevel::AssistedPlanning,
-        Some(4) => LlmAssistLevel::AssistedValidation,
-        Some(5) => LlmAssistLevel::FallbackExecutor,
-        _ => LlmAssistLevel::Standard,
-    }
+    raw.and_then(|s| s.trim().parse::<u8>().ok())
+        .and_then(LlmAssistLevel::from_u8)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ARCH: &str = "https://trivyn.io/ontologies/software/architecture#";
+    const CODE: &str = "https://trivyn.io/ontologies/software/code#";
+
+    fn bootstrap_test_state(name: &str) -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("moosedev-state-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ontology_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+        AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state")
+    }
 
     #[test]
     fn assist_level_is_pure_symbolic_without_provider() {
@@ -529,10 +686,10 @@ mod tests {
     }
 
     #[test]
-    fn assist_level_defaults_to_standard_when_provider_is_configured() {
+    fn assist_level_defaults_to_sensor_when_provider_is_configured() {
         assert!(matches!(
             assist_level_from_raw(None, true),
-            LlmAssistLevel::Standard
+            LlmAssistLevel::Sensor
         ));
         assert!(matches!(
             assist_level_from_raw(Some("0"), true),
@@ -540,7 +697,74 @@ mod tests {
         ));
         assert!(matches!(
             assist_level_from_raw(Some("5"), true),
-            LlmAssistLevel::FallbackExecutor
+            LlmAssistLevel::SensorWithFallback
         ));
+    }
+
+    #[test]
+    fn code_vocabulary_resolution_is_separate_from_capture_kinds() {
+        let state = bootstrap_test_state("code-vocab-resolution");
+
+        assert_eq!(
+            state.resolve_code_class("CodeEntity").unwrap(),
+            format!("{CODE}CodeEntity")
+        );
+        assert!(
+            state.resolve_class("CodeEntity").is_err(),
+            "CodeEntity must stay out of architecture capture kinds"
+        );
+        assert_eq!(
+            state
+                .resolve_code_datatype_property("hasSubstrateSymbol")
+                .unwrap(),
+            format!("{CODE}hasSubstrateSymbol")
+        );
+        assert_eq!(
+            state.resolve_code_class("ProposedLink").unwrap(),
+            format!("{CODE}ProposedLink")
+        );
+        assert!(
+            state.resolve_class("ProposedLink").is_err(),
+            "ProposedLink must stay out of architecture capture kinds"
+        );
+        for prop in [
+            "proposesSubject",
+            "proposesPredicate",
+            "proposesTargetSymbol",
+            "proposesTargetPath",
+            "proposesTargetIri",
+            "hasConfidence",
+            "hasEscalation",
+        ] {
+            assert_eq!(
+                state.resolve_code_datatype_property(prop).unwrap(),
+                format!("{CODE}{prop}")
+            );
+        }
+        // Judgment-stratum classes and playing-relations (un-parked).
+        for class in ["CodeRole", "Criticality"] {
+            assert_eq!(
+                state.resolve_code_class(class).unwrap(),
+                format!("{CODE}{class}")
+            );
+            assert!(
+                state.resolve_class(class).is_err(),
+                "{class} must stay out of architecture capture kinds"
+            );
+        }
+        for prop in ["playsRole", "hasCriticality"] {
+            assert_eq!(
+                state.resolve_object_property(prop).unwrap(),
+                format!("{CODE}{prop}")
+            );
+        }
+        assert_eq!(
+            state.resolve_object_property("realizes").unwrap(),
+            format!("{CODE}realizes")
+        );
+        assert_eq!(
+            state.resolve_object_property("concerns").unwrap(),
+            format!("{ARCH}concerns")
+        );
     }
 }

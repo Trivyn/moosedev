@@ -165,16 +165,16 @@ fn parse_args() -> anyhow::Result<Args> {
         match arg.as_str() {
             "--apply" => apply = true,
             "--data-dir" => {
-                data_dir = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow::anyhow!("--data-dir requires a value"))?,
-                ));
+                data_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("--data-dir requires a value")
+                    })?));
             }
             "--ontology-dir" => {
-                ontology_dir = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow::anyhow!("--ontology-dir requires a value"))?,
-                ));
+                ontology_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("--ontology-dir requires a value")
+                    })?));
             }
             other => anyhow::bail!(
                 "unknown argument {other:?}; expected --apply, --data-dir PATH, --ontology-dir PATH"
@@ -293,10 +293,7 @@ fn plan_sweep(store: &Store) -> anyhow::Result<Vec<GraphChanges>> {
 
     for iri in graph_names {
         let graph = NamedNode::new(&iri)?;
-        let changes = collect_changes(
-            store,
-            GraphNameRef::NamedNode(graph.as_ref()),
-        )?;
+        let changes = collect_changes(store, GraphNameRef::NamedNode(graph.as_ref()))?;
         if !changes.is_empty() {
             out.push(GraphChanges {
                 graph_label: iri,
@@ -378,10 +375,7 @@ fn sha256_hex(text: &str) -> String {
 /// Refuse to mutate a store whose canonical text has diverged: stage 2's
 /// startup sync would otherwise hydrate OLD-namespace text back over the
 /// rewritten store.
-fn preflight_canonical(
-    store: &Store,
-    data_dir: &Path,
-) -> anyhow::Result<canonical::StartupAction> {
+fn preflight_canonical(store: &Store, data_dir: &Path) -> anyhow::Result<canonical::StartupAction> {
     let dump = export::export_canonical_project(store)?;
     let store_hash = sha256_hex(&dump.text);
     let text = match std::fs::read_to_string(canonical::canonical_path(data_dir)) {
@@ -434,7 +428,9 @@ mod tests {
             Some("https://trivyn.io/ontologies/software/engineering#Component")
         );
         assert!(rewrite_iri("https://moosedev.dev/kg/Lesson/abc").is_none());
-        assert!(rewrite_iri("https://trivyn.io/ontologies/software/architecture/mapping/x").is_none());
+        assert!(
+            rewrite_iri("https://trivyn.io/ontologies/software/architecture/mapping/x").is_none()
+        );
         // Idempotency at the pure level: already-migrated IRIs never match.
         assert!(rewrite_iri(&format!("{NEW_ARCH}Constraint")).is_none());
     }
@@ -512,7 +508,9 @@ mod tests {
             assert!(is_excluded_graph(g));
         }
         assert!(!is_excluded_graph(PROJECT_KG_GRAPH_IRI));
-        assert!(!is_excluded_graph(moosedev::provenance::PROVENANCE_GRAPH_IRI));
+        assert!(!is_excluded_graph(
+            moosedev::provenance::PROVENANCE_GRAPH_IRI
+        ));
     }
 
     #[test]
@@ -527,8 +525,7 @@ mod tests {
         let record = NamedOrBlankNode::NamedNode(NamedNode::new_unchecked(
             "https://moosedev.dev/kg/Lesson/abc",
         ));
-        let rdf_type =
-            NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        let rdf_type = NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
 
         store
             .insert(
@@ -583,27 +580,42 @@ mod tests {
 
         // Project graph rewritten.
         let project_quads: Vec<_> = store
-            .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(
-                NamedNode::new_unchecked(PROJECT_KG_GRAPH_IRI).as_ref(),
-            )))
+            .quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(
+                    NamedNode::new_unchecked(PROJECT_KG_GRAPH_IRI).as_ref(),
+                )),
+            )
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(project_quads.iter().all(|q| rewrite_quad(q).is_none()));
 
         // Provenance quoted triple rewritten.
         let prov_quads: Vec<_> = store
-            .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(
-                NamedNode::new_unchecked(moosedev::provenance::PROVENANCE_GRAPH_IRI).as_ref(),
-            )))
+            .quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(
+                    NamedNode::new_unchecked(moosedev::provenance::PROVENANCE_GRAPH_IRI).as_ref(),
+                )),
+            )
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(prov_quads.iter().all(|q| rewrite_quad(q).is_none()));
 
         // Excluded ontology graph untouched.
         let ont_quads: Vec<_> = store
-            .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(
-                NamedNode::new_unchecked(ontology::ARCH_DOMAIN_GRAPH_IRI).as_ref(),
-            )))
+            .quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(
+                    NamedNode::new_unchecked(ontology::ARCH_DOMAIN_GRAPH_IRI).as_ref(),
+                )),
+            )
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(ont_quads.len(), 1);

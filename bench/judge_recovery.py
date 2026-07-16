@@ -30,6 +30,7 @@ import config
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "google/gemma-4-26b-a4b-qat")
 JUDGE_BASE_URL = os.environ.get("JUDGE_BASE_URL", "http://localhost:1234/v1")
 JUDGE_API_KEY = os.environ.get("JUDGE_API_KEY", "lmstudio")
+LEGACY_EPOCH = "legacy-unversioned"
 
 RUBRIC = (
     "You are grading how well a CANDIDATE ANSWER recovers the SPECIFIC reason/rationale stated in the "
@@ -81,12 +82,18 @@ def _fired_recall(row: dict) -> bool:
     return any(k.endswith("get_relevant_context") for k in tc)
 
 
+def _epoch(row: dict) -> str:
+    return row.get("trial_epoch") or LEGACY_EPOCH
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--task", required=True)
     ap.add_argument("--arms", nargs="+", default=["B0", "B2"])
     ap.add_argument("--month", default=None, help="only judge rows stamped with this YYYY-MM")
+    ap.add_argument("--trial-epoch", default=None,
+                    help="only pair rows from this implementation epoch")
     a = ap.parse_args()
 
     task = json.loads((config.corpus_tasks_path(a.corpus) / f"{a.task}.json").read_text())
@@ -97,14 +104,29 @@ def main() -> None:
 
     runs_path = config.corpus_runs_path(a.corpus) / "runs.jsonl"
     rows = [json.loads(l) for l in open(runs_path) if l.strip()]
+    eligible = [x for x in rows if x["task_id"] == a.task and x["arm"] in a.arms
+                and (a.month is None or x.get("month") == a.month)]
+    epochs = sorted({_epoch(x) for x in eligible})
+    if a.trial_epoch:
+        epoch = a.trial_epoch
+    elif len(epochs) == 1:
+        epoch = epochs[0]
+    elif len(epochs) > 1:
+        raise SystemExit(
+            "multiple trial epochs match; pass --trial-epoch to prevent cross-build pairing: "
+            + ", ".join(epochs)
+        )
+    else:
+        epoch = LEGACY_EPOCH
     client = _client()
     out_path = config.corpus_runs_path(a.corpus) / "runs_judged.jsonl"
 
-    print(f"task={a.task}  judge={JUDGE_MODEL} @ {JUDGE_BASE_URL} (BLIND to arm)  month={a.month or 'any'}  gold_len={len(gold)}")
+    print(f"task={a.task}  judge={JUDGE_MODEL} @ {JUDGE_BASE_URL} (BLIND to arm)  "
+          f"month={a.month or 'any'}  epoch={epoch}  gold_len={len(gold)}")
     judged = []
     for arm in a.arms:
         r = [x for x in rows if x["task_id"] == a.task and x["arm"] == arm
-             and (a.month is None or x.get("month") == a.month)]
+             and (a.month is None or x.get("month") == a.month) and _epoch(x) == epoch]
         if not r:
             print(f"  {arm}: no rows")
             continue
@@ -114,6 +136,9 @@ def main() -> None:
         judged.append({
             "run_id": x["run_id"], "corpus": a.corpus, "task_id": a.task, "arm": arm,
             "month": x.get("month"), "judge_model": JUDGE_MODEL,
+            "trial_epoch": epoch,
+            "moosedev_version": x.get("moosedev_version"),
+            "moosedev_binary_sha256": x.get("moosedev_binary_sha256"),
             "judge_score": v["judge_score"], "judge_why": v["judge_why"],
             "recall_fired": fired if arm == "B2" else None,
             "judged_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

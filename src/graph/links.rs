@@ -80,10 +80,7 @@ pub struct UnderLinked {
 
 /// Whether the gated LLM predicate tiebreak runs (default OFF — symbolic-first).
 fn llm_tiebreak_enabled(level: LlmAssistLevel) -> bool {
-    matches!(
-        level,
-        LlmAssistLevel::AssistedValidation | LlmAssistLevel::FallbackExecutor
-    )
+    matches!(level, LlmAssistLevel::SensorWithFallback)
 }
 
 /// True if any object-property edge (excluding `rdf:type`) already connects the two

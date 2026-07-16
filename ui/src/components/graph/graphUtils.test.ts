@@ -1,7 +1,28 @@
 import { describe, expect, it } from 'vitest';
 
 import { QueryResponse } from '../../api/types';
-import { queryToGraph, shortName } from './graphUtils';
+import { queryToGraph, shortName, truncateLabel } from './graphUtils';
+
+describe('truncateLabel', () => {
+  it('leaves short strings unchanged', () => {
+    expect(truncateLabel('short', 10)).toBe('short');
+  });
+
+  it('truncates long strings to the maximum including the ellipsis', () => {
+    const result = truncateLabel('abcdefghij', 6);
+
+    expect(result).toBe('abcde…');
+    expect(Array.from(result)).toHaveLength(6);
+  });
+
+  it('does not split multi-byte code points', () => {
+    expect(truncateLabel('😀😀😀😀', 3)).toBe('😀😀…');
+  });
+
+  it('leaves a string exactly at the boundary unchanged', () => {
+    expect(truncateLabel('12345', 5)).toBe('12345');
+  });
+});
 
 describe('shortName', () => {
   it('uses known MOOSEDev prefixes before falling back to the last path segment', () => {

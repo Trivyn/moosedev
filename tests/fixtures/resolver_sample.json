@@ -1,0 +1,322 @@
+[
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "Mode#",
+    "expect_definition": true,
+    "note": "CLI mode enum definition",
+    "anchor": "enum Mode {",
+    "token": "Mode"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "ResolveArgs#",
+    "expect_definition": true,
+    "note": "CLI resolve argument struct definition",
+    "anchor": "struct ResolveArgs {",
+    "token": "ResolveArgs"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "parse_mode().",
+    "expect_definition": true,
+    "note": "CLI mode parser definition",
+    "anchor": "fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {",
+    "token": "parse_mode"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "index_mode().",
+    "expect_definition": true,
+    "note": "index CLI handler definition",
+    "anchor": "fn index_mode(data_dir: &Path) -> anyhow::Result<()> {",
+    "token": "index_mode"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "resolve_mode().",
+    "expect_definition": true,
+    "note": "resolve CLI handler definition",
+    "anchor": "fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {",
+    "token": "resolve_mode"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "parse_index().",
+    "expect_definition": false,
+    "note": "dispatch reference to index parser",
+    "anchor": "Some(\"index\") => parse_index(iter).map(|()| Mode::Index),",
+    "token": "parse_index"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "parse_resolve().",
+    "expect_definition": false,
+    "note": "dispatch reference to resolve parser",
+    "anchor": "Some(\"resolve\") => parse_resolve(iter).map(Mode::Resolve),",
+    "token": "parse_resolve"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "index_mode().",
+    "expect_definition": false,
+    "note": "dispatch reference to index handler",
+    "anchor": "Mode::Index => index_mode(&data_dir),",
+    "token": "index_mode"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "resolve_mode().",
+    "expect_definition": false,
+    "note": "dispatch reference to resolve handler",
+    "anchor": "Mode::Resolve(args) => resolve_mode(&data_dir, args),",
+    "token": "resolve_mode"
+  },
+  {
+    "path": "src/main.rs",
+    "expect_symbol": "code/substrate/resolver/Substrate#",
+    "expect_definition": false,
+    "note": "reference to substrate loader type",
+    "anchor": "let substrate = Substrate::load(data_dir, &repo_root)?;",
+    "token": "Substrate"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/Position#",
+    "expect_definition": true,
+    "note": "substrate position struct definition",
+    "anchor": "pub struct Position {",
+    "token": "Position"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/SourceRange#",
+    "expect_definition": true,
+    "note": "substrate source range struct definition",
+    "anchor": "pub struct SourceRange {",
+    "token": "SourceRange"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/ResolutionMode#",
+    "expect_definition": true,
+    "note": "resolution mode enum definition",
+    "anchor": "pub enum ResolutionMode {",
+    "token": "ResolutionMode"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/Resolution#",
+    "expect_definition": true,
+    "note": "resolution result struct definition",
+    "anchor": "pub struct Resolution {",
+    "token": "Resolution"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/Substrate#",
+    "expect_definition": true,
+    "note": "substrate resolver struct definition",
+    "anchor": "pub struct Substrate {",
+    "token": "Substrate"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/impl#[Substrate]load().",
+    "expect_definition": true,
+    "note": "Substrate::load definition",
+    "anchor": "pub fn load(data_dir: &Path, repo_root: &Path) -> Result<Substrate> {",
+    "token": "load"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/resolver/impl#[Substrate]resolve().",
+    "expect_definition": true,
+    "note": "Substrate::resolve definition",
+    "anchor": "pub fn resolve(&self, relative_path: &str, pos: Position) -> Option<Resolution> {",
+    "token": "resolve"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/scip/read_index().",
+    "expect_definition": false,
+    "note": "reference to SCIP index reader",
+    "anchor": "let index = scip::read_index(&path).with_context(|| {",
+    "token": "read_index"
+  },
+  {
+    "path": "src/code/substrate/resolver.rs",
+    "expect_symbol": "code/substrate/meta/SubstrateMeta#",
+    "expect_definition": false,
+    "note": "reference to substrate metadata type",
+    "anchor": "let meta = SubstrateMeta::load(data_dir).with_context(|| {",
+    "token": "SubstrateMeta"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "expect_symbol": "code/substrate/meta/SubstrateMeta#",
+    "expect_definition": true,
+    "note": "substrate metadata struct definition",
+    "anchor": "pub struct SubstrateMeta {",
+    "token": "SubstrateMeta"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]load().",
+    "expect_definition": true,
+    "note": "SubstrateMeta::load definition",
+    "anchor": "pub fn load(data_dir: &Path) -> Result<Self> {",
+    "token": "load"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]save().",
+    "expect_definition": true,
+    "note": "SubstrateMeta::save definition",
+    "anchor": "pub fn save(&self, data_dir: &Path) -> Result<()> {",
+    "token": "save"
+  },
+  {
+    "path": "src/code/substrate/meta.rs",
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]current_head().",
+    "expect_definition": true,
+    "note": "SubstrateMeta::current_head definition",
+    "anchor": "pub fn current_head(repo_root: &Path) -> String {",
+    "token": "current_head"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "expect_symbol": "code/substrate/producer/IndexReport#",
+    "expect_definition": true,
+    "note": "index report struct definition",
+    "anchor": "pub struct IndexReport {",
+    "token": "IndexReport"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "expect_symbol": "code/substrate/producer/run_index().",
+    "expect_definition": true,
+    "note": "SCIP producer entry point definition",
+    "anchor": "pub fn run_index(repo_root: &Path, data_dir: &Path) -> Result<IndexReport> {",
+    "token": "run_index"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "expect_symbol": "code/substrate/meta/impl#[SubstrateMeta]current_head().",
+    "expect_definition": false,
+    "note": "reference to current HEAD helper",
+    "anchor": "let commit = SubstrateMeta::current_head(repo_root);",
+    "token": "current_head"
+  },
+  {
+    "path": "src/code/substrate/producer.rs",
+    "expect_symbol": "code/substrate/scip/read_index().",
+    "expect_definition": false,
+    "note": "reference to temporary SCIP index reader",
+    "anchor": "let index = read_index(&tmp_path).with_context(|| {",
+    "token": "read_index"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "expect_symbol": "code/substrate/scip/IngestedIndex#",
+    "expect_definition": true,
+    "note": "ingested SCIP table struct definition",
+    "anchor": "pub(crate) struct IngestedIndex {",
+    "token": "IngestedIndex"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "expect_symbol": "code/substrate/scip/read_index().",
+    "expect_definition": true,
+    "note": "SCIP protobuf reader definition",
+    "anchor": "pub(crate) fn read_index(path: &Path) -> Result<Index> {",
+    "token": "read_index"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "expect_symbol": "code/substrate/scip/ingest().",
+    "expect_definition": true,
+    "note": "SCIP ingestion function definition",
+    "anchor": "pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {",
+    "token": "ingest"
+  },
+  {
+    "path": "src/code/substrate/scip.rs",
+    "expect_symbol": "code/substrate/scip/occurrence_range().",
+    "expect_definition": false,
+    "note": "reference to occurrence range normalizer",
+    "anchor": "let range = occurrence_range(occurrence)",
+    "token": "occurrence_range"
+  },
+  {
+    "path": "src/runtime.rs",
+    "expect_symbol": "runtime/build_server().",
+    "expect_definition": true,
+    "note": "runtime server builder definition",
+    "anchor": "pub async fn build_server(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<MooseDevServer> {",
+    "token": "build_server"
+  },
+  {
+    "path": "src/runtime.rs",
+    "expect_symbol": "runtime/build_state().",
+    "expect_definition": true,
+    "note": "runtime state builder definition",
+    "anchor": "pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<Arc<AppState>> {",
+    "token": "build_state"
+  },
+  {
+    "path": "src/runtime.rs",
+    "expect_symbol": "runtime/spawn_http_if_enabled().",
+    "expect_definition": true,
+    "note": "HTTP UI spawn helper definition",
+    "anchor": "pub async fn spawn_http_if_enabled(state: Arc<AppState>, data_dir: &Path) -> Option<SocketAddr> {",
+    "token": "spawn_http_if_enabled"
+  },
+  {
+    "path": "src/runtime.rs",
+    "expect_symbol": "runtime/build_state().",
+    "expect_definition": false,
+    "note": "reference to runtime state builder",
+    "anchor": "build_state(data_dir, ontology_dir).await?,",
+    "token": "build_state"
+  },
+  {
+    "path": "src/graph/capture.rs",
+    "expect_symbol": "graph/capture/RecordInput#",
+    "expect_definition": true,
+    "note": "record capture input struct definition",
+    "anchor": "pub struct RecordInput {",
+    "token": "RecordInput"
+  },
+  {
+    "path": "src/graph/capture.rs",
+    "expect_symbol": "graph/util/mint_instance_iri().",
+    "expect_definition": false,
+    "note": "reference to IRI minting helper",
+    "anchor": "let subject = mint_instance_iri(&input.class_local);",
+    "token": "mint_instance_iri"
+  },
+  {
+    "path": "src/graph_import.rs",
+    "expect_symbol": "graph_import/import_graph().",
+    "expect_definition": true,
+    "note": "graph import entry point definition",
+    "anchor": "pub fn import_graph(",
+    "token": "import_graph"
+  },
+  {
+    "path": "tests/graph_import.rs",
+    "expect_symbol": "graph_import/import_graph().",
+    "expect_definition": false,
+    "note": "integration test reference to graph import",
+    "anchor": "let first = import_graph(",
+    "token": "import_graph"
+  },
+  {
+    "path": "examples/capgap_probe.rs",
+    "expect_symbol": "main().",
+    "expect_definition": true,
+    "note": "example async main definition",
+    "anchor": "async fn main() -> anyhow::Result<()> {",
+    "token": "main"
+  }
+]

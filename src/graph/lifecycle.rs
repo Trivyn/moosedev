@@ -22,6 +22,17 @@ pub fn is_retired(status: &str) -> bool {
         .any(|retired| status.eq_ignore_ascii_case(retired))
 }
 
+/// Whether a lifecycle status admits a record into the authoritative working
+/// set. `proposed` records live in the ratification inbox, not in recall —
+/// unratified knowledge must never influence an agent as if it were the
+/// maintainers' recorded truth — and `rejected`/retired records were declined
+/// or replaced. Records with no status literal (pre-lifecycle legacy) stay in.
+pub fn in_working_set(status: &str) -> bool {
+    !(status.eq_ignore_ascii_case("proposed")
+        || status.eq_ignore_ascii_case("rejected")
+        || is_retired(status))
+}
+
 /// A decision change: the replacement to record, the decision it supersedes, and
 /// the rationale (the *why*) for the change.
 pub struct SupersedeInput {
@@ -42,10 +53,10 @@ pub struct SupersedeOutcome {
 /// it as history (it is never deleted). The replacement is recorded with the SAME
 /// class as the superseded item (type-preserving), so the caller's `new.class_*`
 /// fields are ignored. Atomic: the new item, the `Rationale` node, the
-/// `supersedes`/`hasRationale` edges, and the old item's status change all commit
-/// in one transaction; the entity index is invalidated once on success. The
-/// superseded subject must already be an `InformationRecord` (or subclass) in the
-/// project graph — else this errors and writes nothing.
+/// `supersedes`/`isSupersededBy`/`hasRationale` edges, and the old item's status
+/// change all commit in one transaction; the entity index is invalidated once
+/// on success. The superseded subject must already be an `InformationRecord`
+/// (or subclass) in the project graph — else this errors and writes nothing.
 pub fn supersede_decision(
     state: &AppState,
     input: &SupersedeInput,
@@ -69,6 +80,7 @@ pub fn supersede_decision(
 
     // Resolve relation + class IRIs from the loaded ontology (by local name).
     let supersedes_pred = state.resolve_object_property("supersedes")?;
+    let is_superseded_by_pred = state.resolve_object_property("isSupersededBy")?;
     let has_rationale_pred = state.resolve_object_property("hasRationale")?;
     let rationale_class = state.resolve_class("Rationale")?;
 
@@ -142,6 +154,15 @@ pub fn supersede_decision(
         Literal::new_simple_literal("superseded"),
         GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
     );
+    // Persist the declared OWL inverse explicitly. Project-graph consumers such
+    // as the ADR renderer traverse from the retired record to its successor and
+    // must remain correct even when enrichment has not run or is unavailable.
+    let successor_link = Quad::new(
+        old_subject.clone(),
+        NamedNode::new(is_superseded_by_pred)?,
+        NamedNode::new(&new_iri)?,
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
+    );
 
     // One atomic transaction: insert the new decision + rationale + the old's new
     // status, and remove the old's prior status quads.
@@ -155,6 +176,7 @@ pub fn supersede_decision(
         txn.remove(quad.as_ref());
     }
     txn.insert(superseded_status.as_ref());
+    txn.insert(successor_link.as_ref());
     txn.commit()
         .map_err(|e| anyhow::anyhow!("supersede commit: {e}"))?;
     state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);

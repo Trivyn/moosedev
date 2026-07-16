@@ -6,13 +6,19 @@ import {
   ChatSessionDetail,
   ChatSessionListResponse,
   ClarificationReply,
+  ConstraintDetailResponse,
+  ConstraintListResponse,
   GraphImportResponse,
   HealthResponse,
   LessonDetailResponse,
   LessonListResponse,
+  ProposalActionResponse,
+  ProposalListResponse,
   QueryResponse,
+  RecordDetailResponse,
   RequirementDetailResponse,
   RequirementListResponse,
+  WhyCoverageResponse,
 } from './types';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -64,6 +70,11 @@ export const api = {
   listLessons: () => request<LessonListResponse>('/lessons'),
   getLesson: (num: string) => request<LessonDetailResponse>(`/lessons/${encodeURIComponent(num)}`),
   downloadLessonArchive: () => download('/lessons/archive.zip'),
+  listConstraints: () => request<ConstraintListResponse>('/constraints'),
+  getConstraint: (num: string) =>
+    request<ConstraintDetailResponse>(`/constraints/${encodeURIComponent(num)}`),
+  downloadConstraintArchive: () => download('/constraints/archive.zip'),
+  record: (uuid: string) => request<RecordDetailResponse>(`/records/${encodeURIComponent(uuid)}`),
   chat: (payload: {
     session_id?: string;
     messages: ChatMessage[];
@@ -99,5 +110,24 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: text,
+    }),
+  debt: () => request<WhyCoverageResponse>('/debt'),
+  listProposals: (status?: string) =>
+    request<ProposalListResponse>(
+      `/proposals${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+    ),
+  acceptProposal: (id: string) =>
+    request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/accept`, {
+      method: 'POST',
+    }),
+  rejectProposal: (id: string) =>
+    request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/reject`, {
+      method: 'POST',
+    }),
+  recategorizeProposal: (id: string, target: string) =>
+    request<ProposalActionResponse>(`/proposals/${encodeURIComponent(id)}/recategorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
     }),
 };

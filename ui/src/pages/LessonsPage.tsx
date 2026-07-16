@@ -5,8 +5,9 @@ import GeneratedArtifactPage from '../components/artifacts/GeneratedArtifactPage
 import { ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
 
 interface LessonsPageProps {
-  targetIri?: string;
+  targetUuid?: string;
   onNavigateArtifact?: (target: ArtifactTarget) => void;
+  onNavigateRecord?: (iri: string) => void;
 }
 
 function warningCount(warnings: LessonWarnings) {
@@ -30,15 +31,21 @@ function LessonListMeta(lesson: LessonSummary) {
   );
 }
 
-export default function LessonsPage({ targetIri, onNavigateArtifact }: LessonsPageProps) {
+export default function LessonsPage({
+  targetUuid,
+  onNavigateArtifact,
+  onNavigateRecord,
+}: LessonsPageProps) {
   return (
     <GeneratedArtifactPage<
       LessonSummary,
       Awaited<ReturnType<typeof api.listLessons>>,
       LessonWarnings
     >
-      targetIri={targetIri}
+      targetUuid={targetUuid}
       onNavigateArtifact={onNavigateArtifact}
+      onNavigateRecord={onNavigateRecord}
+      artifactKind="lessons"
       title="Lessons"
       emptyText="No lessons recorded."
       selectText="Select a lesson."

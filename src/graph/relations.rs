@@ -140,7 +140,7 @@ pub(crate) fn build_relation_catalogue(store: &Store) -> RelationCatalogue {
         r#"
 SELECT DISTINCT ?predicate ?subjectClass ?objectClass
 WHERE {{
-  VALUES ?shapeGraph {{ <{}> <{}> }}
+  VALUES ?shapeGraph {{ <{}> <{}> <{}> }}
   GRAPH ?shapeGraph {{
     ?shape <{}> ?subjectClass .
     {{
@@ -161,6 +161,7 @@ WHERE {{
 }}"#,
         ontology::SE_SHAPES_GRAPH_IRI,
         ontology::ARCH_SHAPES_GRAPH_IRI,
+        ontology::CODE_SHAPES_GRAPH_IRI,
         SH_TARGET_CLASS,
         SH_PROPERTY,
         SH_PATH,
@@ -295,6 +296,8 @@ mod tests {
 
     /// Architecture-domain class namespace (matches the shipped ontologies).
     const ARCH: &str = "https://trivyn.io/ontologies/software/architecture#";
+    /// Code-domain class/property namespace (matches the shipped ontologies).
+    const CODE: &str = "https://trivyn.io/ontologies/software/code#";
 
     /// In-memory store with just the shipped domain + SHACL shape graphs loaded —
     /// enough to build and exercise the relation catalogue.
@@ -307,6 +310,18 @@ mod tests {
 
     fn cls(local: &str) -> String {
         format!("{ARCH}{local}")
+    }
+
+    fn code_cls(local: &str) -> String {
+        format!("{CODE}{local}")
+    }
+
+    fn pred(local: &str) -> String {
+        format!("{ARCH}{local}")
+    }
+
+    fn code_pred(local: &str) -> String {
+        format!("{CODE}{local}")
     }
 
     #[test]
@@ -397,11 +412,66 @@ mod tests {
                 "{subject} should be allowed to concern a SystemComponent"
             );
         }
-        let concerns = format!("{ARCH}concerns");
+        let concerns = pred("concerns");
+        let mut objects = cat.expected_object_classes(&concerns);
+        objects.sort();
         assert_eq!(
-            cat.expected_object_classes(&concerns),
-            vec![cls("SystemComponent")]
+            objects,
+            vec![cls("SystemComponent"), code_cls("CodeEntity")]
         );
+    }
+
+    #[test]
+    fn code_intent_links_are_in_catalogue() {
+        let store = shapes_store();
+        let cat = build_relation_catalogue(&store);
+
+        let code_entity = code_cls("CodeEntity");
+        for (target, local) in [
+            (cls("SystemComponent"), "realizes"),
+            (cls("Requirement"), "satisfies"),
+            (cls("Pattern"), "embodies"),
+        ] {
+            let legal = cat.legal_predicates(&store, &code_entity, &target);
+            let predicate_iri = code_pred(local);
+            assert!(
+                legal.iter().any(|e| {
+                    e.predicate_local == local
+                        && e.predicate_iri == predicate_iri
+                        && e.direction == EdgeDirection::Forward
+                }),
+                "expected CodeEntity --{local}--> {target}; got {legal:?}"
+            );
+            assert!(
+                !cat.constraints_for_predicate(&predicate_iri).is_empty(),
+                "catalogue must include SHACL constraints for code:{local}"
+            );
+        }
+
+        let legal_violates = cat.legal_predicates(&store, &code_entity, &cls("Constraint"));
+        assert!(
+            legal_violates.iter().any(|e| {
+                e.predicate_local == "violates"
+                    && e.predicate_iri == pred("violates")
+                    && e.direction == EdgeDirection::Forward
+            }),
+            "expected CodeEntity --violates--> Constraint; got {legal_violates:?}"
+        );
+
+        let mut constrains_objects = cat.expected_object_classes(&pred("constrains"));
+        constrains_objects.sort();
+        assert_eq!(
+            constrains_objects,
+            vec![
+                cls("ArchitecturalDecision"),
+                cls("SystemComponent"),
+                code_entity.clone(),
+            ]
+        );
+
+        let mut violated_by_objects = cat.expected_object_classes(&pred("isViolatedBy"));
+        violated_by_objects.sort();
+        assert_eq!(violated_by_objects, vec![cls("AntiPattern"), code_entity]);
     }
 
     #[test]

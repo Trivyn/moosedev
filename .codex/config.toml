@@ -3,3 +3,12 @@ type = "stdio"
 command = "./target/release/moosedev"
 args = ["--connect"]
 env = { MOOSEDEV_DATA_DIR = "./.moosedev" }
+
+[mcp_servers.moosedev.tools.get_relevant_context]
+approval_mode = "approve"
+
+[mcp_servers.moosedev.tools.sparql]
+approval_mode = "approve"
+
+[mcp_servers.moosedev.tools.validate_against_architecture]
+approval_mode = "approve"

@@ -74,6 +74,7 @@ fn adr_set_renders_stable_numbered_markdown_from_project_graph() {
     assert!(set.adrs[0]
         .markdown
         .contains("Decision body for First Decision"));
+    assert_eq!(set.summaries()[0].search_text, set.adrs[0].markdown);
     assert!(set
         .index_markdown
         .contains("[First Decision](0001-first-decision.md)"));
@@ -150,14 +151,47 @@ fn adr_summary_status_for_superseded_record_is_plain_text() {
         Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap(),
     )
     .expect("supersede");
-    state.ensure_enriched();
-
     let set = generate_adr_set(&state, AdrGenerationOptions::default()).expect("generate ADRs");
     assert_eq!(set.adrs[0].status, "Superseded by ADR-0002");
     assert!(!set.adrs[0].status.contains('['));
     assert!(set.adrs[0]
         .markdown
         .contains("- Status: Superseded by [ADR-0002](0002-new-decision.md)"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn adr_set_memo_serves_warm_reads_and_invalidates_on_write() {
+    let dir = temp_dir("memo");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_decision(&state, "First decision", "2026-06-25T12:00:00Z");
+    state.note_project_write();
+
+    let first = moosedev::adrs::generate_adr_set_cached(&state, AdrGenerationOptions::default())
+        .expect("cold generate");
+    let warm = moosedev::adrs::generate_adr_set_cached(&state, AdrGenerationOptions::default())
+        .expect("warm generate");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &warm),
+        "unchanged generation serves the memoized set"
+    );
+
+    // A project-graph write bumps the generation → the next read regenerates
+    // and the new decision is visible (no staleness window).
+    record_decision(&state, "Second decision", "2026-06-26T12:00:00Z");
+    state.note_project_write();
+    let refreshed =
+        moosedev::adrs::generate_adr_set_cached(&state, AdrGenerationOptions::default())
+            .expect("regenerate after write");
+    assert!(!std::sync::Arc::ptr_eq(&first, &refreshed));
+    assert_eq!(refreshed.adrs.len(), 2, "the write is visible immediately");
+
+    // Different options never reuse a memo built for other parameters.
+    let other =
+        moosedev::adrs::generate_adr_set_cached(&state, AdrGenerationOptions { batch_size: 5 })
+            .expect("options variant");
+    assert!(!std::sync::Arc::ptr_eq(&refreshed, &other));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

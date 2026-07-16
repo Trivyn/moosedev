@@ -1,5 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Box, CircularProgress, Divider, FormControlLabel, Switch, Tab, Tabs, Typography } from '@mui/material';
+import {
+  Alert,
+  Box,
+  CircularProgress,
+  Divider,
+  FormControlLabel,
+  Switch,
+  Tab,
+  Tabs,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
+} from '@mui/material';
 import { api } from '../api/client';
 import {
   ChatMessage,
@@ -18,6 +31,17 @@ import CytoscapeGraph from '../components/graph/CytoscapeGraph';
 import { queryToGraph } from '../components/graph/graphUtils';
 import RawResults from '../components/sparql/RawResults';
 
+const ASSIST_LEVEL_STORAGE_KEY = 'moosedev.chat.assistLevel';
+
+const readAssistLevel = () => {
+  try {
+    const value = Number.parseInt(localStorage.getItem(ASSIST_LEVEL_STORAGE_KEY) ?? '', 10);
+    return value === 0 || value === 1 || value === 2 ? value : 1;
+  } catch {
+    return 1;
+  }
+};
+
 export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
@@ -27,6 +51,7 @@ export default function ChatPage() {
   const [metrics, setMetrics] = useState<unknown>(null);
   const [tab, setTab] = useState(0);
   const [showMooseTraces, setShowMooseTraces] = useState(true);
+  const [assistLevel, setAssistLevel] = useState<number>(readAssistLevel);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,6 +63,14 @@ export default function ChatPage() {
   useEffect(() => {
     loadSessions().catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [loadSessions]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ASSIST_LEVEL_STORAGE_KEY, String(assistLevel));
+    } catch {
+      // Storage may be unavailable (for example, in private browsing mode).
+    }
+  }, [assistLevel]);
 
   const graph = useMemo(() => queryToGraph(subgraph, { showMooseTraces }), [showMooseTraces, subgraph]);
 
@@ -125,6 +158,7 @@ export default function ChatPage() {
         messages: toWireMessages(nextMessages),
         include_session_map: true,
         include_metrics: true,
+        llm_assist_level: assistLevel,
       });
       appendAssistantTurn(response);
       await applyResponseSideEffects(response);
@@ -155,6 +189,7 @@ export default function ChatPage() {
         include_session_map: true,
         include_metrics: true,
         clarification_reply: reply,
+        llm_assist_level: assistLevel,
       });
       appendAssistantTurn(response);
       await applyResponseSideEffects(response);
@@ -183,11 +218,41 @@ export default function ChatPage() {
         onDelete={(id) => deleteSession(id).catch((err) => setError(err instanceof Error ? err.message : String(err)))}
       />
       <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <Box sx={{ p: 1.5, borderBottom: 1, borderColor: 'divider' }}>
-          <Typography variant="h6">MOOSE Chat</Typography>
-          <Typography variant="caption" color="text.secondary">
-            {sessionId ?? 'New session'}
-          </Typography>
+        <Box
+          sx={{
+            p: 1.5,
+            borderBottom: 1,
+            borderColor: 'divider',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <Box>
+            <Typography variant="h6">MOOSE Chat</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {sessionId ?? 'New session'}
+            </Typography>
+          </Box>
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={assistLevel}
+            onChange={(_, value: number | null) => {
+              if (value !== null) setAssistLevel(value);
+            }}
+            aria-label="LLM assist level"
+          >
+            <Tooltip title="Pure symbolic: zero LLM calls with deterministic synthesis.">
+              <ToggleButton value={0}>Symbolic</ToggleButton>
+            </Tooltip>
+            <Tooltip title="Sensor: the LLM reads only the user's language and never controls the pipeline (default).">
+              <ToggleButton value={1}>Sensor</ToggleButton>
+            </Tooltip>
+            <Tooltip title="Sensor with fallback: adds a loudly tagged, unverified LLM answer when the deterministic pipeline cannot answer.">
+              <ToggleButton value={2}>Sensor + fallback</ToggleButton>
+            </Tooltip>
+          </ToggleButtonGroup>
         </Box>
         {error && (
           <Alert severity="error" onClose={() => setError(null)} sx={{ m: 1 }}>

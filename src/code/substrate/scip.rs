@@ -1,0 +1,467 @@
+//! SCIP decoding and producer-agnostic in-memory tables.
+//!
+//! This module is deliberately crate-private. Public callers work through
+//! `Substrate`, while this layer owns SCIP-specific quirks: protobuf parsing,
+//! UTF-8 position validation, range normalization, symbol interning, and
+//! occurrence sorting.
+
+use std::collections::{hash_map::Entry, HashMap};
+use std::fs;
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+use protobuf::Message;
+use scip::types::{
+    occurrence, symbol_information, Index, MultiLineRange, Occurrence, PositionEncoding,
+    SingleLineRange, SymbolInformation,
+};
+
+use super::resolver::{Position, SourceRange};
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct IngestedIndex {
+    /// Per-file occurrence tables keyed by SCIP `Document.relative_path`.
+    pub(crate) files: HashMap<String, FileOccurrences>,
+    /// Interned raw SCIP symbol strings plus optional metadata.
+    pub(crate) symbols: Vec<SymbolData>,
+    pub(crate) documents: usize,
+    pub(crate) occurrences: usize,
+    pub(crate) definitions: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FileOccurrences {
+    /// Static registry name of the producer that emitted this document.
+    pub(crate) producer: String,
+    /// Occurrences sorted by start/end range and symbol for deterministic lookup.
+    pub(crate) occurrences: Vec<OccurrenceEntry>,
+    /// Largest line span in this file, used to bound resolver backtracking.
+    pub(crate) max_line_span: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OccurrenceEntry {
+    pub(crate) range: SourceRange,
+    /// Captured for future topology/dossier work. Resolution intentionally does
+    /// not fall back to this range on misses.
+    #[allow(dead_code)]
+    pub(crate) enclosing_range: Option<SourceRange>,
+    pub(crate) symbol_id: usize,
+    pub(crate) symbol_roles: i32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SymbolData {
+    /// Raw SCIP symbol. It is the identity string for this phase.
+    pub(crate) symbol: String,
+    /// Producer-supplied display name; first metadata record wins.
+    pub(crate) display_name: Option<String>,
+    /// Producer-supplied SCIP kind; first metadata record wins.
+    pub(crate) kind: Option<String>,
+    /// Producer-supplied signature text; first metadata record wins.
+    pub(crate) signature: Option<String>,
+    /// `Document.relative_path` of the first definition-role occurrence.
+    pub(crate) defined_in: Option<String>,
+    /// Local symbols are valid resolution results but not stable identities.
+    pub(crate) is_local: bool,
+    /// Static registry name of the producer that emitted this symbol.
+    pub(crate) producer: String,
+}
+
+impl IngestedIndex {
+    pub(crate) fn merge(
+        &mut self,
+        mut other: Self,
+        producer: &str,
+        path_prefix: Option<&str>,
+    ) -> Result<()> {
+        let symbol_offset = self.symbols.len();
+        for symbol in &mut other.symbols {
+            symbol.producer = producer.to_string();
+            if let Some(path) = &mut symbol.defined_in {
+                *path = prefixed_path(path_prefix, path);
+            }
+        }
+
+        for (path, mut file) in other.files {
+            let path = prefixed_path(path_prefix, &path);
+            if let Some(existing) = self.files.get(&path) {
+                bail!(
+                    "substrate path collision at `{path}` between producers `{}` and `{producer}`",
+                    existing.producer
+                );
+            }
+            file.producer = producer.to_string();
+            for occurrence in &mut file.occurrences {
+                occurrence.symbol_id += symbol_offset;
+            }
+            self.files.insert(path, file);
+        }
+
+        self.symbols.extend(other.symbols);
+        self.documents += other.documents;
+        self.occurrences += other.occurrences;
+        self.definitions += other.definitions;
+        Ok(())
+    }
+}
+
+fn prefixed_path(prefix: Option<&str>, path: &str) -> String {
+    match prefix {
+        Some(prefix) => format!("{prefix}{path}"),
+        None => path.to_string(),
+    }
+}
+
+pub(crate) fn read_index(path: &Path) -> Result<Index> {
+    let bytes = fs::read(path).with_context(|| {
+        format!(
+            "substrate index missing at {}; run `moosedev index`",
+            path.display()
+        )
+    })?;
+    Index::parse_from_bytes(&bytes).with_context(|| {
+        format!(
+            "failed to parse substrate SCIP index at {}; run `moosedev index`",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
+    let mut files = HashMap::new();
+    let mut symbol_ids = HashMap::<String, usize>::new();
+    let mut symbols = Vec::<SymbolData>::new();
+    let mut occurrence_count = 0usize;
+    let mut definition_count = 0usize;
+    let is_scip_typescript = index
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.tool_info.as_ref())
+        .is_some_and(|tool| tool.name == "scip-typescript");
+    let mut unspecified_encoding_documents = 0usize;
+
+    // Pass 1 interns declared symbol metadata before occurrences. rust-analyzer
+    // may emit duplicate crate symbols, so the first metadata record wins.
+    for document in &index.documents {
+        if validate_position_encoding(
+            &document.relative_path,
+            document.position_encoding.enum_value(),
+        )? {
+            unspecified_encoding_documents += 1;
+        }
+        for symbol_info in &document.symbols {
+            intern_symbol(
+                symbol_info,
+                is_scip_typescript,
+                &mut symbol_ids,
+                &mut symbols,
+            );
+        }
+    }
+    if unspecified_encoding_documents > 0 {
+        tracing::warn!(
+            documents = unspecified_encoding_documents,
+            "SCIP documents have unspecified position_encoding; treating as UTF-8"
+        );
+    }
+
+    // Pass 2 builds producer-agnostic occurrence tables. Occurrences may mention
+    // symbols absent from `Document.symbols`; those get interned without metadata.
+    for document in &index.documents {
+        let mut entries = Vec::with_capacity(document.occurrences.len());
+        let mut max_line_span = 0u32;
+
+        for occurrence in &document.occurrences {
+            let range = occurrence_range(occurrence)
+                .with_context(|| format!("invalid SCIP range in {}", document.relative_path))?;
+            let enclosing_range = occurrence_enclosing_range(occurrence).with_context(|| {
+                format!("invalid SCIP enclosing_range in {}", document.relative_path)
+            })?;
+            let symbol_id = intern_symbol_str(&occurrence.symbol, &mut symbol_ids, &mut symbols);
+            let line_span = range.end.line.saturating_sub(range.start.line);
+            max_line_span = max_line_span.max(line_span);
+            if is_definition_role(occurrence.symbol_roles) {
+                definition_count += 1;
+                symbols[symbol_id]
+                    .defined_in
+                    .get_or_insert_with(|| document.relative_path.clone());
+            }
+            occurrence_count += 1;
+            entries.push(OccurrenceEntry {
+                range,
+                enclosing_range,
+                symbol_id,
+                symbol_roles: occurrence.symbol_roles,
+            });
+        }
+
+        // The resolver relies on start-position order for binary search, but we
+        // sort defensively instead of trusting producer output.
+        entries.sort_by(|a, b| {
+            range_key(&a.range)
+                .cmp(&range_key(&b.range))
+                .then_with(|| span_len(&a.range).cmp(&span_len(&b.range)))
+                .then_with(|| {
+                    symbols[a.symbol_id]
+                        .symbol
+                        .cmp(&symbols[b.symbol_id].symbol)
+                })
+        });
+
+        files.insert(
+            document.relative_path.clone(),
+            FileOccurrences {
+                producer: String::new(),
+                occurrences: entries,
+                max_line_span,
+            },
+        );
+    }
+
+    Ok(IngestedIndex {
+        files,
+        symbols,
+        documents: index.documents.len(),
+        occurrences: occurrence_count,
+        definitions: definition_count,
+    })
+}
+
+pub(crate) fn producer_info(index: &Index) -> (String, String) {
+    index
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.tool_info.as_ref())
+        .map(|tool| {
+            let name = if tool.name.is_empty() {
+                "unknown".to_string()
+            } else {
+                tool.name.clone()
+            };
+            let version = if tool.version.is_empty() {
+                "unknown".to_string()
+            } else {
+                tool.version.clone()
+            };
+            (name, version)
+        })
+        .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()))
+}
+
+pub(crate) fn is_definition_role(symbol_roles: i32) -> bool {
+    symbol_roles & 1 != 0
+}
+
+fn validate_position_encoding(
+    relative_path: &str,
+    encoding: std::result::Result<PositionEncoding, i32>,
+) -> Result<bool> {
+    let encoding = match encoding {
+        Ok(encoding) => encoding,
+        Err(value) => bail!(
+            "unsupported SCIP position_encoding value {} in {}; expected UTF-8; run `moosedev index` with a UTF-8 producer",
+            value,
+            relative_path
+        ),
+    };
+    match encoding {
+        PositionEncoding::UTF8CodeUnitOffsetFromLineStart => Ok(false),
+        // Producers can declare UTF-8 in index metadata while leaving the
+        // per-document encoding unspecified. Accept it, but report the aggregate
+        // once per ingested index so a changed producer contract remains visible.
+        PositionEncoding::UnspecifiedPositionEncoding => Ok(true),
+        PositionEncoding::UTF16CodeUnitOffsetFromLineStart
+        | PositionEncoding::UTF32CodeUnitOffsetFromLineStart => {
+            bail!(
+                "unsupported SCIP position_encoding {:?} in {}; expected UTF-8; run `moosedev index` with a UTF-8 producer",
+                encoding,
+                relative_path
+            )
+        }
+    }
+}
+
+fn intern_symbol(
+    info: &SymbolInformation,
+    is_scip_typescript: bool,
+    symbol_ids: &mut HashMap<String, usize>,
+    symbols: &mut Vec<SymbolData>,
+) -> usize {
+    let display_name = empty_to_none(&info.display_name);
+    let kind = info.kind.enum_value().ok().and_then(|kind| match kind {
+        symbol_information::Kind::UnspecifiedKind => None,
+        _ => Some(format!("{kind:?}")),
+    });
+    let signature = info
+        .signature_documentation
+        .as_ref()
+        .and_then(|signature| empty_to_none(&signature.text))
+        .or_else(|| {
+            is_scip_typescript
+                .then(|| typescript_signature_from_documentation(&info.documentation))
+                .flatten()
+        });
+
+    match symbol_ids.entry(info.symbol.clone()) {
+        Entry::Occupied(entry) => *entry.get(),
+        Entry::Vacant(entry) => {
+            let id = symbols.len();
+            symbols.push(SymbolData {
+                symbol: entry.key().clone(),
+                display_name,
+                kind,
+                signature,
+                defined_in: None,
+                is_local: is_local_symbol(entry.key()),
+                producer: String::new(),
+            });
+            entry.insert(id);
+            id
+        }
+    }
+}
+
+fn typescript_signature_from_documentation(documentation: &[String]) -> Option<String> {
+    let text = documentation.first()?;
+    text.strip_prefix("```ts\n")
+        .and_then(|body| body.strip_suffix("\n```"))
+        .filter(|body| !body.is_empty())
+        .map(str::to_string)
+}
+
+fn intern_symbol_str(
+    symbol: &str,
+    symbol_ids: &mut HashMap<String, usize>,
+    symbols: &mut Vec<SymbolData>,
+) -> usize {
+    match symbol_ids.entry(symbol.to_string()) {
+        Entry::Occupied(entry) => *entry.get(),
+        Entry::Vacant(entry) => {
+            let id = symbols.len();
+            symbols.push(SymbolData {
+                symbol: entry.key().clone(),
+                display_name: None,
+                kind: None,
+                signature: None,
+                defined_in: None,
+                is_local: is_local_symbol(entry.key()),
+                producer: String::new(),
+            });
+            entry.insert(id);
+            id
+        }
+    }
+}
+
+fn is_local_symbol(symbol: &str) -> bool {
+    // scip::symbol handles the formal local-symbol encoding. The string prefix is
+    // a compatibility guard for producer output that uses the textual form.
+    ::scip::symbol::is_local_symbol(symbol) || symbol.starts_with("local ")
+}
+
+fn empty_to_none(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn occurrence_range(occurrence: &Occurrence) -> Result<SourceRange> {
+    // Newer SCIP messages may use typed range oneofs; older producer output uses
+    // the repeated integer field. Normalize both into our end-exclusive shape.
+    match &occurrence.typed_range {
+        Some(occurrence::Typed_range::SingleLineRange(range)) => single_line_range(range),
+        Some(occurrence::Typed_range::MultiLineRange(range)) => multi_line_range(range),
+        None => normalize_repeated_range(&occurrence.range),
+        Some(_) => bail!("unsupported SCIP typed range variant"),
+    }
+}
+
+fn occurrence_enclosing_range(occurrence: &Occurrence) -> Result<Option<SourceRange>> {
+    // Store enclosing ranges for later consumers, but keep resolver miss behavior
+    // strict: this data is never used as a fallback by `Substrate::resolve`.
+    let range = match &occurrence.typed_enclosing_range {
+        Some(occurrence::Typed_enclosing_range::SingleLineEnclosingRange(range)) => {
+            Some(single_line_range(range)?)
+        }
+        Some(occurrence::Typed_enclosing_range::MultiLineEnclosingRange(range)) => {
+            Some(multi_line_range(range)?)
+        }
+        None if occurrence.enclosing_range.is_empty() => None,
+        None => Some(normalize_repeated_range(&occurrence.enclosing_range)?),
+        Some(_) => bail!("unsupported SCIP typed enclosing_range variant"),
+    };
+    Ok(range)
+}
+
+fn single_line_range(range: &SingleLineRange) -> Result<SourceRange> {
+    make_range(
+        range.line,
+        range.start_character,
+        range.line,
+        range.end_character,
+    )
+}
+
+fn multi_line_range(range: &MultiLineRange) -> Result<SourceRange> {
+    make_range(
+        range.start_line,
+        range.start_character,
+        range.end_line,
+        range.end_character,
+    )
+}
+
+fn normalize_repeated_range(range: &[i32]) -> Result<SourceRange> {
+    // SCIP repeated ranges are either single-line [line,start,end] or multi-line
+    // [start_line,start,end_line,end].
+    match range {
+        [line, start_col, end_col] => make_range(*line, *start_col, *line, *end_col),
+        [start_line, start_col, end_line, end_col] => {
+            make_range(*start_line, *start_col, *end_line, *end_col)
+        }
+        _ => bail!("SCIP ranges must have 3 or 4 elements, got {}", range.len()),
+    }
+}
+
+fn make_range(start_line: i32, start_col: i32, end_line: i32, end_col: i32) -> Result<SourceRange> {
+    if start_line < 0 || start_col < 0 || end_line < 0 || end_col < 0 {
+        bail!("SCIP ranges cannot contain negative positions");
+    }
+    let range = SourceRange {
+        start: Position {
+            line: start_line as u32,
+            col: start_col as u32,
+        },
+        end: Position {
+            line: end_line as u32,
+            col: end_col as u32,
+        },
+    };
+    if compare_position(range.start, range.end) > std::cmp::Ordering::Equal {
+        bail!("SCIP range start must be before or equal to end");
+    }
+    Ok(range)
+}
+
+fn range_key(range: &SourceRange) -> (u32, u32, u32, u32) {
+    (
+        range.start.line,
+        range.start.col,
+        range.end.line,
+        range.end.col,
+    )
+}
+
+fn span_len(range: &SourceRange) -> (u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.col.saturating_sub(range.start.col),
+    )
+}
+
+fn compare_position(a: Position, b: Position) -> std::cmp::Ordering {
+    (a.line, a.col).cmp(&(b.line, b.col))
+}

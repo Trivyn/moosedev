@@ -10,9 +10,14 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum_test::TestServer;
 use chrono::Utc;
 use moosedev::api::routes::build_routes;
+use moosedev::code::substrate::{Substrate, SubstrateMeta};
 use moosedev::graph::{self, AppState, RecordInput, PROJECT_KG_GRAPH_IRI};
 use moosedev::llm::LlmConfig;
 use oxigraph::model::{GraphName, Literal, NamedNode, Quad, Term};
+use protobuf::{EnumOrUnknown, MessageField};
+use scip::types::{
+    symbol_information, Document, Index, Occurrence, PositionEncoding, Signature, SymbolInformation,
+};
 use serde_json::{json, Value};
 
 const PROVENANCE_GRAPH_IRI: &str = "https://moosedev.dev/kg/provenance";
@@ -108,6 +113,71 @@ fn record_api_lesson(state: &AppState, title: &str) -> String {
         Utc::now(),
     )
     .expect("record project lesson")
+}
+
+fn record_api_constraint(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("Constraint").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "Constraint".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (
+                    state.capture.description.clone(),
+                    format!("Constraint description for {title}"),
+                ),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record project constraint")
+}
+
+#[tokio::test]
+async fn records_detail_returns_record_metadata_and_edges() {
+    let dir = temp_dir("record-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let decision = record_api_decision(&state, "Record detail decision");
+    let lesson = record_api_lesson(&state, "Record detail lesson");
+    graph::relate(&state, &decision, "yieldsLesson", &lesson).expect("link outgoing lesson");
+    graph::relate(&state, &lesson, "learnedFrom", &decision).expect("link incoming lesson");
+    let uuid = decision.rsplit('/').next().expect("record uuid");
+    let server = test_server(state);
+
+    let response = server.get(&format!("/api/v1/records/{uuid}")).await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["iri"], decision);
+    assert_eq!(body["kind"], "ArchitecturalDecision");
+    assert_eq!(body["title"], "Record detail decision");
+    assert_eq!(
+        body["description"],
+        "Decision description for Record detail decision"
+    );
+    assert_eq!(body["outgoing"][0]["predicate"], "yieldsLesson");
+    assert_eq!(body["outgoing"][0]["target_iri"], lesson);
+    assert_eq!(body["incoming"][0]["predicate"], "learnedFrom");
+    assert_eq!(body["incoming"][0]["source_iri"], lesson);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn records_detail_returns_not_found_for_unknown_uuid() {
+    let dir = temp_dir("record-detail-missing");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/records/not-a-record").await;
+
+    response.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -318,6 +388,8 @@ async fn adrs_list_renders_project_decisions() {
     let dir = temp_dir("adrs-list");
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
     let iri = record_api_decision(&state, "API ADR visible");
+    let requirement = record_api_requirement(&state, "Searchable ADR requirement");
+    graph::relate(&state, &iri, "isMotivatedBy", &requirement).expect("link ADR requirement");
     let server = test_server(state);
 
     let response = server.get("/api/v1/adrs").await;
@@ -330,6 +402,10 @@ async fn adrs_list_renders_project_decisions() {
     assert_eq!(body["adrs"][0]["title"], "API ADR visible");
     assert_eq!(body["adrs"][0]["filename"], "0001-api-adr-visible.md");
     assert_eq!(body["adrs"][0]["iri"], iri);
+    assert!(body["adrs"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&requirement));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -417,6 +493,10 @@ async fn requirements_list_renders_project_requirements() {
     );
     assert_eq!(body["requirements"][0]["iri"], req);
     assert_eq!(body["requirements"][0]["related_adrs"], 1);
+    assert!(body["requirements"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&ad));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -507,6 +587,10 @@ async fn lessons_list_renders_project_lessons() {
     assert_eq!(body["lessons"][0]["filename"], "0001-api-lesson-visible.md");
     assert_eq!(body["lessons"][0]["iri"], lesson);
     assert_eq!(body["lessons"][0]["related_sources"], 1);
+    assert!(body["lessons"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&ad));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -573,6 +657,97 @@ async fn lessons_archive_downloads_zip_with_generated_files() {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut lesson, &mut text).expect("read lesson");
     assert!(text.contains("Lesson description for Archive Lesson"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn constraints_list_renders_project_constraints() {
+    let dir = temp_dir("constraints-list");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let constraint = record_api_constraint(&state, "API Constraint visible");
+    let decision = record_api_decision(&state, "Constrained ADR");
+    graph::relate(&state, &constraint, "constrains", &decision).expect("link constraint");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/constraints").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["graph_constraints"], 1);
+    assert_eq!(body["constraint_files"], 1);
+    assert_eq!(body["constraints"][0]["num"], "0001");
+    assert_eq!(body["constraints"][0]["title"], "API Constraint visible");
+    assert_eq!(
+        body["constraints"][0]["filename"],
+        "0001-api-constraint-visible.md"
+    );
+    assert_eq!(body["constraints"][0]["iri"], constraint);
+    assert_eq!(body["constraints"][0]["related_targets"], 1);
+    assert!(body["constraints"][0]["search_text"]
+        .as_str()
+        .expect("search text")
+        .contains(&decision));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn constraints_detail_returns_generated_markdown() {
+    let dir = temp_dir("constraints-detail");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_constraint(&state, "Detailed Constraint");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/constraints/0001").await;
+
+    response.assert_status_ok();
+    let body = response.json::<Value>();
+    assert_eq!(body["summary"]["filename"], "0001-detailed-constraint.md");
+    assert!(body["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains("Constraint description for Detailed Constraint"));
+
+    let missing = server.get("/api/v1/constraints/9999").await;
+    missing.assert_status_not_found();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn constraints_archive_downloads_zip_with_generated_files() {
+    let dir = temp_dir("constraints-archive");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    record_api_constraint(&state, "Archive Constraint");
+    let server = test_server(state);
+
+    let response = server.get("/api/v1/constraints/archive.zip").await;
+
+    response.assert_status_ok();
+    assert_eq!(response.content_type(), "application/zip");
+    assert!(response
+        .header(CONTENT_DISPOSITION)
+        .to_str()
+        .expect("content-disposition is text")
+        .contains("attachment; filename=\"moosedev-constraints.zip\""));
+    assert_eq!(
+        response
+            .header(CONTENT_TYPE)
+            .to_str()
+            .expect("content-type is text"),
+        "application/zip"
+    );
+
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(response.as_bytes().as_ref())).expect("zip");
+    assert!(archive.by_name("0000-index.md").is_ok());
+    let mut constraint = archive
+        .by_name("0001-archive-constraint.md")
+        .expect("generated constraint file");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut constraint, &mut text).expect("read constraint");
+    assert!(text.contains("Constraint description for Archive Constraint"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -692,6 +867,323 @@ async fn static_fallback_explains_missing_embedded_frontend() {
         response.text().contains("UI is not embedded"),
         "non-embedded builds should have an explicit fallback message"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
+const ALPHA_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/alpha().";
+
+fn code_doc(path: &str) -> Document {
+    let mut d = Document::new();
+    d.relative_path = path.to_string();
+    d.position_encoding = EnumOrUnknown::new(PositionEncoding::UTF8CodeUnitOffsetFromLineStart);
+    d
+}
+
+fn add_public_fn(d: &mut Document, symbol: &str, name: &str) {
+    let mut info = SymbolInformation::new();
+    info.symbol = symbol.to_string();
+    info.display_name = name.to_string();
+    info.kind = EnumOrUnknown::new(symbol_information::Kind::Function);
+    let mut sig = Signature::new();
+    sig.text = format!("pub fn {name}()");
+    info.signature_documentation = MessageField::some(sig);
+    d.symbols.push(info);
+    let mut occ = Occurrence::new();
+    occ.symbol = symbol.to_string();
+    occ.range = vec![0, 0, 10];
+    occ.symbol_roles = 1;
+    occ.enclosing_range = vec![0, 0, 10];
+    d.occurrences.push(occ);
+}
+
+fn foo_substrate() -> Substrate {
+    let mut index = Index::new();
+    let mut module_doc = code_doc("src/foo/a.rs");
+    add_public_fn(&mut module_doc, ALPHA_RAW, "alpha");
+    index.documents.push(module_doc);
+    let meta = SubstrateMeta::single("rust-analyzer", "c0", Utc::now(), 1, 1);
+    Substrate::from_index(index, meta, false).expect("substrate")
+}
+
+fn record_component(state: &AppState, name: &str, covers: &str) -> String {
+    let class_iri = state.resolve_class("SystemComponent").unwrap();
+    let iri = graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "SystemComponent".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), name.to_string()),
+                (state.capture.title.clone(), name.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    let quad = Quad::new(
+        NamedNode::new(&iri).unwrap(),
+        NamedNode::new(COVERS_PATH).unwrap(),
+        Term::from(Literal::new_simple_literal(covers)),
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+    );
+    let mut txn = state.store.start_transaction().unwrap();
+    txn.insert(quad.as_ref());
+    txn.commit().unwrap();
+    iri
+}
+
+#[tokio::test]
+async fn debt_and_proposals_endpoints() {
+    let state = AppState::bootstrap(&temp_dir("debt"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(foo_substrate()));
+    record_component(&state, "foo", "src/foo/");
+    let subject = record_api_decision(&state, "cited decision");
+    graph::propose_link(
+        &state,
+        &subject,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "cited in prose",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+
+    let server = test_server(state);
+
+    // Debt: foo owns 1 public entity, 0 documented (the proposal must not count).
+    let debt = server.get("/api/v1/debt").await;
+    debt.assert_status_ok();
+    let body = debt.json::<Value>();
+    let row = body["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "foo")
+        .expect("foo component");
+    assert_eq!(row["denominator"], 1);
+    assert_eq!(row["numerator"], 0);
+
+    // Inbox lists the pending proposal.
+    let list = server.get("/api/v1/proposals?status=proposed").await;
+    list.assert_status_ok();
+    let proposals = list.json::<Value>();
+    let arr = proposals["proposals"].as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["predicate"], "concerns");
+    let id = arr[0]["id"].as_str().unwrap().to_string();
+
+    // Accept materializes the real link.
+    let accept = server.post(&format!("/api/v1/proposals/{id}/accept")).await;
+    accept.assert_status_ok();
+    assert_eq!(accept.json::<Value>()["status"], "accepted");
+
+    // Debt numerator now reflects the ratified link.
+    let debt2 = server.get("/api/v1/debt").await;
+    let body2 = debt2.json::<Value>();
+    let row2 = body2["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "foo")
+        .expect("foo component");
+    assert_eq!(row2["numerator"], 1);
+
+    // Unknown id → 404.
+    server
+        .post("/api/v1/proposals/nonexistent/accept")
+        .await
+        .assert_status_not_found();
+}
+
+const ALPHA_NORM: &str = "rust-analyzer cargo testpkg . foo/alpha().";
+
+/// Like [`record_api_constraint`] but with an explicit `accepted` lifecycle
+/// status, which the policy gate requires before a Constraint governs an edit.
+fn record_accepted_constraint(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("Constraint").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "Constraint".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("record constraint")
+}
+
+#[tokio::test]
+async fn policy_endpoint_gates_pushes_and_fires() {
+    let data_dir = temp_dir("policy");
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(foo_substrate()));
+    record_component(&state, "foo", "src/foo/");
+
+    // Mint alpha and link an accepted Constraint to it.
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let components = graph::load_components(&state).unwrap();
+    let defs = state.substrate().unwrap().definitions();
+    let plan = graph::plan_mint(
+        &state,
+        &defs,
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    let alpha = graph::entities_by_symbol(&state, &terms)
+        .unwrap()
+        .get(ALPHA_NORM)
+        .expect("alpha minted")
+        .clone();
+    let constraint = record_accepted_constraint(&state, "alpha must stay stable");
+    graph::relate(&state, &constraint, "constrains", &alpha).expect("constrains edge");
+
+    let server = test_server(state);
+
+    // GATE: an edit against the constrained file escalates to ratification.
+    let gate = server
+        .post("/api/v1/policy")
+        .json(&json!({
+            "host": "test-http",
+            "kind": "edit_proposed",
+            "file": "src/foo/a.rs",
+        }))
+        .await;
+    gate.assert_status_ok();
+    let verdict = gate.json::<Value>();
+    assert_eq!(verdict["decision"], "gate");
+    assert_eq!(verdict["disposition"], "require_ratification");
+    assert!(verdict["reason"]
+        .as_str()
+        .unwrap()
+        .contains("alpha must stay stable"));
+    assert_eq!(verdict["records"][0]["iri"], constraint.as_str());
+    assert_eq!(verdict["entities"][0], alpha.as_str());
+
+    // PUSH: touching the file injects the linked knowledge.
+    let push = server
+        .post("/api/v1/policy")
+        .json(&json!({
+            "host": "test-http",
+            "kind": "entity_touched",
+            "file": "src/foo/a.rs",
+        }))
+        .await;
+    push.assert_status_ok();
+    let injected = push.json::<Value>();
+    assert_eq!(injected["decision"], "inject");
+    assert!(injected["dossier_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("alpha must stay stable"));
+
+    // Both acted decisions appended fire telemetry.
+    let fires =
+        std::fs::read_to_string(moosedev::policy::fires::fires_log_path_for(&data_dir)).unwrap();
+    let lines: Vec<Value> = fires
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["verb"], "gate");
+    assert_eq!(lines[1]["verb"], "push");
+    assert_eq!(lines[0]["host"], "test-http");
+}
+
+#[tokio::test]
+async fn automatic_capture_journals_without_touching_the_graph() {
+    let dir = temp_dir("capture-journals");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+
+    let response = server
+        .post("/api/v1/capture")
+        .json(&json!({
+            "host": "claude-code",
+            "summary": "Waiting on the test suite — status, not a decision",
+            "files": ["src/lib.rs", "tests/api.rs"],
+            // Retired field from older deployed adapters: ignored, not an error.
+            "since_unix_seconds": 12345
+        }))
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>()["outcome"], "journaled");
+
+    // Nothing entered the graph or the ratification inbox.
+    let proposals = server.get("/api/v1/proposals?status=proposed").await;
+    proposals.assert_status_ok();
+    assert!(proposals.json::<Value>()["proposals"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The checkpoint is one fire-telemetry journal line carrying the payload.
+    let fires = std::fs::read_to_string(moosedev::policy::fires::fires_log_path_for(&dir))
+        .expect("journal fire");
+    let event: Value = serde_json::from_str(fires.lines().last().unwrap()).unwrap();
+    assert_eq!(event["verb"], "capture");
+    assert_eq!(event["decision"], "journaled");
+    assert_eq!(event["host"], "claude-code");
+    assert_eq!(
+        event["summary"],
+        "Waiting on the test suite — status, not a decision"
+    );
+    assert_eq!(event["files"][1], "tests/api.rs");
+    assert!(event["records_cited"].as_array().unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn capture_with_nothing_to_journal_rejects() {
+    let dir = temp_dir("capture-empty");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let server = test_server(state);
+
+    let empty = server
+        .post("/api/v1/capture")
+        .json(&json!({ "host": "claude-code", "summary": "   " }))
+        .await;
+    empty.assert_status_bad_request();
+    assert!(empty.text().contains("nothing to journal"));
+    assert!(!moosedev::policy::fires::fires_log_path_for(&dir).exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn automatic_capture_reports_journal_write_failure() {
+    let dir = temp_dir("capture-write-failure");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    std::fs::create_dir(moosedev::policy::fires::fires_log_path_for(&dir))
+        .expect("make fire-log path unwritable as a file");
+    let server = test_server(state);
+
+    let response = server
+        .post("/api/v1/capture")
+        .json(&json!({
+            "host": "opencode",
+            "files": ["src/lib.rs"]
+        }))
+        .await;
+
+    response.assert_status_internal_server_error();
+    assert!(response.text().contains("failed to journal capture"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

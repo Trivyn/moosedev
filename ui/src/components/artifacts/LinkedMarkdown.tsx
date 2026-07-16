@@ -1,7 +1,7 @@
 import ReactMarkdown, { Components } from 'react-markdown';
 import { Link as MuiLink } from '@mui/material';
 
-export type ArtifactKind = 'adrs' | 'requirements' | 'lessons';
+export type ArtifactKind = 'adrs' | 'requirements' | 'lessons' | 'constraints';
 
 export interface ArtifactTarget {
   kind: ArtifactKind;
@@ -13,7 +13,7 @@ interface LinkedMarkdownProps {
   onNavigateArtifact?: (target: ArtifactTarget) => void;
 }
 
-function artifactTargetForIri(value: string): ArtifactTarget | null {
+export function artifactTargetForIri(value: string): ArtifactTarget | null {
   if (value.startsWith('https://moosedev.dev/kg/Requirement/')) {
     return { kind: 'requirements', iri: value };
   }
@@ -22,6 +22,9 @@ function artifactTargetForIri(value: string): ArtifactTarget | null {
   }
   if (value.startsWith('https://moosedev.dev/kg/Lesson/')) {
     return { kind: 'lessons', iri: value };
+  }
+  if (value.startsWith('https://moosedev.dev/kg/Constraint/')) {
+    return { kind: 'constraints', iri: value };
   }
   return null;
 }

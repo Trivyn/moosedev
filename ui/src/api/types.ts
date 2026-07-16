@@ -9,6 +9,67 @@ export interface HealthResponse {
   llm_assist_level: string;
 }
 
+export interface ComponentCoverage {
+  iri: string | null;
+  name: string;
+  numerator: number;
+  denominator: number;
+  coverage: number | null;
+  /** Core-surface subset (ratified core roles); 0/0 until roles are ratified. */
+  core_numerator: number;
+  core_denominator: number;
+  undocumented: string[];
+}
+
+export interface WhyCoverageResponse {
+  components: ComponentCoverage[];
+  unmapped: number;
+}
+
+export interface Proposal {
+  id: string;
+  iri: string;
+  /**
+   * 'link' (pending record → entity edge), 'record' (proposed record), or
+   * 'judgment' (pending entity → role/criticality edge).
+   */
+  kind: 'link' | 'record' | 'judgment';
+  label: string;
+  subject_iri: string;
+  predicate: string;
+  target_symbol: string;
+  target_path: string;
+  /** Local class name for 'record' entries (e.g. ArchitecturalDecision). */
+  record_class: string | null;
+  /** Role/criticality individual IRI, for 'judgment' entries. */
+  target_iri: string;
+  /** Classifier confidence literal (e.g. '0.75'), for 'judgment' entries. */
+  confidence: string | null;
+  /** 'escalated' or 'auto-held', for 'judgment' entries. */
+  escalation: string | null;
+  /** Subject's human name: record title ('link') or entity code name ('judgment'). */
+  subject_name: string;
+  /** Subject record's claim (description snippet), for 'link' entries. */
+  subject_description: string | null;
+  /** Subject entity defining file, for 'judgment' entries. */
+  subject_path: string;
+  /** Humanized target: logical path ('link') or individual local name ('judgment'). */
+  target_display: string;
+  evidence: string | null;
+  status: string;
+}
+
+export interface ProposalListResponse {
+  proposals: Proposal[];
+}
+
+export interface ProposalActionResponse {
+  id: string;
+  status: string;
+  entity_iri: string | null;
+  entity_name: string | null;
+}
+
 export interface AdrWarnings {
   missing_context: string[];
   missing_decision: string[];
@@ -24,6 +85,8 @@ export interface AdrSummary {
   author: string;
   iri: string;
   filename: string;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface AdrListResponse {
@@ -55,6 +118,8 @@ export interface RequirementSummary {
   iri: string;
   filename: string;
   related_adrs: number;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface RequirementListResponse {
@@ -85,6 +150,8 @@ export interface LessonSummary {
   iri: string;
   filename: string;
   related_sources: number;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
 }
 
 export interface LessonListResponse {
@@ -99,6 +166,64 @@ export interface LessonListResponse {
 export interface LessonDetailResponse {
   summary: LessonSummary;
   markdown: string;
+}
+
+export interface ConstraintWarnings {
+  missing_description: string[];
+  unlinked_constraints: string[];
+}
+
+export interface ConstraintSummary {
+  num: string;
+  title: string;
+  status: string;
+  date: string;
+  author: string;
+  iri: string;
+  filename: string;
+  related_targets: number;
+  /** Complete generated detail text used by the shared artifact-list search. */
+  search_text: string;
+}
+
+export interface ConstraintListResponse {
+  generated_at: string;
+  graph_constraints: number;
+  constraint_files: number;
+  index_filename: string;
+  warnings: ConstraintWarnings;
+  constraints: ConstraintSummary[];
+}
+
+export interface ConstraintDetailResponse {
+  summary: ConstraintSummary;
+  markdown: string;
+}
+
+export interface RecordOutgoingEdge {
+  predicate: string;
+  target_iri: string;
+  target_label: string;
+  target_kind: string;
+}
+
+export interface RecordIncomingEdge {
+  predicate: string;
+  source_iri: string;
+  source_label: string;
+  source_kind: string;
+}
+
+export interface RecordDetailResponse {
+  iri: string;
+  kind: string;
+  title: string;
+  description: string | null;
+  status: string | null;
+  timestamp: string | null;
+  author: string | null;
+  outgoing: RecordOutgoingEdge[];
+  incoming: RecordIncomingEdge[];
 }
 
 export interface ChatMessage {

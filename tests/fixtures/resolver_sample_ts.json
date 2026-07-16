@@ -1,0 +1,12 @@
+[
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"pub const MAX_DEPTH","token":"MAX_DEPTH","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:const:MAX_DEPTH","expect_definition":true,"note":"top-level const"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"pub label: String","token":"label","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:struct:Widget","expect_definition":true,"note":"field anchors enclosing struct"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"Dark { level","token":"level","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:enum:Shade","expect_definition":true,"note":"variant field anchors enum"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"fn render(&self) -> String;","token":"render","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:fn:Render::render","expect_definition":true,"note":"trait signature"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"\"default body\"","token":"default","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:fn:Render::hint","expect_definition":true,"note":"trait default body"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"let local = self.label.clone()","token":"local","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render","expect_definition":true,"note":"trait impl method"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"Widget {","token":"Widget","occurrence":4,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:fn:Widget::new","expect_definition":true,"note":"inherent impl method"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"42","token":"42","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:fn:outer::inner::nested_fn","expect_definition":true,"note":"nested modules"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"pub struct Hidden","token":"Hidden","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:struct:outer::Hidden","expect_definition":true,"note":"nested struct"},
+  {"path":"tests/fixtures/ts_fallback.rs","anchor":"macro_rules! shout","token":"shout","occurrence":null,"expect_symbol":"ts:rust:tests/fixtures/ts_fallback.rs:macro:shout","expect_definition":true,"note":"macro definition"}
+]

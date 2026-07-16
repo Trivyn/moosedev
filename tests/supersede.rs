@@ -1,10 +1,11 @@
 //! Supersede-with-rationale lifecycle + generic object-property capture.
 //!
-//! Proves: a decision change links new -supersedes-> old, captures the WHY as a
-//! linked `Rationale`, and flips the old decision to `superseded` while preserving
-//! it (and all its other triples) as history; the precondition rejects bad
-//! targets without writing; the read path hides retired records by default and
-//! surfaces the chain; and `record_instance_with_relations` writes relations.
+//! Proves: a decision change persists both new -supersedes-> old and old
+//! -isSupersededBy-> new, captures the WHY as a linked `Rationale`, and flips the
+//! old decision to `superseded` while preserving it (and all its other triples)
+//! as history; the precondition rejects bad targets without writing; the read
+//! path hides retired records by default and surfaces the chain; and
+//! `record_instance_with_relations` writes relations.
 
 use std::path::Path;
 
@@ -115,11 +116,14 @@ fn supersede_links_records_captures_why_and_preserves_old() {
     .expect("supersede");
 
     let supersedes = state.resolve_object_property("supersedes").unwrap();
+    let is_superseded_by = state.resolve_object_property("isSupersededBy").unwrap();
     let has_rationale = state.resolve_object_property("hasRationale").unwrap();
     let rationale_class = state.resolve_class("Rationale").unwrap();
 
-    // The links: new -supersedes-> old, new -hasRationale-> rationale node.
+    // Both lifecycle directions are asserted by the write itself; readers must
+    // not depend on an OWL reasoner having materialized the inverse first.
     assert!(has_edge(&state, &out.new_iri, &supersedes, &old));
+    assert!(has_edge(&state, &old, &is_superseded_by, &out.new_iri));
     assert!(has_edge(
         &state,
         &out.new_iri,

@@ -1,16 +1,26 @@
 pub mod adrs;
 pub mod chat;
+pub mod constraints;
+pub mod debt;
 pub mod export;
 pub mod health;
 pub mod lessons;
+pub mod policy;
+pub mod proposals;
+pub mod records;
 pub mod requirements;
 pub mod sparql;
 pub mod static_files;
 
 pub use adrs::*;
 pub use chat::*;
+pub use constraints::*;
+pub use debt::*;
 pub use export::*;
 pub use health::*;
 pub use lessons::*;
+pub use policy::*;
+pub use proposals::*;
+pub use records::*;
 pub use requirements::*;
 pub use sparql::*;

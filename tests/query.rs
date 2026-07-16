@@ -99,7 +99,7 @@ async fn query_does_not_surface_schema_spec_internal_error_for_project_records()
     let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
 
     let mut state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
-    state.engine_config.llm_assist_level = LlmAssistLevel::Standard;
+    state.engine_config.llm_assist_level = LlmAssistLevel::Sensor;
 
     let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
     graph::record_instance(

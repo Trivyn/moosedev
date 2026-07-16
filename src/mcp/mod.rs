@@ -49,6 +49,14 @@ fn format_suggestions(suggestions: &[graph::LinkSuggestion]) -> String {
     out
 }
 
+fn format_path_list(paths: &[String]) -> String {
+    if paths.is_empty() {
+        "(none)".to_string()
+    } else {
+        format!("[{}]", paths.join(", "))
+    }
+}
+
 /// Best-effort capture-time nudge: up to three legal, unasserted links for the new
 /// record. Never fails the write — a suggestion error just yields no note.
 async fn capture_suggestion_note(state: &graph::AppState, iri: &str) -> String {
@@ -204,8 +212,10 @@ pub struct GetRelevantContextArgs {
     pub topic: Option<String>,
     /// Maximum number of items to return (default 10).
     pub limit: Option<usize>,
-    /// Include superseded/deprecated records too. Defaults to false — only the
-    /// current working set is returned, with each item's supersedes link shown.
+    /// Include records outside the working set too (superseded, deprecated,
+    /// rejected, and still-proposed ones). Defaults to false — only ratified
+    /// current knowledge is returned, with each item's supersedes link shown;
+    /// pending proposals live in `pending_ratifications`, not here.
     pub include_history: Option<bool>,
 }
 
@@ -254,6 +264,92 @@ pub struct RelateArgs {
     pub predicate: String,
     /// IRI of the object record (the relationship's target).
     pub object_iri: String,
+}
+
+/// Arguments for the `link_code` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LinkCodeArgs {
+    /// IRI of the typed KG record to link.
+    pub record_iri: String,
+    /// Object-property local name for the link. Defaults to "concerns".
+    pub predicate: Option<String>,
+    /// Repo-relative path as stored in the substrate index; use with `line` and `col`.
+    pub file: Option<String>,
+    /// 1-based source line for a position selector.
+    pub line: Option<u32>,
+    /// 1-based UTF-8 byte column for a position selector.
+    pub col: Option<u32>,
+    /// SCIP symbol, raw or version-normalized, as an alternative to a file position.
+    pub symbol: Option<String>,
+}
+
+/// Arguments for the `declare_component_paths` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeclareComponentPathsArgs {
+    /// SystemComponent IRI, or its exact name (rdfs:label).
+    pub component: String,
+    /// Repo-relative paths the component covers. Trailing '/' = directory
+    /// prefix (e.g. "src/code/"); no trailing slash = exact file path.
+    pub paths: Vec<String>,
+}
+
+/// Arguments for the `get_entity_dossier` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetEntityDossierArgs {
+    /// Repo-relative path as stored in the substrate index; use with `line` and `col`.
+    pub file: Option<String>,
+    /// 1-based source line for a position selector.
+    pub line: Option<u32>,
+    /// 1-based UTF-8 byte column for a position selector.
+    pub col: Option<u32>,
+    /// SCIP symbol, raw or version-normalized, as an alternative selector.
+    pub symbol: Option<String>,
+    /// CodeEntity IRI as an alternative selector.
+    pub iri: Option<String>,
+}
+
+/// Arguments for the `capture_decision_point` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CaptureDecisionPointArgs {
+    /// Repo-relative changed files (diff-derived by the host adapter).
+    pub files: Option<Vec<String>>,
+    /// The host's own summary text for the decision point — used as the title
+    /// seed; never an interrogated justification.
+    pub summary: Option<String>,
+    /// Optional existing Requirement (IRI or exact title) for `isMotivatedBy`.
+    /// An unresolvable value fails the capture; it is never invented.
+    pub requirement: Option<String>,
+    /// Optional substrate symbols the decision concerns; each is queued as its
+    /// own `concerns` link proposal.
+    pub entities: Option<Vec<String>>,
+    /// Host adapter identity for fire telemetry (defaults to "mcp").
+    pub host: Option<String>,
+    /// Optional author override (defaults to the MCP client name).
+    pub author: Option<String>,
+}
+
+/// Arguments for the `evaluate_policy` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EvaluatePolicyArgs {
+    /// Host adapter reporting the event (e.g. "claude-code", "opencode");
+    /// recorded in fire telemetry. Defaults to "mcp".
+    pub host: Option<String>,
+    /// Event kind: "entity_touched" (push), "edit_proposed" (gate), or
+    /// "decision_point" (capture).
+    pub event: String,
+    /// Repo-relative file the event concerns (entity_touched / edit_proposed).
+    pub file: Option<String>,
+    /// Optional 1-based line for a precise position.
+    pub line: Option<u32>,
+    /// Optional 1-based UTF-8 byte column for a precise position.
+    pub col: Option<u32>,
+    /// Optional edit-text anchor (e.g. an Edit tool's old_string), located in
+    /// the on-disk file to scope the gate to the definitions it overlaps.
+    pub anchor: Option<String>,
+    /// Changed files, for a decision_point event.
+    pub files: Option<Vec<String>>,
+    /// Host-provided summary text, for a decision_point event.
+    pub summary: Option<String>,
 }
 
 /// Arguments for the `get_provenance` tool.
@@ -337,6 +433,173 @@ impl MooseDevServer {
     #[tool(description = "Health check; returns 'pong'.")]
     async fn ping(&self) -> Result<CallToolResult, McpError> {
         Ok(tool_ok("pong"))
+    }
+
+    /// Report the pending ratification queue depth (read-only).
+    #[tool(
+        description = "Count the pending proposals awaiting human ratification (record→code-entity links and proposed records). Read-only; returns the count plus a short preview. Judgment proposals (role/criticality classifications) never count here — they wait quietly in the workbench inbox and are tallied separately. Ratify or reject in the workbench Ratifications page."
+    )]
+    async fn pending_ratifications(&self) -> Result<CallToolResult, McpError> {
+        let proposals = match graph::list_proposals(&self.state, Some("proposed")) {
+            Ok(proposals) => proposals,
+            Err(e) => {
+                return Ok(tool_error(format!(
+                    "failed to read the ratification queue: {e}"
+                )))
+            }
+        };
+        // Never-nudge: judgments wait quietly; only links + records demand.
+        let (judgments, nudging): (Vec<_>, Vec<_>) = proposals
+            .into_iter()
+            .partition(|p| p.kind == graph::ProposalKind::Judgment);
+        let judgment_note = if judgments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n({} judgment proposal(s) waiting quietly — browse them in the workbench inbox.)",
+                judgments.len()
+            )
+        };
+        if nudging.is_empty() {
+            return Ok(tool_ok(format!(
+                "0 pending ratifications — the inbox is empty.{judgment_note}"
+            )));
+        }
+        let mut out = format!("{} pending ratification(s):\n", nudging.len());
+        for proposal in nudging.iter().take(10) {
+            match proposal.kind {
+                graph::ProposalKind::Link => out.push_str(&format!(
+                    "  - [link] {} → {} ({})\n",
+                    proposal.subject_iri, proposal.target_symbol, proposal.target_path
+                )),
+                graph::ProposalKind::Record => out.push_str(&format!(
+                    "  - [record] {} \"{}\"\n",
+                    proposal.record_class.as_deref().unwrap_or("Record"),
+                    proposal.label
+                )),
+                graph::ProposalKind::Judgment => unreachable!("partitioned out above"),
+            }
+        }
+        if nudging.len() > 10 {
+            out.push_str(&format!("  … and {} more\n", nudging.len() - 10));
+        }
+        out.push_str("Ratify or reject them in the workbench Ratifications page.");
+        out.push_str(&judgment_note);
+        Ok(tool_ok(out))
+    }
+
+    /// Evaluate one host event against the active-agency policy engine.
+    #[tool(
+        description = "Evaluate a host event against the graph-driven policy engine and return the typed verdict as JSON. Host adapters contain zero policy: report the event (`entity_touched` for push, `edit_proposed` for gate, `decision_point` for capture) and enact the returned decision (allow / inject / gate / capture_trigger). Gate verdicts cite the accepted Constraints that govern the touched entities. Read-only on the graph; acted decisions append fire telemetry to .moosedev/fires.jsonl."
+    )]
+    async fn evaluate_policy(
+        &self,
+        Parameters(args): Parameters<EvaluatePolicyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let host = args.host.unwrap_or_else(|| "mcp".to_string());
+        let event = match args.event.as_str() {
+            "entity_touched" => {
+                let Some(file) = args.file else {
+                    return Ok(tool_error("entity_touched requires `file`"));
+                };
+                crate::policy::PolicyEvent::EntityTouched {
+                    file,
+                    line: args.line,
+                    col: args.col,
+                }
+            }
+            "edit_proposed" => {
+                let Some(file) = args.file else {
+                    return Ok(tool_error("edit_proposed requires `file`"));
+                };
+                crate::policy::PolicyEvent::EditProposed {
+                    file,
+                    line: args.line,
+                    col: args.col,
+                    anchor: args.anchor,
+                }
+            }
+            "decision_point" => crate::policy::PolicyEvent::DecisionPoint {
+                files: args.files.unwrap_or_default(),
+                summary: args.summary,
+            },
+            other => {
+                return Ok(tool_error(format!(
+                    "unknown event kind {other:?}; use entity_touched, edit_proposed, or decision_point"
+                )))
+            }
+        };
+        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match crate::policy::evaluate_and_fire(&self.state, &repo_root, &event, &host) {
+            Ok(decision) => match serde_json::to_string_pretty(&decision) {
+                Ok(json) => Ok(tool_ok(json)),
+                Err(e) => Ok(tool_error(format!("failed to serialize decision: {e}"))),
+            },
+            Err(e) => Ok(tool_error(format!("policy evaluation failed: {e}"))),
+        }
+    }
+
+    /// Grounded capture at a decision point — proposed record + queued links.
+    #[tool(
+        description = "DELIBERATE grounded capture at a decision point (episode end, acceptance checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the caller's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Call this only when you judge the session produced a real decision worth ratifying; automatic session-end adapters journal to fire telemetry via HTTP instead and never mint records. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
+    )]
+    async fn capture_decision_point(
+        &self,
+        Parameters(args): Parameters<CaptureDecisionPointArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let author = resolve_author(&args.author, &context);
+        let host = args.host.unwrap_or_else(|| "mcp".to_string());
+        let files = args.files.unwrap_or_default();
+        let entities = args.entities.unwrap_or_default();
+        let captured = match graph::capture_decision_point(
+            &self.state,
+            &files,
+            args.summary.as_deref(),
+            args.requirement.as_deref(),
+            &entities,
+            &author,
+            Utc::now(),
+        ) {
+            Ok(captured) => captured,
+            Err(e) => return Ok(tool_error(format!("grounded capture failed: {e}"))),
+        };
+
+        if let Err(e) = self.state.index_record(&captured.record_iri).await {
+            tracing::warn!("dense index update failed for {}: {e}", captured.record_iri);
+        }
+        crate::policy::fires::append_fire_best_effort(
+            &self.state.data_dir,
+            &crate::policy::fires::FireEvent {
+                ts: Utc::now().to_rfc3339(),
+                verb: "capture",
+                host,
+                entity: None,
+                decision: "proposed".to_string(),
+                records_cited: vec![captured.record_iri.clone()],
+                summary: None,
+                files: Vec::new(),
+            },
+        );
+
+        let mut out = format!(
+            "Proposed ArchitecturalDecision \"{}\" → {}\n",
+            captured.title, captured.record_iri
+        );
+        if !captured.proposed_links.is_empty() {
+            out.push_str(&format!(
+                "Queued {} link proposal(s) for ratification.\n",
+                captured.proposed_links.len()
+            ));
+        }
+        if !captured.unanchored.is_empty() {
+            out.push_str(&format!(
+                "Not anchored in the substrate (no link queued): {}.\n",
+                captured.unanchored.join(", ")
+            ));
+        }
+        out.push_str("Ratify or reject in the workbench Ratifications page.");
+        Ok(tool_ok(out))
     }
 
     /// Record a typed knowledge item into the durable project knowledge graph.
@@ -471,7 +734,7 @@ impl MooseDevServer {
 
     /// Record a new decision that supersedes an existing one, preserving history.
     #[tool(
-        description = "Record a NEW knowledge item that supersedes an existing one when a prior decision/requirement/constraint/lesson changes. The replacement is recorded with the SAME knowledge class as the superseded item (type-preserving). Links new -supersedes-> old, captures WHY it changed as a linked Rationale, and marks the old item 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the item being replaced as `superseded_iri`."
+        description = "Record a NEW knowledge item that supersedes an existing one when a prior decision/requirement/constraint/lesson changes. The replacement is recorded with the SAME knowledge class as the superseded item (type-preserving). Atomically links new -supersedes-> old and old -isSupersededBy-> new, captures WHY it changed as a linked Rationale, and marks the old item 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the item being replaced as `superseded_iri`."
     )]
     async fn supersede_decision(
         &self,
@@ -620,6 +883,17 @@ impl MooseDevServer {
                 "`predicate` must not be empty (an object-property local name, e.g. \"violates\")",
             ));
         }
+        // Judgment predicates are ratification-only: a bare playsRole /
+        // hasCriticality edge would carry no proposal node (no confidence,
+        // no ratification provenance) and would be invisible to the dossier
+        // badges and the policy gate, which read judgment nodes.
+        if matches!(predicate.as_str(), "playsRole" | "hasCriticality") {
+            return Ok(tool_error(format!(
+                "{predicate:?} is ratification-only: judgments are proposed by `moosedev classify` \
+                 (or recategorized in the workbench) and materialize on human acceptance — never \
+                 asserted directly"
+            )));
+        }
         match graph::relate(&self.state, &subject_iri, &predicate, &object_iri) {
             Ok(out) => {
                 // A new edge changes what inverse-materialization yields.
@@ -630,6 +904,212 @@ impl MooseDevServer {
                 )))
             }
             Err(e) => Ok(tool_error(format!("failed to relate: {e}"))),
+        }
+    }
+
+    /// Link a typed knowledge record to a CodeEntity resolved from the substrate.
+    #[tool(
+        description = "Link a typed knowledge record to the code entity at a source position or SCIP symbol, lazily minting the CodeEntity in the project KG when it is not yet minted. Pass exactly one selector: either `file` + 1-based `line` + 1-based `col`, or `symbol` (raw or normalized). `predicate` defaults to `concerns`; intent links such as `realizes`, `satisfies`, and `embodies` are auto-oriented."
+    )]
+    async fn link_code(
+        &self,
+        Parameters(args): Parameters<LinkCodeArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let record_iri = args.record_iri.trim().to_string();
+        if record_iri.is_empty() {
+            return Ok(tool_error("`record_iri` must not be empty"));
+        }
+        let predicate = args
+            .predicate
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("concerns")
+            .to_string();
+
+        let file = args.file.map(|s| s.trim().to_string());
+        let symbol = args.symbol.map(|s| s.trim().to_string());
+        let position_supplied = file.is_some() || args.line.is_some() || args.col.is_some();
+        let symbol_supplied = symbol.as_deref().is_some_and(|s| !s.is_empty());
+        if symbol.as_deref().is_some_and(str::is_empty) {
+            return Ok(tool_error("`symbol` must not be empty when provided"));
+        }
+        if position_supplied {
+            let mut missing = Vec::new();
+            if file.as_deref().is_none_or(str::is_empty) {
+                missing.push("file");
+            }
+            if args.line.is_none() {
+                missing.push("line");
+            }
+            if args.col.is_none() {
+                missing.push("col");
+            }
+            if !missing.is_empty() {
+                return Ok(tool_error(format!(
+                    "position selector requires `file`, `line`, and `col`; missing {}",
+                    missing.join(", ")
+                )));
+            }
+        }
+        if position_supplied && symbol_supplied {
+            return Ok(tool_error(
+                "pass exactly one selector: `file` + `line` + `col`, or `symbol`",
+            ));
+        }
+        if !position_supplied && !symbol_supplied {
+            return Ok(tool_error(
+                "pass exactly one selector: `file` + `line` + `col`, or `symbol`",
+            ));
+        }
+
+        let selector = if position_supplied {
+            graph::CodeSelector::Position {
+                file: file.expect("validated file"),
+                line: args.line.expect("validated line"),
+                col: args.col.expect("validated col"),
+            }
+        } else {
+            graph::CodeSelector::Symbol(symbol.expect("validated symbol"))
+        };
+        let agent = resolve_author(&None, &context);
+
+        match graph::link_code(&self.state, &record_iri, &predicate, &selector, &agent) {
+            Ok(out) => {
+                self.state.note_project_write();
+                let stale_note = if out.substrate_stale {
+                    "\nwarning: substrate is stale; positions may have drifted, re-run `moosedev index`."
+                } else {
+                    ""
+                };
+                Ok(tool_ok(format!(
+                    "Linked CodeEntity \"{}\" ({}) [created: {}]\nedge: {} -{}-> {}{}",
+                    out.entity_name,
+                    out.entity_iri,
+                    out.created,
+                    out.subject_iri,
+                    out.predicate_local,
+                    out.object_iri,
+                    stale_note
+                )))
+            }
+            Err(e) => Ok(tool_error(e.to_string())),
+        }
+    }
+
+    /// Declare repo path coverage for a SystemComponent.
+    #[tool(
+        description = "Declare repo-relative path coverage for a SystemComponent. Coverage drives `moosedev mint`'s `realizes` derivation by mapping source paths to owning components. A path ending in `/` is a directory prefix; without a trailing slash it is an exact file path. The call is idempotent and add-only. When several components cover a file, the longest matching path wins."
+    )]
+    async fn declare_component_paths(
+        &self,
+        Parameters(args): Parameters<DeclareComponentPathsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let component = args.component.trim().to_string();
+        if component.is_empty() {
+            return Ok(tool_error("`component` must not be empty"));
+        }
+        if args.paths.is_empty() {
+            return Ok(tool_error("`paths` must not be empty"));
+        }
+
+        match graph::declare_component_paths(&self.state, &component, &args.paths) {
+            Ok(out) => {
+                self.state.note_project_write();
+                Ok(tool_ok(format!(
+                    "Declared coverage for \"{}\" ({})\nadded: {}\nalready covered: {}",
+                    out.component_name,
+                    out.component_iri,
+                    format_path_list(&out.added),
+                    format_path_list(&out.already_covered)
+                )))
+            }
+            Err(e) => Ok(tool_error(e.to_string())),
+        }
+    }
+
+    /// Get the recorded knowledge directly linked to a CodeEntity.
+    #[tool(
+        description = "Returns the recorded knowledge (decisions, constraints, lessons, requirements, and related records) directly linked to the code entity at a position, symbol, or IRI. Pass exactly one selector: `file` + 1-based `line` + 1-based `col`, `symbol`, or `iri`. Distinguishes a not-indexed file from covered-but-unlinked code. When no recorded knowledge is directly linked, returns a clear no-recorded-knowledge reply; use `link_code` to attach records."
+    )]
+    async fn get_entity_dossier(
+        &self,
+        Parameters(args): Parameters<GetEntityDossierArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let file = args.file.map(|s| s.trim().to_string());
+        let symbol = args.symbol.map(|s| s.trim().to_string());
+        let iri = args.iri.map(|s| s.trim().to_string());
+        let position_supplied = file.is_some() || args.line.is_some() || args.col.is_some();
+        let symbol_supplied = symbol.is_some();
+        let iri_supplied = iri.is_some();
+
+        if symbol.as_deref().is_some_and(str::is_empty) {
+            return Ok(tool_error("`symbol` must not be empty when provided"));
+        }
+        if iri.as_deref().is_some_and(str::is_empty) {
+            return Ok(tool_error("`iri` must not be empty when provided"));
+        }
+        if position_supplied {
+            let mut missing = Vec::new();
+            if file.as_deref().is_none_or(str::is_empty) {
+                missing.push("file");
+            }
+            if args.line.is_none() {
+                missing.push("line");
+            }
+            if args.col.is_none() {
+                missing.push("col");
+            }
+            if !missing.is_empty() {
+                return Ok(tool_error(format!(
+                    "position selector requires `file`, `line`, and `col`; missing {}",
+                    missing.join(", ")
+                )));
+            }
+        }
+
+        let selector_count = position_supplied as u8 + symbol_supplied as u8 + iri_supplied as u8;
+        if selector_count != 1 {
+            return Ok(tool_error(
+                "pass exactly one selector: `file` + `line` + `col`, `symbol`, or `iri`",
+            ));
+        }
+
+        let position_file = position_supplied.then(|| file.clone().expect("validated file"));
+        let target = if position_supplied {
+            graph::DossierTarget::Position {
+                file: file.expect("validated file"),
+                line: args.line.expect("validated line"),
+                col: args.col.expect("validated col"),
+            }
+        } else if let Some(symbol) = symbol {
+            graph::DossierTarget::Symbol(symbol)
+        } else {
+            graph::DossierTarget::Iri(iri.expect("validated iri"))
+        };
+
+        match graph::get_entity_dossier(&self.state, &target) {
+            Ok(Some(dossier)) => Ok(tool_ok(graph::render_markdown(&dossier))),
+            Ok(None) => {
+                if let Some(file) = position_file {
+                    let Some(substrate) = self.state.substrate() else {
+                        return Ok(tool_ok(
+                            "code substrate unavailable; run `moosedev index` and restart the backend; records cannot be anchored here yet.",
+                        ));
+                    };
+                    if !substrate.can_anchor(&file) {
+                        return Ok(tool_ok(format!(
+                            "`{file}` is not in the code substrate (indexed: {}); records cannot be anchored here yet.",
+                            substrate.describe_coverage()
+                        )));
+                    }
+                }
+                Ok(tool_ok(
+                    "No recorded knowledge is linked to this code; attach records with `link_code`.",
+                ))
+            }
+            Err(e) => Ok(tool_error(e.to_string())),
         }
     }
 

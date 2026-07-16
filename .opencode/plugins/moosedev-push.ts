@@ -1,9 +1,40 @@
 import { spawn } from "node:child_process"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { createInterface } from "node:readline"
+
+// MOOSEDev active-agency adapter for opencode (v2.2).
+//
+// This plugin contains ZERO policy. It observes host events, reports them to
+// the MOOSEDev daemon's policy engine (`evaluate_policy` over `moosedev
+// --connect`), and enacts the typed verdict it gets back:
+//   - PUSH   entity_touched on the session's working set → inject the returned
+//            dossier markdown (the same bytes the editor hover shows).
+//   - GATE   edit_proposed before Edit/Write/Patch tools → deny blocks the
+//            tool call; require_ratification asks via the permission prompt,
+//            degrading to a warning note when no prompt fires (spec §4.1:
+//            gate where blocking exists, warn-and-inject where only
+//            observation exists).
+//   - CAPTURE session.idle with fresh edits → one journal line in the
+//            daemon's fire telemetry (`POST /api/v1/capture`, debounced).
+//            NEVER a graph record: automatic checkpoints are status, not
+//            decisions (Lesson 641c1811, AD 007dce15).
+// If the daemon is unreachable the plugin fails OPEN (edits proceed, one
+// warning) — a memory sidecar must never brick the host.
 
 type PluginInput = {
   directory: string
   worktree?: string
+}
+
+type ToolBeforeInput = {
+  tool: string
+  sessionID: string
+  callID: string
+}
+
+type ToolBeforeOutput = {
+  args: unknown
 }
 
 type ToolAfterInput = {
@@ -19,6 +50,24 @@ type ToolAfterOutput = {
   metadata: unknown
 }
 
+type PermissionInput = {
+  id: string
+  type: string
+  sessionID: string
+  callID?: string
+  title: string
+  metadata: Record<string, unknown>
+}
+
+type PermissionOutput = {
+  status: "ask" | "deny" | "allow"
+}
+
+type HostEvent = {
+  type: string
+  properties?: Record<string, unknown>
+}
+
 type SystemTransformOutput = {
   system: string[]
 }
@@ -30,29 +79,23 @@ type MessagesTransformOutput = {
   }>
 }
 
-type KnowledgeRecord = {
-  title: string
-  description: string
-  iri: string
+type PolicyVerdict = {
+  decision: "allow" | "inject" | "warn" | "gate" | "capture_trigger"
+  dossier_markdown?: string
+  entities?: string[]
+  records?: Array<{ iri: string; kind: string; title: string }>
+  disposition?: "deny" | "require_plan" | "require_ratification"
+  reason?: string
 }
 
 const MAX_WORKING_SET = 8
-const MAX_SYMBOLS = 6
-const RETRIEVAL_LIMIT = 5
-const BLOCK_LIMIT = 8
+const MAX_PUSH_FILES = 3
+const MAX_BLOCK_CHARS = 6_000
 const REQUEST_TIMEOUT_MS = 5_000
+const CAPTURE_MIN_INTERVAL_MS = 10 * 60_000
 const BLOCK_HEADER = "## Relevant recorded project knowledge (MOOSEDev)"
-const IRI_PATTERN = /https:\/\/moosedev\.dev\/kg\/\S+/g
-// Definition names (struct/enum/trait/type/class) are the strongest retrieval keys — records are
-// indexed by SYMBOL (e.g. "SchemaTriple"), NOT by file path. CamelCase-initial only, and NO `impl`
-// (which captures the trait — "impl Default for X" → "Default" — i.e. noise).
-const TYPE_DEF_RE = /\b(?:struct|enum|trait|type|class|interface)\s+([A-Z][A-Za-z0-9_]*)/g
-// Common std/derive names that are noise as retrieval keys.
-const SYMBOL_DENYLIST = new Set([
-  "Default", "Clone", "Debug", "Serialize", "Deserialize", "Copy", "Eq", "PartialEq", "Ord",
-  "PartialOrd", "Hash", "From", "Into", "TryFrom", "TryInto", "Display", "Error", "Iterator",
-  "Send", "Sync", "Sized", "Drop", "Self", "Option", "Result", "Vec", "String", "Box", "Arc",
-])
+const GATE_HEADER = "## MOOSEDev gate notices"
+const HOST = "opencode"
 const PATH_ARG_KEYS = [
   "filePath",
   "filepath",
@@ -62,11 +105,15 @@ const PATH_ARG_KEYS = [
   "files",
   "paths",
 ]
+const ANCHOR_ARG_KEYS = ["oldString", "old_string", "oldText"]
 
 export async function MooseDevPush(input: PluginInput) {
   const root = input.worktree || input.directory || process.cwd()
   const workingSetBySession = new Map<string, string[]>()
-  const symbolsBySession = new Map<string, string[]>()
+  const gateVerdictsByCall = new Map<string, PolicyVerdict>()
+  const gateNotices: string[] = []
+  const editedFiles = new Set<string>()
+  let lastCaptureAt = 0
   const warned = new Set<string>()
 
   function warnOnce(key: string, message: string) {
@@ -95,70 +142,138 @@ export async function MooseDevPush(input: PluginInput) {
     }
   }
 
-  function symbolSet(sessionID: string) {
-    let set = symbolsBySession.get(sessionID)
-    if (!set) {
-      set = []
-      symbolsBySession.set(sessionID, set)
-    }
-    return set
-  }
-
-  function addSymbols(sessionID: string, symbols: string[]) {
-    const set = symbolSet(sessionID)
-    const defaultSet = sessionID === "default" ? set : symbolSet("default")
-    for (const sym of symbols) {
-      pushRecent(set, sym)
-      if (defaultSet !== set) pushRecent(defaultSet, sym)
+  async function evaluatePolicy(
+    args: Record<string, unknown>,
+  ): Promise<PolicyVerdict | undefined> {
+    const text = await callTool("evaluate_policy", { host: HOST, ...args }, warnOnce)
+    if (!text) return undefined
+    try {
+      return JSON.parse(text) as PolicyVerdict
+    } catch {
+      warnOnce("verdict-json", "evaluate_policy returned non-JSON; ignoring this verdict.")
+      return undefined
     }
   }
 
+  /// Resolve (and cache) the gate verdict for one tool call.
+  async function gateVerdict(
+    callID: string,
+    file: string,
+    anchor: string | undefined,
+  ): Promise<PolicyVerdict | undefined> {
+    const cached = gateVerdictsByCall.get(callID)
+    if (cached) return cached
+    const verdict = await evaluatePolicy({
+      event: "edit_proposed",
+      file,
+      ...(anchor ? { anchor } : {}),
+    })
+    if (verdict) gateVerdictsByCall.set(callID, verdict)
+    return verdict
+  }
+
+  function queueGateNotice(verdict: PolicyVerdict) {
+    const note = `- ${verdict.reason || "a recorded constraint governs the edited code"}`
+    if (!gateNotices.includes(note)) gateNotices.push(note)
+    if (gateNotices.length > 4) gateNotices.shift()
+  }
+
+  /// Entity-exact push: ask the policy engine about the session's most recent
+  /// files and inject the dossiers it returns — resolver-backed, not lexical.
   async function knowledgeBlock(sessionID: string): Promise<string | undefined> {
-    // Aggregate the session's set with the "default" accumulator: opencode may invoke this hook with a
-    // sessionID different from the one tool.execute.after observed, so rely on the union, not a match.
-    const symbols = [...new Set([...symbolSet(sessionID), ...symbolSet("default")])].slice(0, MAX_SYMBOLS)
-    const paths = [...new Set([...workingSet(sessionID), ...workingSet("default")])]
+    const paths = [
+      ...new Set([...workingSet(sessionID), ...workingSet("default")]),
+    ].slice(0, MAX_PUSH_FILES)
 
-    // Retrieve PER-SYMBOL and merge. A combined multi-symbol topic dilutes the specific record out of
-    // the top-K (e.g. SchemaTriple's cache-gap lesson gets buried by ingest symbols), so query each
-    // focused symbol separately and union the results; fall back to a path-based topic if no symbols.
-    const pathTopic = buildTopic([], paths)
-    const queries = symbols.length > 0 ? symbols : pathTopic ? [pathTopic] : []
-    if (queries.length === 0) return undefined
-
-    const perSymbol: KnowledgeRecord[][] = []
-    for (const q of queries) {
-      const text = await getRelevantContext(q, 2, warnOnce)
-      perSymbol.push(text ? parseRecords(text) : [])
-    }
-    // Round-robin merge: take each focused symbol's rank-1 record FIRST (so every symbol contributes
-    // its best hit before any rank-2 fills the block), then rank-2. Guarantees the edit-target
-    // symbol's top record (e.g. SchemaTriple's cache-gap lesson) survives even amid noisier symbols.
-    const seen = new Set<string>()
-    const records: KnowledgeRecord[] = []
-    for (let rank = 0; rank < 2 && records.length < BLOCK_LIMIT; rank++) {
-      for (const recs of perSymbol) {
-        const rec = recs[rank]
-        if (rec && !seen.has(rec.iri)) {
-          seen.add(rec.iri)
-          records.push(rec)
-        }
-        if (records.length >= BLOCK_LIMIT) break
-      }
+    const sections: string[] = []
+    const seenEntities = new Set<string>()
+    for (const file of paths) {
+      const verdict = await evaluatePolicy({ event: "entity_touched", file })
+      if (!verdict || verdict.decision !== "inject" || !verdict.dossier_markdown) continue
+      const entities = verdict.entities || []
+      if (entities.length > 0 && entities.every((e) => seenEntities.has(e))) continue
+      for (const entity of entities) seenEntities.add(entity)
+      sections.push(verdict.dossier_markdown)
+      if (sections.join("\n").length > MAX_BLOCK_CHARS) break
     }
 
-    // Inject the CURRENT records every turn. The block is re-rendered per turn (prepended to a fresh
-    // system prompt), so it does not grow across turns.
-    if (records.length === 0) return undefined
-    return renderBlock(records)
+    const parts: string[] = []
+    if (gateNotices.length > 0) {
+      parts.push(`${GATE_HEADER}\n${gateNotices.join("\n")}`)
+    }
+    if (sections.length > 0) {
+      parts.push(`${BLOCK_HEADER}\n${capBlock(sections.join("\n\n"), MAX_BLOCK_CHARS)}`)
+    }
+    if (parts.length === 0) return undefined
+    return parts.join("\n\n")
   }
 
   return {
+    // GATE — evaluate before the edit executes; throwing blocks the tool call.
+    "tool.execute.before": async (toolInput: ToolBeforeInput, output: ToolBeforeOutput) => {
+      if (!isEditTool(toolInput.tool)) return
+      const paths = new Set<string>()
+      collectPathArgs(output.args, paths)
+      const file = [...paths]
+        .map((p) => normalizeProjectPath(p, root))
+        .find((p): p is string => Boolean(p))
+      if (!file) return
+      const anchor = firstStringArg(output.args, ANCHOR_ARG_KEYS)
+
+      const verdict = await gateVerdict(toolInput.callID, file, anchor)
+      if (!verdict || verdict.decision !== "gate") return
+      if (verdict.disposition === "deny") {
+        throw new Error(`MOOSEDev gate (deny): ${verdict.reason || "recorded constraint violation"}`)
+      }
+      // require_ratification: the permission prompt (below) asks when it fires;
+      // otherwise degrade to a warning note injected next turn.
+      queueGateNotice(verdict)
+    },
+
+    // GATE — typed permission surface, when the host prompts for this call.
+    "permission.ask": async (permission: PermissionInput, output: PermissionOutput) => {
+      let verdict = permission.callID
+        ? gateVerdictsByCall.get(permission.callID)
+        : undefined
+      if (!verdict) {
+        const paths = new Set<string>()
+        collectPathArgs(permission.metadata, paths)
+        const file = [...paths]
+          .map((p) => normalizeProjectPath(p, root))
+          .find((p): p is string => Boolean(p))
+        if (!file) return
+        const anchor = firstStringArg(permission.metadata, ANCHOR_ARG_KEYS)
+        verdict = permission.callID
+          ? await gateVerdict(permission.callID, file, anchor)
+          : await evaluatePolicy({ event: "edit_proposed", file, ...(anchor ? { anchor } : {}) })
+      }
+      if (!verdict || verdict.decision !== "gate") return
+      output.status = verdict.disposition === "deny" ? "deny" : "ask"
+    },
+
+    // PUSH input — track the session's working set from observed tool activity.
     "tool.execute.after": async (toolInput: ToolAfterInput, output: ToolAfterOutput) => {
       const paths = extractToolPaths(toolInput.tool, toolInput.args, output.output)
       if (paths.length > 0) addWorkingPaths(toolInput.sessionID, paths)
-      const symbols = extractSymbols(`${safeStringify(toolInput.args)}\n${output.output || ""}`)
-      if (symbols.length > 0) addSymbols(toolInput.sessionID, symbols)
+    },
+
+    // CAPTURE — accumulate edited files; journal at idle checkpoints, debounced.
+    event: async ({ event }: { event: HostEvent }) => {
+      if (event.type === "file.edited") {
+        const file = normalizeProjectPath(String(event.properties?.file || ""), root)
+        if (file && !isMooseDevStatePath(file)) editedFiles.add(file)
+        return
+      }
+      if (event.type !== "session.idle" || editedFiles.size === 0) return
+      const now = Date.now()
+      if (now - lastCaptureAt < CAPTURE_MIN_INTERVAL_MS) return
+      const files = [...editedFiles]
+      const journaled = await journalCheckpoint(root, files, warnOnce)
+      // Only a confirmed journal write clears the file set — failures retain
+      // it so the next idle event can retry.
+      if (!journaled) return
+      lastCaptureAt = now
+      for (const file of files) editedFiles.delete(file)
     },
 
     "experimental.chat.system.transform": async (
@@ -188,6 +303,19 @@ export async function MooseDevPush(input: PluginInput) {
       })
     },
   }
+}
+
+function isEditTool(tool: string): boolean {
+  const lower = tool.toLowerCase()
+  return lower.includes("edit") || lower.includes("write") || lower.includes("patch")
+}
+
+function firstStringArg(value: unknown, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const candidate = getObjectValue(value, key)
+    if (typeof candidate === "string" && candidate.length > 0) return candidate
+  }
+  return undefined
 }
 
 function extractToolPaths(tool: string, args: unknown, output: string): string[] {
@@ -274,6 +402,10 @@ function normalizeProjectPath(raw: string, root: string): string | undefined {
   return path.replace(/\/+/g, "/")
 }
 
+function isMooseDevStatePath(path: string): boolean {
+  return path === ".moosedev" || path.startsWith(".moosedev/")
+}
+
 function pushRecent(set: string[], value: string) {
   const existing = set.indexOf(value)
   if (existing >= 0) set.splice(existing, 1)
@@ -281,39 +413,46 @@ function pushRecent(set: string[], value: string) {
   if (set.length > MAX_WORKING_SET) set.length = MAX_WORKING_SET
 }
 
-function buildTopic(symbols: string[], paths: string[]): string | undefined {
-  // Lead with SYMBOLS (records are symbol-indexed); add a few recent file basenames as backup.
-  const symbolBits = symbols.slice(0, MAX_SYMBOLS)
-  const fileBits = paths.slice(0, 3).flatMap((path) => {
-    const basename = path.split("/").at(-1)
-    return basename ? [basename] : []
-  })
-  const parts = [...symbolBits, ...fileBits]
-  if (parts.length === 0) return undefined
-  return parts.join(" ").slice(0, 240)
-}
-
-function extractSymbols(text: string): string[] {
-  const out: string[] = []
-  TYPE_DEF_RE.lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = TYPE_DEF_RE.exec(text))) {
-    if (!SYMBOL_DENYLIST.has(match[1])) out.push(match[1])
-  }
-  return out
-}
-
-function safeStringify(value: unknown): string {
+/// Journal one automatic session checkpoint to the daemon's fire telemetry
+/// (`POST /api/v1/capture`). Never writes the graph — deliberate capture is
+/// the only record-minting path. Returns true only on a confirmed 2xx.
+async function journalCheckpoint(
+  root: string,
+  files: string[],
+  warnOnce: (key: string, message: string) => void,
+): Promise<boolean> {
+  const dataDir = process.env.MOOSEDEV_DATA_DIR || ".moosedev"
+  let addr: string
   try {
-    return typeof value === "string" ? value : JSON.stringify(value) ?? ""
+    addr = readFileSync(resolve(root, dataDir, "http.addr"), "utf8").trim()
   } catch {
-    return ""
+    warnOnce("journal-addr", "no MOOSEDev http.addr; session checkpoint not journaled")
+    return false
+  }
+  if (!addr) return false
+  try {
+    const response = await fetch(`http://${addr}/api/v1/capture`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: HOST, files }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) {
+      warnOnce("journal-http", `session checkpoint journal failed: HTTP ${response.status}`)
+      return false
+    }
+    return true
+  } catch (error) {
+    warnOnce("journal-http", `session checkpoint journal failed: ${error}`)
+    return false
   }
 }
 
-async function getRelevantContext(
-  topic: string,
-  limit: number,
+/// Spawn `moosedev --connect`, call one MCP tool, return its text content.
+/// Requires a running `--serve` backend (MOOSEDEV_NO_AUTOSPAWN).
+async function callTool(
+  name: string,
+  args: Record<string, unknown>,
   warnOnce: (key: string, message: string) => void,
 ): Promise<string | undefined> {
   // Default to the conventional per-project store, so `moosedev init --opencode`
@@ -348,7 +487,7 @@ async function getRelevantContext(
       const message = JSON.parse(line) as JsonRpcResponse
       if (typeof message.id === "number") pending.get(message.id)?.(message)
     } catch {
-      warnOnce("bad-json", "MOOSEDev returned a non-JSON line; skipping injection for this turn.")
+      warnOnce("bad-json", "MOOSEDev returned a non-JSON line; skipping this call.")
     }
   })
 
@@ -367,12 +506,12 @@ async function getRelevantContext(
       {
         protocolVersion: "2025-06-18",
         capabilities: {},
-        clientInfo: { name: "opencode-moosedev-push", version: "0.1.0" },
+        clientInfo: { name: "opencode-moosedev", version: "0.2.0" },
       },
       REQUEST_TIMEOUT_MS,
     )
     if (initialized.error) {
-      warnOnce("initialize-error", `MOOSEDev initialize failed; skipping injection. ${shorten(initialized.error.message || stderr)}`)
+      warnOnce("initialize-error", `MOOSEDev initialize failed; skipping. ${shorten(initialized.error.message || stderr)}`)
       return undefined
     }
 
@@ -383,18 +522,23 @@ async function getRelevantContext(
       pending,
       nextID++,
       "tools/call",
-      { name: "get_relevant_context", arguments: { topic, limit } },
+      { name, arguments: args },
       REQUEST_TIMEOUT_MS,
     )
 
     if (result.error) {
-      warnOnce("tool-error", `get_relevant_context failed; skipping injection. ${shorten(stderr || result.error.message || "")}`)
+      warnOnce(`tool-error-${name}`, `${name} failed; skipping. ${shorten(stderr || result.error.message || "")}`)
+      return undefined
+    }
+
+    if (isToolError(result.result)) {
+      warnOnce(`tool-result-error-${name}`, `${name} returned an error result; skipping.`)
       return undefined
     }
 
     return extractTextContent(result.result)
   } catch (error) {
-    warnOnce("mcp-error", `MOOSEDev retrieval failed; skipping injection. ${shorten(error instanceof Error ? error.message : String(error))}`)
+    warnOnce("mcp-error", `MOOSEDev call failed; skipping. ${shorten(error instanceof Error ? error.message : String(error))}`)
     return undefined
   } finally {
     cleanup()
@@ -405,6 +549,12 @@ type JsonRpcResponse = {
   id?: number
   result?: unknown
   error?: { message?: string }
+}
+
+function isToolError(result: unknown): boolean {
+  return Boolean(
+    result && typeof result === "object" && (result as Record<string, unknown>).isError === true,
+  )
 }
 
 function request(
@@ -456,49 +606,6 @@ function extractTextContent(result: unknown): string | undefined {
   return text || undefined
 }
 
-function parseRecords(text: string): KnowledgeRecord[] {
-  const records: KnowledgeRecord[] = []
-  let current: Partial<KnowledgeRecord> | undefined
-
-  for (const line of text.split(/\r?\n/)) {
-    const title = line.match(/^•\s+.+?\s+—\s+"(.+)"\s*$/)
-    if (title) {
-      if (isCompleteRecord(current)) records.push(current)
-      current = { title: title[1], description: "" }
-      continue
-    }
-
-    if (!current) continue
-
-    const description = line.match(/^\s+hasDescription:\s*(.+)$/)
-    if (description) {
-      current.description = description[1]
-      continue
-    }
-
-    const iri = line.match(IRI_PATTERN)
-    if (iri) {
-      current.iri = iri[0]
-    }
-  }
-
-  if (isCompleteRecord(current)) records.push(current)
-  return records
-}
-
-function isCompleteRecord(record: Partial<KnowledgeRecord> | undefined): record is KnowledgeRecord {
-  return Boolean(record?.title && record.iri)
-}
-
-function renderBlock(records: KnowledgeRecord[]): string {
-  const lines = records.map((record) => {
-    const title = shorten(oneLine(record.title), 160)
-    const description = shorten(oneLine(record.description), 420)
-    return description ? `- ${title}: ${description}` : `- ${title}`
-  })
-  return `${BLOCK_HEADER}\n${lines.join("\n")}`
-}
-
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim()
 }
@@ -507,4 +614,10 @@ function shorten(text: string, max = 240): string {
   const clean = oneLine(text)
   if (clean.length <= max) return clean
   return `${clean.slice(0, Math.max(0, max - 3)).trimEnd()}...`
+}
+
+/// Cap a multi-line markdown block without collapsing its newlines.
+function capBlock(text: string, max: number): string {
+  if (text.length <= max) return text
+  return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`
 }

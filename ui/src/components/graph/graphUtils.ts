@@ -44,6 +44,12 @@ const MOOSE_TRACE_SUPPORT_LOCALS = new Set([
   'usedSchemaKind',
 ]);
 
+export function truncateLabel(value: string, max = 48): string {
+  const codePoints = Array.from(value);
+  if (codePoints.length <= max) return value;
+  return `${codePoints.slice(0, max - 1).join('')}…`;
+}
+
 interface GraphTriple {
   subject: QueryValue;
   predicate: QueryValue;

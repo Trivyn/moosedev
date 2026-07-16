@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::adrs::{AdrSummary, AdrWarnings};
+use crate::constraints::{ConstraintSummary, ConstraintWarnings};
 use crate::lessons::{LessonSummary, LessonWarnings};
 use crate::requirements::{RequirementSummary, RequirementWarnings};
 
@@ -37,6 +38,120 @@ pub struct AdrListResponse {
 pub struct AdrDetailResponse {
     pub summary: AdrSummary,
     pub markdown: String,
+}
+
+#[derive(Serialize)]
+pub struct RecordDetailResponse {
+    pub iri: String,
+    pub kind: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub timestamp: Option<String>,
+    pub author: Option<String>,
+    pub outgoing: Vec<RecordOutgoingEdge>,
+    pub incoming: Vec<RecordIncomingEdge>,
+}
+
+#[derive(Serialize)]
+pub struct RecordOutgoingEdge {
+    pub predicate: String,
+    pub target_iri: String,
+    pub target_label: String,
+    pub target_kind: String,
+}
+
+#[derive(Serialize)]
+pub struct RecordIncomingEdge {
+    pub predicate: String,
+    pub source_iri: String,
+    pub source_label: String,
+    pub source_kind: String,
+}
+
+#[derive(Serialize)]
+pub struct ConstraintListResponse {
+    pub generated_at: String,
+    pub graph_constraints: usize,
+    pub constraint_files: usize,
+    pub index_filename: String,
+    pub warnings: ConstraintWarnings,
+    pub constraints: Vec<ConstraintSummary>,
+}
+
+#[derive(Serialize)]
+pub struct ConstraintDetailResponse {
+    pub summary: ConstraintSummary,
+    pub markdown: String,
+}
+
+#[derive(Serialize)]
+pub struct WhyCoverageResponse {
+    pub components: Vec<ComponentCoverageDto>,
+    /// Public-surface definitions whose path maps to no component.
+    pub unmapped: usize,
+}
+
+#[derive(Serialize)]
+pub struct ComponentCoverageDto {
+    pub iri: Option<String>,
+    pub name: String,
+    pub numerator: usize,
+    pub denominator: usize,
+    /// Documented fraction, or null when the component owns no public surface.
+    pub coverage: Option<f64>,
+    /// Core-surface subset (ratified core-algorithm/domain-logic roles) with
+    /// linked rationale — 0/0 until roles are ratified. Additive view.
+    pub core_numerator: usize,
+    pub core_denominator: usize,
+    pub undocumented: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ProposalListResponse {
+    pub proposals: Vec<ProposalDto>,
+}
+
+#[derive(Serialize)]
+pub struct ProposalDto {
+    /// Minted UUID (last IRI segment) — the id in accept/reject routes.
+    pub id: String,
+    pub iri: String,
+    /// `link` (pending record→entity edge), `record` (proposed record), or
+    /// `judgment` (pending entity→role/criticality edge).
+    pub kind: String,
+    pub label: String,
+    pub subject_iri: String,
+    pub predicate: String,
+    pub target_symbol: String,
+    pub target_path: String,
+    /// Local class name for `record` entries (e.g. `ArchitecturalDecision`).
+    pub record_class: Option<String>,
+    /// Role/criticality individual IRI, for `judgment` entries.
+    pub target_iri: String,
+    /// Classifier confidence literal, for `judgment` entries.
+    pub confidence: Option<String>,
+    /// `escalated` or `auto-held`, for `judgment` entries.
+    pub escalation: Option<String>,
+    /// Subject's human name: record title (`link`) or entity code name (`judgment`).
+    pub subject_name: String,
+    /// Subject record's claim (description snippet), for `link` entries.
+    pub subject_description: Option<String>,
+    /// Subject entity defining file, for `judgment` entries.
+    pub subject_path: String,
+    /// Humanized target: logical path (`link`) or individual local name (`judgment`).
+    pub target_display: String,
+    pub evidence: Option<String>,
+    pub status: String,
+}
+
+#[derive(Serialize)]
+pub struct ProposalActionResponse {
+    pub id: String,
+    pub status: String,
+    /// Set on accept: the code entity the materialized link points at.
+    pub entity_iri: Option<String>,
+    pub entity_name: Option<String>,
 }
 
 #[derive(Serialize)]

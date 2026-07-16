@@ -1,0 +1,91 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix moose: <https://trivyn.io/ontologies/moose#> .
+@prefix shape: <https://trivyn.io/ontologies/software/code/shapes#> .
+@prefix code: <https://trivyn.io/ontologies/software/code#> .
+@prefix arch: <https://trivyn.io/ontologies/software/architecture#> .
+@prefix dcam: <http://purl.org/dc/dcam/> .
+
+<https://trivyn.io/ontologies/software/code/shapes> a owl:Ontology ;
+    rdfs:label "SHACL Shapes" ;
+    owl:imports <https://trivyn.io/ontologies/software/code> .
+
+# =============================================================================
+# Hand-curated 2026-07-08 (v2 slice-2 Phase 0): v2.0 scope was CodeEntity only.
+# The judgment-stratum slice un-parked CodeRole and Criticality: playsRole /
+# hasCriticality gained shape branches below, which is what admits CodeEntity
+# subjects for them through the relation catalogue — their write path is
+# accept-only (relate() runs when a human ratifies a judgment proposal; the
+# classifier itself writes only shapeless ProposedLink literals).
+# The still-parked classes (CodeSnapshot, AttentionPolicy, Observation,
+# AuthorshipProvenance, CodeFile) deliberately have NO shapes: shape entries
+# feed the relation catalogue, and their strata must not gain write paths
+# before their instrumentation machinery ships.
+#
+# Structure is machine-derived (never agent-written), so this shape validates
+# integrity — cardinality and datatype — not editorial completeness.
+#
+# The intent links (code:realizes / code:satisfies / code:embodies) are
+# declared in software-code.ttl with architecture-class ranges; arch:violates
+# is the architecture ontology's own (widened) property. Either way, a node
+# shape targeting code:CodeEntity with the predicate is what makes it legal
+# for CodeEntity subjects in the relation catalogue.
+# =============================================================================
+
+shape:CodeEntityShape a sh:NodeShape ;
+    sh:targetClass code:CodeEntity ;
+    sh:property [
+        sh:path code:hasSubstrateSymbol ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:hasEntityKind ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:hasCodeName ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:hasLogicalPath ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:definedInPath ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:realizes ;
+        sh:class arch:SystemComponent
+    ] ;
+    sh:property [
+        sh:path code:satisfies ;
+        sh:class arch:Requirement
+    ] ;
+    sh:property [
+        sh:path code:embodies ;
+        sh:class arch:Pattern
+    ] ;
+    sh:property [
+        sh:path arch:violates ;
+        sh:class arch:Constraint
+    ] ;
+    sh:property [
+        sh:path code:playsRole ;
+        sh:class code:CodeRole ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path code:hasCriticality ;
+        sh:class code:Criticality ;
+        sh:maxCount 1
+    ] .
