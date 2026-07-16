@@ -230,6 +230,25 @@ fn accepted_constraint_requires_ratification_and_fires() {
 }
 
 #[test]
+fn fire_write_failure_does_not_fail_an_acted_policy_decision() {
+    let f = setup("policy-fire-write-failure");
+    graph::relate(&f.state, &f.constraint, "constrains", &f.alpha).expect("constrains edge");
+    std::fs::create_dir(fires_log_path_for(&f.state.data_dir))
+        .expect("make fire-log path unwritable as a file");
+
+    let decision = evaluate_and_fire(&f.state, &f.repo_root, &edit(Some("alpha")), "test-host")
+        .expect("telemetry failure must not fail policy evaluation");
+
+    assert!(matches!(
+        decision,
+        PolicyDecision::Gate {
+            disposition: GateDisposition::RequireRatification,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn violates_edge_denies_over_constrains() {
     let f = setup("policy-deny");
     graph::relate(&f.state, &f.constraint, "constrains", &f.alpha).expect("constrains edge");

@@ -126,10 +126,11 @@ pub struct AppState {
     canonical_throttle: crate::canonical::WriteThrottle,
     /// Serializes enrichment so concurrent reads enrich at most once.
     enrich_lock: std::sync::Mutex<()>,
-    /// Serializes judgment-axis check-and-write transitions. Oxigraph
+    /// Serializes ratification-queue check-and-write transitions. Oxigraph
     /// transactions make each individual write atomic, while this lock keeps
-    /// the exclusivity precondition and its write in one critical section.
-    judgment_write_lock: std::sync::Mutex<()>,
+    /// proposal deduplication, judgment-axis exclusivity, and queue lifecycle
+    /// preconditions in the same critical section as their writes.
+    proposal_write_lock: std::sync::Mutex<()>,
     /// Memo of the last rendered ADR set, keyed on `project_write_generation`
     /// (see [`crate::adrs::generate_adr_set_cached`]).
     pub adr_memo: crate::adrs::AdrSetMemo,
@@ -234,15 +235,15 @@ impl AppState {
             project_write_generation: AtomicU64::new(0),
             canonical_throttle: crate::canonical::WriteThrottle::default(),
             enrich_lock: std::sync::Mutex::new(()),
-            judgment_write_lock: std::sync::Mutex::new(()),
+            proposal_write_lock: std::sync::Mutex::new(()),
             adr_memo: crate::adrs::AdrSetMemo::default(),
         })
     }
 
-    pub(crate) fn lock_judgment_writes(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
-        self.judgment_write_lock
+    pub(crate) fn lock_proposal_writes(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
+        self.proposal_write_lock
             .lock()
-            .map_err(|_| anyhow::anyhow!("judgment write lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("proposal write lock poisoned"))
     }
 
     /// Mark the reasoner-materialized edges stale — call after any write that changes the

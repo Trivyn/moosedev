@@ -15,6 +15,7 @@ use crate::code::substrate::Position;
 use super::capture::asserted_project_types;
 use super::code_entities::{entities_by_symbol, CodeTerms};
 use super::context::first_literal;
+use super::lifecycle::in_working_set;
 use super::proposals::{judgments_for_entity, JudgmentSummary};
 use super::state::AppState;
 use super::util::local_name;
@@ -46,7 +47,7 @@ pub struct RecordSummary {
     pub description: Option<String>,
     /// Workbench deep link when the HTTP UI has published an address.
     pub workbench_url: Option<String>,
-    /// Lifecycle status; superseded records remain visible, deprecated records do not.
+    /// Lifecycle status; superseded records remain visible as labeled history.
     pub status: String,
     /// RFC3339 capture timestamp, or empty when the record lacks one.
     pub timestamp: String,
@@ -170,7 +171,7 @@ pub fn get_entity_dossier(
     }))
 }
 
-/// Return all non-deprecated knowledge records directly linked to one CodeEntity.
+/// Return all dossier-visible knowledge records directly linked to one CodeEntity.
 pub(crate) fn direct_records_for_entity(
     state: &AppState,
     entity_iri: &str,
@@ -517,7 +518,7 @@ fn collect_objects(
     Ok(())
 }
 
-/// Build a display summary for a record, skipping dangling and deprecated nodes.
+/// Build a display summary for a record, skipping dangling and dossier-hidden nodes.
 fn summarize_record(
     state: &AppState,
     record_iri: &str,
@@ -530,10 +531,10 @@ fn summarize_record(
         .unwrap_or_else(|| local_name(record_iri).to_string());
     let status = first_literal(&state.store, record_iri, &state.capture.status)
         .unwrap_or_else(|| "unknown".to_string());
-    // Deprecated records are hidden history; rejected records were explicitly
-    // declined by a human and must never surface as documentation (or count
-    // toward why-coverage, which shares this oracle).
-    if status.eq_ignore_ascii_case("deprecated") || status.eq_ignore_ascii_case("rejected") {
+    // Proposed records live only in the ratification inbox; rejected and
+    // deprecated records are hidden history. Superseded records remain visible
+    // as labeled history so a dossier preserves the rationale's evolution.
+    if !is_dossier_visible(&status) {
         return None;
     }
     Some(RecordSummary {
@@ -547,6 +548,12 @@ fn summarize_record(
             .unwrap_or_default(),
         predicate_local: predicate_local.to_string(),
     })
+}
+
+/// Dossier lifecycle policy shared by direct records, inherited component
+/// records, hover rendering, and why-coverage through [`summarize_record`].
+fn is_dossier_visible(status: &str) -> bool {
+    in_working_set(status) || status.eq_ignore_ascii_case("superseded")
 }
 
 /// Return a fresh workbench deep link for a record when the HTTP UI is available.

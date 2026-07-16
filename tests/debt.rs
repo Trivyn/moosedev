@@ -107,6 +107,10 @@ fn synthetic_substrate() -> Substrate {
 }
 
 fn record(state: &AppState, kind: &str, title: &str) -> String {
+    record_with_status(state, kind, title, "accepted")
+}
+
+fn record_with_status(state: &AppState, kind: &str, title: &str, status: &str) -> String {
     let class_iri = state.resolve_class(kind).expect("known class");
     graph::record_instance(
         state,
@@ -116,7 +120,7 @@ fn record(state: &AppState, kind: &str, title: &str) -> String {
             properties: vec![
                 (moose::RDFS_LABEL.to_string(), title.to_string()),
                 (state.capture.title.clone(), title.to_string()),
-                (state.capture.status.clone(), "accepted".to_string()),
+                (state.capture.status.clone(), status.to_string()),
             ],
         },
         "tester",
@@ -165,7 +169,8 @@ fn why_coverage_counts_documented_public_surface() {
     .unwrap();
     graph::apply_mint(&state, &plan, &terms).unwrap();
 
-    // Document alpha only: a Constraint concerns it.
+    // Document alpha with accepted knowledge. A proposed record concerns beta,
+    // but inbox material must not increase authoritative why-coverage.
     let entities = graph::entities_by_symbol(&state, &terms).unwrap();
     let alpha = entities
         .get("rust-analyzer cargo testpkg . foo/alpha().")
@@ -179,6 +184,22 @@ fn why_coverage_counts_documented_public_surface() {
         &concerns,
         NamedNode::new(&alpha).unwrap().into(),
     );
+    let beta = entities
+        .get("rust-analyzer cargo testpkg . foo/beta().")
+        .expect("beta minted")
+        .clone();
+    let proposed = record_with_status(
+        &state,
+        "ArchitecturalDecision",
+        "proposed beta rationale",
+        "proposed",
+    );
+    insert_quad(
+        &state,
+        &proposed,
+        &concerns,
+        NamedNode::new(&beta).unwrap().into(),
+    );
 
     let report = graph::compute_why_coverage(&state).unwrap();
     let foo_cov = report
@@ -191,7 +212,10 @@ fn why_coverage_counts_documented_public_surface() {
         foo_cov.denominator, 2,
         "alpha + beta are public, non-module, non-test; helper (private) is excluded"
     );
-    assert_eq!(foo_cov.numerator, 1, "only alpha has a linked record");
+    assert_eq!(
+        foo_cov.numerator, 1,
+        "only alpha has a dossier-visible linked record"
+    );
     assert_eq!(
         foo_cov.undocumented,
         vec!["beta".to_string()],

@@ -568,7 +568,7 @@ impl MooseDevServer {
         if let Err(e) = self.state.index_record(&captured.record_iri).await {
             tracing::warn!("dense index update failed for {}: {e}", captured.record_iri);
         }
-        crate::policy::fires::append_fire(
+        crate::policy::fires::append_fire_best_effort(
             &self.state.data_dir,
             &crate::policy::fires::FireEvent {
                 ts: Utc::now().to_rfc3339(),

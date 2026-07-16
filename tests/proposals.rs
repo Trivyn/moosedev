@@ -194,7 +194,7 @@ fn proposed_link_is_invisible_until_accepted() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].subject_iri, f.constraint);
     assert_eq!(pending[0].predicate_local, "concerns");
-    assert_eq!(pending[0].target_symbol, ALPHA_RAW);
+    assert_eq!(pending[0].target_symbol, ALPHA_NORM);
     assert!(
         !has_records(&f.state, &f.alpha),
         "a proposal must not create the concerns edge"
@@ -838,6 +838,27 @@ fn duplicate_pending_link_proposals_are_not_minted() {
     // …and gets the existing pending entry instead of a duplicate.
     assert_eq!(first, second);
     assert_eq!(graph::pending_count(&f.state).unwrap(), 1);
+    assert_eq!(
+        graph::list_proposals(&f.state, Some("proposed")).unwrap()[0].target_symbol,
+        ALPHA_NORM,
+        "the graph stores stable version-normalized proposal identity"
+    );
+
+    // A later producer version is the same code entity and therefore the same
+    // pending proposal; package-version churn must not multiply the inbox.
+    let version_bumped = ALPHA_RAW.replace("0.1.0", "9.8.7");
+    let after_version_bump = graph::propose_link(
+        &f.state,
+        &f.constraint,
+        "concerns",
+        &version_bumped,
+        "src/foo/a.rs",
+        "same entity from a newer index",
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(after_version_bump, first);
 
     // Once resolved, an identical proposal may be minted again (a genuinely
     // new capture after a rejection is new information).
@@ -854,6 +875,55 @@ fn duplicate_pending_link_proposals_are_not_minted() {
     )
     .unwrap();
     assert_ne!(first, third);
+}
+
+#[test]
+fn concurrent_equivalent_link_proposals_share_one_stable_identity() {
+    let f = setup("proposals-concurrent-dedup");
+    let subject = f.constraint.clone();
+    let state = Arc::new(f.state);
+    let barrier = Arc::new(Barrier::new(3));
+    let targets = [ALPHA_RAW.to_string(), ALPHA_RAW.replace("0.1.0", "9.8.7")];
+    let mut workers = Vec::new();
+    for target in targets {
+        let state = Arc::clone(&state);
+        let barrier = Arc::clone(&barrier);
+        let subject = subject.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            graph::propose_link(
+                &state,
+                &subject,
+                "concerns",
+                &target,
+                "src/foo/a.rs",
+                "concurrent equivalent citation",
+                "tester",
+                Utc::now(),
+            )
+        }));
+    }
+
+    barrier.wait();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("proposal worker"))
+        .collect();
+    assert!(
+        results.iter().all(Result::is_ok),
+        "both equivalent submissions succeed: {results:?}"
+    );
+    assert_eq!(
+        results[0].as_ref().unwrap(),
+        results[1].as_ref().unwrap(),
+        "equivalent concurrent submissions return the same proposal"
+    );
+
+    let pending = graph::list_proposals(&state, Some("proposed")).unwrap();
+    assert_eq!(pending.len(), 1, "only one pending queue node is minted");
+    assert_eq!(pending[0].kind, graph::ProposalKind::Link);
+    assert_eq!(pending[0].target_symbol, ALPHA_NORM);
+    assert_eq!(graph::pending_count(&state).unwrap(), 1);
 }
 
 #[test]

@@ -1165,3 +1165,25 @@ async fn capture_with_nothing_to_journal_rejects() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn automatic_capture_reports_journal_write_failure() {
+    let dir = temp_dir("capture-write-failure");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    std::fs::create_dir(moosedev::policy::fires::fires_log_path_for(&dir))
+        .expect("make fire-log path unwritable as a file");
+    let server = test_server(state);
+
+    let response = server
+        .post("/api/v1/capture")
+        .json(&json!({
+            "host": "opencode",
+            "files": ["src/lib.rs"]
+        }))
+        .await;
+
+    response.assert_status_internal_server_error();
+    assert!(response.text().contains("failed to journal capture"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

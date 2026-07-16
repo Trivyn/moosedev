@@ -14,6 +14,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::Serialize;
 
 /// File name of the fire log inside the data dir.
@@ -50,24 +51,23 @@ pub fn fires_log_path_for(data_dir: &Path) -> PathBuf {
     data_dir.join(FIRES_LOG_FILE_NAME)
 }
 
-/// Best-effort append of one fire line. Telemetry must never fail the policy
-/// evaluation it describes (invariant #1: the symbolic decision is primary),
-/// so IO or serialization errors are logged and swallowed.
-pub fn append_fire(data_dir: &Path, event: &FireEvent) {
-    let line = match serde_json::to_string(event) {
-        Ok(line) => line,
-        Err(e) => {
-            tracing::warn!("fires.jsonl: failed to serialize fire event: {e}");
-            return;
-        }
-    };
+/// Append one fire line, reporting serialization and IO failures to the caller.
+pub fn append_fire(data_dir: &Path, event: &FireEvent) -> anyhow::Result<()> {
+    let line = serde_json::to_string(event).context("serialize fire event")?;
     let path = fires_log_path_for(data_dir);
-    let result = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .and_then(|mut file| writeln!(file, "{line}"));
-    if let Err(e) = result {
-        tracing::warn!("fires.jsonl: failed to append to {}: {e}", path.display());
+        .with_context(|| format!("open fire log {}", path.display()))?;
+    writeln!(file, "{line}").with_context(|| format!("append fire log {}", path.display()))?;
+    Ok(())
+}
+
+/// Best-effort append for operational telemetry that must not fail the policy
+/// decision or deliberate graph capture it describes.
+pub fn append_fire_best_effort(data_dir: &Path, event: &FireEvent) {
+    if let Err(e) = append_fire(data_dir, event) {
+        tracing::warn!("fires.jsonl: failed to append fire event: {e}");
     }
 }

@@ -420,6 +420,11 @@ async fn code_action_proposal_round_trips_editor_to_hover() -> anyhow::Result<()
         })
         .expect("candidate link action offered")
         .clone();
+    assert_eq!(
+        link["command"]["arguments"][0]["targetSymbol"],
+        json!(NORMALIZED_SYMBOL),
+        "the editor command carries stable proposal identity"
+    );
 
     // 2. executeCommand files the proposal — and only a proposal: no edge yet,
     //    hover unchanged (advisory-until-ratified).
@@ -440,6 +445,7 @@ async fn code_action_proposal_round_trips_editor_to_hover() -> anyhow::Result<()
         .expect("proposal sits in the queue");
     assert_eq!(entry.kind, ProposalKind::Link);
     assert_eq!(entry.subject_iri, candidate);
+    assert_eq!(entry.target_symbol, NORMALIZED_SYMBOL);
     let hover = client.hover_markdown(&uri, 7, 5).await?;
     assert!(
         !hover.unwrap_or_default().contains("timeout contract"),

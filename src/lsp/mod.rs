@@ -31,7 +31,7 @@ use lsp_types::{
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::code::substrate::symbols::logical_path;
+use crate::code::substrate::symbols::{logical_path, normalize_symbol};
 use crate::code::substrate::{DefinitionEntry, Position as SubstratePosition, SourceRange};
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
@@ -1005,8 +1005,8 @@ impl LspSession {
             .into_iter()
             .filter(|p| {
                 p.kind == ProposalKind::Link
-                    && (p.target_symbol == definition.symbol
-                        || p.target_symbol == definition.normalized_symbol)
+                    && normalize_symbol(&p.target_symbol).as_deref()
+                        == Some(definition.normalized_symbol.as_str())
             })
             .map(|p| p.subject_iri)
             .collect::<std::collections::HashSet<_>>();
@@ -1040,7 +1040,7 @@ impl LspSession {
                     serde_json::json!({
                         "recordIri": candidate.iri,
                         "predicate": "concerns",
-                        "targetSymbol": definition.symbol,
+                        "targetSymbol": definition.normalized_symbol,
                         "targetPath": definition.file,
                         "entityName": entity_name,
                     }),
@@ -1191,7 +1191,7 @@ impl LspSession {
             &self.state,
             &args.record_iri,
             &args.predicate,
-            &args.target_symbol,
+            &definition.normalized_symbol,
             &args.target_path,
             &format!("proposed from an editor code action ({})", args.target_path),
             &self.author,

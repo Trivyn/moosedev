@@ -47,6 +47,10 @@ pub fn relevant_context(
     limit: usize,
     include_history: bool,
 ) -> anyhow::Result<Vec<ContextItem>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     // Materialize inferred edges if a write invalidated them, so the typed expansion
     // traverses fresh inverse/subproperty links (bidirectional walk).
     state.ensure_enriched();
@@ -78,6 +82,18 @@ pub fn relevant_context(
             // expansion. The confidence floor preserves the honest empty state
             // (invariant #6): an irrelevant query still seeds nothing. Soft-falls to
             // pure BM25 when the instance index is empty or the backbone is absent.
+            // Overfetch by the number of lifecycle-ineligible subjects. At most
+            // that many ranked hits can be removed below, so this still fills a
+            // visible page whenever enough relevant working-set records exist,
+            // without materializing the complete class-scoped ranking.
+            let ranked_limit = if include_history {
+                limit
+            } else {
+                limit.saturating_add(count_non_working_set_subjects(
+                    &state.store,
+                    &state.capture.status,
+                ))
+            };
             let mut hits: Vec<(String, String)> = state
                 .entity_index
                 .search_records_hybrid(
@@ -86,7 +102,7 @@ pub fn relevant_context(
                     &state.store,
                     &data_graphs,
                     &text_fields,
-                    limit,
+                    ranked_limit,
                     &state.instance_store,
                     dense_floor(),
                 )
@@ -100,29 +116,32 @@ pub fn relevant_context(
             if let Some(anchor) = resolve_topic_to_record(state, t) {
                 hits.retain(|(iri, _)| iri != &anchor.0);
                 hits.insert(0, anchor);
-                hits.truncate(limit);
             }
             hits
         }
-        None => list_instances(&state.store, &class_iris, limit),
+        None => list_instances_filtered(&state.store, &class_iris, limit, |iri| {
+            include_history
+                || first_literal(&state.store, iri, &state.capture.status)
+                    .as_deref()
+                    .is_none_or(in_working_set)
+        }),
     };
 
+    // Apply working-set eligibility before the result budget. Status-less
+    // legacy records remain eligible; include_history preserves the complete
+    // ranking. Proposed records belong to the inbox, while rejected and retired
+    // records are audit history rather than authoritative recall.
     let mut items: Vec<ContextItem> = subjects
         .into_iter()
+        .filter(|(iri, _)| {
+            include_history
+                || first_literal(&state.store, iri, &state.capture.status)
+                    .as_deref()
+                    .is_none_or(in_working_set)
+        })
+        .take(limit)
         .map(|(iri, class_iri)| build_context_item(state, iri, class_iri))
         .collect();
-
-    // Default to the *current* working set: hide superseded/deprecated records
-    // (history is one hop away — `include_history` lists them, and each current
-    // item still surfaces its `supersedes` link + rationale) AND unratified or
-    // declined ones — a `proposed` record lives in the ratification inbox and a
-    // `rejected` one was expressly declined; neither may reach an agent as
-    // authoritative recall. Filtering after the fetch means a page can return
-    // fewer than `limit` items when history exists; acceptable for v1's data
-    // volumes.
-    if !include_history {
-        items.retain(|item| !item.is_historical());
-    }
 
     // Bounded relational expansion (Constraint aa8b3fa3): for a focused topic, reach
     // the few linked records that COMPLETE an answer — the lexically-distant neighbor
@@ -567,9 +586,25 @@ pub(crate) fn list_instances(
     class_iris: &[String],
     limit: usize,
 ) -> Vec<(String, String)> {
+    list_instances_filtered(store, class_iris, limit, |_| true)
+}
+
+/// List distinct instances that satisfy `eligible`, stopping after `limit`
+/// visible subjects. A subject asserted as multiple classes keeps the first
+/// class encountered and consumes only one result slot.
+fn list_instances_filtered(
+    store: &Store,
+    class_iris: &[String],
+    limit: usize,
+    mut eligible: impl FnMut(&str) -> bool,
+) -> Vec<(String, String)> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let rdf_type = NamedNodeRef::new_unchecked(moose::RDF_TYPE);
     let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for class_iri in class_iris {
         let Ok(class) = NamedNodeRef::new(class_iri) else {
             continue;
@@ -584,7 +619,11 @@ pub(crate) fn list_instances(
             .flatten()
         {
             if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
-                out.push((s.as_str().to_string(), class_iri.clone()));
+                let iri = s.as_str();
+                if !seen.insert(iri.to_string()) || !eligible(iri) {
+                    continue;
+                }
+                out.push((iri.to_string(), class_iri.clone()));
                 if out.len() >= limit {
                     return out;
                 }
@@ -592,6 +631,37 @@ pub(crate) fn list_instances(
         }
     }
     out
+}
+
+/// Count distinct subjects whose lifecycle status is outside the authoritative
+/// working set. The count may include non-architecture subjects, which is a
+/// safe overestimate for the hybrid overfetch budget.
+fn count_non_working_set_subjects(store: &Store, status_iri: &str) -> usize {
+    let Ok(status) = NamedNodeRef::new(status_iri) else {
+        return 0;
+    };
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut subjects = HashSet::new();
+    for quad in store
+        .quads_for_pattern(
+            None,
+            Some(status),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+    {
+        let Term::Literal(value) = &quad.object else {
+            continue;
+        };
+        if in_working_set(value.value()) {
+            continue;
+        }
+        if let oxigraph::model::NamedOrBlankNode::NamedNode(subject) = &quad.subject {
+            subjects.insert(subject.as_str().to_string());
+        }
+    }
+    subjects.len()
 }
 
 fn count_instances(store: &Store, class_iris: &[String]) -> usize {

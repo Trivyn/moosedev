@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use crate::provenance;
 
 use super::capture::{record_instance_with_relation_args, RecordInput};
-use super::proposals::propose_link;
+use super::proposals::propose_link_unlocked;
 use super::state::AppState;
 
 /// What one decision-point capture wrote — reported in full, no silent drops.
@@ -105,6 +105,10 @@ pub fn capture_decision_point(
             (state.capture.status.clone(), "proposed".to_string()),
         ],
     };
+    // The record and all of its queued links form one proposal-write critical
+    // section. A concurrent accept/reject cannot observe the record before its
+    // complete link set has been enqueued.
+    let _proposal_guard = state.lock_proposal_writes()?;
     let outcome = record_instance_with_relation_args(state, &input, &relations, author, when)?;
 
     if let Err(e) = provenance::record_provenance(&state.store, &outcome.iri, author) {
@@ -134,7 +138,7 @@ pub fn capture_decision_point(
                 .min_by_key(|d| d.entry.symbol.matches('/').count())
         });
         match module {
-            Some(def) => proposed_links.push(propose_link(
+            Some(def) => proposed_links.push(propose_link_unlocked(
                 state,
                 &outcome.iri,
                 "concerns",
@@ -155,7 +159,7 @@ pub fn capture_decision_point(
                 .find(|d| d.symbol == symbol || d.normalized_symbol == symbol)
         });
         match definition {
-            Some(def) => proposed_links.push(propose_link(
+            Some(def) => proposed_links.push(propose_link_unlocked(
                 state,
                 &outcome.iri,
                 "concerns",

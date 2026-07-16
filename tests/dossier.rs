@@ -60,7 +60,7 @@ fn state_with_tree_sitter_fixture(name: &str) -> AppState {
 
 /// Record a minimal typed knowledge node with title and accepted status.
 fn record(state: &AppState, kind: &str, title: &str) -> String {
-    record_with_description(state, kind, title, None)
+    record_with_description_and_status(state, kind, title, None, "accepted")
 }
 
 fn record_with_description(
@@ -69,11 +69,25 @@ fn record_with_description(
     title: &str,
     description: Option<&str>,
 ) -> String {
+    record_with_description_and_status(state, kind, title, description, "accepted")
+}
+
+fn record_with_status(state: &AppState, kind: &str, title: &str, status: &str) -> String {
+    record_with_description_and_status(state, kind, title, None, status)
+}
+
+fn record_with_description_and_status(
+    state: &AppState,
+    kind: &str,
+    title: &str,
+    description: Option<&str>,
+    status: &str,
+) -> String {
     let class_iri = state.resolve_class(kind).expect("known class");
     let mut properties = vec![
         (moose::RDFS_LABEL.to_string(), title.to_string()),
         (state.capture.title.clone(), title.to_string()),
-        (state.capture.status.clone(), "accepted".to_string()),
+        (state.capture.status.clone(), status.to_string()),
     ];
     if let Some(description) = description {
         properties.push((state.capture.description.clone(), description.to_string()));
@@ -450,6 +464,81 @@ fn retracted_filtered_and_superseded_shown() {
         .direct_records
         .iter()
         .any(|record| record.title == "Successor decision"));
+}
+
+/// Inbox and declined records are hidden through both direct and component
+/// links, while superseded records remain visible as dossier history.
+#[test]
+fn dossier_lifecycle_visibility_applies_to_direct_and_component_records() {
+    let state = state_with_substrate("lifecycle-all-surfaces");
+    let entity_iri = pre_mint_public(&state);
+    let component_iri = graph::load_components(&state).unwrap()[0]
+        .iri
+        .clone()
+        .unwrap();
+
+    for (status, title) in [
+        ("proposed", "Direct proposed record"),
+        ("rejected", "Direct rejected record"),
+        ("deprecated", "Direct deprecated record"),
+    ] {
+        let record = record_with_status(&state, "ArchitecturalDecision", title, status);
+        graph::relate(&state, &record, "concerns", &entity_iri).unwrap();
+    }
+    let direct_accepted = record(&state, "ArchitecturalDecision", "Direct accepted record");
+    let direct_superseded = record_with_status(
+        &state,
+        "ArchitecturalDecision",
+        "Direct superseded record",
+        "superseded",
+    );
+    graph::relate(&state, &direct_accepted, "concerns", &entity_iri).unwrap();
+    graph::relate(&state, &direct_superseded, "concerns", &entity_iri).unwrap();
+
+    for (status, title) in [
+        ("proposed", "Component proposed record"),
+        ("rejected", "Component rejected record"),
+        ("deprecated", "Component deprecated record"),
+    ] {
+        let record = record_with_status(&state, "ArchitecturalDecision", title, status);
+        graph::relate(&state, &record, "concerns", &component_iri).unwrap();
+    }
+    let component_accepted = record(&state, "ArchitecturalDecision", "Component accepted record");
+    let component_superseded = record_with_status(
+        &state,
+        "ArchitecturalDecision",
+        "Component superseded record",
+        "superseded",
+    );
+    graph::relate(&state, &component_accepted, "concerns", &component_iri).unwrap();
+    graph::relate(&state, &component_superseded, "concerns", &component_iri).unwrap();
+
+    let dossier = graph::get_entity_dossier(&state, &DossierTarget::Iri(entity_iri))
+        .unwrap()
+        .expect("accepted direct record keeps dossier visible");
+    let direct_titles = dossier
+        .direct_records
+        .iter()
+        .map(|record| record.title.as_str())
+        .collect::<Vec<_>>();
+    let component_titles = dossier
+        .component_records
+        .iter()
+        .map(|record| record.title.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(direct_titles.len(), 2);
+    assert!(direct_titles.contains(&"Direct accepted record"));
+    assert!(direct_titles.contains(&"Direct superseded record"));
+    assert_eq!(component_titles.len(), 2);
+    assert!(component_titles.contains(&"Component accepted record"));
+    assert!(component_titles.contains(&"Component superseded record"));
+    assert!(dossier.direct_records.iter().any(|record| {
+        record.title == "Direct superseded record" && record.status == "superseded"
+    }));
+    assert!(dossier.component_records.iter().any(|record| {
+        record.title == "Component superseded record" && record.status == "superseded"
+    }));
 }
 
 /// Position, normalized symbol, and IRI selectors resolve to the same dossier.

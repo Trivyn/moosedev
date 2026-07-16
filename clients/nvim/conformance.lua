@@ -6,9 +6,10 @@
 --
 --   nvim --headless -l conformance.lua <repo_root> <rel_file> <line> <col>
 --
--- <line>/<col> are 1-based and should sit on a substrate-resolved public
--- definition. Run via conformance.sh, which prepares a SCRATCH copy of the
--- repo so the filed proposal never lands in a real project graph.
+-- <line>/<col> are 1-based and must sit on a substrate-resolved public
+-- definition with linked knowledge, because a non-null dossier hover is part
+-- of this fixture's contract. Run via conformance.sh, which prepares a SCRATCH
+-- copy of the repo so the filed proposal never lands in a real project graph.
 --
 -- API notes: `vim.lsp.buf_request_sync` is the stable sync-request surface
 -- across 0.9–0.12; params are built by hand (make_position_params grew a
@@ -84,19 +85,20 @@ local function req(method, params, label)
   return entry and entry.result, nil
 end
 
--- 4. Hover: the dossier query (may be honestly silent on an unlinked entity,
---    but must not error).
+-- 4. Hover: this knowledge-bearing conformance target must return a dossier.
 local hover, hover_err = req("textDocument/hover", {
   textDocument = { uri = uri },
   position = pos,
 }, "hover")
 check(hover_err == nil, "hover answers without error")
-if hover and hover.contents then
-  check(
-    type(hover.contents.value) == "string" and hover.contents.value:find("**", 1, true) ~= nil,
-    "hover renders dossier markdown"
-  )
-end
+check(hover ~= nil and hover.contents ~= nil, "hover returns a non-null dossier")
+check(
+  hover ~= nil
+    and hover.contents ~= nil
+    and type(hover.contents.value) == "string"
+    and hover.contents.value:find("**", 1, true) ~= nil,
+  "hover renders dossier markdown"
+)
 
 -- 5. Code lens.
 local lenses, lens_err = req("textDocument/codeLens", { textDocument = { uri = uri } }, "codeLens")

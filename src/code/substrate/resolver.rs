@@ -351,11 +351,26 @@ impl Substrate {
                 is_public: false,
             });
         }
+        if let Some(exact) = self
+            .index
+            .symbols
+            .iter()
+            .find(|data| data.symbol == symbol)
+            .and_then(definition_entry)
+        {
+            return Some(exact);
+        }
+        // Compare stable identities on both sides. Proposal nodes may come
+        // from an older index and therefore carry a stale raw package version;
+        // normalizing only the current indexed symbol would fail to resolve
+        // that otherwise-identical target after a crate-version bump. Local
+        // SCIP symbols deliberately have no normalized identity, but retain
+        // their exact-lookup compatibility through the branch above.
+        let normalized = symbols::normalize_symbol(symbol)?;
         self.index.symbols.iter().find_map(|data| {
-            (data.symbol == symbol
-                || symbols::normalize_symbol(&data.symbol).as_deref() == Some(symbol))
-            .then(|| definition_entry(data))
-            .flatten()
+            (symbols::normalize_symbol(&data.symbol).as_deref() == Some(normalized.as_str()))
+                .then(|| definition_entry(data))
+                .flatten()
         })
     }
 
@@ -871,6 +886,33 @@ mod tests {
         assert_eq!(definitions[0].file, "src/runtime.rs");
         assert!(!definitions[0].is_module);
         assert!(definitions[0].is_public);
+    }
+
+    #[test]
+    fn definition_lookup_accepts_a_stale_raw_package_version() {
+        let current = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let stale = "rust-analyzer cargo moosedev 0.5.0 runtime/build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            current,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        document.occurrences.push(occ(current, vec![7, 4, 16], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+        let definition = substrate
+            .definition_for_symbol(stale)
+            .expect("stale raw version resolves through normalized identity");
+
+        assert_eq!(definition.symbol, current);
+        assert_eq!(
+            definition.normalized_symbol,
+            "rust-analyzer cargo moosedev . runtime/build_server()."
+        );
     }
 
     #[test]

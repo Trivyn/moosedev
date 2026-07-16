@@ -1,8 +1,8 @@
 # MOOSEDev
 
-**Structured, long-term project memory for coding agents — a neurosymbolic MCP server that fights comprehension debt.**
+**Structured, long-term project memory for coding agents — a neurosymbolic daemon that fights comprehension debt.**
 
-> Status: **active development.** See [Status](#status).
+> Status: **v2.x scope complete; active pre-production development.** See [Status](#status).
 
 *NOTE*: MOOSEDev is in **very** early development, and is not to be considered production ready.
 
@@ -10,7 +10,7 @@
 
 ## What is MOOSEDev?
 
-MOOSEDev is a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sidecar that gives coding agents — and eventually humans — a reliable, **structured, queryable, long-term understanding** of a software project.
+MOOSEDev is a local project-memory daemon that gives coding agents and humans a reliable, **structured, queryable, long-term understanding** of a software project. Agents reach it through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), editors through a knowledge-focused LSP, and humans through the web workbench.
 
 Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph**:  architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
 
@@ -26,34 +26,26 @@ Most agent "memory" tools store free text and retrieve it with embeddings; they 
 - **Auditability.** Queries carry execution traces, so reasoning is inspectable rather than opaque.
 - **Local and under your control.** Runs locally; no required cloud services.
 
-The full set of design invariants lives in [`CLAUDE.md`](./CLAUDE.md).
+The full set of design invariants lives in [`AGENTS.md`](./AGENTS.md) and [`CLAUDE.md`](./CLAUDE.md).
 
 ## How it works
 
 ```
-  Coding agent (Claude Code, Claude Desktop, …)
-        │  MCP — JSON-RPC over stdio
-        ▼
-  ┌────────────────────────────────────┐
-  │ MOOSEDev  (this repo)              │
-  │   • MCP server (rmcp)              │
-  │   • typed knowledge capture        │
-  │   • durable knowledge graph        │──▶ oxigraph (RDF, on-disk)
-  │   • SPARQL · arch validation       │
-  └─────────────────┬──────────────────┘
-                    │ composes
-                    ▼
-  ┌────────────────────────────────────┐
-  │ MOOSE engine  (closed)             │
-  │   • NLQ query + execution traces   │
-  │   • alignment                      │
-  │   • focus stack · local embeddings │
-  └────────────────────────────────────┘
+  Coding agents ── MCP ───────┐
+  Editors ─────── Knowledge-LSP├──▶ MOOSEDev shared daemon
+  Host hooks ──── policy events┘       │
+                                       ├── code substrate (SCIP + tree-sitter)
+                                       ├── typed capture + ratification queue
+  Human workbench ◀── HTTP ────────────┤
+                                       ├── oxigraph project knowledge graph
+                                       └── MOOSE engine
+                                           • symbolic NLQ + traces
+                                           • alignment + local embeddings
 ```
 
-MOOSE provides the read/reason side: natural-language query, the alignment engine, conversational focus, execution traces, and local embeddings (Snowflake Arctic-Embed-S via Candle). MOOSEDev provides the host side: the MCP server, the durable knowledge graph and its typed **write** path, a SPARQL endpoint, lightweight validation, and the bootstrap workflow.
+MOOSE provides the read/reason side: natural-language query, the alignment engine, conversational focus, execution traces, and local embeddings (Snowflake Arctic-Embed-S via Candle). MOOSEDev provides the host side: one shared daemon, the durable knowledge graph and typed **write** path, the code substrate and entity dossiers, the host-independent policy engine, MCP/LSP/HTTP surfaces, SPARQL, validation, and bootstrap workflows. All surfaces use the same graph queries and policy engine; editor and host adapters remain thin clients rather than second sources of truth.
 
-## v1 tool surface
+## MCP tool surface
 
 All of the tools below are live. They speak MCP over stdio; the LLM acts only as a sensor — the symbolic layer does the load-bearing work.
 
@@ -64,10 +56,16 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 | `supersede_decision` | Record a type-preserving replacement that supersedes a prior item: links `supersedes`, captures *why*, marks the old one superseded (never deleted) |
 | `retract_decision` | Deprecate a recorded item that no longer applies (no replacement); captures *why* and preserves it as history |
 | `relate` | Link two recorded items with a typed, ontology-legal relationship so memory can be *traversed*, not just searched |
+| `link_code` | Link a typed record to a code entity by source position or stable symbol, lazily minting private entities when needed |
+| `declare_component_paths` | Declare the repo paths owned by a system component so code entities can realize the right architecture |
+| `get_entity_dossier` | Return the authoritative decisions, constraints, lessons, judgments, and observations linked to one code entity |
+| `evaluate_policy` | Evaluate push, gate, or capture events through the shared symbolic policy engine |
+| `capture_decision_point` | Create a grounded, proposed decision from a completed episode and queue its code links for human ratification |
+| `pending_ratifications` | Report proposed records and links awaiting human review without turning judgment classification into a nudge |
 | `suggest_links` | Suggest ranked, ontology-legal links between records (suggest-only; confirm with `relate`); can scan for under-linked records |
 | `query` | Natural-language query over the graph, with a symbolic reasoning trace |
-| `get_relevant_context` | Retrieve recorded knowledge relevant to a topic (symbolic, no LLM; superseded entries excluded); omit the topic to list everything |
-| `get_provenance` | Edit provenance for an item — which agent recorded it, and when — by IRI |
+| `get_relevant_context` | Retrieve current, authoritative knowledge relevant to a topic (symbolic, no LLM); omit the topic to list everything, or explicitly opt into lifecycle history |
+| `get_provenance` | Retrieve provenance for an item — which agent recorded it, and when — by IRI |
 | `align_concepts` | Align a new concept to the best-matching ontology class (keyword + embedding sensors), with rationale or ranked candidates |
 | `suggest_mappings` | Propose ranked ontology-class mappings for a new concept, for human review |
 | `sparql` | Read-only SPARQL over the local store (SELECT/ASK → JSON; CONSTRUCT/DESCRIBE → N-Triples) |
@@ -76,19 +74,18 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 
 ## Status
 
-This is an active build with a working v1 surface. **Live today and exercised by integration tests:**
+The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.7.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
 
-- **Typed knowledge capture** into a durable, on-disk graph that persists across restarts — decisions, lessons, constraints, patterns, anti-patterns, requirements (`record_important_decision`) — plus the full edit-and-link lifecycle: `supersede_decision`, `retract_decision`, `relate`, `suggest_links`.
-- **Natural-language query** with a symbolic reasoning trace (`query`); symbolic, no-LLM **context recall** (`get_relevant_context`); and edit **provenance** (`get_provenance`).
-- **Concept alignment** to the project ontology (`align_concepts`, `suggest_mappings`).
-- **SPARQL** reads (`sparql`) and **SHACL validation** of recorded knowledge against the architecture shapes (`validate_against_architecture`).
-- **Graph export / import** for backup and version control (CLI plus the `export_graph` tool).
-- A **shared multi-client backend** (one `--serve` process, thin `--connect` proxies) so several agents share one live graph concurrently, and a **loopback web UI** for humans.
-- **Bootstrap** an existing codebase into the graph two ways: a **snapshot** agent skill that surveys current design rationale (`skills/bootstrap-existing-codebase.md`, auto-installed by `moosedev init`), and a **temporal** git-walk command (`moosedev bootstrap --temporal`) that replays trunk history, stamping each decision-bearing commit with its real commit date + author.
-- A **graph→docs workflow** that renders captured decisions as a standard ADR set (`skills/generate-adrs-from-graph.md`).
-- A **stdio MCP server** (rmcp 1.7, latest negotiated protocol) verified end-to-end (`initialize` → `tools/list` → `tools/call`), and persistence across restarts (on-disk oxigraph).
+The v1 memory foundation remains intact: typed capture and lifecycle management, symbolic query and recall, alignment, SPARQL, SHACL validation, graph import/export, shared multi-client operation, bootstrap workflows, generated documentation, and a loopback web workbench.
 
-Against the roadmap in [`tasks/todo.md`](./tasks/todo.md): M0–M3 are complete, M4 is partial (the bootstrap workflow shipped; the `get_focus_stack` tool is deferred), and the M5 shared-backend core is complete.
+v2 adds the code-aware and active layers:
+
+- **v2.0 — code-aware read path:** SCIP/rust-analyzer indexing with a tree-sitter fallback, stable code-entity identity, deterministic position resolution, component path coverage, entity dossiers, and honest-silence hover/diagnostics.
+- **v2.1 — ambient understanding:** knowledge LSP code lenses, constraint and stale-rationale diagnostics, per-component why-coverage debt, the workbench ratification inbox, and pending-review nudges.
+- **v2.2 — active agency:** one graph-driven policy engine for entity-exact push, edit-time gates, and grounded decision capture; thin Claude Code and opencode adapters; best-effort fire telemetry in `.moosedev/fires.jsonl`. Automatic session checkpoints only journal telemetry; deliberate `capture_decision_point` calls are the path that proposes graph records.
+- **v2.3 — ratified editor writes:** LSP code actions propose record links, roles, and criticality; every change goes through the ratification queue, with no direct LSP graph-write path. Push/pull diagnostic parity and the real Neovim conformance client are covered by tests.
+
+The phase definitions and acceptance criteria are in [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md). VS Code remains intentionally post-v2; Zed and Neovim are the delivered editor clients.
 
 ## Getting started
 
@@ -146,7 +143,16 @@ cd /path/to/your/project
 moosedev init
 ```
 
-This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, a `CLAUDE.md` template, and the bootstrap agent skills under `.claude/skills/` — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. See the [Quickstart](docs/quickstart.md) for the full flow, and `moosedev init --help` for options (`--codex`, `--opencode`, `--stdio`, `--force`).
+This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignore` memory rule, a `CLAUDE.md` template, and agent skills under `.claude/skills/` — non-destructively (it won't clobber an existing `CLAUDE.md` or other MCP servers) — then reload your MCP client. Add only the integrations you use:
+
+```sh
+moosedev init --codex          # Codex MCP config + .agents/skills/
+moosedev init --zed            # project-local Knowledge-LSP settings
+moosedev init --opencode       # active-agency opencode adapter
+moosedev init --claude-hooks   # Claude Code push/gate/capture hooks
+```
+
+Flags compose, and repeated runs merge safely. `--stdio` opts out of the default shared daemon; `--force` replaces existing MOOSEDev entries. See the [Quickstart](docs/quickstart.md) for the full flow and `moosedev --help` for the complete option list.
 
 <details>
 <summary>Manual configuration</summary>
@@ -167,7 +173,25 @@ MOOSEDev speaks MCP over **stdio**; `init` just generates this for you. To confi
 Use an absolute path to the binary if `moosedev` isn't on the client's `PATH`. To share one graph across several clients, use `"args": ["--connect"]` — see [Shared mode](#shared-mode-multiple-clients--agents) below.
 </details>
 
-All tools in the [v1 tool surface](#v1-tool-surface) are available over this transport.
+All tools in the [MCP tool surface](#mcp-tool-surface) are available over this transport.
+
+### Index code and enable the Knowledge-LSP
+
+v2's code-aware surfaces need a substrate index and minted public code entities. Preview the graph-changing steps before applying them:
+
+```sh
+moosedev index
+moosedev mint
+moosedev mint --apply
+moosedev classify
+moosedev classify --apply   # optional role/criticality proposals
+```
+
+`mint` and `classify` open the single-writer store directly, including in dry-run mode, so stop the shared daemon before running them. Both are dry-run unless `--apply` is present. Re-run `moosedev index` after significant source changes; `moosedev init` can also install a post-commit refresh hook. `moosedev resolve FILE LINE:COL` is the deterministic debugging path for position resolution.
+
+The Knowledge-LSP runs through `moosedev lsp` and shares the daemon's graph. It provides entity-dossier hover, role/criticality and debt code lenses, Information/Hint constraint and staleness diagnostics (push and pull), and proposal-only code actions. Use `moosedev init --zed` with the thin [Zed client](clients/zed/README.md)—currently installed as a development extension from `clients/zed`—or install the plain [Neovim registration](clients/nvim/README.md). The Neovim directory also contains the executable conformance suite.
+
+Classification only creates proposals. Judgments and editor code actions do not affect authoritative dossiers or debt metrics until a human ratifies them in the web workbench.
 
 ### Seed the graph (bootstrap)
 
@@ -308,17 +332,25 @@ auto-spawned backend inherits the resolved configuration.
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live. Runtime state is kept out of version control except `kg.nq`, the committed canonical serialization of the project graph (see "Version-controlled memory").
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.
+- **Knowledge-LSP** (`MOOSEDEV_NO_LSP`): disable the daemon's editor endpoint when set to a truthy value.
+- **Code index producers** (`MOOSEDEV_SCIP_PRODUCER`, `MOOSEDEV_SCIP_TYPESCRIPT`): override the Rust and TypeScript SCIP producer commands used by `moosedev index`. Rust defaults to `rust-analyzer`; TypeScript defaults to `npx --yes @sourcegraph/scip-typescript`.
 - **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live. By default MOOSEDev looks for an `ontologies/` directory next to the running binary (the layout of the released tarball), then falls back to the crate's `ontologies/` for `cargo run`. Set this only to load ontologies from a custom location. *Keep the unpacked release bundle together so the binary can find its `ontologies/`.*
 
 ## Project layout
 
 ```
-src/            # the MCP server (Rust): mcp/, graph/, ontology/, alignment/, llm/, api/, …
+src/            # shared daemon and CLI (Rust)
+src/code/       # SCIP/tree-sitter code substrate, resolver, minting, observations
+src/lsp/        # thin Knowledge-LSP transport and presentation surface
+src/policy/     # host-independent push/gate/capture policy engine and fire telemetry
 ui/             # the human-facing web UI (Vite/React); built to ui/dist/ and embedded in the binary
+clients/        # thin Knowledge-LSP clients and conformance fixtures (Zed, Neovim)
+.claude/hooks/  # Claude Code active-agency adapters installed by init
+.opencode/      # opencode active-agency adapter installed by init
 ontologies/     # software-engineering + architecture ontologies + SHACL shapes (.ttl)
 skills/         # workflow docs: bootstrap, temporal capture, ADR generation
 templates/      # CLAUDE.md template for projects adopting MOOSEDev as memory
-spec/           # specification + design of record + upstream engine asks
+spec/           # v1/v2 specifications + design of record + upstream engine asks
 tasks/          # build checklist / roadmap
 tests/          # integration tests
 ```
@@ -333,9 +365,12 @@ Contributions to the open parts of MOOSEDev are welcome. Deep changes to MOOSE b
 ## Documentation
 
 - [`spec/MOOSEDev_spec.md`](./spec/MOOSEDev_spec.md) — v1 scope definition
+- [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md) — v2 code layer, active-agency layer, Knowledge-LSP, and acceptance criteria
 - [`spec/MOOSEDev_design.md`](./spec/MOOSEDev_design.md) — design of record (architecture, decisions, milestones)
 - [`spec/core-moose-asks.md`](./spec/core-moose-asks.md) — capabilities to upstream into core MOOSE
-- [`CLAUDE.md`](./CLAUDE.md) — design invariants and development practices
+- [`docs/quickstart.md`](./docs/quickstart.md) — installation, initialization, bootstrap, and first recall
+- [`clients/zed/README.md`](./clients/zed/README.md) / [`clients/nvim/README.md`](./clients/nvim/README.md) — delivered Knowledge-LSP clients
+- [`AGENTS.md`](./AGENTS.md) / [`CLAUDE.md`](./CLAUDE.md) — design invariants and development practices
 
 ## How this was built
 

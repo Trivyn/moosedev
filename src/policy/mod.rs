@@ -25,7 +25,7 @@ use crate::graph::{
     render_markdown, resolve_target_entity, AppState, CodeTerms, DossierTarget, RecordSummary,
 };
 
-use fires::{append_fire, FireEvent};
+use fires::{append_fire_best_effort, FireEvent};
 
 /// One host event reported by an adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,7 +193,7 @@ pub fn evaluate_and_fire(
         | PolicyDecision::CaptureTrigger { .. } => None,
     };
     if let Some((verb, enacted, entities, records)) = fire {
-        append_fire(
+        append_fire_best_effort(
             &state.data_dir,
             &FireEvent {
                 ts: chrono::Utc::now().to_rfc3339(),

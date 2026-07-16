@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { readFileSync } from "node:fs"
-import { join } from "node:path"
+import { resolve } from "node:path"
 import { createInterface } from "node:readline"
 
 // MOOSEDev active-agency adapter for opencode (v2.2).
@@ -424,7 +424,7 @@ async function journalCheckpoint(
   const dataDir = process.env.MOOSEDEV_DATA_DIR || ".moosedev"
   let addr: string
   try {
-    addr = readFileSync(join(root, dataDir, "http.addr"), "utf8").trim()
+    addr = readFileSync(resolve(root, dataDir, "http.addr"), "utf8").trim()
   } catch {
     warnOnce("journal-addr", "no MOOSEDev http.addr; session checkpoint not journaled")
     return false

@@ -30,6 +30,8 @@ use oxigraph::model::{
     GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, Term,
 };
 
+use crate::code::substrate::symbols::normalize_symbol;
+
 use super::capture::require_information_record;
 use super::context::first_literal;
 use super::link_code::{link_code, CodeSelector, LinkCodeOutcome};
@@ -226,6 +228,41 @@ pub fn propose_link(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<String> {
+    let _guard = state.lock_proposal_writes()?;
+    propose_link_unlocked(
+        state,
+        subject_iri,
+        predicate_local,
+        target_symbol,
+        target_path,
+        evidence,
+        author,
+        when,
+    )
+}
+
+/// Enqueue a proposed link without acquiring the proposal-write lock.
+///
+/// The caller must hold the guard returned by [`AppState::lock_proposal_writes`]
+/// for this entire call. Keeping normalization, duplicate detection, and insert
+/// inside that critical section makes idempotence linearizable.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn propose_link_unlocked(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    target_symbol: &str,
+    target_path: &str,
+    evidence: &str,
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<String> {
+    // Proposal identity is code-entity identity, not one producer run's raw
+    // package version. Persist the normalized form at the graph boundary so
+    // every caller (capture, LSP, future hosts) gets the same invariant.
+    let target_symbol = normalize_symbol(target_symbol).ok_or_else(|| {
+        anyhow::anyhow!("target symbol is local or invalid SCIP: {target_symbol}")
+    })?;
     let terms = ProposalTerms::resolve(state)?;
     if let Some(existing) = scan_link_proposals(state, Some(PROPOSED))?
         .into_iter()
@@ -233,7 +270,7 @@ pub fn propose_link(
             p.kind == ProposalKind::Link
                 && p.subject_iri == subject_iri
                 && p.predicate_local == predicate_local
-                && p.target_symbol == target_symbol
+                && normalize_symbol(&p.target_symbol).as_deref() == Some(target_symbol.as_str())
         })
     {
         return Ok(existing.iri);
@@ -263,7 +300,7 @@ pub fn propose_link(
         lit(moose::RDFS_LABEL, &label)?,
         lit(&terms.subject, subject_iri)?,
         lit(&terms.predicate, predicate_local)?,
-        lit(&terms.target_symbol, target_symbol)?,
+        lit(&terms.target_symbol, &target_symbol)?,
         lit(&terms.target_path, target_path)?,
         lit(&state.capture.description, evidence)?,
         lit(&state.capture.author, author)?,
@@ -313,7 +350,7 @@ pub fn propose_judgment(
         matches!(escalation, ESCALATED | AUTO_HELD),
         "escalation must be {ESCALATED:?} or {AUTO_HELD:?}, got {escalation:?}"
     );
-    let _guard = state.lock_judgment_writes()?;
+    let _guard = state.lock_proposal_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     if let Some(existing) = scan_link_proposals(state, Some(PROPOSED))?
         .into_iter()
@@ -556,7 +593,7 @@ pub fn accept_proposal(
     proposal_iri: &str,
     agent: &str,
 ) -> anyhow::Result<AcceptOutcome> {
-    let _guard = state.lock_judgment_writes()?;
+    let _guard = state.lock_proposal_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     match require_pending(state, proposal_iri, &terms)? {
         ProposalKind::Link => {
@@ -676,7 +713,7 @@ pub fn recategorize_judgment(
     new_target_local: &str,
     agent: &str,
 ) -> anyhow::Result<AcceptOutcome> {
-    let _guard = state.lock_judgment_writes()?;
+    let _guard = state.lock_proposal_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     let kind = require_pending(state, proposal_iri, &terms)?;
     anyhow::ensure!(
@@ -837,7 +874,7 @@ pub fn recategorize_judgment(
 /// declined record's links are dead by definition, and leaving them pending
 /// would let a later accept resurrect the record into dossiers.
 pub fn reject_proposal(state: &AppState, proposal_iri: &str, agent: &str) -> anyhow::Result<()> {
-    let _guard = state.lock_judgment_writes()?;
+    let _guard = state.lock_proposal_writes()?;
     let terms = ProposalTerms::resolve(state)?;
     let kind = require_pending(state, proposal_iri, &terms)?;
     set_status(state, proposal_iri, REJECTED)?;

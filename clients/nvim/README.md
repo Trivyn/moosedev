@@ -37,8 +37,12 @@ clients/nvim/conformance.sh            # builds moosedev, runs headless nvim
 ```
 
 `conformance.lua` drives a real Neovim LSP client against the daemon —
-capabilities, hover, code lens, pull diagnostics, code action, and an
-executeCommand round-trip (idempotency included) — exiting non-zero on any
-failure. The runner SKIPs cleanly when `nvim` is not installed. It runs
-against a **scratch copy** of fixture data, so it never writes proposals into
-your real project graph.
+capabilities, a required non-null dossier hover, code lens, pull diagnostics,
+code action, and an executeCommand round-trip (idempotency included) — exiting
+non-zero on any failure. The default target is the public, substrate-covered,
+knowledge-bearing `propose_link` definition. Custom `rel_file line col` targets
+must likewise be public, substrate-resolved, and knowledge-bearing; an honestly
+silent hover is valid product behavior but fails this conformance fixture. The
+runner SKIPs cleanly when `nvim` is not installed. It runs against a **scratch
+copy** of fixture data, so it never writes proposals into your real project
+graph.

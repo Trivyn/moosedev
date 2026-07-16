@@ -94,7 +94,8 @@ pub async fn capture_decision_point(
             summary,
             files: req.files,
         },
-    );
+    )
+    .map_err(|e| ApiError::internal(format!("failed to journal capture: {e}")))?;
     Ok(Json(CaptureResponse {
         outcome: "journaled",
     }))

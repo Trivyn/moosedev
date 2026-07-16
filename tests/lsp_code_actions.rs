@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use moosedev::code::substrate::{Substrate, SubstrateMeta};
 use moosedev::graph::{self, AppState, CodeSelector, RecordInput, PROJECT_KG_GRAPH_IRI};
 use moosedev::lsp;
-use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
+use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, Quad};
 use protobuf::{EnumOrUnknown, MessageField};
 use scip::types::{
     symbol_information, Document, Index, Occurrence, PositionEncoding, Signature, SymbolInformation,
@@ -24,6 +24,7 @@ use tokio::net::UnixStream;
 const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
 const MODULE_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/";
 const PUBLIC_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+const PUBLIC_NORMALIZED: &str = "rust-analyzer cargo moosedev . runtime/build_server().";
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -407,6 +408,37 @@ fn link_record_iris(actions: &[Value]) -> Vec<String> {
         .collect()
 }
 
+fn rewrite_proposal_target(state: &AppState, proposal_iri: &str, target_symbol: &str) {
+    let predicate = state
+        .resolve_code_datatype_property("proposesTargetSymbol")
+        .unwrap();
+    let subject = NamedNode::new(proposal_iri).unwrap();
+    let predicate = NamedNode::new(predicate).unwrap();
+    let graph = NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap();
+    let old: Vec<Quad> = state
+        .store
+        .quads_for_pattern(
+            Some(subject.as_ref().into()),
+            Some(predicate.as_ref()),
+            None,
+            Some(GraphNameRef::NamedNode(graph.as_ref())),
+        )
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let replacement = Quad::new(
+        subject,
+        predicate,
+        Literal::new_simple_literal(target_symbol),
+        GraphName::NamedNode(graph),
+    );
+    let mut txn = state.store.start_transaction().unwrap();
+    for quad in &old {
+        txn.remove(quad.as_ref());
+    }
+    txn.insert(replacement.as_ref());
+    txn.commit().unwrap();
+}
+
 #[tokio::test]
 async fn code_actions_offer_links_and_judgments_with_menu_discipline() -> anyhow::Result<()> {
     let _guard = ENV_LOCK.lock().await;
@@ -429,7 +461,7 @@ async fn code_actions_offer_links_and_judgments_with_menu_discipline() -> anyhow
         link_public(&state, &crowded);
     }
     let pending = record(&state, "Lesson", "build_server retry policy");
-    graph::propose_link(
+    let pending_iri = graph::propose_link(
         &state,
         &pending,
         "concerns",
@@ -439,6 +471,11 @@ async fn code_actions_offer_links_and_judgments_with_menu_discipline() -> anyhow
         "tester",
         Utc::now(),
     )?;
+    // Simulate a pre-normalization queue entry without migrating it. The LSP
+    // must compare semantic identity and suppress the equivalent current
+    // target even though the stored raw package version is stale.
+    let stale_raw = PUBLIC_SYMBOL.replace("0.6.3", "0.5.0");
+    rewrite_proposal_target(&state, &pending_iri, &stale_raw);
     mint_public_entities(&state);
 
     let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
@@ -450,6 +487,16 @@ async fn code_actions_offer_links_and_judgments_with_menu_discipline() -> anyhow
     let actions = client.code_action(&uri, 7, 5, None).await?;
     let titles = action_titles(&actions);
     let offered = link_record_iris(&actions);
+    for action in actions
+        .iter()
+        .filter(|a| a["command"]["command"] == json!("moosedev.proposeLink"))
+    {
+        assert_eq!(
+            action["command"]["arguments"][0]["targetSymbol"],
+            json!(PUBLIC_NORMALIZED),
+            "LSP actions emit stable normalized proposal targets"
+        );
+    }
     assert!(
         offered.contains(&candidate),
         "lexically-related record offered: {titles:?}"

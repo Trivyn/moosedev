@@ -1049,6 +1049,7 @@ mod tests {
         assert!(plugin.contains("MOOSEDEV_DATA_DIR"));
         assert!(plugin.contains("journalCheckpoint(root, files, warnOnce)"));
         assert!(plugin.contains("isMooseDevStatePath(file)"));
+        assert!(plugin.contains("resolve(root, dataDir, \"http.addr\")"));
         let _ = std::fs::remove_dir_all(&target);
     }
 

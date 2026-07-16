@@ -357,7 +357,7 @@ fn accept_ratifies_record_in_place_and_link_materializes_edge() {
     // Ratify the alpha link: the concerns edge materializes and debt moves.
     let alpha_link = pending
         .iter()
-        .find(|p| p.target_symbol == ALPHA_RAW)
+        .find(|p| p.target_symbol == ALPHA_NORM)
         .expect("alpha link queued");
     let outcome = graph::accept_proposal(&f.state, &alpha_link.iri, "tester").unwrap();
     assert!(matches!(outcome, AcceptOutcome::Link(_)));
@@ -385,7 +385,7 @@ fn link_accept_requires_a_ratified_subject_record() {
     let link = graph::list_proposals(&f.state, Some("proposed"))
         .unwrap()
         .into_iter()
-        .find(|p| p.target_symbol == ALPHA_RAW)
+        .find(|p| p.target_symbol == ALPHA_NORM)
         .expect("alpha link queued")
         .iri;
 
@@ -497,5 +497,33 @@ fn ungrounded_or_unanchored_captures_are_honest() {
     assert_eq!(
         captured.unanchored,
         vec!["symbol:rust-analyzer cargo ghost 1.0.0 spook#".to_string()]
+    );
+}
+
+#[test]
+fn capture_guards_record_and_link_queue_as_one_proposal_write() {
+    let source = include_str!("../src/graph/grounded_capture.rs");
+    let capture = source
+        .split_once("pub fn capture_decision_point(")
+        .expect("capture function exists")
+        .1
+        .split_once("fn cap_title(")
+        .expect("capture function ends before cap_title")
+        .0;
+
+    let lock = capture
+        .find("state.lock_proposal_writes()?")
+        .expect("capture acquires proposal-write lock");
+    let record = capture
+        .find("record_instance_with_relation_args(")
+        .expect("capture records the proposal");
+    assert!(lock < record, "proposal lock must precede record creation");
+    assert!(
+        capture.contains("propose_link_unlocked("),
+        "capture must reuse its caller-held guard for queued links"
+    );
+    assert!(
+        !capture.contains("propose_link("),
+        "capture must not recursively acquire the proposal-write lock"
     );
 }
