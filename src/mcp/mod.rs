@@ -23,6 +23,8 @@ use crate::graph::{self, AppState, RecordInput, SupersedeInput};
 use crate::provenance;
 use crate::{sparql, validation};
 
+const SERVER_INSTRUCTIONS: &str = "MOOSEDev is durable, authoritative structured project memory. Before non-trivial work, call `get_relevant_context` with no `topic` for a broad current inventory; set `limit` up to 100, or use `sparql` when completeness matters. Use `get_relevant_context` for fast hybrid recall, `query` for one focused relationship question, and `sparql` for exact or exhaustive structural reads. Before editing a specific function, type, or module, call `get_entity_dossier`; an empty dossier does not replace project recall. Run `align_concepts` before introducing a new knowledge term. After capturing a record, report its kind, title, and IRI. Correct existing knowledge with `supersede_decision` or `retract_decision` instead of duplicating it, and run `validate_against_architecture` after any graph write.";
+
 /// Tool result helpers — the `vec![Content::text(..)]` wrapping repeats across
 /// every handler, so name it once.
 fn tool_ok(message: impl Into<String>) -> CallToolResult {
@@ -191,6 +193,7 @@ pub struct RecordDecisionArgs {
 /// One inline relation for `record_important_decision`: an object property plus its
 /// target typed node (by IRI or exact label/title).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[schemars(inline)]
 pub struct RelationArg {
     /// Object-property local name from the architecture ontology (as in `relate`).
     pub predicate: String,
@@ -201,16 +204,18 @@ pub struct RelationArg {
 /// Arguments for the `query` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct QueryArgs {
-    /// Natural-language question to answer over the project knowledge graph.
+    /// One short, focused, single-purpose question whose answer requires
+    /// synthesizing relationships in the project knowledge graph.
     pub question: String,
 }
 
 /// Arguments for the `get_relevant_context` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetRelevantContextArgs {
-    /// Topic/focus to retrieve context for. Omit to list all recorded knowledge.
+    /// Topic/focus for fast hybrid relevance recall. Omit for a broad current
+    /// inventory, bounded by `limit`.
     pub topic: Option<String>,
-    /// Maximum number of items to return (default 10).
+    /// Maximum number of items to return (default 10; clamped to 1..=100).
     pub limit: Option<usize>,
     /// Include records outside the working set too (superseded, deprecated,
     /// rejected, and still-proposed ones). Defaults to false — only ratified
@@ -222,7 +227,8 @@ pub struct GetRelevantContextArgs {
 /// Arguments for the `supersede_decision` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SupersedeArgs {
-    /// IRI of the existing decision being replaced (it will be marked "superseded").
+    /// IRI of the existing typed knowledge record being replaced; it will be
+    /// marked "superseded" but preserved as history.
     pub superseded_iri: String,
     /// Short human-readable title for the new (replacement) decision — a NAME/handle (≤~80 chars),
     /// NOT the claim (put the claim at the start of `description`).
@@ -261,6 +267,7 @@ pub struct RelateArgs {
     pub subject_iri: String,
     /// The relationship: an object-property local name from the architecture
     /// ontology — e.g. "violates", "isMotivatedBy", "concerns", "dependsOn".
+    /// `playsRole` and `hasCriticality` are ratification-only and rejected here.
     pub predicate: String,
     /// IRI of the object record (the relationship's target).
     pub object_iri: String,
@@ -271,13 +278,17 @@ pub struct RelateArgs {
 pub struct LinkCodeArgs {
     /// IRI of the typed KG record to link.
     pub record_iri: String,
-    /// Object-property local name for the link. Defaults to "concerns".
+    /// Object-property local name for the link. Defaults to "concerns"; use
+    /// "constrains" when attaching a Constraint to code.
     pub predicate: Option<String>,
-    /// Repo-relative path as stored in the substrate index; use with `line` and `col`.
+    /// Repo-relative path as stored in the substrate index; provide together
+    /// with `line` and `col`, instead of `symbol`.
     pub file: Option<String>,
     /// 1-based source line for a position selector.
+    #[schemars(range(min = 1))]
     pub line: Option<u32>,
     /// 1-based UTF-8 byte column for a position selector.
+    #[schemars(range(min = 1))]
     pub col: Option<u32>,
     /// SCIP symbol, raw or version-normalized, as an alternative to a file position.
     pub symbol: Option<String>,
@@ -289,18 +300,23 @@ pub struct DeclareComponentPathsArgs {
     /// SystemComponent IRI, or its exact name (rdfs:label).
     pub component: String,
     /// Repo-relative paths the component covers. Trailing '/' = directory
-    /// prefix (e.g. "src/code/"); no trailing slash = exact file path.
+    /// prefix (e.g. "src/code/"); no trailing slash = exact file path. Must
+    /// contain at least one path.
+    #[schemars(length(min = 1), inner(length(min = 1)))]
     pub paths: Vec<String>,
 }
 
 /// Arguments for the `get_entity_dossier` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetEntityDossierArgs {
-    /// Repo-relative path as stored in the substrate index; use with `line` and `col`.
+    /// Repo-relative path as stored in the substrate index; provide together
+    /// with `line` and `col`, instead of `symbol` or `iri`.
     pub file: Option<String>,
     /// 1-based source line for a position selector.
+    #[schemars(range(min = 1))]
     pub line: Option<u32>,
     /// 1-based UTF-8 byte column for a position selector.
+    #[schemars(range(min = 1))]
     pub col: Option<u32>,
     /// SCIP symbol, raw or version-normalized, as an alternative selector.
     pub symbol: Option<String>,
@@ -311,7 +327,8 @@ pub struct GetEntityDossierArgs {
 /// Arguments for the `capture_decision_point` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CaptureDecisionPointArgs {
-    /// Repo-relative changed files (diff-derived by the host adapter).
+    /// Repo-relative changed files (diff-derived by the host adapter). At least
+    /// one changed file or a `summary` must ground the proposal.
     pub files: Option<Vec<String>>,
     /// The host's own summary text for the decision point — used as the title
     /// seed; never an interrogated justification.
@@ -336,33 +353,36 @@ pub struct EvaluatePolicyArgs {
     pub host: Option<String>,
     /// Event kind: "entity_touched" (push), "edit_proposed" (gate), or
     /// "decision_point" (capture).
+    #[schemars(extend("enum" = ["entity_touched", "edit_proposed", "decision_point"]))]
     pub event: String,
-    /// Repo-relative file the event concerns (entity_touched / edit_proposed).
+    /// Repo-relative file required by `entity_touched` and `edit_proposed`.
     pub file: Option<String>,
-    /// Optional 1-based line for a precise position.
+    /// Optional 1-based line for a precise position; provide with `col`.
+    #[schemars(range(min = 1))]
     pub line: Option<u32>,
-    /// Optional 1-based UTF-8 byte column for a precise position.
+    /// Optional 1-based UTF-8 byte column for a precise position; provide with `line`.
+    #[schemars(range(min = 1))]
     pub col: Option<u32>,
     /// Optional edit-text anchor (e.g. an Edit tool's old_string), located in
-    /// the on-disk file to scope the gate to the definitions it overlaps.
+    /// the on-disk file to scope an `edit_proposed` gate to overlapping definitions.
     pub anchor: Option<String>,
-    /// Changed files, for a decision_point event.
+    /// Changed files for a `decision_point` event.
     pub files: Option<Vec<String>>,
-    /// Host-provided summary text, for a decision_point event.
+    /// Host-provided summary text for a `decision_point` event.
     pub summary: Option<String>,
 }
 
 /// Arguments for the `get_provenance` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetProvenanceArgs {
-    /// IRI of the recorded item to fetch edit provenance for.
+    /// Non-empty IRI of the recorded item to fetch edit provenance for.
     pub iri: String,
 }
 
 /// Arguments for the `align_concepts` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AlignConceptsArgs {
-    /// Label of the new concept to align (e.g. "Design Decision").
+    /// Non-empty label of the new concept to align (e.g. "Design Decision").
     pub label: String,
     /// Optional definition / description to sharpen the match.
     pub definition: Option<String>,
@@ -373,7 +393,7 @@ pub struct AlignConceptsArgs {
 /// Arguments for the `suggest_mappings` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SuggestMappingsArgs {
-    /// Label of the concept to find candidate class mappings for.
+    /// Non-empty label of the concept to find candidate class mappings for.
     pub label: String,
     /// Optional definition / description to sharpen the candidates.
     pub definition: Option<String>,
@@ -382,7 +402,7 @@ pub struct SuggestMappingsArgs {
 /// Arguments for the `sparql` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SparqlArgs {
-    /// Read-only SPARQL query to run against the local project store.
+    /// Non-empty read-only SPARQL query to run against the local project store.
     pub query: String,
 }
 
@@ -392,10 +412,10 @@ pub struct SuggestLinksArgs {
     /// IRI of a single record to suggest links for. Omit to SCAN the project graph
     /// for under-linked records (those the shapes say SHOULD carry a link).
     pub iri: Option<String>,
-    /// Maximum suggestions per record (default 5).
+    /// Maximum suggestions per record (default 5; clamped to 1..=25).
     pub top_n: Option<usize>,
     /// In scan mode, the maximum number of under-linked records to inspect
-    /// (default 20).
+    /// (default 20; clamped to 1..=200).
     pub max_records: Option<usize>,
 }
 
@@ -406,7 +426,8 @@ pub struct ExportGraphArgs {
     pub format: Option<String>,
     /// Named graph scope: project, provenance, or all. Defaults to project.
     pub graph: Option<String>,
-    /// Optional output path. Prefer an absolute path. If omitted, the RDF text is returned inline.
+    /// Optional output path. Prefer an absolute path. If present, writes or
+    /// overwrites that file; if omitted, returns the RDF text inline.
     pub path: Option<String>,
 }
 
@@ -430,14 +451,28 @@ impl MooseDevServer {
     }
 
     /// Health check — confirms the MCP transport is live. Returns "pong".
-    #[tool(description = "Health check; returns 'pong'.")]
+    #[tool(
+        description = "Health check; returns 'pong'.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     async fn ping(&self) -> Result<CallToolResult, McpError> {
         Ok(tool_ok("pong"))
     }
 
     /// Report the pending ratification queue depth (read-only).
     #[tool(
-        description = "Count the pending proposals awaiting human ratification (record→code-entity links and proposed records). Read-only; returns the count plus a short preview. Judgment proposals (role/criticality classifications) never count here — they wait quietly in the workbench inbox and are tallied separately. Ratify or reject in the workbench Ratifications page."
+        description = "Count the pending proposals awaiting human ratification (record→code-entity links and proposed records). Read-only; returns the count plus a short preview. Judgment proposals (role/criticality classifications) never count here — they wait quietly in the workbench inbox and are tallied separately. Ratify or reject in the workbench Ratifications page.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn pending_ratifications(&self) -> Result<CallToolResult, McpError> {
         let proposals = match graph::list_proposals(&self.state, Some("proposed")) {
@@ -490,7 +525,13 @@ impl MooseDevServer {
 
     /// Evaluate one host event against the active-agency policy engine.
     #[tool(
-        description = "Evaluate a host event against the graph-driven policy engine and return the typed verdict as JSON. Host adapters contain zero policy: report the event (`entity_touched` for push, `edit_proposed` for gate, `decision_point` for capture) and enact the returned decision (allow / inject / gate / capture_trigger). Gate verdicts cite the accepted Constraints that govern the touched entities. Read-only on the graph; acted decisions append fire telemetry to .moosedev/fires.jsonl."
+        description = "Host-adapter integration tool: evaluate one host event against the graph-driven policy engine and return the typed verdict to enact. Do not use it for ordinary knowledge queries. Use `file` for `entity_touched` and `edit_proposed`; use `files` and optional `summary` for `decision_point`. Gate verdicts cite governing accepted Constraints. It does not modify the project graph, but enacted decisions may append fire telemetry to `.moosedev/fires.jsonl`; returns JSON allow/inject/gate/capture_trigger output.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn evaluate_policy(
         &self,
@@ -541,7 +582,13 @@ impl MooseDevServer {
 
     /// Grounded capture at a decision point — proposed record + queued links.
     #[tool(
-        description = "DELIBERATE grounded capture at a decision point (episode end, acceptance checkpoint): mint a PROPOSED ArchitecturalDecision from what actually happened — the caller's own summary plus the diff-derived changed-file list — and queue its entity links as ratification proposals. Call this only when you judge the session produced a real decision worth ratifying; automatic session-end adapters journal to fire telemetry via HTTP instead and never mint records. Nothing takes effect until a human ratifies it in the workbench inbox; the record is never auto-accepted. `isMotivatedBy` links only an EXISTING Requirement (pass `requirement`); it is omitted when none is given, never invented. Reports everything written, including files that could not be anchored in the substrate."
+        description = "At a deliberate decision checkpoint, create a PROPOSED ArchitecturalDecision from the caller's summary and changed files, and queue entity links for human ratification. Use only when the session produced a real decision worth review; use `record_important_decision` for knowledge that should be accepted immediately, and `evaluate_policy` for automatic host-event handling. `requirement`, when supplied, must resolve to an existing Requirement. Writes a proposed record, ratification proposals, and capture telemetry; nothing takes effect until a human ratifies it. Returns the record IRI, queued-link count, and unanchored inputs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn capture_decision_point(
         &self,
@@ -604,7 +651,13 @@ impl MooseDevServer {
 
     /// Record a typed knowledge item into the durable project knowledge graph.
     #[tool(
-        description = "Record a typed architectural decision (or other knowledge class) into the durable project knowledge graph. Inline `relations` can link the new record to existing typed graph nodes, including `concerns` edges to SystemComponent records. For an ArchitecturalDecision, capture its cluster in the SAME call: `alternatives_considered` (options you weighed and rejected) and `consequences` (trade-offs that result) are each minted as a typed node and linked — record what you actually weighed; omit when there is none (do not invent)."
+        description = "Create a durable typed knowledge record directly in the project graph; the record is accepted by default unless `status` is supplied. Use this after broad recall or an exact SPARQL check confirms the knowledge is new, and call `align_concepts` first when introducing a term. Inline `relations` link existing typed nodes atomically; ArchitecturalDecision alternatives and consequences are minted as typed linked nodes in the same call. This writes the graph and returns the new record IRI and applied links; run `validate_against_architecture` afterward. Use `capture_decision_point` instead when the record must remain proposed for human ratification.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn record_important_decision(
         &self,
@@ -734,7 +787,13 @@ impl MooseDevServer {
 
     /// Record a new decision that supersedes an existing one, preserving history.
     #[tool(
-        description = "Record a NEW knowledge item that supersedes an existing one when a prior decision/requirement/constraint/lesson changes. The replacement is recorded with the SAME knowledge class as the superseded item (type-preserving). Atomically links new -supersedes-> old and old -isSupersededBy-> new, captures WHY it changed as a linked Rationale, and marks the old item 'superseded' — the old record is preserved (never deleted), so the history and reasoning are retained. Pass the IRI of the item being replaced as `superseded_iri`."
+        description = "Replace an existing typed knowledge record when prior knowledge has changed. Atomically creates a replacement of the same class, captures the required rationale as a typed Rationale, links the history in both directions, and marks the old record superseded without deleting it. Use `retract_decision` when there is no successor, and `record_important_decision` only for genuinely new knowledge. Writes the graph and returns the old, new, and rationale IRIs; run `validate_against_architecture` afterward.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn supersede_decision(
         &self,
@@ -812,7 +871,13 @@ impl MooseDevServer {
 
     /// Retract a recorded knowledge item in place (mark deprecated + capture why).
     #[tool(
-        description = "Retract a recorded knowledge item that should no longer apply (e.g. a duplicate, or a decision abandoned WITHOUT a replacement). Marks it 'deprecated' so it drops out of the current working set, captures WHY as a linked Rationale, and preserves the record as history (never deleted). Use supersede_decision instead when a replacement record exists. Pass the item's IRI as `iri` and the reason as `rationale`."
+        description = "Retract a recorded knowledge item that should no longer apply (e.g. a duplicate, or a decision abandoned WITHOUT a replacement). Marks it 'deprecated' so it drops out of the current working set, captures WHY as a linked Rationale, and preserves the record as history (never deleted). Use supersede_decision instead when a replacement record exists. Pass the item's IRI as `iri` and the reason as `rationale`.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn retract_decision(
         &self,
@@ -864,7 +929,13 @@ impl MooseDevServer {
 
     /// Link two recorded knowledge items with a typed relationship edge.
     #[tool(
-        description = "Link two typed graph nodes with a typed relationship, building the project knowledge GRAPH (not just a list). The relationship is an object property from the architecture ontology, given by its local name — e.g. an AntiPattern `violates` a Constraint, an ArchitecturalDecision `isMotivatedBy` a Requirement, any record `concerns` a SystemComponent, one Component `dependsOn` another. Both endpoints must already exist; the edge is added idempotently. Use this to connect related decisions, constraints, lessons, and patterns so memory can be TRAVERSED, not only searched."
+        description = "Assert an idempotent, ontology-declared object-property edge between two existing typed graph nodes. Use this when evidence supports the relationship; use `suggest_links` when candidate relationships are unknown, and `link_code` when attaching a record to source code. The predicate and SHACL domain/range are validated, and judgment predicates remain ratification-only. Writes the edge and returns the resolved subject–predicate–object relationship.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn relate(
         &self,
@@ -909,7 +980,13 @@ impl MooseDevServer {
 
     /// Link a typed knowledge record to a CodeEntity resolved from the substrate.
     #[tool(
-        description = "Link a typed knowledge record to the code entity at a source position or SCIP symbol, lazily minting the CodeEntity in the project KG when it is not yet minted. Pass exactly one selector: either `file` + 1-based `line` + 1-based `col`, or `symbol` (raw or normalized). `predicate` defaults to `concerns`; intent links such as `realizes`, `satisfies`, and `embodies` are auto-oriented."
+        description = "Attach a typed knowledge record to the CodeEntity resolved by exactly one selector: `file` + 1-based `line` + 1-based UTF-8 byte `col`, or SCIP `symbol`. Use `constrains` for a Constraint and `concerns` for other entity-specific records unless another ontology predicate is intended. The call is idempotent, may lazily mint the CodeEntity, and auto-orients intent predicates such as `realizes`, `satisfies`, and `embodies`. Writes the graph and returns the entity, edge, and substrate-staleness status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn link_code(
         &self,
@@ -1000,7 +1077,13 @@ impl MooseDevServer {
 
     /// Declare repo path coverage for a SystemComponent.
     #[tool(
-        description = "Declare repo-relative path coverage for a SystemComponent. Coverage drives `moosedev mint`'s `realizes` derivation by mapping source paths to owning components. A path ending in `/` is a directory prefix; without a trailing slash it is an exact file path. The call is idempotent and add-only. When several components cover a file, the longest matching path wins."
+        description = "Bootstrap/admin tool: add repo-relative path coverage to an existing SystemComponent so code entities can derive their owning component through `realizes`. A trailing `/` means directory prefix; otherwise the path is an exact file. This is an idempotent, add-only graph write; when coverage overlaps, the longest matching path wins. Returns paths added and paths already covered.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn declare_component_paths(
         &self,
@@ -1031,7 +1114,13 @@ impl MooseDevServer {
 
     /// Get the recorded knowledge directly linked to a CodeEntity.
     #[tool(
-        description = "Returns the recorded knowledge (decisions, constraints, lessons, requirements, and related records) directly linked to the code entity at a position, symbol, or IRI. Pass exactly one selector: `file` + 1-based `line` + 1-based `col`, `symbol`, or `iri`. Distinguishes a not-indexed file from covered-but-unlinked code. When no recorded knowledge is directly linked, returns a clear no-recorded-knowledge reply; use `link_code` to attach records."
+        description = "Retrieve the recorded knowledge governing one code entity, including directly linked records and records inherited through its realized SystemComponent. Call this before editing a specific function, type, or module, and treat returned Constraints as hard rules. Pass exactly one selector: `file` + 1-based `line` + 1-based UTF-8 byte `col`, `symbol`, or CodeEntity `iri`. Read-only and entity-specific: a no-recorded-knowledge result does not replace project recall.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_entity_dossier(
         &self,
@@ -1115,7 +1204,13 @@ impl MooseDevServer {
 
     /// Suggest typed links to add to the project knowledge graph (suggest-only).
     #[tool(
-        description = "Suggest typed links to add to the project knowledge GRAPH — ranked, ontology-legal candidate relationships between recorded items, so memory can be TRAVERSED, not just searched. Suggest-only: it writes nothing; confirm a suggestion by calling `relate` with the printed arguments. Pass `iri` to get link candidates for one record; omit it to SCAN for under-linked records (records the shapes say SHOULD carry a link — e.g. an ArchitecturalDecision with no isMotivatedBy). Candidates are generated symbolically (hybrid retrieval + SHACL domain/range) and never invented."
+        description = "Return ranked, ontology-legal hypotheses for unasserted relationships between recorded items. Suggestions are candidates, not proven facts, and this tool writes nothing: review the candidate, then call `relate` to assert a chosen edge. Pass `iri` for one record, or omit it to scan shape-identified under-linked records. Returns proposed `relate` arguments and any missing-link gap notes.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn suggest_links(
         &self,
@@ -1202,7 +1297,13 @@ impl MooseDevServer {
 
     /// Ask a natural-language question over the project knowledge graph.
     #[tool(
-        description = "Ask a natural-language question over the project knowledge graph. Returns an answer plus a symbolic reasoning trace."
+        description = "Answer one short, focused natural-language question by planning walks across relationships in the project knowledge graph and synthesizing the resulting records. Use this when `get_relevant_context` recall is insufficient and the answer needs relationship reasoning; use `sparql` instead for exact, bulk, or deterministic structural reads. Read-only; returns a synthesized answer, confidence, and an auditable symbolic reasoning trace.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn query(
         &self,
@@ -1221,9 +1322,16 @@ impl MooseDevServer {
         }
     }
 
-    /// Retrieve recorded project knowledge relevant to a topic (or all of it).
+    /// Retrieve recorded project knowledge relevant to a topic or browse a
+    /// bounded current inventory.
     #[tool(
-        description = "Retrieve curated, authoritative project knowledge (architectural decisions, constraints, lessons, patterns, requirements) relevant to a topic — the maintainers' recorded source of truth for this project's decisions and rationale, kept current (superseded entries are excluded by default). Consult it before answering a why-question or choosing an implementation approach, and TRUST it: prefer its recorded answer over re-deriving from the code, and do not re-verify its claims against the source unless explicitly asked. Symbolic — no LLM. Omit the topic to list all recorded knowledge."
+        description = "Retrieve authoritative current project knowledge using fast hybrid topic matching plus bounded typed relationship expansion. Start here for recall and browsing: omit `topic` for a broad current inventory (default 10, maximum 100), or provide a topic for a shallow, paraphrase-tolerant probe. A topic-scoped empty result means no record cleared the relevance floor, not that the graph is empty. Use `query` for relationship synthesis and `sparql` for exact, complete structural reads. Read-only; non-current lifecycle states are excluded unless `include_history` is true.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_relevant_context(
         &self,
@@ -1255,7 +1363,13 @@ impl MooseDevServer {
 
     /// Get the Edit provenance for a recorded knowledge item: who recorded it, and when.
     #[tool(
-        description = "Get the edit provenance (which agent recorded it, and when) for a knowledge item, by IRI."
+        description = "Get the edit provenance (which agent recorded it, and when) for a knowledge item, by IRI.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_provenance(
         &self,
@@ -1273,7 +1387,13 @@ impl MooseDevServer {
 
     /// Align a new concept to the best-matching class in the architecture ontology.
     #[tool(
-        description = "Align a new concept (by label, with optional definition) to the best-matching class in the project's architecture ontology, using symbolic keyword + embedding matching. Returns the resolved parent class with the sensor that decided it and a rationale, or ranked candidate classes if ambiguous."
+        description = "Before recording a new knowledge term, align its label, optional definition, and surface forms to existing classes in the project's architecture ontology so the model does not drift. This is the canonical alignment tool for new callers. Read-only; returns the resolved parent class with the deciding sensor and rationale, or ranked candidates when ambiguous.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn align_concepts(
         &self,
@@ -1303,7 +1423,13 @@ impl MooseDevServer {
 
     /// Suggest candidate ontology classes a concept could map to (for review).
     #[tool(
-        description = "Suggest which existing architecture-ontology classes a new concept could map to, for human review. Same alignment engine as align_concepts; surfaces the ranked candidate classes when the match is ambiguous."
+        description = "Compatibility alias for `align_concepts` using the same alignment engine. New callers should use `align_concepts`, which also accepts surface labels. Read-only; returns the resolved ontology class and rationale, or ranked candidates when ambiguous.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn suggest_mappings(
         &self,
@@ -1327,7 +1453,13 @@ impl MooseDevServer {
 
     /// Run a read-only SPARQL query over the local store.
     #[tool(
-        description = "Run a read-only SPARQL query over the local store. Default graph is the union of named graphs unless the query specifies FROM. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. Key graph IRIs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, architecture shapes https://moosedev.dev/kg/ontology/software-architecture/shapes."
+        description = "Run an exact, read-only SPARQL query over the local knowledge store. Use this for deterministic structural reads, exhaustive listings, deduplication checks, and explicit named-graph selection; use `get_relevant_context` for fast topical recall and `query` for relationship synthesis. The default graph is the union of named graphs unless `FROM` is specified. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. Key graphs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, shapes https://moosedev.dev/kg/ontology/software-architecture/shapes.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn sparql(
         &self,
@@ -1348,7 +1480,13 @@ impl MooseDevServer {
     /// Serialize the project knowledge graph to RDF text for backup / version
     /// control / transfer — NOT a read or search path.
     #[tool(
-        description = "Serialize the project knowledge graph to RDF text for BACKUP, version control, or transfer — this is NOT a read or search path. To read, search, or traverse knowledge — to answer a question, render a document, or inspect records — use `sparql`, `get_relevant_context`, or `query` instead; do NOT dump the whole graph into context (that defeats the point of structured, queryable memory). Defaults to canonical N-Quads for the project graph. N-Triples is deterministic after graph names are dropped; Turtle is human-readable, not byte-canonical. Optional args: format nq|nt|ttl, graph project|provenance|all, path for writing to a file instead of returning inline text (absolute paths recommended)."
+        description = "Serialize the project knowledge graph to RDF text for BACKUP, version control, or transfer — this is NOT a read or search path. To read, search, or traverse knowledge — to answer a question, render a document, or inspect records — use `sparql`, `get_relevant_context`, or `query` instead; do NOT dump the whole graph into context (that defeats the point of structured, queryable memory). Defaults to canonical N-Quads for the project graph. N-Triples is deterministic after graph names are dropped; Turtle is human-readable, not byte-canonical. Optional args: format nq|nt|ttl, graph project|provenance|all, path for writing to a file instead of returning inline text (absolute paths recommended).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn export_graph(
         &self,
@@ -1391,7 +1529,13 @@ impl MooseDevServer {
 
     /// Validate recorded knowledge against the loaded architecture shapes.
     #[tool(
-        description = "Validate the durable project knowledge graph against the loaded architecture SHACL shapes. Symbolic and on-demand; validates recorded knowledge, not source code."
+        description = "Check the durable project knowledge graph against the loaded architecture SHACL shapes. Run this after graph writes or lifecycle changes to catch structural and ontology violations. Read-only and symbolic; validates recorded knowledge, not source code, and returns a deterministic validation report.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn validate_against_architecture(&self) -> Result<CallToolResult, McpError> {
         match validation::validate_project(&self.state) {
@@ -1416,16 +1560,61 @@ impl ServerHandler for MooseDevServer {
         server_impl.version = env!("CARGO_PKG_VERSION").to_string();
         info.server_info = server_impl;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.instructions = Some(
-            "MOOSEDev: structured, long-term project memory built on the MOOSE engine. Use sparql for deterministic read-only graph queries and validate_against_architecture to check recorded knowledge against loaded shapes.".to_string(),
-        );
+        info.instructions = Some(SERVER_INSTRUCTIONS.to_string());
         info
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_when;
+    use super::{resolve_when, MooseDevServer, SERVER_INSTRUCTIONS};
+    use rmcp::model::Tool;
+    use serde_json::Value;
+
+    const TOOL_NAMES: [&str; 20] = [
+        "align_concepts",
+        "capture_decision_point",
+        "declare_component_paths",
+        "evaluate_policy",
+        "export_graph",
+        "get_entity_dossier",
+        "get_provenance",
+        "get_relevant_context",
+        "link_code",
+        "pending_ratifications",
+        "ping",
+        "query",
+        "record_important_decision",
+        "relate",
+        "retract_decision",
+        "sparql",
+        "suggest_links",
+        "suggest_mappings",
+        "supersede_decision",
+        "validate_against_architecture",
+    ];
+
+    fn tool_catalog() -> Vec<Tool> {
+        MooseDevServer::tool_router().list_all()
+    }
+
+    fn tool<'a>(catalog: &'a [Tool], name: &str) -> &'a Tool {
+        catalog
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+    }
+
+    fn schema(tool: &Tool) -> Value {
+        Value::Object((*tool.input_schema).clone())
+    }
+
+    fn description<'a>(catalog: &'a [Tool], name: &str) -> &'a str {
+        tool(catalog, name)
+            .description
+            .as_deref()
+            .unwrap_or_else(|| panic!("missing description for {name}"))
+    }
 
     #[test]
     fn resolve_when_parses_rfc3339() {
@@ -1446,6 +1635,189 @@ mod tests {
             err.contains("RFC3339"),
             "error names the expected format: {err}"
         );
+    }
+
+    #[test]
+    fn mcp_tool_catalog_has_complete_descriptions_and_annotations() {
+        let catalog = tool_catalog();
+        let mut names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_ref()).collect();
+        names.sort_unstable();
+        assert_eq!(names, TOOL_NAMES);
+
+        for tool in &catalog {
+            assert!(
+                tool.description
+                    .as_deref()
+                    .is_some_and(|description| !description.trim().is_empty()),
+                "{} needs a non-empty operational description",
+                tool.name
+            );
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} needs MCP annotations", tool.name));
+            assert_eq!(
+                annotations.open_world_hint,
+                Some(false),
+                "{} operates on the closed project-memory domain",
+                tool.name
+            );
+
+            for (property, property_schema) in tool.input_schema["properties"]
+                .as_object()
+                .into_iter()
+                .flatten()
+            {
+                assert!(
+                    property_schema["description"]
+                        .as_str()
+                        .is_some_and(|description| !description.trim().is_empty()),
+                    "{}.{} needs a non-empty schema description",
+                    tool.name,
+                    property
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_tool_annotations_match_effects() {
+        let catalog = tool_catalog();
+        let read_only = [
+            "align_concepts",
+            "get_entity_dossier",
+            "get_provenance",
+            "get_relevant_context",
+            "pending_ratifications",
+            "ping",
+            "query",
+            "sparql",
+            "suggest_links",
+            "suggest_mappings",
+            "validate_against_architecture",
+        ];
+        let additive_non_idempotent = [
+            "capture_decision_point",
+            "evaluate_policy",
+            "record_important_decision",
+        ];
+        let additive_idempotent = ["declare_component_paths", "link_code", "relate"];
+        let destructive = ["export_graph", "retract_decision", "supersede_decision"];
+
+        for name in read_only {
+            let annotations = tool(&catalog, name).annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(true), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(false), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(true), "{name}");
+        }
+        for name in additive_non_idempotent {
+            let annotations = tool(&catalog, name).annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(false), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(false), "{name}");
+        }
+        for name in additive_idempotent {
+            let annotations = tool(&catalog, name).annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(false), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(true), "{name}");
+        }
+        for name in destructive {
+            let annotations = tool(&catalog, name).annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(true), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(false), "{name}");
+        }
+    }
+
+    #[test]
+    fn mcp_descriptions_encode_routing_boundaries() {
+        let catalog = tool_catalog();
+        for name in ["get_relevant_context", "query", "sparql"] {
+            let description = description(&catalog, name);
+            for peer in ["get_relevant_context", "query", "sparql"] {
+                if peer != name {
+                    assert!(
+                        description.contains(peer),
+                        "{name} must route against {peer}"
+                    );
+                }
+            }
+        }
+
+        assert!(description(&catalog, "query").contains("focused"));
+        assert!(
+            description(&catalog, "record_important_decision").contains("capture_decision_point")
+        );
+        assert!(
+            description(&catalog, "capture_decision_point").contains("record_important_decision")
+        );
+        assert!(description(&catalog, "supersede_decision").contains("retract_decision"));
+        assert!(description(&catalog, "get_entity_dossier").contains("before editing"));
+        assert!(description(&catalog, "suggest_links").contains("not proven facts"));
+        assert!(description(&catalog, "suggest_mappings").contains("Compatibility alias"));
+        assert!(description(&catalog, "evaluate_policy").contains("Host-adapter"));
+        assert!(!description(&catalog, "evaluate_policy").contains("warn"));
+        assert!(description(&catalog, "capture_decision_point").contains("queued-link count"));
+        assert!(description(&catalog, "get_relevant_context").contains("maximum 100"));
+        assert!(SERVER_INSTRUCTIONS.contains("limit` up to 100"));
+
+        for required in [
+            "get_relevant_context",
+            "query",
+            "sparql",
+            "get_entity_dossier",
+            "align_concepts",
+            "validate_against_architecture",
+        ] {
+            assert!(
+                SERVER_INSTRUCTIONS.contains(required),
+                "server instructions must mention {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_input_schema_exposes_operational_constraints() {
+        let catalog = tool_catalog();
+
+        let policy = schema(tool(&catalog, "evaluate_policy"));
+        assert_eq!(
+            policy["properties"]["event"]["enum"],
+            serde_json::json!(["entity_touched", "edit_proposed", "decision_point"])
+        );
+        for field in ["line", "col"] {
+            assert_eq!(policy["properties"][field]["minimum"], 1);
+        }
+
+        for name in ["link_code", "get_entity_dossier"] {
+            let schema = schema(tool(&catalog, name));
+            for field in ["line", "col"] {
+                assert_eq!(schema["properties"][field]["minimum"], 1, "{name}.{field}");
+            }
+        }
+
+        let paths = schema(tool(&catalog, "declare_component_paths"));
+        assert_eq!(paths["properties"]["paths"]["minItems"], 1);
+        assert_eq!(paths["properties"]["paths"]["items"]["minLength"], 1);
+
+        let record = schema(tool(&catalog, "record_important_decision"));
+        let relation_items = &record["properties"]["relations"]["items"];
+        assert!(
+            relation_items.get("$ref").is_none(),
+            "relations must be inline"
+        );
+        assert_eq!(
+            relation_items["required"],
+            serde_json::json!(["predicate", "target"])
+        );
+        assert_eq!(relation_items["properties"]["predicate"]["type"], "string");
+        assert_eq!(relation_items["properties"]["target"]["type"], "string");
+
+        let query = schema(tool(&catalog, "query"));
+        assert!(query["properties"]["question"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("focused")));
     }
 
     #[test]
