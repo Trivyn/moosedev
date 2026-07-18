@@ -40,7 +40,9 @@ pub fn link_code(
     agent: &str,
 ) -> anyhow::Result<LinkCodeOutcome> {
     let substrate = state.substrate().ok_or_else(|| {
-        anyhow::anyhow!("code substrate unavailable; run `moosedev index` and restart the backend")
+        anyhow::anyhow!(
+            "code substrate unavailable; run `moosedev index`; the backend will load it automatically"
+        )
     })?;
     let entry = match selector {
         CodeSelector::Position { file, line, col } => {

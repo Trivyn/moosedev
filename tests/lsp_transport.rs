@@ -229,6 +229,7 @@ async fn initialize_negotiates_and_declares_capabilities() -> anyhow::Result<()>
     let capabilities = &init["result"]["capabilities"];
     assert_eq!(capabilities["hoverProvider"], json!(true));
     assert_eq!(capabilities["textDocumentSync"]["openClose"], json!(true));
+    assert_eq!(capabilities["textDocumentSync"]["change"], json!(1));
     assert_eq!(capabilities["textDocumentSync"]["save"], json!(true));
     assert_eq!(capabilities["positionEncoding"], json!("utf-8"));
     assert_eq!(

@@ -6,11 +6,14 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use moosedev::code::substrate::{Substrate, SubstrateMeta};
+use moosedev::code::substrate::scheduler::{ReindexScheduler, SchedulerConfig};
+use moosedev::code::substrate::{
+    generation_dir, producer_index_path_in, ProducerRun, Substrate, SubstrateMeta,
+};
 use moosedev::graph::{self, AppState, CodeSelector, RecordInput, PROJECT_KG_GRAPH_IRI};
 use moosedev::lsp;
 use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
-use protobuf::{EnumOrUnknown, MessageField};
+use protobuf::{EnumOrUnknown, Message, MessageField};
 use scip::types::{
     symbol_information, Document, Index, Occurrence, PositionEncoding, Signature, SymbolInformation,
 };
@@ -157,6 +160,21 @@ fn link_public(state: &AppState, record_iri: &str, public_start: u32) {
     .expect("link public build_server");
 }
 
+fn link_public_without_installing_substrate(state: &AppState, record_iri: &str, public_start: u32) {
+    let offline = synthetic_substrate(public_start);
+    let entry = offline
+        .definitions()
+        .into_iter()
+        .find(|entry| entry.symbol == PUBLIC_SYMBOL)
+        .expect("public definition");
+    let terms = graph::CodeTerms::resolve(state).expect("code terms");
+    let components = graph::load_components(state).expect("components");
+    let entity = graph::ensure_entity(state, &terms, &components, &entry, "tester")
+        .expect("ensure public entity");
+    graph::relate(state, record_iri, "constrains", &entity.iri)
+        .expect("link constraint to offline entity");
+}
+
 fn mint_public_entities(state: &AppState) {
     let substrate = state.substrate().expect("substrate");
     let terms = graph::CodeTerms::resolve(state).expect("code terms");
@@ -174,6 +192,11 @@ fn mint_public_entities(state: &AppState) {
 }
 
 fn synthetic_substrate(public_start: u32) -> Substrate {
+    Substrate::from_index(synthetic_index(public_start), meta(), false)
+        .expect("synthetic substrate")
+}
+
+fn synthetic_index(public_start: u32) -> Index {
     let mut index = Index::new();
     let mut document = doc("src/runtime.rs");
     document.symbols.push(info(
@@ -206,8 +229,48 @@ fn synthetic_substrate(public_start: u32) -> Substrate {
         .occurrences
         .push(occ(SECOND_SYMBOL, vec![8, 4, 14], 1));
     index.documents.push(document);
+    index
+}
 
-    Substrate::from_index(index, meta(), false).expect("synthetic substrate")
+fn publish_disk_substrate(data_dir: &Path, index: &Index) {
+    publish_disk_substrate_started_at(data_dir, index, Utc::now());
+}
+
+fn publish_disk_substrate_started_at(
+    data_dir: &Path,
+    index: &Index,
+    indexed_started_at: DateTime<Utc>,
+) {
+    let generation = format!("gen-{}", uuid::Uuid::new_v4());
+    let artifact_root = generation_dir(data_dir, &generation);
+    std::fs::create_dir_all(&artifact_root).expect("create substrate generation");
+    std::fs::write(
+        producer_index_path_in(&artifact_root, "rust-analyzer"),
+        index.write_to_bytes().expect("serialize SCIP index"),
+    )
+    .expect("write SCIP index");
+    SubstrateMeta {
+        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
+        indexed_commit: "unknown".to_string(),
+        indexed_started_at: Some(indexed_started_at),
+        indexed_at: Utc::now(),
+        generation: Some(generation),
+        producers: vec![ProducerRun {
+            name: "rust-analyzer".to_string(),
+            producer: "rust-analyzer".to_string(),
+            producer_version: "test".to_string(),
+            mode: "scip".to_string(),
+            documents: index.documents.len(),
+            occurrences: index
+                .documents
+                .iter()
+                .map(|document| document.occurrences.len())
+                .sum(),
+            path_prefix: None,
+        }],
+    }
+    .save(data_dir)
+    .expect("publish substrate manifest");
 }
 
 fn doc(relative_path: &str) -> Document {
@@ -376,6 +439,19 @@ where
     }
 
     async fn did_open(&mut self, uri: impl Into<String>) -> anyhow::Result<()> {
+        let uri = uri.into();
+        let path = uri
+            .strip_prefix("file://")
+            .context("test URI must be a file URI")?;
+        let text = std::fs::read_to_string(path)?;
+        self.did_open_text(uri, text).await
+    }
+
+    async fn did_open_text(
+        &mut self,
+        uri: impl Into<String>,
+        text: impl Into<String>,
+    ) -> anyhow::Result<()> {
         self.send(json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didOpen",
@@ -384,8 +460,25 @@ where
                     "uri": uri.into(),
                     "languageId": "rust",
                     "version": 1,
-                    "text": "ignored unsaved text"
+                    "text": text.into()
                 }
+            }
+        }))
+        .await
+    }
+
+    async fn did_change(
+        &mut self,
+        uri: impl Into<String>,
+        version: i32,
+        text: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.into(), "version": version },
+                "contentChanges": [{ "text": text.into() }]
             }
         }))
         .await
@@ -396,8 +489,7 @@ where
             "jsonrpc": "2.0",
             "method": "textDocument/didSave",
             "params": {
-                "textDocument": { "uri": uri.into() },
-                "text": "ignored saved notification text"
+                "textDocument": { "uri": uri.into() }
             }
         }))
         .await
@@ -569,9 +661,11 @@ async fn diagnostics_republish_when_substrate_becomes_available() -> anyhow::Res
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
     let repo_root = synthetic_repo_root("diag-late-root", "    build_server();");
     let data_dir = fresh_dir("diag-late-data");
-    let state = Arc::new(bootstrap("diag-late-state"));
+    let state = Arc::new(AppState::bootstrap(&data_dir, &ontology_dir())?);
+    state.load_substrate(&repo_root);
     seed_component(&state, "runtime component", "src/");
     let constraint = record(&state, "Constraint", "Late substrate constraint");
+    link_public_without_installing_substrate(&state, &constraint, 4);
     let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
     let uri = file_uri(&repo_root.join("src/runtime.rs"));
 
@@ -583,8 +677,7 @@ async fn diagnostics_republish_when_substrate_becomes_available() -> anyhow::Res
         json!([])
     );
 
-    state.set_substrate(Arc::new(synthetic_substrate(4)));
-    link_public(&state, &constraint, 4);
+    publish_disk_substrate(&data_dir, &synthetic_index(4));
     let republished = client
         .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
         .await?
@@ -664,6 +757,53 @@ async fn diagnostics_republish_after_substrate_swap() -> anyhow::Result<()> {
         .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
         .await?
         .is_some());
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn generation_older_than_disk_stays_silent_for_open_document() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-generation-mismatch-root", "    build_server();");
+    let data_dir = fresh_dir("diag-generation-mismatch-data");
+    publish_disk_substrate(&data_dir, &synthetic_index(4));
+    let state = Arc::new(AppState::bootstrap(&data_dir, &ontology_dir())?);
+    state.load_substrate(&repo_root);
+    seed_component(&state, "runtime component", "src/");
+    let constraint = record(&state, "Constraint", "Generation mismatch constraint");
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    assert_eq!(
+        diagnostics(&client.read_until_diagnostics(&uri).await?).len(),
+        1
+    );
+
+    // This generation started before the later save and therefore cannot
+    // prove that its positions describe the current file. A refresh must
+    // retract the old push and pull must remain honestly empty.
+    let build_started = Utc::now();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    std::fs::write(
+        repo_root.join("src/runtime.rs"),
+        runtime_source("    let plan = build_server();"),
+    )?;
+    publish_disk_substrate_started_at(&data_dir, &synthetic_index(4), build_started);
+
+    let republished = client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(6))
+        .await?
+        .expect("generation mismatch retracts pushed diagnostics");
+    assert_eq!(diagnostics(&republished), Vec::<Value>::new());
+    assert_eq!(client.pull_diagnostics(&uri).await?["items"], json!([]));
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -803,6 +943,56 @@ async fn constrained_entity_gets_information() -> anyhow::Result<()> {
     );
     assert!(diagnostics[0].get("codeDescription").is_none());
     assert_severity_ceiling(&diagnostics);
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn diagnostics_follow_unsaved_buffer_line_shifts_without_guessing_changed_lines(
+) -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("diag-buffer-root", "    build_server();");
+    let data_dir = fresh_dir("diag-buffer-data");
+    let state = Arc::new(state_with_substrate("diag-buffer-state", 4));
+    let constraint = record(&state, "Constraint", "Buffer-shifted constraint");
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+    let saved = std::fs::read_to_string(repo_root.join("src/runtime.rs"))?;
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    let shifted = saved.replacen(
+        "    #[allow(dead_code)]",
+        "    // unsaved one\n    // unsaved two\n    #[allow(dead_code)]",
+        1,
+    );
+    client.did_open_text(&uri, &shifted).await?;
+    let published = diagnostics(&client.read_until_diagnostics(&uri).await?);
+    assert_eq!(
+        published[0]["range"]["start"],
+        json!({ "line": 9, "character": 4 })
+    );
+
+    let shifted_again = shifted.replacen(
+        "    // unsaved one",
+        "    // unsaved zero\n    // unsaved one",
+        1,
+    );
+    client.did_change(&uri, 2, &shifted_again).await?;
+    let pulled = client.pull_diagnostics(&uri).await?;
+    assert_eq!(
+        pulled["items"][0]["range"]["start"],
+        json!({ "line": 10, "character": 4 })
+    );
+
+    let changed_declaration = shifted_again.replace("    build_server();", "    build_server( );");
+    client.did_change(&uri, 3, changed_declaration).await?;
+    assert_eq!(client.pull_diagnostics(&uri).await?["items"], json!([]));
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -1071,6 +1261,13 @@ async fn repo_substrate_diagnostics_when_index_present() -> anyhow::Result<()> {
     }
 
     let substrate = Substrate::load(&substrate_data_dir, repo_root)?;
+    if substrate.meta().indexed_started_at.is_none() {
+        eprintln!(
+            "skipping LSP diagnostics substrate integration: {} predates generation-safe source baselines; run `moosedev index`",
+            meta_path.display()
+        );
+        return Ok(());
+    }
     let state = Arc::new(bootstrap("repo-substrate-diagnostics"));
     state.set_substrate(Arc::new(substrate));
     seed_component(&state, "source component", "src/");
@@ -1239,6 +1436,197 @@ async fn pull_diagnostics_match_push_and_are_empty_for_unresolvable_uris() -> an
     let outside = client.pull_diagnostics("file:///tmp/elsewhere.rs").await?;
     assert_eq!(outside["kind"], json!("full"));
     assert_eq!(outside["items"], json!([]));
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn did_save_nudges_reindex() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("save-nudge-root", "    build_server();");
+    let data_dir = fresh_dir("save-nudge-data");
+    let state = Arc::new(state_with_substrate("save-nudge-state", 4));
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = recorded.clone();
+    state.set_reindex_nudger(Box::new(move |rel_path| {
+        sink.lock().unwrap().push(rel_path.to_string());
+    }));
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    client.read_until_diagnostics(&uri).await?;
+
+    // A saved change on disk (didSave carries no text) must arm the rebuild.
+    std::fs::write(
+        repo_root.join("src/runtime.rs"),
+        runtime_source("    let plan = build_server();"),
+    )?;
+    client.did_save(&uri).await?;
+    // Consume the save republish so shutdown reads its own response.
+    client.read_until_diagnostics(&uri).await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !recorded.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(recorded.lock().unwrap().as_slice(), ["src/runtime.rs"]);
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn did_save_without_changes_still_nudges() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("save-same-root", "    build_server();");
+    let data_dir = fresh_dir("save-same-data");
+    let state = Arc::new(state_with_substrate("save-same-state", 4));
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = recorded.clone();
+    state.set_reindex_nudger(Box::new(move |rel_path| {
+        sink.lock().unwrap().push(rel_path.to_string());
+    }));
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    client.read_until_diagnostics(&uri).await?;
+
+    // Disk untouched, yet the save must still nudge: suppressing "unchanged"
+    // saves races the async re-base after a rebuild publishes (a fast
+    // revert-save matches the stale baseline and would silently strand the
+    // index). The pull round-trip sequences after the notification.
+    client.did_save(&uri).await?;
+    client.pull_diagnostics(&uri).await?;
+    assert_eq!(recorded.lock().unwrap().as_slice(), ["src/runtime.rs"]);
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn save_triggers_debounced_rebuild_and_diagnostics_move() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("save-loop-root", "    build_server();");
+    let data_dir = fresh_dir("save-loop-data");
+    publish_disk_substrate(&data_dir, &synthetic_index(4));
+    let state = Arc::new(AppState::bootstrap(&data_dir, &ontology_dir())?);
+    state.load_substrate(&repo_root);
+    seed_component(&state, "runtime component", "src/");
+    let constraint = record(&state, "Constraint", "Loop constraint");
+    link_public(&state, &constraint, 4);
+
+    // Real scheduler; the runner stands in for `run_index` by publishing the
+    // generation a fresh producer run over the edited file would emit.
+    let runner_data_dir = data_dir.clone();
+    let scheduler = ReindexScheduler::spawn(
+        SchedulerConfig {
+            quiet: Duration::from_millis(100),
+            max_wait: Duration::from_secs(5),
+            failure_cooldown: Duration::from_secs(5),
+        },
+        Box::new(|rel_path| rel_path.ends_with(".rs")),
+        Box::new(move || {
+            publish_disk_substrate(&runner_data_dir, &synthetic_index(15));
+            Ok(())
+        }),
+    );
+    state.set_reindex_nudger(scheduler.nudger());
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    let initial = diagnostics(&client.read_until_diagnostics(&uri).await?);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0]["range"]["start"]["character"], json!(4));
+
+    // Editing the definition line itself leaves it unmappable: the didSave
+    // republish must drop the diagnostic rather than guess a position.
+    std::fs::write(
+        repo_root.join("src/runtime.rs"),
+        runtime_source("    let plan = build_server();"),
+    )?;
+    client.did_save(&uri).await?;
+    assert_eq!(
+        diagnostics(&client.read_until_diagnostics(&uri).await?),
+        Vec::<Value>::new()
+    );
+
+    // The debounced rebuild publishes the fresh generation; the session tick
+    // reloads it, re-bases the document, and republishes at the new position.
+    let republished = client
+        .read_until_diagnostics_timeout(&uri, Duration::from_secs(8))
+        .await?
+        .expect("diagnostics republished after save-triggered rebuild");
+    let republished = diagnostics(&republished);
+    assert_eq!(republished.len(), 1);
+    assert_eq!(republished[0]["range"]["start"]["character"], json!(15));
+    assert!(republished[0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Loop constraint")));
+
+    client.shutdown_and_exit().await?;
+    scheduler.shutdown();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn did_change_republishes_shifted_diagnostics() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("change-push-root", "    build_server();");
+    let data_dir = fresh_dir("change-push-data");
+    let state = Arc::new(state_with_substrate("change-push-state", 4));
+    let constraint = record(&state, "Constraint", "Change constraint");
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true, json!(null)).await?;
+    client.did_open(&uri).await?;
+    let initial = diagnostics(&client.read_until_diagnostics(&uri).await?);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(
+        initial[0]["range"]["start"],
+        json!({"line": 7, "character": 4})
+    );
+
+    // Typing must move the squiggle without a save: insert a line above the
+    // definition and expect a push republish at the shifted position.
+    let mut lines: Vec<String> = std::fs::read_to_string(repo_root.join("src/runtime.rs"))?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.insert(7, "    // inserted while typing".to_string());
+    client.did_change(&uri, 2, lines.join("\n")).await?;
+    let shifted = diagnostics(&client.read_until_diagnostics(&uri).await?);
+    assert_eq!(shifted.len(), 1);
+    assert_eq!(
+        shifted[0]["range"]["start"],
+        json!({"line": 8, "character": 4})
+    );
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

@@ -715,6 +715,18 @@ async fn main() -> anyhow::Result<()> {
             // wasted model load. This gives a clear message and exits fast.
             runtime::ensure_no_live_backend(&socket).await?;
             let state = runtime::build_state(&data_dir, &ontology_dir()).await?;
+            // Save-triggered background reindex: daemon-global, one scheduler
+            // shared by every LSP session; index.lock remains the cross-process
+            // guard against hook/manual runs.
+            let reindex = std::env::current_dir().ok().and_then(|repo_root| {
+                moosedev::code::substrate::scheduler::spawn_save_reindex(
+                    repo_root,
+                    data_dir.clone(),
+                )
+            });
+            if let Some(scheduler) = &reindex {
+                state.set_reindex_nudger(scheduler.nudger());
+            }
             let server = moosedev::mcp::MooseDevServer::new(state.clone());
             // Infallible: a UI bind failure must not abort the MCP backend. The
             // bound address (None if the UI is disabled/failed) drives --open.
@@ -744,6 +756,11 @@ async fn main() -> anyhow::Result<()> {
             let result = runtime::serve_unix(server, &socket).await;
             let _ = std::fs::remove_file(&pidfile);
             let _ = std::fs::remove_file(runtime::http_addr_file_path_for(&data_dir));
+            if let Some(reindex) = reindex {
+                // Stop scheduling rebuilds; never blocks on an in-flight run
+                // (an abandoned run's unpublished generation stays invisible).
+                reindex.shutdown();
+            }
             if let Some(lsp_listener) = lsp_listener {
                 // Published diagnostics are sticky in editors: retract them
                 // while the session sockets are still alive, or the squiggles

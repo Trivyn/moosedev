@@ -189,7 +189,7 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     if opts.claude_hooks {
         write_claude_hooks(opts, &mut report)?;
     }
-    offer_post_commit_hook(opts, &mut report)?;
+    offer_reindex_hooks(opts, &mut report)?;
 
     Ok(report)
 }
@@ -468,47 +468,73 @@ fn write_claude_hooks(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
     Ok(())
 }
 
-/// Offer a safe, project-local re-index hook without changing user hook content.
-fn offer_post_commit_hook(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+/// Git events whose new working-tree content should refresh the substrate:
+/// commits, plus HEAD moves without one (pull/merge, checkout, rebase).
+const REINDEX_HOOK_EVENTS: [&str; 3] = ["post-commit", "post-merge", "post-checkout"];
+
+/// One shared async template for every re-index hook. Backgrounded so the git
+/// operation never blocks on the full producer run; the daemon hot-reloads the
+/// published index and live staleness covers the window in between. Concurrent
+/// events serialize on this repository's `index.lock`; waiting is intentional,
+/// because the later event may describe newer working-tree content and must not
+/// be discarded.
+const REINDEX_HOOK: &str = "#!/bin/sh\n\
+# moosedev: refresh the code substrate in the background after this git event —\n\
+# the daemon hot-reloads the new index when it lands. Concurrent events wait\n\
+# on this repository's index lock so the newest tree is always indexed.\n\
+nohup moosedev index >/dev/null 2>&1 &\n";
+
+/// The exact bytes older `moosedev init` versions wrote (a synchronous run
+/// that blocked each commit); safe to upgrade in place.
+const LEGACY_SYNC_HOOK: &str =
+    "#!/bin/sh\n# moosedev: refresh the code substrate after each commit\nmoosedev index || true\n";
+
+/// Offer safe, project-local re-index hooks without changing user hook content.
+fn offer_reindex_hooks(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
     let git_dir = opts.target_dir.join(".git");
     if !git_dir.is_dir() {
-        report.notes.push(
-            "no .git directory found; post-commit re-index hook was not installed".to_string(),
-        );
+        report
+            .notes
+            .push("no .git directory found; re-index hooks were not installed".to_string());
         return Ok(());
     }
 
-    let path = git_dir.join("hooks/post-commit");
-    let hook_exists = match std::fs::symlink_metadata(&path) {
-        Ok(_) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
-    };
-    if hook_exists {
-        let content = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        if content
-            .windows(b"moosedev index".len())
-            .any(|part| part == b"moosedev index")
-        {
-            report.entries.push(Entry::new(path, Outcome::Skipped));
-        } else {
-            report.notes.push(
-                "post-commit hook exists without MOOSEDev; append this exact line manually: moosedev index || true"
-                    .to_string(),
-            );
+    for name in REINDEX_HOOK_EVENTS {
+        let path = git_dir.join("hooks").join(name);
+        let hook_exists = match std::fs::symlink_metadata(&path) {
+            Ok(_) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+        };
+        if hook_exists {
+            let content =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            if content == LEGACY_SYNC_HOOK.as_bytes() {
+                // Our own old synchronous template: upgrading in place is
+                // non-clobbering because we authored those exact bytes.
+                std::fs::write(&path, REINDEX_HOOK)
+                    .with_context(|| format!("write {}", path.display()))?;
+                set_executable(&path)?;
+                report.entries.push(Entry::new(path, Outcome::Merged));
+            } else if content
+                .windows(b"moosedev index".len())
+                .any(|part| part == b"moosedev index")
+            {
+                report.entries.push(Entry::new(path, Outcome::Skipped));
+            } else {
+                report.notes.push(format!(
+                    "{name} hook exists without MOOSEDev; append this line manually: nohup moosedev index >/dev/null 2>&1 &"
+                ));
+            }
+            continue;
         }
-        return Ok(());
-    }
 
-    let dir = path.parent().expect("hook path has a parent");
-    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(
-        &path,
-        "#!/bin/sh\n# moosedev: refresh the code substrate after each commit\nmoosedev index || true\n",
-    )
-    .with_context(|| format!("write {}", path.display()))?;
-    set_executable(&path)?;
-    report.entries.push(Entry::new(path, Outcome::Created));
+        let dir = path.parent().expect("hook path has a parent");
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        std::fs::write(&path, REINDEX_HOOK).with_context(|| format!("write {}", path.display()))?;
+        set_executable(&path)?;
+        report.entries.push(Entry::new(path, Outcome::Created));
+    }
     Ok(())
 }
 
@@ -1243,32 +1269,37 @@ mod tests {
     }
 
     #[test]
-    fn post_commit_hook_created_when_missing() {
+    fn reindex_hooks_created_when_missing() {
         let target = temp_project("hook-fresh");
         std::fs::create_dir_all(target.join(".git/hooks")).unwrap();
 
         let report = init_project(&opts(&target)).unwrap();
-        let path = target.join(".git/hooks/post-commit");
-        let hook = std::fs::read_to_string(&path).unwrap();
-        assert!(hook.contains("moosedev index || true"));
-        assert_eq!(
-            outcome_for(&report, ".git/hooks/post-commit"),
-            Some(&Outcome::Created)
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_ne!(
-                std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
-                0
+        for name in REINDEX_HOOK_EVENTS {
+            let path = target.join(".git/hooks").join(name);
+            let hook = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(hook, REINDEX_HOOK, "{name}");
+            assert!(!hook.contains("--if-idle"), "{name}: {hook}");
+            assert!(!hook.contains("pgrep"), "{name}: {hook}");
+            assert_eq!(
+                outcome_for(&report, &format!(".git/hooks/{name}")),
+                Some(&Outcome::Created),
+                "{name}"
             );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_ne!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+                    0
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]
-    fn post_commit_hook_existing_untouched() {
+    fn reindex_hooks_existing_untouched() {
         let target = temp_project("hook-existing");
         let hook_dir = target.join(".git/hooks");
         std::fs::create_dir_all(&hook_dir).unwrap();
@@ -1281,10 +1312,19 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("moosedev index || true")));
+            .any(|note| note.contains("post-commit hook exists without MOOSEDev")));
         assert!(outcome_for(&report, ".git/hooks/post-commit").is_none());
+        // A foreign hook on one event never blocks installing the others.
+        assert_eq!(
+            outcome_for(&report, ".git/hooks/post-merge"),
+            Some(&Outcome::Created)
+        );
+        assert_eq!(
+            outcome_for(&report, ".git/hooks/post-checkout"),
+            Some(&Outcome::Created)
+        );
 
-        let existing = b"#!/bin/sh\nmoosedev index || true\n";
+        let existing = b"#!/bin/sh\nmoosedev index --custom-flags || true\n";
         std::fs::write(&path, existing).unwrap();
         let report = init_project(&opts(&target)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), existing);
@@ -1292,6 +1332,32 @@ mod tests {
             outcome_for(&report, ".git/hooks/post-commit"),
             Some(&Outcome::Skipped)
         );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn legacy_sync_post_commit_upgraded_in_place() {
+        let target = temp_project("hook-legacy");
+        let hook_dir = target.join(".git/hooks");
+        std::fs::create_dir_all(&hook_dir).unwrap();
+        let path = hook_dir.join("post-commit");
+        std::fs::write(&path, LEGACY_SYNC_HOOK).unwrap();
+
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), REINDEX_HOOK.as_bytes());
+        assert_eq!(
+            outcome_for(&report, ".git/hooks/post-commit"),
+            Some(&Outcome::Merged)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+                0
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&target);
     }

@@ -16,7 +16,7 @@ use moose::types::{CompactVocabulary, FallbackPolicy, HybridConfig, LlmAssistLev
 use oxigraph::model::NamedNode;
 use oxigraph::store::Store;
 
-use crate::code::substrate::Substrate;
+use crate::code::substrate::{Substrate, SubstrateIdentity, SubstrateMeta};
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::ontology::{self, MooseDevOntologyResolver};
 
@@ -71,6 +71,10 @@ impl CapturePredicates {
     }
 }
 
+/// Callback that requests a debounced substrate rebuild for a saved
+/// repo-relative path.
+pub type ReindexNudger = Box<dyn Fn(&str) + Send + Sync>;
+
 /// Long-lived server state: the durable store, the entity-index cache MOOSE keeps
 /// coherent on write, loaded vocabularies, the query `EngineConfig`, and the LLM
 /// sensor + ontology resolver used by the query pipeline.
@@ -111,9 +115,20 @@ pub struct AppState {
     /// Best-effort code substrate. Absent when no index has been built; position-
     /// based tools degrade with honest errors instead of blocking server startup.
     substrate: RwLock<Option<Arc<Substrate>>>,
+    /// Repository to use for disk-backed loads, retained even when startup
+    /// precedes the first completed index publication.
+    substrate_repo_root: RwLock<Option<PathBuf>>,
     /// Serializes disk-backed substrate reloads after `moosedev index` updates
-    /// the on-disk pair. The getter does no watcher or background work.
+    /// the on-disk manifest. The getter does no watcher or background work.
     substrate_reload_lock: std::sync::Mutex<()>,
+    /// A broken immutable generation is attempted once, then skipped until the
+    /// manifest identity changes. This prevents every hover request and LSP
+    /// poll from repeating the same failed load and warning.
+    failed_substrate_generation: std::sync::Mutex<Option<SubstrateIdentity>>,
+    /// Editor-facing surfaces post save nudges here; the serve path installs
+    /// the daemon-global reindex scheduler's entry point. Unset (no-op nudges)
+    /// outside serve.
+    reindex_nudger: RwLock<Option<ReindexNudger>>,
     /// Set true by any write that changes the project graph; drained by
     /// [`AppState::ensure_enriched`] before a read, so GROWL re-materializes the
     /// inferred inverse/subproperty edges lazily — one pass per capture burst.
@@ -229,7 +244,10 @@ impl AppState {
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
             substrate: RwLock::new(None),
+            substrate_repo_root: RwLock::new(None),
             substrate_reload_lock: std::sync::Mutex::new(()),
+            failed_substrate_generation: std::sync::Mutex::new(None),
+            reindex_nudger: RwLock::new(None),
             // Start stale so the first read after startup materializes inferred edges.
             inferred_stale: std::sync::atomic::AtomicBool::new(true),
             project_write_generation: AtomicU64::new(0),
@@ -273,61 +291,109 @@ impl AppState {
         self.project_write_generation.load(Ordering::Acquire)
     }
 
-    /// Return the loaded code substrate, reloading a disk-backed one when the
-    /// completed on-disk metadata identifies a newer index. Synthetic test
-    /// substrates have no repository root and intentionally bypass this path.
+    /// Return the loaded code substrate, loading or reloading whenever the
+    /// atomically published manifest identifies a generation not yet seen.
+    /// Synthetic test substrates bypass disk loading unless `load_substrate`
+    /// previously configured a repository root.
     pub fn substrate(&self) -> Option<Arc<Substrate>> {
-        let substrate = self.current_substrate()?;
-        if substrate.repo_root().is_none() || !self.substrate_meta_changed(&substrate) {
-            return Some(substrate);
+        let current = self.substrate_snapshot();
+        let repo_root = self
+            .substrate_repo_root
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .or_else(|| {
+                current
+                    .as_deref()
+                    .and_then(Substrate::repo_root)
+                    .map(Path::to_path_buf)
+            });
+        let Some(repo_root) = repo_root else {
+            return current;
+        };
+        let Ok(on_disk) = SubstrateMeta::load(&self.data_dir) else {
+            return current;
+        };
+        let identity = on_disk.identity();
+        if current
+            .as_deref()
+            .is_some_and(|loaded| loaded.meta().identity() == identity)
+        {
+            return current;
+        }
+        if self.failed_generation_is(&identity) {
+            return current;
         }
 
         let _reload_guard = self
             .substrate_reload_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // A concurrent caller may have finished the reload while we waited.
-        let substrate = self.current_substrate()?;
-        let Some(repo_root) = substrate.repo_root().map(Path::to_path_buf) else {
-            return Some(substrate);
+        // A concurrent caller may have finished or memoized the load while we waited.
+        let current = self.substrate_snapshot();
+        let Ok(on_disk) = SubstrateMeta::load(&self.data_dir) else {
+            return current;
         };
-        if !self.substrate_meta_changed(&substrate) {
-            return Some(substrate);
+        let identity = on_disk.identity();
+        if current
+            .as_deref()
+            .is_some_and(|loaded| loaded.meta().identity() == identity)
+            || self.failed_generation_is(&identity)
+        {
+            return current;
         }
 
-        match Substrate::load(&self.data_dir, &repo_root) {
+        // Load the sampled manifest specifically. Re-reading or internally
+        // retrying a newer manifest would make a failure memo refer to an
+        // identity other than the generation that actually failed.
+        match Substrate::load_with(&self.data_dir, &repo_root, on_disk) {
             Ok(reloaded) => {
                 let definitions = reloaded.stats().definitions;
                 let indexed_at = reloaded.meta().indexed_at;
                 let reloaded = Arc::new(reloaded);
                 self.set_substrate(reloaded.clone());
-                tracing::info!(
-                    "substrate reloaded: {definitions} definition(s), indexed at {indexed_at}"
-                );
+                if current.is_some() {
+                    tracing::info!(
+                        "substrate reloaded: {definitions} definition(s), indexed at {indexed_at}"
+                    );
+                } else {
+                    tracing::info!(
+                        "substrate loaded after becoming available: {definitions} definition(s), indexed at {indexed_at}"
+                    );
+                }
                 Some(reloaded)
             }
             Err(error) => {
-                tracing::warn!("substrate reload failed; serving previous substrate: {error}");
-                Some(substrate)
+                *self
+                    .failed_substrate_generation
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(identity);
+                if current.is_some() {
+                    tracing::warn!("substrate reload failed; serving previous substrate: {error}");
+                } else {
+                    tracing::warn!("substrate load failed; substrate remains unavailable: {error}");
+                }
+                current
             }
         }
     }
 
-    fn current_substrate(&self) -> Option<Arc<Substrate>> {
+    /// Return the currently installed substrate without consulting the disk
+    /// manifest. Request pipelines can pin this snapshot after choosing an
+    /// explicit reload boundary.
+    pub fn substrate_snapshot(&self) -> Option<Arc<Substrate>> {
         self.substrate
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
-    /// A completed producer run writes metadata last. Unreadable metadata can
-    /// therefore be a partial rewrite; retain the known-good in-memory index.
-    fn substrate_meta_changed(&self, substrate: &Substrate) -> bool {
-        let Ok(on_disk) = crate::code::substrate::SubstrateMeta::load(&self.data_dir) else {
-            return false;
-        };
-        let loaded = substrate.meta();
-        on_disk.indexed_commit != loaded.indexed_commit || on_disk.indexed_at != loaded.indexed_at
+    fn failed_generation_is(&self, identity: &SubstrateIdentity) -> bool {
+        self.failed_substrate_generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            == Some(identity)
     }
 
     /// Replace the current code substrate. Used by runtime startup and tests.
@@ -336,19 +402,46 @@ impl AppState {
             .substrate
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(substrate);
+        *self
+            .failed_substrate_generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// Best-effort load of the code substrate from disk. Missing or invalid
     /// indexes are normal before `moosedev index`; callers should surface
     /// substrate absence at tool-use time.
     pub fn load_substrate(&self, repo_root: &Path) {
-        match Substrate::load(&self.data_dir, repo_root) {
-            Ok(substrate) => {
-                let definitions = substrate.stats().definitions;
-                self.set_substrate(Arc::new(substrate));
-                tracing::info!("MOOSEDev: loaded code substrate ({definitions} definition(s))");
-            }
-            Err(e) => tracing::info!("MOOSEDev: code substrate unavailable: {e}"),
+        *self
+            .substrate_repo_root
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(repo_root.to_path_buf());
+        if self.substrate().is_none() {
+            tracing::info!(
+                "MOOSEDev: code substrate unavailable; it will load automatically after `moosedev index` completes"
+            );
+        }
+    }
+
+    /// Install the debounced-reindex entry point. Serve-path wiring only.
+    pub fn set_reindex_nudger(&self, nudger: ReindexNudger) {
+        *self
+            .reindex_nudger
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(nudger);
+    }
+
+    /// Request a debounced substrate rebuild for a saved repo-relative path.
+    /// No-op when no scheduler is installed. The callback is a channel send,
+    /// so invoking it under the read guard is non-blocking.
+    pub fn nudge_reindex(&self, rel_path: &str) {
+        if let Some(nudger) = self
+            .reindex_nudger
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            nudger(rel_path);
         }
     }
 

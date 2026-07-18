@@ -20,9 +20,8 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::substrate_dir;
+use super::{substrate_dir, CHURN_FILE_NAME};
 
-pub const CHURN_FILE_NAME: &str = "churn.json";
 pub const CHURN_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_WINDOW_MONTHS: u32 = 24;
 
@@ -152,8 +151,11 @@ impl ChurnIndex {
     /// optional evidence, never a load failure (the substrate must keep
     /// working on installs indexed before this sidecar existed).
     pub fn load(data_dir: &Path) -> Result<Option<Self>> {
-        let path = churn_path(data_dir);
-        let text = match fs::read_to_string(&path) {
+        Self::load_from(&churn_path(data_dir))
+    }
+
+    pub fn load_from(path: &Path) -> Result<Option<Self>> {
+        let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
@@ -170,13 +172,16 @@ impl ChurnIndex {
 
     /// Write the sidecar (pretty JSON, mirrors `SubstrateMeta::save`).
     pub fn save(&self, data_dir: &Path) -> Result<()> {
-        let path = churn_path(data_dir);
+        self.save_to(&churn_path(data_dir))
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create substrate directory {}", parent.display()))?;
         }
         let text = serde_json::to_string_pretty(self).context("serialize churn index")?;
-        fs::write(&path, text).with_context(|| format!("write {}", path.display()))
+        fs::write(path, text).with_context(|| format!("write {}", path.display()))
     }
 }
 

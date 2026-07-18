@@ -1,11 +1,11 @@
 //! On-demand SCIP producer runner for `moosedev index`.
 //!
-//! The persisted substrate is the raw producer artifact plus `meta.json`.
-//! We deliberately validate the temporary SCIP file before promotion, then write
-//! metadata last so a metadata file means "the substrate is complete enough to
-//! load".
+//! Producer output is assembled in an immutable generation. We deliberately
+//! validate and sync every artifact before atomically publishing `meta.json`, so
+//! readers see either the previous complete generation or the next one.
 
-use std::fs;
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,11 +14,12 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 
-use super::meta::{ProducerRun, SubstrateMeta, CURRENT_SCHEMA_VERSION};
+use super::meta::{sync_directory, ProducerRun, SubstrateMeta, CURRENT_SCHEMA_VERSION};
 use super::scip::{ingest, producer_info, read_index};
 use super::{
-    index_log_path, index_path, meta_path, producer_index_path, producer_index_tmp_path,
-    substrate_dir,
+    generation_dir, generations_dir, index_lock_path, index_log_path, index_path, index_tmp_path,
+    producer_index_path, producer_index_path_in, producer_index_tmp_path,
+    producer_index_tmp_path_in, substrate_dir, CHURN_FILE_NAME,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub struct ProducerSpec {
     /// Detect one project target. Multi-project producers are a future registry seam.
     pub detect: fn(&Path) -> Option<ProducerTarget>,
     pub command: fn(&ProducerTarget, &Path) -> Command,
+    /// File extensions whose saves can shift this producer's indexed positions.
+    pub extensions: &'static [&'static str],
 }
 
 static PRODUCERS: [ProducerSpec; 2] = [
@@ -39,16 +42,30 @@ static PRODUCERS: [ProducerSpec; 2] = [
         name: "rust-analyzer",
         detect: detect_rust,
         command: rust_analyzer_command,
+        extensions: &["rs"],
     },
     ProducerSpec {
         name: "scip-typescript",
         detect: detect_typescript,
         command: scip_typescript_command,
+        // scip-typescript also indexes JS under allowJs; over-triggering on
+        // repos without it is bounded by the reindex debounce.
+        extensions: &["ts", "tsx", "js", "jsx", "mts", "cts"],
     },
 ];
 
 pub fn registry() -> &'static [ProducerSpec] {
     &PRODUCERS
+}
+
+/// Extensions covered by the producers that detect this repository right now.
+/// Empty when no producer detects it (non-code repos, synthetic test roots).
+pub fn detected_save_extensions(repo_root: &Path) -> Vec<&'static str> {
+    registry()
+        .iter()
+        .filter(|producer| (producer.detect)(repo_root).is_some())
+        .flat_map(|producer| producer.extensions.iter().copied())
+        .collect()
 }
 
 fn detect_rust(repo_root: &Path) -> Option<ProducerTarget> {
@@ -175,6 +192,9 @@ pub fn run_index_with(
         )
     })?;
 
+    // Every writer participates in one stable advisory lock. The file itself
+    // is never replaced, so concurrent invocations cannot split across inodes.
+    let _index_lock = acquire_index_lock(data_dir)?;
     let started = start_index(data_dir)?;
     let commit = SubstrateMeta::current_head(repo_root);
     let detected = producers
@@ -187,24 +207,44 @@ pub fn run_index_with(
             repo_root.display()
         );
     }
-    let _ = fs::remove_file(index_path(data_dir));
-    remove_if_present(&meta_path(data_dir))?;
+    let generation = format!("gen-{}", uuid::Uuid::new_v4());
+    let artifact_root = generation_dir(data_dir, &generation);
+    fs::create_dir_all(&artifact_root).with_context(|| {
+        format!(
+            "failed to create candidate substrate generation {}",
+            artifact_root.display()
+        )
+    })?;
+    let producer_names = detected
+        .iter()
+        .map(|(spec, _)| spec.name)
+        .collect::<Vec<_>>();
+    // This timestamp brackets every producer read. A source file whose mtime
+    // is still strictly older after publication did not change during this
+    // build and can safely serve as the generation's LSP mapping baseline.
+    let indexed_started_at = Utc::now();
 
     let mut runs = Vec::new();
     let mut reports = Vec::new();
     let mut warnings = Vec::new();
     for (spec, target) in detected {
         write_log_header(data_dir, spec.name)?;
-        match run_producer(spec, &target, data_dir) {
+        match run_producer(spec, &target, data_dir, &artifact_root) {
             Ok((run, report)) => {
                 runs.push(run);
                 reports.push(report);
             }
-            Err(error) => warnings.push(exclude_failed_producer(spec, data_dir, &error)?),
+            Err(error) => warnings.push(exclude_failed_producer(
+                spec,
+                data_dir,
+                &artifact_root,
+                &error,
+            )?),
         }
     }
 
     if reports.is_empty() {
+        let _ = fs::remove_dir_all(&artifact_root);
         bail!(
             "all detected SCIP producers failed: {}",
             warnings.join("; ")
@@ -220,13 +260,13 @@ pub fn run_index_with(
         match super::ChurnIndex::extract(repo_root, super::churn::DEFAULT_WINDOW_MONTHS).and_then(
             |index| {
                 let count = index.files.len();
-                index.save(data_dir)?;
+                index.save_to(&artifact_root.join(CHURN_FILE_NAME))?;
                 Ok(count)
             },
         ) {
             Ok(count) => Some(count),
             Err(error) => {
-                let _ = std::fs::remove_file(super::churn::churn_path(data_dir));
+                let _ = std::fs::remove_file(artifact_root.join(CHURN_FILE_NAME));
                 warnings.push(format!("churn sidecar skipped: {error}"));
                 None
             }
@@ -236,10 +276,18 @@ pub fn run_index_with(
         schema_version: CURRENT_SCHEMA_VERSION,
         indexed_commit: commit.clone(),
         indexed_at: Utc::now(),
+        indexed_started_at: Some(indexed_started_at),
+        generation: Some(generation.clone()),
         producers: runs,
     };
+    sync_generation(&artifact_root)?;
     meta.save(data_dir)
         .context("failed to write substrate metadata after SCIP index promotion")?;
+    warnings.extend(cleanup_after_publish(
+        data_dir,
+        &generation,
+        &producer_names,
+    ));
 
     Ok(IndexReport {
         commit,
@@ -258,15 +306,16 @@ fn run_producer(
     spec: &ProducerSpec,
     target: &ProducerTarget,
     data_dir: &Path,
+    artifact_root: &Path,
 ) -> Result<(ProducerRun, ProducerReport)> {
-    let tmp_path = producer_index_tmp_path(data_dir, spec.name);
+    let tmp_path = producer_index_tmp_path_in(artifact_root, spec.name);
     let absolute_tmp_path = std::path::absolute(&tmp_path).with_context(|| {
         format!(
             "failed to absolutize temporary SCIP index {}",
             tmp_path.display()
         )
     })?;
-    let final_path = producer_index_path(data_dir, spec.name);
+    let final_path = producer_index_path_in(artifact_root, spec.name);
     remove_if_present(&tmp_path)?;
 
     let mut command = (spec.command)(target, &absolute_tmp_path);
@@ -331,10 +380,11 @@ fn run_producer(
 fn exclude_failed_producer(
     spec: &ProducerSpec,
     data_dir: &Path,
+    artifact_root: &Path,
     error: &anyhow::Error,
 ) -> Result<String> {
-    remove_if_present(&producer_index_tmp_path(data_dir, spec.name))?;
-    remove_if_present(&producer_index_path(data_dir, spec.name))?;
+    remove_if_present(&producer_index_tmp_path_in(artifact_root, spec.name))?;
+    remove_if_present(&producer_index_path_in(artifact_root, spec.name))?;
     let warning = format!(
         "producer `{}` failed and was excluded: {error:#}",
         spec.name
@@ -342,6 +392,109 @@ fn exclude_failed_producer(
     tracing::warn!(producer = spec.name, error = %error, "SCIP producer failed and was excluded");
     write_log_warning(data_dir, &warning)?;
     Ok(warning)
+}
+
+fn open_index_lock(data_dir: &Path) -> Result<fs::File> {
+    let path = index_lock_path(data_dir);
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("failed to open index lock {}", path.display()))
+}
+
+fn acquire_index_lock(data_dir: &Path) -> Result<fs::File> {
+    let path = index_lock_path(data_dir);
+    let file = open_index_lock(data_dir)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            tracing::info!(path = %path.display(), "another index build is running; waiting for it to finish");
+            file.lock()
+                .with_context(|| format!("failed to wait on index lock {}", path.display()))?;
+        }
+        Err(TryLockError::Error(error)) => {
+            return Err(error).with_context(|| format!("failed to lock {}", path.display()));
+        }
+    }
+    Ok(file)
+}
+
+fn sync_generation(artifact_root: &Path) -> Result<()> {
+    for entry in fs::read_dir(artifact_root)
+        .with_context(|| format!("failed to read generation {}", artifact_root.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("failed to inspect generation {}", artifact_root.display()))?;
+        if entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?
+            .is_file()
+        {
+            fs::File::open(entry.path())
+                .with_context(|| format!("failed to open {} for sync", entry.path().display()))?
+                .sync_all()
+                .with_context(|| format!("failed to sync {}", entry.path().display()))?;
+        }
+    }
+    fs::File::open(artifact_root)
+        .with_context(|| format!("failed to open {} for sync", artifact_root.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync generation {}", artifact_root.display()))?;
+    // The new generation's directory entry lives in the parent (generations/);
+    // without syncing it a crash can preserve meta.json while losing the
+    // directory it references.
+    if let Some(parent) = artifact_root.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn cleanup_after_publish(
+    data_dir: &Path,
+    active_generation: &str,
+    producer_names: &[&str],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Ok(entries) = fs::read_dir(generations_dir(data_dir)) {
+        for entry in entries.flatten() {
+            if entry.file_name() == active_generation {
+                continue;
+            }
+            if let Err(error) = fs::remove_dir_all(entry.path()) {
+                warnings.push(format!(
+                    "failed to remove stale substrate generation {}: {error}",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+
+    let mut names = producer_names.iter().copied().collect::<BTreeSet<_>>();
+    names.extend(registry().iter().map(|producer| producer.name));
+    let mut legacy_paths = vec![
+        index_path(data_dir),
+        index_tmp_path(data_dir),
+        super::churn::churn_path(data_dir),
+    ];
+    for name in names {
+        legacy_paths.push(producer_index_path(data_dir, name));
+        legacy_paths.push(producer_index_tmp_path(data_dir, name));
+    }
+    for path in legacy_paths {
+        if let Err(error) = remove_if_present(&path) {
+            warnings.push(format!(
+                "failed to remove legacy substrate artifact {}: {error:#}",
+                path.display()
+            ));
+        }
+    }
+    for warning in &warnings {
+        tracing::warn!(warning, "substrate cleanup was incomplete");
+    }
+    warnings
 }
 
 /// Summarize the producer log without re-emitting noisy upstream diagnostics.
@@ -484,6 +637,21 @@ mod tests {
     }
 
     #[test]
+    fn detected_save_extensions_follow_producer_detection() {
+        let repo_root = unique_temp_dir("save-extensions");
+        assert!(detected_save_extensions(&repo_root).is_empty());
+        fs::write(
+            repo_root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        let extensions = detected_save_extensions(&repo_root);
+        assert!(extensions.contains(&"rs"));
+        assert!(!extensions.contains(&"ts"));
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
     fn typescript_detection_finds_root_or_sorted_first_level_project() {
         let repo_root = unique_temp_dir("typescript-detect");
         let typescript = &registry()[1];
@@ -577,19 +745,22 @@ mod tests {
                 name: "first",
                 detect: detect_all,
                 command: copy_first,
+                extensions: &["rs"],
             },
             ProducerSpec {
                 name: "second",
                 detect: detect_prefixed,
                 command: copy_second,
+                extensions: &["rs"],
             },
         ];
 
         let report = run_index_with(&specs, &repo_root, &data_dir).unwrap();
         assert_eq!(report.producers.len(), 2);
-        assert!(producer_index_path(&data_dir, "first").is_file());
-        assert!(producer_index_path(&data_dir, "second").is_file());
         let meta = SubstrateMeta::load(&data_dir).unwrap();
+        let artifact_root = meta.artifact_root(&data_dir).unwrap();
+        assert!(producer_index_path_in(&artifact_root, "first").is_file());
+        assert!(producer_index_path_in(&artifact_root, "second").is_file());
         assert_eq!(meta.producers.len(), 2);
         assert_eq!(meta.producers[1].path_prefix.as_deref(), Some("ui/"));
         let log = fs::read_to_string(index_log_path(&data_dir)).unwrap();
@@ -613,11 +784,13 @@ mod tests {
                 name: "first",
                 detect: detect_all,
                 command: copy_first,
+                extensions: &["rs"],
             },
             ProducerSpec {
                 name: "failed",
                 detect: detect_all,
                 command: fail_command,
+                extensions: &["rs"],
             },
         ];
 
@@ -641,8 +814,89 @@ mod tests {
         assert_eq!(SubstrateMeta::load(&data_dir).unwrap().producers.len(), 1);
         let log = fs::read_to_string(index_log_path(&data_dir)).unwrap();
         assert!(log.contains("WARNING: producer `failed` failed"));
+        let artifact_root = SubstrateMeta::load(&data_dir)
+            .unwrap()
+            .artifact_root(&data_dir)
+            .unwrap();
+        assert!(!producer_index_path_in(&artifact_root, "failed").exists());
 
         let _ = fs::remove_dir_all(repo_root);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn all_failed_build_preserves_the_published_substrate() {
+        let repo_root = unique_temp_dir("all-failed-repo");
+        let data_dir = unique_temp_dir("all-failed-data");
+        let published_path = producer_index_path(&data_dir, "published");
+        fs::create_dir_all(published_path.parent().unwrap()).unwrap();
+        write_prepared(&published_path, "src/published.rs", "published");
+        let published = SubstrateMeta::single("published", "old", Utc::now(), 1, 1);
+        published.save(&data_dir).unwrap();
+        let specs = [ProducerSpec {
+            name: "failed",
+            detect: detect_all,
+            command: fail_command,
+            extensions: &["rs"],
+        }];
+
+        let error = run_index_with(&specs, &repo_root, &data_dir).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("all detected SCIP producers failed"));
+        assert_eq!(SubstrateMeta::load(&data_dir).unwrap(), published);
+        assert!(published_path.is_file());
+
+        let _ = fs::remove_dir_all(repo_root);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn successful_publish_removes_orphan_generations() {
+        let repo_root = unique_temp_dir("orphan-repo");
+        let data_dir = unique_temp_dir("orphan-data");
+        write_prepared(&repo_root.join("first.scip"), "src/first.rs", "first");
+        let orphan = generation_dir(&data_dir, "gen-00000000-0000-4000-8000-000000000000");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("partial"), b"partial").unwrap();
+        let specs = [ProducerSpec {
+            name: "first",
+            detect: detect_all,
+            command: copy_first,
+            extensions: &["rs"],
+        }];
+
+        run_index_with(&specs, &repo_root, &data_dir).unwrap();
+        let meta = SubstrateMeta::load(&data_dir).unwrap();
+        assert!(meta.artifact_root(&data_dir).unwrap().is_dir());
+        assert!(!orphan.exists());
+
+        let _ = fs::remove_dir_all(repo_root);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn index_lock_serializes_builders() {
+        let data_dir = unique_temp_dir("index-lock");
+        fs::create_dir_all(substrate_dir(&data_dir)).unwrap();
+        let first = acquire_index_lock(&data_dir).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let other_data_dir = data_dir.clone();
+        let waiter = std::thread::spawn(move || {
+            let lock = acquire_index_lock(&other_data_dir).unwrap();
+            send.send(()).unwrap();
+            drop(lock);
+        });
+
+        assert!(receive
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(first);
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        waiter.join().unwrap();
+
         let _ = fs::remove_dir_all(data_dir);
     }
 

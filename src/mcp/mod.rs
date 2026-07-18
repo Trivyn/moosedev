@@ -1184,7 +1184,7 @@ impl MooseDevServer {
                 if let Some(file) = position_file {
                     let Some(substrate) = self.state.substrate() else {
                         return Ok(tool_ok(
-                            "code substrate unavailable; run `moosedev index` and restart the backend; records cannot be anchored here yet.",
+                            "code substrate unavailable; run `moosedev index`; the backend will load it automatically when indexing completes, but records cannot be anchored here yet.",
                         ));
                     };
                     if !substrate.can_anchor(&file) {
