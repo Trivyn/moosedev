@@ -13,7 +13,7 @@ use super::meta::SubstrateMeta;
 use super::scip::{self, IngestedIndex, OccurrenceEntry, SymbolData};
 use super::symbols;
 use super::treesitter::{parse_identity, TreeSitterFallback};
-use super::{meta_path, producer_index_path};
+use super::{meta_path, producer_index_path_in, CHURN_FILE_NAME};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
@@ -115,9 +115,26 @@ impl Substrate {
                 meta_path(data_dir).display()
             )
         })?;
+        Self::load_with(data_dir, repo_root, meta)
+    }
+
+    /// Load a specific, already-sampled manifest. Callers that compare an
+    /// identity before loading — and memoize failures against it — must load
+    /// exactly what they sampled, not whatever the manifest says by the time
+    /// the load starts.
+    pub fn load_with(data_dir: &Path, repo_root: &Path, meta: SubstrateMeta) -> Result<Substrate> {
+        Self::load_generation(data_dir, repo_root, meta)
+    }
+
+    fn load_generation(
+        data_dir: &Path,
+        repo_root: &Path,
+        meta: SubstrateMeta,
+    ) -> Result<Substrate> {
+        let artifact_root = meta.artifact_root(data_dir)?;
         let mut merged = IngestedIndex::default();
         for producer in &meta.producers {
-            let path = producer_index_path(data_dir, &producer.name);
+            let path = producer_index_path_in(&artifact_root, &producer.name);
             let index = scip::read_index(&path).with_context(|| {
                 format!(
                     "failed to load substrate index for producer `{}` at {}; run `moosedev index`",
@@ -136,7 +153,8 @@ impl Substrate {
         let current_head = SubstrateMeta::current_head(repo_root);
         let stale = current_head != meta.indexed_commit;
         // Best-effort: a missing or unreadable sidecar never fails the load.
-        let churn = super::ChurnIndex::load(data_dir).unwrap_or_default();
+        let churn =
+            super::ChurnIndex::load_from(&artifact_root.join(CHURN_FILE_NAME)).unwrap_or_default();
         Ok(Substrate {
             index: merged,
             meta,
@@ -211,6 +229,35 @@ impl Substrate {
 
     pub fn meta(&self) -> &SubstrateMeta {
         &self.meta
+    }
+
+    /// Read a source baseline only when filesystem evidence proves it did not
+    /// change during or after this generation's producer run. The two metadata
+    /// samples reject concurrent writes while the file is being read.
+    pub fn read_indexed_source(&self, relative_path: &str) -> Option<String> {
+        if !self.index.files.contains_key(relative_path) {
+            return None;
+        }
+        if !std::path::Path::new(relative_path)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let build_started_at = self.meta.indexed_started_at?;
+        let path = self.repo_root()?.join(relative_path);
+        let before = std::fs::metadata(&path).ok()?;
+        let before_modified = before.modified().ok()?;
+        if chrono::DateTime::<chrono::Utc>::from(before_modified) >= build_started_at {
+            return None;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let after = std::fs::metadata(path).ok()?;
+        let after_modified = after.modified().ok()?;
+        if before_modified != after_modified || before.len() != after.len() {
+            return None;
+        }
+        (chrono::DateTime::<chrono::Utc>::from(after_modified) < build_started_at).then_some(text)
     }
 
     pub fn is_stale(&self) -> bool {
@@ -1359,6 +1406,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    #[test]
+    fn load_with_uses_the_sampled_manifest_exactly() {
+        let data_dir = unique_temp_dir("sampled-load");
+        write_index(
+            &data_dir,
+            "latest",
+            index_with_definition("src/lib.rs", "rust-analyzer cargo latest 1.0.0 item()."),
+        );
+        multi_meta(vec![producer_run("latest", None)])
+            .save(&data_dir)
+            .unwrap();
+        let sampled = multi_meta(vec![producer_run("missing", None)]);
+
+        let error = Substrate::load_with(&data_dir, &data_dir, sampled)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn indexed_source_requires_a_stable_file_older_than_the_build() {
+        let data_dir = unique_temp_dir("indexed-source");
+        let source_path = data_dir.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, "pub fn item() {}\n").unwrap();
+        write_index(
+            &data_dir,
+            "rust-analyzer",
+            index_with_definition("src/lib.rs", "rust-analyzer cargo test 1.0.0 item()."),
+        );
+
+        let mut trusted_meta = multi_meta(vec![producer_run("rust-analyzer", None)]);
+        trusted_meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(2));
+        trusted_meta.save(&data_dir).unwrap();
+        let trusted = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(
+            trusted.read_indexed_source("src/lib.rs").as_deref(),
+            Some("pub fn item() {}\n")
+        );
+        assert_eq!(trusted.read_indexed_source("src/missing.rs"), None);
+
+        let mut untrusted_meta = trusted_meta;
+        untrusted_meta.indexed_started_at = Some(Utc::now() - chrono::Duration::seconds(2));
+        untrusted_meta.save(&data_dir).unwrap();
+        let untrusted = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(untrusted.read_indexed_source("src/lib.rs"), None);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     fn write_index(data_dir: &Path, producer: &str, index: Index) {
         let path = producer_index_path(data_dir, producer);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1393,9 +1492,11 @@ mod tests {
 
     fn multi_meta(producers: Vec<ProducerRun>) -> SubstrateMeta {
         SubstrateMeta {
-            schema_version: crate::code::substrate::meta::CURRENT_SCHEMA_VERSION,
+            schema_version: crate::code::substrate::meta::LEGACY_SCHEMA_VERSION,
             indexed_commit: "unknown".to_string(),
             indexed_at: Utc::now(),
+            indexed_started_at: None,
+            generation: None,
             producers,
         }
     }

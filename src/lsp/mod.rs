@@ -4,6 +4,7 @@
 //! Unix socket. The daemon session shares the same [`AppState`] as MCP/HTTP, so
 //! editor hover can serve the same dossiers as the MCP tools.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -26,13 +27,16 @@ use lsp_types::{
     HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent, MarkupKind,
     MessageType, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
     RelatedFullDocumentDiagnosticReport, ServerCapabilities, ShowMessageParams,
-    TextDocumentSyncCapability, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::code::substrate::symbols::{logical_path, normalize_symbol};
-use crate::code::substrate::{DefinitionEntry, Position as SubstratePosition, SourceRange};
+use crate::code::substrate::{
+    DefinitionEntry, Position as SubstratePosition, SourceRange, Substrate,
+};
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
     pending_count, render_markdown, AppState, CodeTerms, DossierTarget, ProposalKind,
@@ -60,6 +64,152 @@ enum SessionEncoding {
     Utf16,
 }
 
+#[derive(Debug)]
+struct OpenDocument {
+    rel_path: String,
+    /// Saved source text whose positions the loaded substrate is assumed to use.
+    base_text: String,
+    /// Exact session substrate whose coordinates `base_text` represents.
+    /// `None` means the current disk contents could not be proven to match an
+    /// immutable index generation, so every position-bearing surface must stay
+    /// silent for this document.
+    base_substrate: Option<usize>,
+    /// Current editor buffer, including unsaved changes.
+    text: String,
+    lines: LineMap,
+}
+
+impl OpenDocument {
+    fn new(
+        rel_path: String,
+        base_text: String,
+        text: String,
+        base_substrate: Option<usize>,
+    ) -> Self {
+        let lines = LineMap::between(&base_text, &text);
+        Self {
+            rel_path,
+            base_text,
+            base_substrate,
+            text,
+            lines,
+        }
+    }
+
+    fn update_text(&mut self, text: String) {
+        self.lines = LineMap::between(&self.base_text, &text);
+        self.text = text;
+    }
+
+    fn update_base(&mut self, base_text: String, substrate: &Arc<Substrate>) {
+        self.lines = LineMap::between(&base_text, &self.text);
+        self.base_text = base_text;
+        self.base_substrate = Some(substrate_identity(substrate));
+    }
+
+    fn invalidate_base(&mut self) {
+        self.base_substrate = None;
+    }
+
+    fn is_aligned_with(&self, substrate: &Arc<Substrate>) -> bool {
+        self.base_substrate == Some(substrate_identity(substrate))
+    }
+}
+
+fn substrate_identity(substrate: &Arc<Substrate>) -> usize {
+    Arc::as_ptr(substrate) as usize
+}
+
+fn indexed_base_text(
+    repo_root: &Path,
+    substrate: &Arc<Substrate>,
+    rel_path: &str,
+) -> Option<String> {
+    if substrate.repo_root().is_none() {
+        // Synthetic substrates are test-only and have no generation artifacts;
+        // their caller owns the promise that the fixture text matches the index.
+        std::fs::read_to_string(repo_root.join(rel_path)).ok()
+    } else {
+        substrate.read_indexed_source(rel_path)
+    }
+}
+
+#[derive(Debug)]
+struct LineMap {
+    base_to_buffer: Vec<Option<u32>>,
+    buffer_to_base: Vec<Option<u32>>,
+}
+
+impl LineMap {
+    const MAX_DIFF_CELLS: usize = 4_000_000;
+
+    /// Align only byte-identical lines. Inserted lines shift anchors exactly;
+    /// changed/deleted lines stay unmapped so editor surfaces remain silent
+    /// instead of guessing at an entity's new position.
+    fn between(base: &str, buffer: &str) -> Self {
+        let base_lines = base.split('\n').collect::<Vec<_>>();
+        let buffer_lines = buffer.split('\n').collect::<Vec<_>>();
+        let base_len = base_lines.len();
+        let buffer_len = buffer_lines.len();
+        let mut map = Self {
+            base_to_buffer: vec![None; base_len],
+            buffer_to_base: vec![None; buffer_len],
+        };
+        if base == buffer {
+            for line in 0..base_len {
+                map.base_to_buffer[line] = u32::try_from(line).ok();
+                map.buffer_to_base[line] = u32::try_from(line).ok();
+            }
+            return map;
+        }
+
+        let leading_equal = base_lines
+            .iter()
+            .zip(&buffer_lines)
+            .take_while(|(base, buffer)| base == buffer)
+            .count();
+        let trailing_equal = base_lines[leading_equal..]
+            .iter()
+            .rev()
+            .zip(buffer_lines[leading_equal..].iter().rev())
+            .take_while(|(base, buffer)| base == buffer)
+            .count();
+        let changed_base = base_len - leading_equal - trailing_equal;
+        let changed_buffer = buffer_len - leading_equal - trailing_equal;
+        if changed_base.saturating_mul(changed_buffer) > Self::MAX_DIFF_CELLS {
+            return map;
+        }
+
+        let mut base_line = 0usize;
+        let mut buffer_line = 0usize;
+        for part in diff::slice(&base_lines, &buffer_lines) {
+            match part {
+                diff::Result::Left(_) => base_line += 1,
+                diff::Result::Right(_) => buffer_line += 1,
+                diff::Result::Both(_, _) => {
+                    if let (Ok(base_u32), Ok(buffer_u32)) =
+                        (u32::try_from(base_line), u32::try_from(buffer_line))
+                    {
+                        map.base_to_buffer[base_line] = Some(buffer_u32);
+                        map.buffer_to_base[buffer_line] = Some(base_u32);
+                    }
+                    base_line += 1;
+                    buffer_line += 1;
+                }
+            }
+        }
+        map
+    }
+
+    fn to_buffer(&self, line: u32) -> Option<u32> {
+        self.base_to_buffer.get(line as usize).copied().flatten()
+    }
+
+    fn to_base(&self, line: u32) -> Option<u32> {
+        self.buffer_to_base.get(line as usize).copied().flatten()
+    }
+}
+
 struct LspSession {
     state: Arc<AppState>,
     connection: Connection,
@@ -73,7 +223,16 @@ struct LspSession {
     /// Author identity for editor-originated proposals, derived from the
     /// client's `clientInfo.name` at initialize (e.g. `editor:neovim`).
     author: String,
-    open_docs: HashMap<String, String>,
+    open_docs: HashMap<String, OpenDocument>,
+    /// Substrate generation this session serves from. Advanced ONLY by
+    /// `refresh_if_state_changed`, together with every open document's
+    /// `base_text`, so served positions and the index never mix generations.
+    substrate: Option<Arc<Substrate>>,
+    /// Per-file `git log -1` instants for the stale-rationale banner. A
+    /// didChange cannot change a file's last commit, so publishes triggered by
+    /// typing reuse the memo; cleared per file on save/open and wholesale on a
+    /// substrate-generation change.
+    commit_instants: HashMap<String, Option<DateTime<FixedOffset>>>,
     last_diagnostics_generation: Option<(usize, u64)>,
     retracted: Arc<AtomicBool>,
 }
@@ -390,6 +549,8 @@ fn run_session(
         nudged: false,
         author: "editor".to_string(),
         open_docs: HashMap::new(),
+        substrate: None,
+        commit_instants: HashMap::new(),
         last_diagnostics_generation: None,
         retracted,
     };
@@ -503,6 +664,11 @@ impl LspSession {
                 }
                 Err(_) => break,
             };
+            // Serve every message from a repaired state: the substrate pin,
+            // document base_text, and published diagnostics advance together
+            // before any dispatch, so no request can map old-baseline
+            // positions against a newer lazily-loaded index.
+            self.refresh_if_state_changed()?;
             match msg {
                 Message::Request(req) => {
                     if self.connection.handle_shutdown(&req)? {
@@ -530,12 +696,10 @@ impl LspSession {
                     }
                 }
                 Message::Notification(notification) => match notification.method.as_str() {
-                    "textDocument/didOpen" | "textDocument/didSave" => {
-                        self.handle_diagnostics_event(notification.params)?;
-                    }
+                    "textDocument/didOpen" => self.handle_did_open(notification.params)?,
+                    "textDocument/didSave" => self.handle_did_save(notification.params)?,
                     "textDocument/didClose" => self.handle_did_close(notification.params),
-                    // Diagnostics are saved-state only; unsaved didChange text is ignored.
-                    "textDocument/didChange" => {}
+                    "textDocument/didChange" => self.handle_did_change(notification.params)?,
                     DAEMON_SHUTDOWN_METHOD => {
                         self.retract_published_diagnostics();
                         break;
@@ -549,9 +713,7 @@ impl LspSession {
         Ok(())
     }
 
-    fn handle_diagnostics_event(&mut self, params: serde_json::Value) -> anyhow::Result<()> {
-        // Diagnostics are intentionally saved-state only: use the URI from the
-        // event, but ignore any text payload the editor sends with didOpen/didSave.
+    fn handle_did_open(&mut self, params: serde_json::Value) -> anyhow::Result<()> {
         self.maybe_nudge();
         let Some(uri) = notification_text_document_uri(&params) else {
             return Ok(());
@@ -559,14 +721,97 @@ impl LspSession {
         let Some(rel_path) = repo_relative_path(&self.repo_root, &uri) else {
             return Ok(());
         };
-        let generation = self.knowledge_generation();
-        let diagnostics = self.file_diagnostics(&rel_path);
-        self.publish(uri.clone(), diagnostics)?;
-        self.open_docs.insert(uri.to_string(), rel_path);
-        if self.last_diagnostics_generation.is_none() {
-            self.last_diagnostics_generation = Some(generation);
+        let disk_text = std::fs::read_to_string(self.repo_root.join(&rel_path)).unwrap_or_default();
+        let text = params
+            .pointer("/textDocument/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&disk_text)
+            .to_string();
+        let (base_text, base_substrate) = self
+            .substrate
+            .as_ref()
+            .and_then(|substrate| {
+                indexed_base_text(&self.repo_root, substrate, &rel_path)
+                    .map(|base_text| (base_text, Some(substrate_identity(substrate))))
+            })
+            .unwrap_or_default();
+        self.open_docs.insert(
+            uri.to_string(),
+            OpenDocument::new(rel_path.clone(), base_text, text, base_substrate),
+        );
+        self.commit_instants.remove(&rel_path);
+        self.publish_current_diagnostics(uri, &rel_path)
+    }
+
+    fn handle_did_save(&mut self, params: serde_json::Value) -> anyhow::Result<()> {
+        self.maybe_nudge();
+        let Some(uri) = notification_text_document_uri(&params) else {
+            return Ok(());
+        };
+        let Some(rel_path) = repo_relative_path(&self.repo_root, &uri) else {
+            return Ok(());
+        };
+        let saved_text = params
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| std::fs::read_to_string(self.repo_root.join(&rel_path)).ok())
+            .unwrap_or_default();
+        match self.open_docs.get_mut(uri.as_str()) {
+            Some(document) => document.update_text(saved_text),
+            None => {
+                let (base_text, base_substrate) = self
+                    .substrate
+                    .as_ref()
+                    .and_then(|substrate| {
+                        indexed_base_text(&self.repo_root, substrate, &rel_path)
+                            .map(|base_text| (base_text, Some(substrate_identity(substrate))))
+                    })
+                    .unwrap_or_default();
+                self.open_docs.insert(
+                    uri.to_string(),
+                    OpenDocument::new(rel_path.clone(), base_text, saved_text, base_substrate),
+                );
+            }
         }
-        Ok(())
+        // Every save nudges, unconditionally: suppressing saves byte-identical
+        // to base_text races the async re-base after a rebuild publishes (a
+        // fast revert-save matches the STALE baseline and the reconciliation
+        // it needs is exactly what gets suppressed). Editors already skip
+        // didSave on clean buffers, and the scheduler debounces the rest.
+        self.state.nudge_reindex(&rel_path);
+        self.commit_instants.remove(&rel_path);
+        self.publish_current_diagnostics(uri, &rel_path)
+    }
+
+    fn handle_did_change(&mut self, params: serde_json::Value) -> anyhow::Result<()> {
+        let Some(uri) = notification_text_document_uri(&params) else {
+            return Ok(());
+        };
+        let Some(text) = params
+            .get("contentChanges")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|changes| changes.last())
+            .and_then(|change| change.get("text"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(());
+        };
+        let Some(document) = self.open_docs.get_mut(uri.as_str()) else {
+            return Ok(());
+        };
+        document.update_text(text.to_string());
+        // Push surfaces must re-publish when the state they render changes —
+        // the buffer's line alignment is part of that state.
+        let rel_path = document.rel_path.clone();
+        self.publish_current_diagnostics(uri, &rel_path)
+    }
+
+    fn publish_current_diagnostics(&mut self, uri: Uri, rel_path: &str) -> anyhow::Result<()> {
+        // Generation bookkeeping lives in `refresh_if_state_changed`, which
+        // runs before every dispatched message.
+        let diagnostics = self.file_diagnostics(rel_path);
+        self.publish(uri, diagnostics)
     }
 
     fn handle_did_close(&mut self, params: serde_json::Value) {
@@ -601,7 +846,10 @@ impl LspSession {
         }
         let uri = code_lens_uri(&params)?;
         let rel_path = repo_relative_path(&self.repo_root, &uri)?;
-        let substrate = self.state.substrate()?;
+        let substrate = self.substrate.clone()?;
+        if !self.document_matches_substrate(&rel_path, &substrate) {
+            return Some(Vec::new());
+        }
         let terms = CodeTerms::resolve(&self.state).ok()?;
         let entities = entities_by_symbol(&self.state, &terms).ok()?;
         let judgments = crate::graph::judgments_by_subject(&self.state).unwrap_or_default();
@@ -636,7 +884,7 @@ impl LspSession {
                 continue;
             }
             let title = parts.join(" · ");
-            let Some(range) = self.diagnostic_range(&rel_path, definition.range) else {
+            let Some(range) = self.diagnostic_range(&substrate, &rel_path, definition.range) else {
                 continue;
             };
             lenses.push(CodeLens {
@@ -692,24 +940,48 @@ impl LspSession {
         self.retracted.store(true, Ordering::Relaxed);
     }
 
-    fn knowledge_generation(&self) -> (usize, u64) {
-        let substrate = self
-            .state
-            .substrate()
-            .map_or(0, |substrate| Arc::as_ptr(&substrate) as usize);
-        (substrate, self.state.project_write_generation())
-    }
-
     fn refresh_if_state_changed(&mut self) -> anyhow::Result<()> {
-        let generation = self.knowledge_generation();
+        // The ONLY call site of the lazily-reloading `state.substrate()` in
+        // this session: the pin, every document's base_text, and the published
+        // diagnostics advance together here, never independently.
+        let live = self.state.substrate();
+        let generation = (
+            live.as_ref()
+                .map_or(0, |substrate| Arc::as_ptr(substrate) as usize),
+            self.state.project_write_generation(),
+        );
         if self.last_diagnostics_generation == Some(generation) {
             return Ok(());
+        }
+
+        let substrate_changed = self
+            .last_diagnostics_generation
+            .is_some_and(|previous| previous.0 != generation.0);
+        self.substrate = live;
+        if substrate_changed {
+            self.commit_instants.clear();
+            for document in self.open_docs.values_mut() {
+                let Some(substrate) = self.substrate.as_ref() else {
+                    document.invalidate_base();
+                    continue;
+                };
+                if let Some(base_text) =
+                    indexed_base_text(&self.repo_root, substrate, &document.rel_path)
+                {
+                    document.update_base(base_text, substrate);
+                } else {
+                    // A save may have landed while this generation was being
+                    // built. Without an exact indexed baseline, silence is the
+                    // only honest coordinate response.
+                    document.invalidate_base();
+                }
+            }
         }
 
         let open_docs: Vec<_> = self
             .open_docs
             .iter()
-            .map(|(uri, rel_path)| (uri.clone(), rel_path.clone()))
+            .map(|(uri, document)| (uri.clone(), document.rel_path.clone()))
             .collect();
         for (uri, rel_path) in open_docs {
             let diagnostics = self.file_diagnostics(&rel_path);
@@ -719,10 +991,13 @@ impl LspSession {
         Ok(())
     }
 
-    fn file_diagnostics(&self, rel_path: &str) -> Vec<Diagnostic> {
-        let Some(substrate) = self.state.substrate() else {
+    fn file_diagnostics(&mut self, rel_path: &str) -> Vec<Diagnostic> {
+        let Some(substrate) = self.substrate.clone() else {
             return Vec::new();
         };
+        if !self.document_matches_substrate(rel_path, &substrate) {
+            return Vec::new();
+        }
 
         let terms = match CodeTerms::resolve(&self.state) {
             Ok(terms) => terms,
@@ -741,7 +1016,7 @@ impl LspSession {
         let file_commit = self
             .diagnostics
             .stale_rationale
-            .then(|| self.file_last_commit_instant(rel_path))
+            .then(|| self.file_last_commit_instant_memo(rel_path))
             .flatten();
 
         // Message shaping and severity discipline are host-independent policy
@@ -765,7 +1040,7 @@ impl LspSession {
             if records.is_empty() {
                 continue;
             }
-            let Some(range) = self.diagnostic_range(rel_path, definition.range) else {
+            let Some(range) = self.diagnostic_range(&substrate, rel_path, definition.range) else {
                 continue;
             };
 
@@ -806,14 +1081,91 @@ impl LspSession {
         diagnostics
     }
 
-    fn diagnostic_range(&self, rel_path: &str, range: SourceRange) -> Option<Range> {
+    fn document_matches_substrate(&self, rel_path: &str, substrate: &Arc<Substrate>) -> bool {
+        self.open_docs
+            .values()
+            .find(|document| document.rel_path == rel_path)
+            .is_none_or(|document| document.is_aligned_with(substrate))
+    }
+
+    fn substrate_position(
+        &self,
+        substrate: &Arc<Substrate>,
+        rel_path: &str,
+        position: Position,
+    ) -> Option<SubstratePosition> {
+        let document = self
+            .open_docs
+            .values()
+            .find(|document| document.rel_path == rel_path);
+        let buffer_line = match document {
+            Some(document) => {
+                if !document.is_aligned_with(substrate) {
+                    return None;
+                }
+                document.text.lines().nth(position.line as usize)?
+            }
+            None => {
+                return Some(SubstratePosition {
+                    line: position.line,
+                    col: utf8_col(
+                        &self.repo_root,
+                        rel_path,
+                        position.line,
+                        position.character,
+                        self.encoding,
+                    )?,
+                })
+            }
+        };
+        let line = document?.lines.to_base(position.line)?;
+        let col = match self.encoding {
+            SessionEncoding::Utf8 => position.character,
+            SessionEncoding::Utf16 => utf16_character_to_utf8_col(buffer_line, position.character),
+        };
+        Some(SubstratePosition { line, col })
+    }
+
+    fn diagnostic_range(
+        &self,
+        substrate: &Arc<Substrate>,
+        rel_path: &str,
+        range: SourceRange,
+    ) -> Option<Range> {
+        let document = self
+            .open_docs
+            .values()
+            .find(|document| document.rel_path == rel_path);
+        let range = match document {
+            Some(document) => {
+                if !document.is_aligned_with(substrate) {
+                    return None;
+                }
+                SourceRange {
+                    start: SubstratePosition {
+                        line: document.lines.to_buffer(range.start.line)?,
+                        col: range.start.col,
+                    },
+                    end: SubstratePosition {
+                        line: document.lines.to_buffer(range.end.line)?,
+                        col: range.end.col,
+                    },
+                }
+            }
+            None => range,
+        };
         match self.encoding {
             SessionEncoding::Utf8 => Some(Range::new(
                 Position::new(range.start.line, range.start.col),
                 Position::new(range.end.line, range.end.col),
             )),
             SessionEncoding::Utf16 => {
-                let file = std::fs::read_to_string(self.repo_root.join(rel_path)).ok()?;
+                let file = match document {
+                    Some(document) => Cow::Borrowed(document.text.as_str()),
+                    None => {
+                        Cow::Owned(std::fs::read_to_string(self.repo_root.join(rel_path)).ok()?)
+                    }
+                };
                 let start_line = file.lines().nth(range.start.line as usize)?;
                 let end_line = file.lines().nth(range.end.line as usize)?;
                 Some(Range::new(
@@ -828,6 +1180,18 @@ impl LspSession {
                 ))
             }
         }
+    }
+
+    /// Memoized per open file: publishes triggered by typing must not spawn a
+    /// `git log` subprocess per keystroke. Invalidated on open/save and on a
+    /// substrate-generation change (the post-commit reindex path).
+    fn file_last_commit_instant_memo(&mut self, rel_path: &str) -> Option<DateTime<FixedOffset>> {
+        if let Some(cached) = self.commit_instants.get(rel_path) {
+            return *cached;
+        }
+        let instant = self.file_last_commit_instant(rel_path);
+        self.commit_instants.insert(rel_path.to_string(), instant);
+        instant
     }
 
     fn file_last_commit_instant(&self, rel_path: &str) -> Option<DateTime<FixedOffset>> {
@@ -886,15 +1250,17 @@ impl LspSession {
     /// per-file diagnostics the push path publishes, computed on demand.
     /// Unresolvable URIs get an honest empty full report, never an error.
     fn handle_pull_diagnostics(
-        &self,
+        &mut self,
         id: lsp_server::RequestId,
         params: serde_json::Value,
     ) -> anyhow::Result<()> {
-        let mut items = serde_json::from_value::<DocumentDiagnosticParams>(params)
+        let rel_path = serde_json::from_value::<DocumentDiagnosticParams>(params)
             .ok()
-            .and_then(|params| repo_relative_path(&self.repo_root, &params.text_document.uri))
-            .map(|rel_path| self.file_diagnostics(&rel_path))
-            .unwrap_or_default();
+            .and_then(|params| repo_relative_path(&self.repo_root, &params.text_document.uri));
+        let mut items = match rel_path {
+            Some(rel_path) => self.file_diagnostics(&rel_path),
+            None => Vec::new(),
+        };
         // The same severity ceiling `publish` enforces guards this path.
         items.retain(is_allowed_diagnostic_severity);
         let report = DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
@@ -937,22 +1303,9 @@ impl LspSession {
             return Some(Vec::new());
         }
         let rel_path = repo_relative_path(&self.repo_root, &params.text_document.uri)?;
-        let position = params.range.start;
-        let col0 = utf8_col(
-            &self.repo_root,
-            &rel_path,
-            position.line,
-            position.character,
-            self.encoding,
-        )?;
-        let substrate = self.state.substrate()?;
-        let resolution = substrate.resolve(
-            &rel_path,
-            SubstratePosition {
-                line: position.line,
-                col: col0,
-            },
-        )?;
+        let substrate = self.substrate.clone()?;
+        let position = self.substrate_position(&substrate, &rel_path, params.range.start)?;
+        let resolution = substrate.resolve(&rel_path, position)?;
         if resolution.is_local {
             return Some(Vec::new());
         }
@@ -1172,9 +1525,9 @@ impl LspSession {
         // symbol (or a path contradicting its definition) would queue a
         // proposal that can never be accepted.
         let definition = self
-            .state
-            .substrate()
-            .and_then(|s| s.definition_for_symbol(&args.target_symbol))
+            .substrate
+            .as_deref()
+            .and_then(|substrate| substrate.definition_for_symbol(&args.target_symbol))
             .ok_or_else(|| {
                 format!(
                     "targetSymbol has no workspace definition in the substrate: {}",
@@ -1281,28 +1634,27 @@ impl LspSession {
             &self.repo_root,
             &params.text_document_position_params.text_document.uri,
         )?;
-        let position = params.text_document_position_params.position;
-        let col0 = utf8_col(
-            &self.repo_root,
+        let substrate = self.substrate.clone()?;
+        let position = self.substrate_position(
+            &substrate,
             &rel_path,
-            position.line,
-            position.character,
-            self.encoding,
+            params.text_document_position_params.position,
         )?;
-        let dossier = match get_entity_dossier(
-            &self.state,
-            &DossierTarget::Position {
-                file: rel_path,
-                line: position.line + 1,
-                col: col0 + 1,
-            },
-        ) {
-            Ok(dossier) => dossier?,
-            Err(e) => {
-                tracing::warn!("Knowledge-LSP hover dossier lookup failed: {e}");
-                return None;
-            }
-        };
+        // Resolve the position against the session-pinned substrate so hover
+        // and the rebased documents never mix generations; the dossier itself
+        // is fetched by symbol, whose identity is generation-independent.
+        let resolution = substrate.resolve(&rel_path, position)?;
+        if resolution.is_local {
+            return None;
+        }
+        let dossier =
+            match get_entity_dossier(&self.state, &DossierTarget::Symbol(resolution.symbol)) {
+                Ok(dossier) => dossier?,
+                Err(e) => {
+                    tracing::warn!("Knowledge-LSP hover dossier lookup failed: {e}");
+                    return None;
+                }
+            };
 
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -1612,6 +1964,7 @@ fn server_capabilities(encoding: SessionEncoding) -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
+                change: Some(TextDocumentSyncKind::FULL),
                 save: Some(TextDocumentSyncSaveOptions::Supported(true)),
                 ..Default::default()
             },
@@ -1736,6 +2089,33 @@ mod tests {
             negotiate_session_encoding(&ClientCapabilities::default()),
             SessionEncoding::Utf16
         );
+    }
+
+    #[test]
+    fn line_map_tracks_insertions_and_rejects_changed_lines() {
+        let base = "alpha\nbeta\ngamma\n";
+        let inserted = "zero\nalpha\nbeta\ngamma\n";
+        let map = LineMap::between(base, inserted);
+        assert_eq!(map.to_buffer(0), Some(1));
+        assert_eq!(map.to_buffer(2), Some(3));
+        assert_eq!(map.to_base(0), None);
+        assert_eq!(map.to_base(2), Some(1));
+
+        let changed = LineMap::between(base, "alpha\nBETA\ngamma\n");
+        assert_eq!(changed.to_buffer(1), None);
+        assert_eq!(changed.to_base(1), None);
+    }
+
+    #[test]
+    fn line_map_bounds_only_the_changed_middle() {
+        let base = (0..3_000)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let buffer = base.replacen("line 1500", "inserted\nline 1500", 1);
+        let map = LineMap::between(&base, &buffer);
+
+        assert_eq!(map.to_buffer(2_999), Some(3_000));
     }
 
     #[test]

@@ -9,13 +9,15 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use moosedev::code::substrate::{Substrate, SubstrateMeta};
+use moosedev::code::substrate::{
+    generation_dir, producer_index_path_in, ProducerRun, Substrate, SubstrateMeta,
+};
 use moosedev::graph::{
     self, AppState, CodeSelector, DossierTarget, RecordInput, PROJECT_KG_GRAPH_IRI,
 };
 use moosedev::lsp;
 use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
-use protobuf::{EnumOrUnknown, MessageField};
+use protobuf::{EnumOrUnknown, Message, MessageField};
 use scip::types::{
     symbol_information, Document, Index, Occurrence, PositionEncoding, Signature, SymbolInformation,
 };
@@ -148,7 +150,27 @@ fn link_public(state: &AppState, record_iri: &str, public_start: u32) {
     .expect("link public build_server");
 }
 
+fn link_public_without_installing_substrate(state: &AppState, record_iri: &str, public_start: u32) {
+    let offline = synthetic_substrate(public_start, false);
+    let entry = offline
+        .definitions()
+        .into_iter()
+        .find(|entry| entry.symbol == PUBLIC_SYMBOL)
+        .expect("public definition");
+    let terms = graph::CodeTerms::resolve(state).expect("code terms");
+    let components = graph::load_components(state).expect("components");
+    let entity = graph::ensure_entity(state, &terms, &components, &entry, "tester")
+        .expect("ensure public entity");
+    graph::relate(state, record_iri, "concerns", &entity.iri)
+        .expect("link record to offline entity");
+}
+
 fn synthetic_substrate(public_start: u32, stale: bool) -> Substrate {
+    Substrate::from_index(synthetic_index(public_start), meta(), stale)
+        .expect("synthetic substrate")
+}
+
+fn synthetic_index(public_start: u32) -> Index {
     let mut index = Index::new();
     let mut document = doc("src/runtime.rs");
     document.symbols.push(info(
@@ -190,8 +212,40 @@ fn synthetic_substrate(public_start: u32, stale: bool) -> Substrate {
         .occurrences
         .push(occ(LOCAL_SYMBOL, vec![20, 8, 11], 0));
     index.documents.push(document);
+    index
+}
 
-    Substrate::from_index(index, meta(), stale).expect("synthetic substrate")
+fn publish_disk_substrate(data_dir: &Path, index: &Index) {
+    let generation = format!("gen-{}", uuid::Uuid::new_v4());
+    let artifact_root = generation_dir(data_dir, &generation);
+    std::fs::create_dir_all(&artifact_root).expect("create substrate generation");
+    std::fs::write(
+        producer_index_path_in(&artifact_root, "rust-analyzer"),
+        index.write_to_bytes().expect("serialize SCIP index"),
+    )
+    .expect("write SCIP index");
+    SubstrateMeta {
+        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
+        indexed_commit: "unknown".to_string(),
+        indexed_started_at: Some(Utc::now()),
+        indexed_at: Utc::now(),
+        generation: Some(generation),
+        producers: vec![ProducerRun {
+            name: "rust-analyzer".to_string(),
+            producer: "rust-analyzer".to_string(),
+            producer_version: "test".to_string(),
+            mode: "scip".to_string(),
+            documents: index.documents.len(),
+            occurrences: index
+                .documents
+                .iter()
+                .map(|document| document.occurrences.len())
+                .sum(),
+            path_prefix: None,
+        }],
+    }
+    .save(data_dir)
+    .expect("publish substrate manifest");
 }
 
 fn doc(relative_path: &str) -> Document {
@@ -487,6 +541,38 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn hover_recovers_when_substrate_is_published_without_reconnect() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("late-root", "    build_server();");
+    let data_dir = fresh_dir("late-data");
+    let state = Arc::new(AppState::bootstrap(&data_dir, &ontology_dir())?);
+    state.load_substrate(&repo_root);
+    seed_component(&state, "runtime component", "src/");
+    let decision = record(
+        &state,
+        "ArchitecturalDecision",
+        "Late substrate hover decision",
+    );
+    link_public_without_installing_substrate(&state, &decision, 4);
+    let socket = spawn_listener(state, &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true).await?;
+    assert_null_hover(&client.hover(2, &uri, 7, 4).await?);
+
+    publish_disk_substrate(&data_dir, &synthetic_index(4));
+    let recovered = client.hover(3, &uri, 7, 4).await?;
+    assert!(hover_markdown(&recovered).contains("Late substrate hover decision"));
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
 async fn hover_is_silent_on_unlinked_and_tokenless() -> anyhow::Result<()> {
     let _guard = ENV_LOCK.lock().await;
     let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
@@ -608,6 +694,13 @@ async fn repo_substrate_hover_when_index_present() -> anyhow::Result<()> {
     }
 
     let substrate = Substrate::load(&substrate_data_dir, repo_root)?;
+    if substrate.meta().indexed_started_at.is_none() {
+        eprintln!(
+            "skipping LSP hover substrate integration: {} predates generation-safe source baselines; run `moosedev index`",
+            meta_path.display()
+        );
+        return Ok(());
+    }
     let state = Arc::new(bootstrap("repo-substrate-hover"));
     state.set_substrate(Arc::new(substrate));
     seed_component(&state, "source component", "src/");

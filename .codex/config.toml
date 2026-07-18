@@ -12,3 +12,6 @@ approval_mode = "approve"
 
 [mcp_servers.moosedev.tools.validate_against_architecture]
 approval_mode = "approve"
+
+[mcp_servers.moosedev.tools.supersede_decision]
+approval_mode = "approve"

@@ -6,7 +6,8 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use moosedev::code::substrate::producer::noteworthy_diagnostics;
 use moosedev::code::substrate::{
-    index_log_path, producer_index_path, run_index, Substrate, SubstrateMeta, STALE_CHECK_TTL,
+    generation_dir, index_log_path, producer_index_path, producer_index_path_in, run_index,
+    ProducerRun, Substrate, SubstrateMeta, STALE_CHECK_TTL,
 };
 use moosedev::graph::AppState;
 use protobuf::{EnumOrUnknown, Message, MessageField};
@@ -122,6 +123,51 @@ fn write_substrate(data_dir: &Path, index: &Index, commit: &str, indexed_at: Dat
     .expect("write substrate metadata");
 }
 
+fn write_generation(
+    data_dir: &Path,
+    index: &Index,
+    commit: &str,
+    indexed_at: DateTime<Utc>,
+) -> SubstrateMeta {
+    let generation = format!("gen-{}", uuid::Uuid::new_v4());
+    let artifact_root = generation_dir(data_dir, &generation);
+    let path = producer_index_path_in(&artifact_root, "rust-analyzer");
+    std::fs::create_dir_all(&artifact_root).expect("create generation directory");
+    std::fs::write(&path, index.write_to_bytes().expect("serialize SCIP index"))
+        .expect("write generation SCIP index");
+    SubstrateMeta {
+        schema_version: moosedev::code::substrate::meta::CURRENT_SCHEMA_VERSION,
+        indexed_commit: commit.to_string(),
+        indexed_at,
+        indexed_started_at: None,
+        generation: Some(generation),
+        producers: vec![ProducerRun {
+            name: "rust-analyzer".to_string(),
+            producer: "rust-analyzer".to_string(),
+            producer_version: "test".to_string(),
+            mode: "scip".to_string(),
+            documents: index.documents.len(),
+            occurrences: index
+                .documents
+                .iter()
+                .map(|document| document.occurrences.len())
+                .sum(),
+            path_prefix: None,
+        }],
+    }
+}
+
+fn publish_generation(
+    data_dir: &Path,
+    index: &Index,
+    commit: &str,
+    indexed_at: DateTime<Utc>,
+) -> SubstrateMeta {
+    let meta = write_generation(data_dir, index, commit, indexed_at);
+    meta.save(data_dir).expect("publish generation manifest");
+    meta
+}
+
 #[test]
 fn disk_backed_substrate_updates_staleness_after_head_changes() {
     let repo_root = git_repo("live-stale-repo");
@@ -143,7 +189,7 @@ fn app_state_reloads_completed_substrates_and_keeps_last_good_copy() {
     let data_dir = fresh_dir("reload-data");
     let head = SubstrateMeta::current_head(&repo_root);
     let first_indexed_at = Utc::now();
-    write_substrate(
+    publish_generation(
         &data_dir,
         &index_with_definitions(1),
         &head,
@@ -162,7 +208,7 @@ fn app_state_reloads_completed_substrates_and_keeps_last_good_copy() {
     );
 
     let second_indexed_at = first_indexed_at + ChronoDuration::seconds(1);
-    write_substrate(
+    publish_generation(
         &data_dir,
         &index_with_definitions(2),
         &head,
@@ -171,22 +217,87 @@ fn app_state_reloads_completed_substrates_and_keeps_last_good_copy() {
     let reloaded = state.substrate().expect("reloaded substrate");
     assert_eq!(reloaded.stats().definitions, 2);
 
-    std::fs::write(
-        producer_index_path(&data_dir, "rust-analyzer"),
-        b"not a SCIP index",
-    )
-    .expect("corrupt SCIP index");
-    let corrupt_meta = SubstrateMeta::single(
-        "rust-analyzer",
-        head,
+    let corrupt_meta = write_generation(
+        &data_dir,
+        &index_with_definitions(3),
+        &head,
         second_indexed_at + ChronoDuration::seconds(1),
-        3,
-        3,
     );
-    corrupt_meta.save(&data_dir).expect("bump corrupt metadata");
+    let corrupt_path = producer_index_path_in(
+        &corrupt_meta.artifact_root(&data_dir).unwrap(),
+        "rust-analyzer",
+    );
+    std::fs::write(&corrupt_path, b"not a SCIP index").expect("corrupt SCIP index");
+    corrupt_meta
+        .save(&data_dir)
+        .expect("publish corrupt metadata");
     let retained = state.substrate().expect("retained substrate");
     assert!(Arc::ptr_eq(&reloaded, &retained));
     assert_eq!(retained.stats().definitions, 2);
+
+    // Repairing immutable artifact bytes without changing the manifest is only
+    // a test probe: the failed identity must remain memoized and not be retried.
+    std::fs::write(
+        &corrupt_path,
+        index_with_definitions(3)
+            .write_to_bytes()
+            .expect("serialize repaired SCIP index"),
+    )
+    .expect("repair corrupt SCIP index");
+    let still_retained = state.substrate().expect("memoized failed generation");
+    assert!(Arc::ptr_eq(&reloaded, &still_retained));
+
+    publish_generation(
+        &data_dir,
+        &index_with_definitions(4),
+        &head,
+        second_indexed_at + ChronoDuration::seconds(2),
+    );
+    assert_eq!(
+        state
+            .substrate()
+            .expect("new manifest identity recovers")
+            .stats()
+            .definitions,
+        4
+    );
+}
+
+#[test]
+fn app_state_recovers_from_absent_substrate_without_restart() {
+    let repo_root = git_repo("cold-recovery-repo");
+    let data_dir = fresh_dir("cold-recovery-data");
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap app state");
+    state.load_substrate(&repo_root);
+    assert!(state.substrate().is_none());
+
+    let head = SubstrateMeta::current_head(&repo_root);
+    publish_generation(&data_dir, &index_with_definitions(2), &head, Utc::now());
+
+    let recovered = state.substrate().expect("cold substrate recovery");
+    assert_eq!(recovered.stats().definitions, 2);
+    assert_eq!(recovered.repo_root(), Some(repo_root.as_path()));
+}
+
+#[test]
+fn candidate_is_invisible_until_the_manifest_is_published() {
+    let repo_root = git_repo("manifest-last-repo");
+    let data_dir = fresh_dir("manifest-last-data");
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap app state");
+    state.load_substrate(&repo_root);
+    let head = SubstrateMeta::current_head(&repo_root);
+    let meta = write_generation(&data_dir, &index_with_definitions(1), &head, Utc::now());
+
+    assert!(state.substrate().is_none(), "candidate must not be visible");
+    meta.save(&data_dir).expect("publish manifest last");
+    assert_eq!(
+        state
+            .substrate()
+            .expect("published candidate")
+            .stats()
+            .definitions,
+        1
+    );
 }
 
 #[test]
@@ -272,7 +383,14 @@ fn producer_logs_upstream_diagnostics_without_dumping_them() {
     assert_eq!(report.definitions, 1);
     assert_eq!(noteworthy_diagnostics(&data_dir), Some(2));
     assert!(
-        producer_index_path(&data_dir, "rust-analyzer").is_file(),
+        producer_index_path_in(
+            &SubstrateMeta::load(&data_dir)
+                .expect("load published metadata")
+                .artifact_root(&data_dir)
+                .expect("published artifact root"),
+            "rust-analyzer"
+        )
+        .is_file(),
         "index should be promoted"
     );
     let log = std::fs::read_to_string(index_log_path(&data_dir)).expect("read producer log");
