@@ -280,16 +280,17 @@ pub fn pidfile_path_for(data_dir: &Path) -> PathBuf {
 }
 
 /// Path to the per-data-dir file recording the HTTP UI's bound address.
-pub fn http_addr_file_path_for(data_dir: &Path) -> PathBuf {
+pub(crate) fn http_addr_file_path_for(data_dir: &Path) -> PathBuf {
     data_dir.join(HTTP_ADDR_FILE_NAME)
 }
 
 /// Read the HTTP UI address published by a running backend, if any. Symmetric
 /// with the write in [`bind_http_listener`]: it re-parses to a [`SocketAddr`], so
 /// a missing, empty, or corrupt `http.addr` yields `None` rather than a bad URL.
-/// Trust it only while the backend is live ([`backend_is_live`]) — a stale file
-/// can outlive a crashed backend.
-pub fn read_http_addr(data_dir: &Path) -> Option<SocketAddr> {
+/// The address is a hint only — a stale file can outlive a crashed backend, and
+/// the port can be reclaimed — so callers must verify backend identity before
+/// trusting it; [`verify_http_addr`] is the sanctioned consumer.
+pub(crate) fn read_http_addr(data_dir: &Path) -> Option<SocketAddr> {
     std::fs::read_to_string(http_addr_file_path_for(data_dir))
         .ok()?
         .trim()

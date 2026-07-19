@@ -767,7 +767,7 @@ async fn main() -> anyhow::Result<()> {
             );
             let result = runtime::serve_unix(server, &socket).await;
             let _ = std::fs::remove_file(&pidfile);
-            let _ = std::fs::remove_file(runtime::http_addr_file_path_for(&data_dir));
+            runtime::invalidate_http_addr(&data_dir);
             if let Some(reindex) = reindex {
                 // Stop scheduling rebuilds; never blocks on an in-flight run
                 // (an abandoned run's unpublished generation stays invisible).
