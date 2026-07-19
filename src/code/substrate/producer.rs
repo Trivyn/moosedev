@@ -28,6 +28,7 @@ pub struct ProducerTarget {
     pub path_prefix: Option<String>,
 }
 
+#[derive(Clone, Copy)]
 pub struct ProducerSpec {
     pub name: &'static str,
     /// Detect one project target. Multi-project producers are a future registry seam.
@@ -37,25 +38,9 @@ pub struct ProducerSpec {
     pub extensions: &'static [&'static str],
 }
 
-static PRODUCERS: [ProducerSpec; 2] = [
-    ProducerSpec {
-        name: "rust-analyzer",
-        detect: detect_rust,
-        command: rust_analyzer_command,
-        extensions: &["rs"],
-    },
-    ProducerSpec {
-        name: "scip-typescript",
-        detect: detect_typescript,
-        command: scip_typescript_command,
-        // scip-typescript also indexes JS under allowJs; over-triggering on
-        // repos without it is bounded by the reindex debounce.
-        extensions: &["ts", "tsx", "js", "jsx", "mts", "cts"],
-    },
-];
-
+/// The producer registry, defined per language in `super::lang`.
 pub fn registry() -> &'static [ProducerSpec] {
-    &PRODUCERS
+    super::lang::producer_registry()
 }
 
 /// Extensions covered by the producers that detect this repository right now.
@@ -66,81 +51,6 @@ pub fn detected_save_extensions(repo_root: &Path) -> Vec<&'static str> {
         .filter(|producer| (producer.detect)(repo_root).is_some())
         .flat_map(|producer| producer.extensions.iter().copied())
         .collect()
-}
-
-fn detect_rust(repo_root: &Path) -> Option<ProducerTarget> {
-    repo_root
-        .join("Cargo.toml")
-        .is_file()
-        .then(|| ProducerTarget {
-            project_dir: repo_root.to_path_buf(),
-            path_prefix: None,
-        })
-}
-
-fn rust_analyzer_command(target: &ProducerTarget, output_tmp: &Path) -> Command {
-    let binary =
-        std::env::var("MOOSEDEV_SCIP_PRODUCER").unwrap_or_else(|_| "rust-analyzer".to_string());
-    let mut command = Command::new(binary);
-    command
-        .arg("scip")
-        .arg(&target.project_dir)
-        .arg("--output")
-        .arg(output_tmp);
-    command
-}
-
-fn detect_typescript(repo_root: &Path) -> Option<ProducerTarget> {
-    if is_typescript_project(repo_root) {
-        return Some(ProducerTarget {
-            project_dir: repo_root.to_path_buf(),
-            path_prefix: None,
-        });
-    }
-
-    let mut directories = fs::read_dir(repo_root)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name != "node_modules" && !name.starts_with('.')
-        })
-        .collect::<Vec<_>>();
-    directories.sort_by_key(|entry| entry.file_name());
-
-    directories.into_iter().find_map(|entry| {
-        let project_dir = entry.path();
-        is_typescript_project(&project_dir).then(|| ProducerTarget {
-            project_dir,
-            path_prefix: Some(format!("{}/", entry.file_name().to_string_lossy())),
-        })
-    })
-}
-
-fn is_typescript_project(path: &Path) -> bool {
-    path.join("tsconfig.json").is_file() && path.join("package.json").is_file()
-}
-
-fn scip_typescript_command(target: &ProducerTarget, output_tmp: &Path) -> Command {
-    let mut command = match std::env::var_os("MOOSEDEV_SCIP_TYPESCRIPT") {
-        Some(binary) => {
-            let mut command = Command::new(binary);
-            command.arg("index");
-            command
-        }
-        None => {
-            let mut command = Command::new("npx");
-            command.args(["--yes", "@sourcegraph/scip-typescript", "index"]);
-            command
-        }
-    };
-    command
-        .arg("--output")
-        .arg(output_tmp)
-        .current_dir(&target.project_dir);
-    command
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,6 +558,12 @@ mod tests {
         let extensions = detected_save_extensions(&repo_root);
         assert!(extensions.contains(&"rs"));
         assert!(!extensions.contains(&"ts"));
+        assert!(!extensions.contains(&"py"));
+
+        write_python_manifest(&repo_root, "pyproject.toml");
+        let extensions = detected_save_extensions(&repo_root);
+        assert!(extensions.contains(&"py"));
+        assert!(extensions.contains(&"pyi"));
         let _ = fs::remove_dir_all(repo_root);
     }
 
@@ -694,6 +610,53 @@ mod tests {
     }
 
     #[test]
+    fn python_detection_finds_root_or_sorted_first_level_project() {
+        let repo_root = unique_temp_dir("python-detect");
+        let python = &registry()[2];
+        assert!((python.detect)(&repo_root).is_none());
+
+        write_python_manifest(&repo_root.join("z-project"), "pyproject.toml");
+        write_python_manifest(&repo_root.join("a-project"), "setup.py");
+        assert_eq!(
+            (python.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.join("a-project"),
+                path_prefix: Some("a-project/".to_string()),
+            })
+        );
+
+        write_python_manifest(&repo_root, "setup.cfg");
+        assert_eq!(
+            (python.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.clone(),
+                path_prefix: None,
+            })
+        );
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn python_detection_accepts_root_requirements_but_not_subdir_requirements() {
+        let repo_root = unique_temp_dir("python-requirements");
+        let python = &registry()[2];
+        write_python_manifest(&repo_root.join("bench"), "requirements.txt");
+        write_python_manifest(&repo_root.join("node_modules"), "pyproject.toml");
+        write_python_manifest(&repo_root.join(".hidden"), "pyproject.toml");
+        assert!((python.detect)(&repo_root).is_none());
+
+        write_python_manifest(&repo_root, "requirements.txt");
+        assert_eq!(
+            (python.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.clone(),
+                path_prefix: None,
+            })
+        );
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
     fn rust_command_honors_binary_override() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("MOOSEDEV_SCIP_PRODUCER");
@@ -731,6 +694,43 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("MOOSEDEV_SCIP_TYPESCRIPT", value),
             None => std::env::remove_var("MOOSEDEV_SCIP_TYPESCRIPT"),
+        }
+    }
+
+    #[test]
+    fn python_command_override_replaces_npx_and_sets_project_directory() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("MOOSEDEV_SCIP_PYTHON");
+        std::env::set_var("MOOSEDEV_SCIP_PYTHON", "fake-scip-python");
+        let target = ProducerTarget {
+            project_dir: PathBuf::from("api"),
+            path_prefix: Some("api/".to_string()),
+        };
+
+        let command = (registry()[2].command)(&target, Path::new("/tmp/out.scip"));
+        assert_eq!(command.get_program(), "fake-scip-python");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["index", "--output", "/tmp/out.scip"]
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("api")));
+
+        std::env::remove_var("MOOSEDEV_SCIP_PYTHON");
+        let command = (registry()[2].command)(&target, Path::new("/tmp/out.scip"));
+        assert_eq!(command.get_program(), "npx");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "--yes",
+                "@sourcegraph/scip-python",
+                "index",
+                "--output",
+                "/tmp/out.scip"
+            ]
+        );
+
+        if let Some(value) = previous {
+            std::env::set_var("MOOSEDEV_SCIP_PYTHON", value);
         }
     }
 
@@ -940,6 +940,11 @@ mod tests {
         fs::create_dir_all(path).unwrap();
         fs::write(path.join("tsconfig.json"), "{}").unwrap();
         fs::write(path.join("package.json"), "{}").unwrap();
+    }
+
+    fn write_python_manifest(path: &Path, marker: &str) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join(marker), "").unwrap();
     }
 
     fn write_prepared(path: &Path, relative_path: &str, symbol: &str) {

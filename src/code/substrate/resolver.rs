@@ -567,27 +567,9 @@ fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
 }
 
 fn definition_is_public(symbol: &SymbolData) -> bool {
-    match symbol.producer.as_str() {
-        "rust-analyzer" => {
-            // Invariant: rust-analyzer renders Rust visibility as the signature
-            // prefix, so `pub`, `pub(crate)`, and `pub(super)` all match. A
-            // substring check would misclassify private items whose names or
-            // parameters contain "pub" (e.g. `fn ..._publishes_...()`). Items
-            // with no rendered visibility (trait/impl members) are treated as
-            // private; lazy minting covers them.
-            symbol
-                .signature
-                .as_deref()
-                .is_some_and(|text| text.starts_with("pub"))
-        }
-        // scip-typescript 0.4.0 does not encode export-ness. This structural
-        // over-approximation therefore includes private top-level declarations,
-        // while members and parameters remain lazy-mint-only.
-        "scip-typescript" => !symbol.is_local && symbols::is_top_level_declaration(&symbol.symbol),
-        // Unknown producers remain lazy-mint-only until their visibility
-        // semantics have an explicit dispatch arm.
-        _ => false,
-    }
+    // Visibility contracts are per-language (lang::ProducerHooks). Unknown
+    // producers remain lazy-mint-only until a language module registers one.
+    super::lang::producer_hooks(&symbol.producer).is_some_and(|hooks| (hooks.is_public)(symbol))
 }
 
 fn range_contains(range: SourceRange, pos: Position) -> bool {
@@ -1165,6 +1147,135 @@ mod tests {
                 "{symbol}"
             );
         }
+    }
+
+    #[test]
+    fn python_public_gate_keeps_underscore_free_top_level_declarations() {
+        let fixtures = [
+            ("scip-python python vis-fixture 1.2.3 vis/func().", true),
+            ("scip-python python vis-fixture 1.2.3 vis/Example#", true),
+            ("scip-python python vis-fixture 1.2.3 vis/_helper().", false),
+            // Top-level dunders are excluded by the underscore gate.
+            (
+                "scip-python python vis-fixture 1.2.3 vis/__version__.",
+                false,
+            ),
+            (
+                "scip-python python vis-fixture 1.2.3 vis/Example#method().",
+                false,
+            ),
+            (
+                "scip-python python vis-fixture 1.2.3 vis/Example#attr.",
+                false,
+            ),
+            ("scip-python python vis-fixture 1.2.3 vis/func().(x)", false),
+        ];
+        let mut index = Index::new();
+        set_tool_name(&mut index, "scip-python");
+        let mut document = doc("vis.py");
+        for (line, (symbol, _)) in fixtures.iter().enumerate() {
+            let mut symbol_info = SymbolInformation::new();
+            symbol_info.symbol = (*symbol).to_string();
+            document.symbols.push(symbol_info);
+            document
+                .occurrences
+                .push(occ(symbol, vec![line as i32, 0, 1], 1));
+        }
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta_for("scip-python"), false).unwrap();
+        for (symbol, expected) in fixtures {
+            assert_eq!(
+                substrate.definition_for_symbol(symbol).unwrap().is_public,
+                expected,
+                "{symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_module_marker_canonicalizes_to_namespace_module() {
+        // scip-python renders module definitions as `` `pkg.mod`/__init__: ``;
+        // ingest canonicalizes them to the namespace module symbol so they
+        // classify, name, and batch-mint as ordinary modules (lang::python).
+        let marker = "scip-python python vis-fixture 1.2.3 `vis.app`/__init__:";
+        let canonical = "scip-python python vis-fixture 1.2.3 `vis.app`/";
+        let mut index = Index::new();
+        set_tool_name(&mut index, "scip-python");
+        let mut document = doc("vis/app.py");
+        let mut symbol_info = SymbolInformation::new();
+        symbol_info.symbol = marker.to_string();
+        document.symbols.push(symbol_info);
+        document.occurrences.push(occ(marker, vec![0, 0, 1], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta_for("scip-python"), false).unwrap();
+        let definition = substrate
+            .definition_for_symbol(canonical)
+            .expect("module marker ingests under the canonical namespace symbol");
+        assert!(definition.is_module);
+        assert!(!definition.is_public);
+        assert_eq!(definition.display_name.as_deref(), Some("vis.app"));
+        // A caller presenting the producer's RAW marker (dossier/link_code by
+        // symbol) resolves to the same entry: normalize_symbol canonicalizes
+        // at the identity boundary, not only at ingest.
+        let raw_lookup = substrate
+            .definition_for_symbol(marker)
+            .expect("raw module marker resolves through boundary canonicalization");
+        assert_eq!(raw_lookup, definition);
+    }
+
+    #[test]
+    fn python_definition_uses_descriptor_name_and_fenced_declaration() {
+        let fenced = "scip-python python vis-fixture 1.2.3 app/main().";
+        let module = "scip-python python vis-fixture 1.2.3 app/__init__:";
+        let mismatched = "scip-python python vis-fixture 1.2.3 app/other().";
+        let mut index = Index::new();
+        set_tool_name(&mut index, "scip-python");
+        let mut document = doc("app.py");
+        let mut symbol_info = SymbolInformation::new();
+        symbol_info.symbol = fenced.to_string();
+        symbol_info.documentation =
+            vec!["```python\ndef main(\n    x\n) -> None:\n```".to_string()];
+        document.symbols.push(symbol_info);
+        document.occurrences.push(occ(fenced, vec![0, 0, 4], 1));
+        let mut symbol_info = SymbolInformation::new();
+        symbol_info.symbol = module.to_string();
+        symbol_info.documentation = vec!["(module) app".to_string()];
+        document.symbols.push(symbol_info);
+        document.occurrences.push(occ(module, vec![1, 0, 1], 1));
+        let mut symbol_info = SymbolInformation::new();
+        symbol_info.symbol = mismatched.to_string();
+        symbol_info.documentation = vec!["```ts\nfunction other()\n```".to_string()];
+        document.symbols.push(symbol_info);
+        document.occurrences.push(occ(mismatched, vec![2, 0, 5], 1));
+        index.documents.push(document);
+
+        let substrate = Substrate::from_index(index, meta_for("scip-python"), false).unwrap();
+        let definition = substrate.definition_for_symbol(fenced).unwrap();
+        assert_eq!(definition.display_name.as_deref(), Some("main"));
+        assert_eq!(
+            definition.signature.as_deref(),
+            Some("def main(\n    x\n) -> None:")
+        );
+        assert!(definition.is_public);
+        // Unfenced module docs and fence-language mismatches never become
+        // signatures. The marker ingests under its canonical namespace symbol.
+        let canonical_module = "scip-python python vis-fixture 1.2.3 app/";
+        assert_eq!(
+            substrate
+                .definition_for_symbol(canonical_module)
+                .unwrap()
+                .signature,
+            None
+        );
+        assert_eq!(
+            substrate
+                .definition_for_symbol(mismatched)
+                .unwrap()
+                .signature,
+            None
+        );
     }
 
     #[test]

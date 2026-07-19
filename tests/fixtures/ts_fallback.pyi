@@ -1,0 +1,6 @@
+"""Stub fixture for the tree-sitter Python fallback resolver."""
+
+class Widget:
+    def render(self) -> str: ...
+
+def top_level(a: int, b: int) -> int: ...

@@ -80,7 +80,7 @@ The v1 memory foundation remains intact: typed capture and lifecycle management,
 
 v2 adds the code-aware and active layers:
 
-- **v2.0 — code-aware read path:** SCIP/rust-analyzer indexing with a tree-sitter fallback, stable code-entity identity, deterministic position resolution, component path coverage, entity dossiers, and honest-silence hover/diagnostics.
+- **v2.0 — code-aware read path:** SCIP indexing (Rust, TypeScript, Python) with a tree-sitter fallback, stable code-entity identity, deterministic position resolution, component path coverage, entity dossiers, and honest-silence hover/diagnostics.
 - **v2.1 — ambient understanding:** knowledge LSP code lenses, constraint and stale-rationale diagnostics, per-component why-coverage debt, the workbench ratification inbox, and pending-review nudges.
 - **v2.2 — active agency:** one graph-driven policy engine for entity-exact push, edit-time gates, and grounded decision capture; thin Claude Code and opencode adapters; best-effort fire telemetry in `.moosedev/fires.jsonl`. Automatic session checkpoints only journal telemetry; deliberate `capture_decision_point` calls are the path that proposes graph records.
 - **v2.3 — ratified editor writes:** LSP code actions propose record links, roles, and criticality; every change goes through the ratification queue, with no direct LSP graph-write path. Push/pull diagnostic parity and the real Neovim conformance client are covered by tests.
@@ -333,7 +333,7 @@ auto-spawned backend inherits the resolved configuration.
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.
 - **Knowledge-LSP** (`MOOSEDEV_NO_LSP`): disable the daemon's editor endpoint when set to a truthy value.
-- **Code index producers** (`MOOSEDEV_SCIP_PRODUCER`, `MOOSEDEV_SCIP_TYPESCRIPT`): override the Rust and TypeScript SCIP producer commands used by `moosedev index`. Rust defaults to `rust-analyzer`; TypeScript defaults to `npx --yes @sourcegraph/scip-typescript`.
+- **Code index producers** (`MOOSEDEV_SCIP_PRODUCER`, `MOOSEDEV_SCIP_TYPESCRIPT`, `MOOSEDEV_SCIP_PYTHON`): override the Rust, TypeScript, and Python SCIP producer commands used by `moosedev index`. Rust defaults to `rust-analyzer`; TypeScript defaults to `npx --yes @sourcegraph/scip-typescript`; Python defaults to `npx --yes @sourcegraph/scip-python` (needs Python 3.10+ on PATH; activate the project's virtual environment for cross-package references).
 - **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live. By default MOOSEDev looks for an `ontologies/` directory next to the running binary (the layout of the released tarball), then falls back to the crate's `ontologies/` for `cargo run`. Set this only to load ontologies from a custom location. *Keep the unpacked release bundle together so the binary can find its `ontologies/`.*
 
 ## Project layout

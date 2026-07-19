@@ -66,6 +66,29 @@ fn git_repo(tag: &str) -> PathBuf {
     repo_root
 }
 
+fn python_git_repo(tag: &str) -> PathBuf {
+    let repo_root = fresh_dir(tag);
+    git(&repo_root, &["init"]);
+    git(
+        &repo_root,
+        &["config", "user.email", "tests@moosedev.local"],
+    );
+    git(&repo_root, &["config", "user.name", "MOOSEDev tests"]);
+    std::fs::write(
+        repo_root.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write pyproject manifest");
+    std::fs::write(
+        repo_root.join("main.py"),
+        "def greet(name):\n    return name\n",
+    )
+    .expect("write python source");
+    git(&repo_root, &["add", "pyproject.toml", "main.py"]);
+    git(&repo_root, &["commit", "-m", "initial"]);
+    repo_root
+}
+
 fn commit(repo_root: &Path, contents: &str) -> String {
     std::fs::write(repo_root.join("tracked.rs"), contents).expect("update tracked source");
     git(repo_root, &["add", "tracked.rs"]);
@@ -344,6 +367,87 @@ impl Drop for EnvRestore {
             None => std::env::remove_var(self.key),
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn python_producer_runs_via_override_and_publishes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let repo_root = python_git_repo("python-producer-repo");
+    let data_dir = fresh_dir("python-producer-data");
+
+    let symbol = "scip-python python fixture 0.1 main/greet().";
+    let mut index = Index::new();
+    let mut metadata = scip::types::Metadata::new();
+    let mut tool_info = scip::types::ToolInfo::new();
+    tool_info.name = "scip-python".to_string();
+    tool_info.version = "0.6.6".to_string();
+    metadata.tool_info = MessageField::some(tool_info);
+    index.metadata = MessageField::some(metadata);
+    let mut document = Document::new();
+    document.relative_path = "main.py".to_string();
+    document.position_encoding =
+        EnumOrUnknown::new(PositionEncoding::UTF8CodeUnitOffsetFromLineStart);
+    let mut info = SymbolInformation::new();
+    info.symbol = symbol.to_string();
+    info.documentation = vec!["```python\ndef greet(name):\n```".to_string()];
+    document.symbols.push(info);
+    let mut occurrence = Occurrence::new();
+    occurrence.symbol = symbol.to_string();
+    occurrence.range = vec![0, 4, 9];
+    occurrence.symbol_roles = 1;
+    document.occurrences.push(occurrence);
+    index.documents.push(document);
+
+    let prepared_index = data_dir.join("prepared.scip");
+    std::fs::write(
+        &prepared_index,
+        index.write_to_bytes().expect("serialize prepared index"),
+    )
+    .expect("write prepared index");
+    // scip-python invocation is `index --output <path>`, so the output is "$3"
+    // (the rust-analyzer fake's is "$4": `scip <project> --output <path>`).
+    let script = data_dir.join("fake-scip-python.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ncp '{}' \"$3\"\n", prepared_index.display()),
+    )
+    .expect("write fake producer");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("make fake producer executable");
+    let _restore = EnvRestore::set("MOOSEDEV_SCIP_PYTHON", &script);
+
+    let report = run_index(&repo_root, &data_dir).expect("fake scip-python index run");
+    assert_eq!(report.definitions, 1);
+    let meta = SubstrateMeta::load(&data_dir).expect("load published metadata");
+    assert_eq!(meta.producers.len(), 1);
+    assert_eq!(meta.producers[0].name, "scip-python");
+    assert!(producer_index_path_in(
+        &meta
+            .artifact_root(&data_dir)
+            .expect("published artifact root"),
+        "scip-python"
+    )
+    .is_file());
+
+    let substrate = Substrate::load(&data_dir, &repo_root).expect("load python substrate");
+    let definition = substrate
+        .definition_for_symbol(symbol)
+        .expect("python definition resolves");
+    assert!(definition.is_public);
+    assert_eq!(definition.signature.as_deref(), Some("def greet(name):"));
+    let resolution = substrate
+        .resolve(
+            "main.py",
+            moosedev::code::substrate::Position { line: 0, col: 5 },
+        )
+        .expect("position resolves inside greet");
+    assert_eq!(resolution.symbol, symbol);
 }
 
 #[cfg(unix)]

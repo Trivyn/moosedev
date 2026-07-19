@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use tree_sitter::{Node, Parser, Point, Tree};
 
+use super::lang::{self, FallbackSpec};
 use super::resolver::{Position, SourceRange};
 
 const CACHE_CAPACITY: usize = 16;
@@ -42,7 +43,7 @@ impl TreeSitterFallback {
     }
 
     pub(crate) fn supports_path(path: &Path) -> bool {
-        grammar_for(path).is_some()
+        lang::fallback_for_path(path).is_some()
     }
 
     pub(crate) fn resolve_position(
@@ -52,19 +53,17 @@ impl TreeSitterFallback {
         pos: Position,
     ) -> Option<SyntacticResolution> {
         let relative = safe_relative_path(relative_path)?;
-        if !Self::supports_path(relative) {
-            return None;
-        }
+        let fallback = lang::fallback_for_path(relative)?;
         let absolute = repo_root.join(relative);
-        let (source, tree) = self.parse_file(&absolute)?;
+        let (source, tree) = self.parse_file(fallback, &absolute)?;
         let point = Point::new(pos.line as usize, pos.col as usize);
         let mut node = tree
             .root_node()
             .named_descendant_for_point_range(point, point)?;
 
         loop {
-            if declaration_kind(node.kind()).is_some() {
-                return resolution_for_node(relative_path, &source, node);
+            if (fallback.declaration_kind)(node.kind()).is_some() {
+                return resolution_for_node(fallback, relative_path, &source, node);
             }
             node = node.parent()?;
         }
@@ -75,15 +74,19 @@ impl TreeSitterFallback {
     pub(crate) fn identity_alive(&self, repo_root: &Path, identity: &str) -> Option<bool> {
         let parsed = parse_identity(identity)?;
         let relative = safe_relative_path(parsed.path)?;
-        if !Self::supports_path(relative) {
+        let fallback = lang::fallback_for_path(relative)?;
+        // A tag that disagrees with the path's language is unverifiable, not
+        // positively gone — never orphan on malformed evidence.
+        if fallback.tag != parsed.tag {
             return None;
         }
         let absolute = repo_root.join(relative);
         if !absolute.is_file() {
             return Some(false);
         }
-        let (source, tree) = self.parse_file(&absolute)?;
+        let (source, tree) = self.parse_file(fallback, &absolute)?;
         Some(tree_contains_identity(
+            fallback,
             tree.root_node(),
             parsed.path,
             &source,
@@ -91,7 +94,7 @@ impl TreeSitterFallback {
         ))
     }
 
-    fn parse_file(&self, absolute: &Path) -> Option<(String, Tree)> {
+    fn parse_file(&self, fallback: &FallbackSpec, absolute: &Path) -> Option<(String, Tree)> {
         let modified = fs::metadata(absolute).ok()?.modified().ok()?;
         let mut cache = self
             .cache
@@ -105,7 +108,7 @@ impl TreeSitterFallback {
 
         let source = fs::read_to_string(absolute).ok()?;
         let mut parser = Parser::new();
-        parser.set_language(&grammar_for(absolute)?).ok()?;
+        parser.set_language(&(fallback.grammar)()).ok()?;
         let tree = parser.parse(&source, None)?;
         if cache.len() >= CACHE_CAPACITY && !cache.contains_key(absolute) {
             cache.clear();
@@ -118,17 +121,9 @@ impl TreeSitterFallback {
     }
 }
 
-/// Extension-to-grammar registry. Adding another language is one match row plus
-/// its identity prefix; Rust is intentionally the only supported row in this slice.
-fn grammar_for(path: &Path) -> Option<tree_sitter::Language> {
-    match path.extension()?.to_str()? {
-        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ParsedIdentity<'a> {
+    pub tag: &'a str,
     pub path: &'a str,
     pub kind: &'a str,
     pub qualified_name: &'a str,
@@ -136,16 +131,19 @@ pub(crate) struct ParsedIdentity<'a> {
 
 pub(crate) fn parse_identity(identity: &str) -> Option<ParsedIdentity<'_>> {
     let mut fields = identity.splitn(5, ':');
-    if fields.next()? != "ts" || fields.next()? != "rust" {
+    if fields.next()? != "ts" {
         return None;
     }
+    let tag = fields.next()?;
+    let fallback = lang::fallback_for_tag(tag)?;
     let parsed = ParsedIdentity {
+        tag,
         path: fields.next()?,
         kind: fields.next()?,
         qualified_name: fields.next()?,
     };
     (!parsed.path.is_empty()
-        && declaration_kind_for_identity(parsed.kind)
+        && fallback.identity_kinds.contains(&parsed.kind)
         && !parsed.qualified_name.is_empty())
     .then_some(parsed)
 }
@@ -160,51 +158,20 @@ fn safe_relative_path(path: &str) -> Option<&Path> {
     .then_some(path)
 }
 
-fn declaration_kind(node_kind: &str) -> Option<&'static str> {
-    match node_kind {
-        "function_item" | "function_signature_item" => Some("fn"),
-        "struct_item" => Some("struct"),
-        "enum_item" => Some("enum"),
-        "union_item" => Some("union"),
-        "trait_item" => Some("trait"),
-        "impl_item" => Some("impl"),
-        "mod_item" => Some("mod"),
-        "const_item" => Some("const"),
-        "static_item" => Some("static"),
-        "type_item" => Some("type"),
-        "macro_definition" => Some("macro"),
-        _ => None,
-    }
-}
-
-fn declaration_kind_for_identity(kind: &str) -> bool {
-    matches!(
-        kind,
-        "fn" | "struct"
-            | "enum"
-            | "union"
-            | "trait"
-            | "impl"
-            | "mod"
-            | "const"
-            | "static"
-            | "type"
-            | "macro"
-    )
-}
-
 fn resolution_for_node(
+    fallback: &FallbackSpec,
     relative_path: &str,
     source: &str,
     node: Node<'_>,
 ) -> Option<SyntacticResolution> {
-    let kind = declaration_kind(node.kind())?;
-    let name = declaration_name(node, source)?;
-    let qualified_name = qualified_name(node, source)?;
+    let language = fallback.tag;
+    let kind = (fallback.declaration_kind)(node.kind())?;
+    let name = declaration_name(fallback, node, source)?;
+    let qualified_name = qualified_name(fallback, node, source)?;
     let start = node.start_position();
     let end = node.end_position();
     Some(SyntacticResolution {
-        identity: format!("ts:rust:{relative_path}:{kind}:{qualified_name}"),
+        identity: format!("ts:{language}:{relative_path}:{kind}:{qualified_name}"),
         name,
         kind: kind.to_string(),
         range: SourceRange {
@@ -220,23 +187,21 @@ fn resolution_for_node(
     })
 }
 
-fn declaration_name(node: Node<'_>, source: &str) -> Option<String> {
-    if node.kind() == "impl_item" {
-        let ty = node_text(node.child_by_field_name("type")?, source)?;
-        return match node.child_by_field_name("trait") {
-            Some(trait_node) => Some(format!("<{ty} as {}>", node_text(trait_node, source)?)),
-            None => Some(ty.to_string()),
-        };
+fn declaration_name(fallback: &FallbackSpec, node: Node<'_>, source: &str) -> Option<String> {
+    if let Some(language_name) = fallback.declaration_name {
+        if let Some(name) = language_name(node, source) {
+            return Some(name);
+        }
     }
     Some(node_text(node.child_by_field_name("name")?, source)?.to_string())
 }
 
-fn qualified_name(node: Node<'_>, source: &str) -> Option<String> {
+fn qualified_name(fallback: &FallbackSpec, node: Node<'_>, source: &str) -> Option<String> {
     let mut names = Vec::new();
     let mut cursor = Some(node);
     while let Some(current) = cursor {
-        if declaration_kind(current.kind()).is_some() {
-            names.push(declaration_name(current, source)?);
+        if (fallback.declaration_kind)(current.kind()).is_some() {
+            names.push(declaration_name(fallback, current, source)?);
         }
         cursor = current.parent();
     }
@@ -244,13 +209,19 @@ fn qualified_name(node: Node<'_>, source: &str) -> Option<String> {
     Some(names.join("::"))
 }
 
-fn node_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
+pub(crate) fn node_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     source.get(node.byte_range())
 }
 
-fn tree_contains_identity(node: Node<'_>, path: &str, source: &str, identity: &str) -> bool {
-    if declaration_kind(node.kind()).is_some()
-        && resolution_for_node(path, source, node)
+fn tree_contains_identity(
+    fallback: &FallbackSpec,
+    node: Node<'_>,
+    path: &str,
+    source: &str,
+    identity: &str,
+) -> bool {
+    if (fallback.declaration_kind)(node.kind()).is_some()
+        && resolution_for_node(fallback, path, source, node)
             .is_some_and(|resolution| resolution.identity == identity)
     {
         return true;
@@ -258,7 +229,7 @@ fn tree_contains_identity(node: Node<'_>, path: &str, source: &str, identity: &s
     let mut cursor = node.walk();
     let found = node
         .named_children(&mut cursor)
-        .any(|child| tree_contains_identity(child, path, source, identity));
+        .any(|child| tree_contains_identity(fallback, child, path, source, identity));
     found
 }
 
@@ -269,13 +240,14 @@ mod tests {
     use super::*;
 
     const FIXTURE_PATH: &str = "tests/fixtures/ts_fallback.rs";
+    const PY_FIXTURE_PATH: &str = "tests/fixtures/ts_fallback.py";
 
     fn root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
-    fn position_of(needle: &str) -> Position {
-        let source = fs::read_to_string(root().join(FIXTURE_PATH)).unwrap();
+    fn position_in(path: &str, needle: &str) -> Position {
+        let source = fs::read_to_string(root().join(path)).unwrap();
         let offset = source.find(needle).unwrap();
         let before = &source[..offset];
         Position {
@@ -284,8 +256,12 @@ mod tests {
         }
     }
 
+    fn resolve_in(path: &str, needle: &str) -> Option<SyntacticResolution> {
+        TreeSitterFallback::default().resolve_position(&root(), path, position_in(path, needle))
+    }
+
     fn resolve(needle: &str) -> Option<SyntacticResolution> {
-        TreeSitterFallback::default().resolve_position(&root(), FIXTURE_PATH, position_of(needle))
+        resolve_in(FIXTURE_PATH, needle)
     }
 
     #[test]
@@ -332,6 +308,75 @@ mod tests {
                 },
             )
             .is_none());
+    }
+
+    #[test]
+    fn resolves_smallest_enclosing_python_declarations() {
+        let cases = [
+            ("a + b", "fn:top_level"),
+            ("label = ", "class:Widget"),
+            ("local = 1", "fn:Widget::render"),
+            ("return 42", "fn:outer::nested_fn"),
+            ("decorated body", "fn:decorated"),
+        ];
+        for (needle, suffix) in cases {
+            let resolution = resolve_in(PY_FIXTURE_PATH, needle)
+                .unwrap_or_else(|| panic!("no hit for {needle}"));
+            assert_eq!(
+                resolution.identity,
+                format!("ts:python:{PY_FIXTURE_PATH}:{suffix}")
+            );
+        }
+    }
+
+    #[test]
+    fn python_non_declaration_positions_are_misses() {
+        for needle in ["\"\"\"Fixture", "import collections", "MAX_DEPTH = 3"] {
+            assert!(
+                resolve_in(PY_FIXTURE_PATH, needle).is_none(),
+                "unexpected hit for {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_stub_files_resolve_like_python_sources() {
+        let stub = "tests/fixtures/ts_fallback.pyi";
+        let resolution = resolve_in(stub, "-> str").expect("stub method resolves");
+        assert_eq!(
+            resolution.identity,
+            format!("ts:python:{stub}:fn:Widget::render")
+        );
+        let resolution = resolve_in(stub, "a: int").expect("stub function resolves");
+        assert_eq!(
+            resolution.identity,
+            format!("ts:python:{stub}:fn:top_level")
+        );
+    }
+
+    #[test]
+    fn python_identities_parse_and_reject_unknown_languages() {
+        let identity = "ts:python:tests/fixtures/ts_fallback.py:fn:Widget::render";
+        let parsed = parse_identity(identity).unwrap();
+        assert_eq!(parsed.path, PY_FIXTURE_PATH);
+        assert_eq!(parsed.kind, "fn");
+        assert_eq!(parsed.qualified_name, "Widget::render");
+        assert!(parse_identity("ts:python:tests/fixtures/ts_fallback.py:class:Widget").is_some());
+        assert!(parse_identity("ts:go:tests/fixtures/ts_fallback.py:fn:main").is_none());
+    }
+
+    #[test]
+    fn python_identity_alive_requires_exact_declaration() {
+        let fallback = TreeSitterFallback::default();
+        let identity = resolve_in(PY_FIXTURE_PATH, "local = 1").unwrap().identity;
+        assert_eq!(fallback.identity_alive(&root(), &identity), Some(true));
+        assert_eq!(
+            fallback.identity_alive(
+                &root(),
+                "ts:python:tests/fixtures/ts_fallback.py:fn:no_such_fn"
+            ),
+            Some(false)
+        );
     }
 
     #[test]
