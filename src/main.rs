@@ -96,6 +96,7 @@ struct InitArgs {
     codex: bool,
     opencode: bool,
     zed: bool,
+    vscode: bool,
     claude_hooks: bool,
     stdio: bool,
     binary: Option<PathBuf>,
@@ -174,6 +175,7 @@ INIT OPTIONS:
     --opencode                Also install the opencode push plugin (.opencode/plugins/)
     --claude-hooks            Also install the Claude Code gate/push/capture hooks (.claude/hooks/)
     --zed                     Also write project-local .zed/settings.json
+    --vscode                  Also write project-local .vscode/settings.json
     --binary PATH             Force this binary path in the config instead of
                               the auto-resolved command (bare `moosedev` on PATH,
                               else this executable's absolute path)
@@ -424,6 +426,7 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
     let mut codex = false;
     let mut opencode = false;
     let mut zed = false;
+    let mut vscode = false;
     let mut claude_hooks = false;
     let mut stdio = false;
     let mut binary = None;
@@ -439,6 +442,8 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
             opencode = true;
         } else if arg == "--zed" {
             zed = true;
+        } else if arg == "--vscode" {
+            vscode = true;
         } else if arg == "--claude-hooks" {
             claude_hooks = true;
         } else if arg == "--stdio" {
@@ -472,6 +477,7 @@ fn parse_init<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<Init
         codex,
         opencode,
         zed,
+        vscode,
         claude_hooks,
         stdio,
         binary,
@@ -716,6 +722,10 @@ async fn main() -> anyhow::Result<()> {
             // would otherwise fail first with the raw RocksDB lock error after a
             // wasted model load. This gives a clear message and exits fast.
             runtime::ensure_no_live_backend(&socket).await?;
+            // Withdraw any crash-stale published address before the (long)
+            // bootstrap: hooks and `--status` must not trust a previous run's
+            // port while this one is still coming up.
+            runtime::invalidate_http_addr(&data_dir);
             let state = runtime::build_state(&data_dir, &ontology_dir()).await?;
             // Save-triggered background reindex: daemon-global, one scheduler
             // shared by every LSP session; index.lock remains the cross-process
@@ -1255,7 +1265,9 @@ async fn status_mode(data_dir: &Path, socket: &Path) -> anyhow::Result<()> {
         None => println!("backend: running"),
     }
 
-    match runtime::read_http_addr(data_dir) {
+    // Identity-verified: the file alone can be crash-stale, so only report an
+    // address a MOOSEDev backend for THIS data dir actually answers on.
+    match runtime::verify_http_addr(data_dir).await {
         Some(addr) => println!("web UI:  http://{addr}"),
         None => println!("web UI:  not running (disabled or failed to bind)"),
     }
@@ -1273,7 +1285,7 @@ async fn ui_mode(data_dir: &Path, socket: &Path) -> anyhow::Result<()> {
     // is connectable the address file is already present.
     runtime::connect_or_spawn(socket, data_dir).await?;
 
-    let Some(addr) = runtime::read_http_addr(data_dir) else {
+    let Some(addr) = runtime::verify_http_addr(data_dir).await else {
         anyhow::bail!(
             "the MOOSEDev web UI is not available (disabled via MOOSEDEV_NO_HTTP or failed to bind); see {}",
             runtime::serve_log_path_for(data_dir).display()
@@ -1437,6 +1449,7 @@ fn init_mode(args: InitArgs) -> anyhow::Result<()> {
         codex: args.codex,
         opencode: args.opencode,
         zed: args.zed,
+        vscode: args.vscode,
         claude_hooks: args.claude_hooks,
     };
     let report = init::init_project(&opts)?;

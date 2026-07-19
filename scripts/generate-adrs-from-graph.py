@@ -68,6 +68,17 @@ SELECT ?ad ?dir ?rel ?node ?nlabel ?ndesc WHERE {{
 
 Binding = dict[str, dict[str, Any]]
 Meta = dict[str, str]
+PROJECT_GRAPH_IRI = "https://moosedev.dev/kg/project"
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep address verification on the listener named by http.addr."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+DIRECT_OPENER = urllib.request.build_opener(NoRedirectHandler())
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,11 +127,50 @@ def backend_addr(repo_root: Path, explicit_addr: str | None) -> str:
         return explicit_addr
     addr_path = repo_root / ".moosedev" / "http.addr"
     try:
-        return addr_path.read_text(encoding="utf-8").strip()
+        addr = addr_path.read_text(encoding="utf-8").strip()
     except FileNotFoundError as exc:
         raise SystemExit(
             f"missing {addr_path}; start the backend with `moosedev --serve` or pass --addr"
         ) from exc
+    if not addr:
+        raise SystemExit(f"empty {addr_path}; start the backend or pass --addr")
+    verify_backend_identity(addr, addr_path.parent.resolve())
+    return addr
+
+
+def verify_backend_identity(addr: str, expected_data_dir: Path) -> None:
+    endpoint = f"http://{addr}/api/v1/health"
+    request = urllib.request.Request(endpoint, headers={"Accept": "application/json"})
+    try:
+        with DIRECT_OPENER.open(request, timeout=2) as response:
+            if not 200 <= response.status < 300:
+                raise SystemExit(
+                    f"health check at {endpoint} returned HTTP {response.status}; refusing stale http.addr"
+                )
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise SystemExit(
+            f"health check failed at {endpoint}; refusing stale http.addr: HTTP {exc.code}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise SystemExit(
+            f"health check failed at {endpoint}; refusing stale http.addr: {exc}"
+        ) from exc
+    try:
+        health = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"health check at {endpoint} returned non-JSON; refusing stale http.addr"
+        ) from exc
+    if not isinstance(health, dict) or (
+        health.get("status") != "ok"
+        or health.get("project_graph") != PROJECT_GRAPH_IRI
+        or health.get("data_dir") != str(expected_data_dir)
+    ):
+        raise SystemExit(
+            f"health identity at {endpoint} does not match {expected_data_dir}; refusing stale http.addr"
+        )
 
 
 def query(endpoint: str, sparql: str) -> list[Binding]:

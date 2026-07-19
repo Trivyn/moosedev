@@ -23,6 +23,13 @@ pub(crate) struct LanguageSpec {
     pub producer: Option<ProducerHooks>,
     /// Tree-sitter syntactic fallback half; None when no grammar is registered.
     pub fallback: Option<FallbackSpec>,
+    /// Zed language names this language covers. Zed is the one client that
+    /// bakes a language list into its extension manifest (every other client
+    /// attaches broadly and relies on server-side silence for non-substrate
+    /// files), so the names live here — in the registry — and a test keeps
+    /// `clients/zed/extension.toml` from drifting.
+    #[cfg_attr(not(test), allow(dead_code))] // read by the extension.toml sync test
+    pub zed_languages: &'static [&'static str],
 }
 
 pub(crate) struct ProducerHooks {
@@ -129,4 +136,45 @@ pub(crate) fn first_matching_subdir(
             path_prefix: Some(format!("{}/", entry.file_name().to_string_lossy())),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `clients/zed/extension.toml` must carry exactly the registry's Zed
+    /// language names: adding a language is one module + one `LANGUAGES` row,
+    /// and this test points at the single client file that cannot derive its
+    /// list at runtime.
+    #[test]
+    fn zed_extension_languages_match_registry() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("clients/zed/extension.toml");
+        let manifest = fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+        let languages_line = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("languages"))
+            .expect("extension.toml declares a languages list");
+        let declared: Vec<&str> = languages_line.split('"').skip(1).step_by(2).collect();
+
+        let registry: Vec<&str> = LANGUAGES
+            .iter()
+            .flat_map(|language| language.zed_languages.iter().copied())
+            .collect();
+
+        for name in &registry {
+            assert!(
+                declared.contains(name),
+                "clients/zed/extension.toml is missing {name:?} — update its languages list \
+                 to match the lang registry: {registry:?}"
+            );
+        }
+        for name in &declared {
+            assert!(
+                registry.contains(name),
+                "clients/zed/extension.toml declares {name:?}, which no registered language \
+                 claims — remove it or register the language here"
+            );
+        }
+    }
 }

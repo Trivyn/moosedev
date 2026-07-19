@@ -37,10 +37,24 @@ end
 
 -- 1. Start the real client (the stdio shim autospawns the daemon; a fresh
 --    scratch store hydrates from kg.nq, so allow a generous first-init wait).
+--    The showDocument handler answers the server's openEntity round-trip
+--    without actually opening a browser; the publishDiagnostics counter
+--    proves push suppression for this pull-capable client.
+local show_document_requests = {}
+local publish_count = 0
 local client_id = vim.lsp.start({
   name = "moosedev-conformance",
   cmd = { "moosedev", "lsp" },
   root_dir = repo,
+  handlers = {
+    ["window/showDocument"] = function(_, result)
+      table.insert(show_document_requests, result)
+      return { success = true }
+    end,
+    ["textDocument/publishDiagnostics"] = function()
+      publish_count = publish_count + 1
+    end,
+  },
 })
 if not check(client_id ~= nil, "client started") then
   os.exit(1)
@@ -62,7 +76,8 @@ check(caps.codeActionProvider ~= nil, "capability: codeActionProvider")
 check(
   caps.executeCommandProvider ~= nil
     and vim.tbl_contains(caps.executeCommandProvider.commands, "moosedev.proposeLink")
-    and vim.tbl_contains(caps.executeCommandProvider.commands, "moosedev.proposeJudgment"),
+    and vim.tbl_contains(caps.executeCommandProvider.commands, "moosedev.proposeJudgment")
+    and vim.tbl_contains(caps.executeCommandProvider.commands, "moosedev.openEntity"),
   "capability: executeCommandProvider commands"
 )
 check(caps.diagnosticProvider ~= nil, "capability: diagnosticProvider (pull)")
@@ -111,6 +126,36 @@ check(
   "pull diagnostics returns a full report"
 )
 
+-- 6b. Lens command round-trip: `moosedev.openEntity` is server-handled — the
+--     daemon resolves the workbench URL and asks this client to open it via
+--     window/showDocument (answered by the handler above, browserless).
+--     Neovim advertises window.showDocument from 0.10.
+local open_lens
+for _, lens in ipairs(lenses or {}) do
+  if lens.command and lens.command.command == "moosedev.openEntity" and lens.command.arguments ~= nil then
+    open_lens = lens.command
+    break
+  end
+end
+if check(open_lens ~= nil, "a lens carries moosedev.openEntity with an entity argument")
+  and vim.fn.has("nvim-0.10") == 1
+then
+  local _, open_err = req("workspace/executeCommand", {
+    command = open_lens.command,
+    arguments = open_lens.arguments,
+  }, "executeCommand openEntity")
+  check(open_err == nil, "openEntity answers without error")
+  vim.wait(2000, function()
+    return #show_document_requests > 0
+  end, 50)
+  local shown = show_document_requests[1]
+  check(shown ~= nil and shown.external == true, "server sent window/showDocument (external)")
+  check(
+    shown ~= nil and type(shown.uri) == "string" and shown.uri:find("/#/record/", 1, true) ~= nil,
+    "showDocument opens a workbench record URL"
+  )
+end
+
 -- 7. Code action: the lightbulb menu on the target entity.
 local actions, action_err = req("textDocument/codeAction", {
   textDocument = { uri = uri },
@@ -153,6 +198,16 @@ if check(propose ~= nil, "menu offers a moosedev.propose* action at the target p
     arguments = { { entityIri = "not an iri", predicate = "playsRole", targetLocal = "boundary" } },
   }, "executeCommand invalid")
   check(invalid ~= nil and invalid.code == -32602, "malformed arguments get InvalidParams")
+end
+
+-- 10. Push suppression: this client advertises textDocument.diagnostic
+--     (0.10+), so the daemon must serve pull ONLY — a push would land in a
+--     second namespace and double-report every squiggle.
+if vim.fn.has("nvim-0.10") == 1 then
+  check(
+    publish_count == 0,
+    "no publishDiagnostics pushed to a pull-capable client (saw " .. publish_count .. ")"
+  )
 end
 
 -- client:stop() on 0.11+; the module-level form for older Neovim.

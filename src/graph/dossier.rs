@@ -556,22 +556,19 @@ fn is_dossier_visible(status: &str) -> bool {
     in_working_set(status) || status.eq_ignore_ascii_case("superseded")
 }
 
-/// Return a fresh workbench deep link for a record when the HTTP UI is available.
+/// Return a fresh workbench deep link for a record when the HTTP UI is
+/// serving in THIS daemon run.
 ///
-/// The daemon rewrites `http.addr` every time it serves. Reading it for each
-/// summary avoids retaining stale addresses after a configuration change; a
-/// restart self-heals any address left behind by an older daemon.
+/// The in-process address is the only trusted source: the `http.addr` file
+/// lingers after a crash, so after an HTTP-disabled or failed restart it can
+/// point at a dead port or an unrelated local service. (The file stays for
+/// cross-process `--status`/`ui` discovery.)
 pub(crate) fn workbench_record_url(
     state: &AppState,
     record_iri: &str,
     kind: &str,
 ) -> Option<String> {
-    let addr =
-        std::fs::read_to_string(crate::runtime::http_addr_file_path_for(&state.data_dir)).ok()?;
-    let addr = addr.trim();
-    if addr.is_empty() {
-        return None;
-    }
+    let addr = state.http_addr()?;
     let route = match kind {
         "ArchitecturalDecision" => "adrs",
         "Requirement" => "requirements",
@@ -583,6 +580,13 @@ pub(crate) fn workbench_record_url(
         "http://{addr}/#/{route}/{}",
         local_name(record_iri)
     ))
+}
+
+/// Workbench deep link for a code entity. The `#/record/<uuid>` route resolves
+/// any typed project-graph subject by UUID, CodeEntities included, so entity
+/// links need no dedicated route.
+pub(crate) fn workbench_entity_url(state: &AppState, entity_iri: &str) -> Option<String> {
+    workbench_record_url(state, entity_iri, "CodeEntity")
 }
 
 /// Keep dossier output stable and useful: constraints first, then decisions,

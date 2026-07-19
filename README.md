@@ -85,7 +85,7 @@ v2 adds the code-aware and active layers:
 - **v2.2 — active agency:** one graph-driven policy engine for entity-exact push, edit-time gates, and grounded decision capture; thin Claude Code and opencode adapters; best-effort fire telemetry in `.moosedev/fires.jsonl`. Automatic session checkpoints only journal telemetry; deliberate `capture_decision_point` calls are the path that proposes graph records.
 - **v2.3 — ratified editor writes:** LSP code actions propose record links, roles, and criticality; every change goes through the ratification queue, with no direct LSP graph-write path. Push/pull diagnostic parity and the real Neovim conformance client are covered by tests.
 
-The phase definitions and acceptance criteria are in [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md). VS Code remains intentionally post-v2; Zed and Neovim are the delivered editor clients.
+The phase definitions and acceptance criteria are in [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md). Delivered editor clients: Zed, Neovim, VS Code, and Emacs (eglot/lsp-mode) — all thin stanzas over the same server.
 
 ## Getting started
 
@@ -148,6 +148,7 @@ This writes a ready-to-use `.mcp.json` (shared `--connect` mode), the `.gitignor
 ```sh
 moosedev init --codex          # Codex MCP config + .agents/skills/
 moosedev init --zed            # project-local Knowledge-LSP settings
+moosedev init --vscode         # project-local VS Code settings (extension in clients/vscode)
 moosedev init --opencode       # active-agency opencode adapter
 moosedev init --claude-hooks   # Claude Code push/gate/capture hooks
 ```
@@ -189,7 +190,7 @@ moosedev classify --apply   # optional role/criticality proposals
 
 `mint` and `classify` open the single-writer store directly, including in dry-run mode, so stop the shared daemon before running them. Both are dry-run unless `--apply` is present. Re-run `moosedev index` after significant source changes; `moosedev init` can also install a post-commit refresh hook. `moosedev resolve FILE LINE:COL` is the deterministic debugging path for position resolution.
 
-The Knowledge-LSP runs through `moosedev lsp` and shares the daemon's graph. It provides entity-dossier hover, role/criticality and debt code lenses, Information/Hint constraint and staleness diagnostics (push and pull), and proposal-only code actions. Use `moosedev init --zed` with the thin [Zed client](clients/zed/README.md)—currently installed as a development extension from `clients/zed`—or install the plain [Neovim registration](clients/nvim/README.md). The Neovim directory also contains the executable conformance suite.
+The Knowledge-LSP runs through `moosedev lsp` and shares the daemon's graph. It provides entity-dossier hover, role/criticality and debt code lenses, Information/Hint constraint and staleness diagnostics (pull for capable clients, push otherwise), and proposal-only code actions; lens clicks open the workbench via `window/showDocument`, handled server-side so no client needs custom glue. Clients are thin stanzas: [Zed](clients/zed/README.md) (dev extension), [Neovim](clients/nvim/README.md) (plain lspconfig entry; also hosts the executable conformance suite), [VS Code](clients/vscode/README.md) (LSP-client extension, local `.vsix`), and [Emacs](clients/emacs/README.md) (eglot + lsp-mode registrations in one file).
 
 Classification only creates proposals. Judgments and editor code actions do not affect authoritative dossiers or debt metrics until a human ratifies them in the web workbench.
 
@@ -344,7 +345,7 @@ src/code/       # SCIP/tree-sitter code substrate, resolver, minting, observatio
 src/lsp/        # thin Knowledge-LSP transport and presentation surface
 src/policy/     # host-independent push/gate/capture policy engine and fire telemetry
 ui/             # the human-facing web UI (Vite/React); built to ui/dist/ and embedded in the binary
-clients/        # thin Knowledge-LSP clients and conformance fixtures (Zed, Neovim)
+clients/        # thin Knowledge-LSP clients and conformance fixtures (Zed, Neovim, VS Code, Emacs)
 .claude/hooks/  # Claude Code active-agency adapters installed by init
 .opencode/      # opencode active-agency adapter installed by init
 ontologies/     # software-engineering + architecture ontologies + SHACL shapes (.ttl)
@@ -369,7 +370,7 @@ Contributions to the open parts of MOOSEDev are welcome. Deep changes to MOOSE b
 - [`spec/MOOSEDev_design.md`](./spec/MOOSEDev_design.md) — design of record (architecture, decisions, milestones)
 - [`spec/core-moose-asks.md`](./spec/core-moose-asks.md) — capabilities to upstream into core MOOSE
 - [`docs/quickstart.md`](./docs/quickstart.md) — installation, initialization, bootstrap, and first recall
-- [`clients/zed/README.md`](./clients/zed/README.md) / [`clients/nvim/README.md`](./clients/nvim/README.md) — delivered Knowledge-LSP clients
+- [`clients/zed/README.md`](./clients/zed/README.md) / [`clients/nvim/README.md`](./clients/nvim/README.md) / [`clients/vscode/README.md`](./clients/vscode/README.md) / [`clients/emacs/README.md`](./clients/emacs/README.md) — delivered Knowledge-LSP clients
 - [`AGENTS.md`](./AGENTS.md) / [`CLAUDE.md`](./CLAUDE.md) — design invariants and development practices
 
 ## How this was built

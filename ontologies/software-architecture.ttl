@@ -32,7 +32,7 @@ knowledge artifacts: constraints (restrictions the design must satisfy), lessons
 problematic structures) and patterns (their positive counterpart), and requirements (the drivers). The relationships are the heart — they encode the
 reasoning chains: a decision concerns system components, is motivated by requirements/constraints, has a rationale, weighs alternatives, results in
 consequences, and supersedes prior decisions; a constraint constrains components and decisions; an anti-pattern violates constraints; a lesson is learned
-from decisions and anti-patterns. Every artifact is an information record about the system, carrying an author, a timestamp, and a lifecycle status 
+from decisions and anti-patterns. Every artifact is an information record about the system, carrying an author, a timestamp, and a lifecycle status
 (proposed / accepted / superseded / deprecated). Rich in relationships, shallow in taxonomy. It refers to the software-engineering ontology for the system
 elements that decisions and constraints are about..
 Core fallback: yes.
@@ -72,6 +72,7 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:definition "A recorded choice about a system's structure or behavior and its reasoning." ;
     skos:historyNote "Derived from synthesis source 'ArchitecturalDecision'" ;
     skos:altLabel "Design Decision";
+    skos:altLabel "ADR";
     skos:hiddenLabel "AD";
     skos:example "Adopting a microservices architecture to improve scalability.";
     skos:example "Using a PostgreSQL database instead of a NoSQL solution for ACID compliance.".

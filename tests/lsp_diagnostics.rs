@@ -412,6 +412,15 @@ where
         } else {
             json!({})
         };
+        self.initialize_with_capabilities(capabilities, initialization_options)
+            .await
+    }
+
+    async fn initialize_with_capabilities(
+        &mut self,
+        capabilities: Value,
+        initialization_options: Value,
+    ) -> anyhow::Result<()> {
         self.send(json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -856,6 +865,11 @@ async fn closed_documents_are_pruned_from_diagnostics_refresh() -> anyhow::Resul
     client.did_open(&uri).await?;
     client.read_until_diagnostics(&uri).await?;
     client.did_close(&uri).await?;
+    // Serialize the queue before swapping the substrate: refresh runs before
+    // every dispatch, so an unprocessed didClose would still be in open_docs
+    // when the generation change republishes (a race, not the pruning under
+    // test). A synchronous request guarantees didClose has been dispatched.
+    client.code_lens(&uri).await?;
     state.set_substrate(Arc::new(synthetic_substrate(4)));
 
     assert!(client
@@ -1007,7 +1021,7 @@ async fn constraint_diagnostic_links_to_workbench_with_description() -> anyhow::
     let repo_root = synthetic_repo_root("diag-link-root", "    build_server();");
     let data_dir = fresh_dir("diag-link-data");
     let state = Arc::new(state_with_substrate("diag-link-state", 4));
-    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")?;
+    state.publish_http_addr("127.0.0.1:7474".parse()?);
     let constraint = record_with_description(
         &state,
         "Constraint",
@@ -1627,6 +1641,122 @@ async fn did_change_republishes_shifted_diagnostics() -> anyhow::Result<()> {
         shifted[0]["range"]["start"],
         json!({"line": 8, "character": 4})
     );
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn push_suppressed_for_pull_capable_client() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("pull-cap-root", "    build_server();");
+    let data_dir = fresh_dir("pull-cap-data");
+    let state = Arc::new(state_with_substrate("pull-cap-state", 4));
+    let constraint = record(&state, "Constraint", "Pull-owned constraint");
+    link_public(&state, &constraint, 4);
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client
+        .initialize_with_capabilities(
+            json!({
+                "general": { "positionEncodings": ["utf-8"] },
+                "textDocument": { "diagnostic": {} }
+            }),
+            json!(null),
+        )
+        .await?;
+
+    // The session writer is single-threaded and writes in order: if didOpen
+    // had pushed, publishDiagnostics would arrive before this response.
+    client.did_open(&uri).await?;
+    client
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": &uri } }
+        }))
+        .await?;
+    let message = client.read().await?.expect("codeLens response");
+    assert_eq!(
+        message["id"],
+        json!(77),
+        "no push may precede the response for a pull-capable client: {message}"
+    );
+
+    // Pull still serves the same items the push path would have published.
+    let report = client.pull_diagnostics(&uri).await?;
+    let items = report["items"].as_array().expect("full report items");
+    assert_eq!(items.len(), 1, "pull serves the diagnostics: {report}");
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pull_client_gets_refresh_request_on_generation_change() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("pull-ref-root", "    build_server();");
+    let data_dir = fresh_dir("pull-ref-data");
+    let state = Arc::new(state_with_substrate("pull-ref-state", 4));
+    let initial = record(&state, "Constraint", "Initial constraint");
+    link_public(&state, &initial, 4);
+    let added = record(&state, "Constraint", "Post-open constraint");
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+    let uri = file_uri(&repo_root.join("src/runtime.rs"));
+
+    let mut client = direct_client(&socket).await?;
+    client
+        .initialize_with_capabilities(
+            json!({
+                "general": { "positionEncodings": ["utf-8"] },
+                "textDocument": { "diagnostic": {} },
+                "workspace": { "diagnostic": { "refreshSupport": true } }
+            }),
+            json!(null),
+        )
+        .await?;
+    client.did_open(&uri).await?;
+
+    // Quiet at session start: no push, and the initial generation pin must
+    // not trigger a refresh (the 2s idle tick runs refresh_if_state_changed
+    // within this window, so silence here is a real negative).
+    let quiet = tokio::time::timeout(Duration::from_secs(3), client.read()).await;
+    assert!(
+        quiet.is_err(),
+        "nothing may be sent at session start for a pull client: {quiet:?}"
+    );
+
+    link_public(&state, &added, 4);
+    // `link_public` calls the graph primitive directly; production MCP writes
+    // invoke the AppState post-write hook after that primitive succeeds.
+    state.note_project_write();
+
+    let request = client.read().await?.expect("refresh request");
+    assert_eq!(
+        request["method"],
+        json!("workspace/diagnostic/refresh"),
+        "generation change must request a client re-pull: {request}"
+    );
+    let request_id = request["id"].clone();
+    assert!(!request_id.is_null(), "refresh must be a request");
+    client
+        .send(json!({ "jsonrpc": "2.0", "id": request_id, "result": null }))
+        .await?;
+
+    // The dropped response must not wedge the loop, and the re-pull sees the
+    // new record.
+    let report = client.pull_diagnostics(&uri).await?;
+    let items = report["items"].as_array().expect("full report items");
+    assert_eq!(items.len(), 2, "re-pull serves both records: {report}");
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

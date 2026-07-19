@@ -26,6 +26,9 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         signature_fence: Some("ts"),
     }),
     fallback: None,
+    // scip-typescript indexes JS too (allowJs), so JavaScript buffers are a
+    // real substrate surface, not over-claiming.
+    zed_languages: &["TypeScript", "TSX", "JavaScript"],
 };
 
 fn detect(repo_root: &Path) -> Option<ProducerTarget> {

@@ -120,6 +120,12 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
 /// success it returns the bound address (used by `--serve --open` to launch a
 /// browser, and published to `http.addr` for `--status`/`ui`).
 pub async fn spawn_http_if_enabled(state: Arc<AppState>, data_dir: &Path) -> Option<SocketAddr> {
+    // Invalidate any previous run's published address before every startup
+    // path: a crash leaves the file behind, and if THIS startup is disabled,
+    // misconfigured, or fails to bind, cross-process readers (`--status`,
+    // `ui`, the generated hooks) would otherwise trust a dead — or since
+    // reclaimed — port. A successful bind below rewrites it.
+    invalidate_http_addr(data_dir);
     if http_disabled() {
         tracing::info!("MOOSEDev HTTP UI disabled by MOOSEDEV_NO_HTTP");
         return None;
@@ -128,19 +134,71 @@ pub async fn spawn_http_if_enabled(state: Arc<AppState>, data_dir: &Path) -> Opt
         .map_err(|e| tracing::warn!("HTTP UI unavailable: {e}; MCP backend continues"))
         .ok()?;
     let (listener, local_addr) = bind_http_listener(addr, data_dir).await?;
+    // Publish in-process too: workbench-URL rendering trusts only the address
+    // THIS run bound, never the on-disk file (which lingers after a crash).
+    state.publish_http_addr(local_addr);
     tracing::info!("MOOSEDev web UI serving at http://{local_addr}");
     // HTTP and MCP share the same Arc<AppState>. That is the important safety
     // property: only the `--serve` backend opens RocksDB, so the UI cannot create
     // a second writer beside the MCP server.
+    let serving_state = state.clone();
     let app = api::routes::build_routes(state);
     // Dropping the JoinHandle does not cancel the spawned task — the UI serves for
     // the life of the process.
+    let served_data_dir = data_dir.to_path_buf();
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::warn!("HTTP UI server stopped: {e}");
         }
+        // Serving ended (error or otherwise) while the process lives on: both
+        // in-process and cross-process publications must stop advertising it.
+        serving_state.clear_http_addr_if(local_addr);
+        invalidate_http_addr(&served_data_dir);
     });
     Some(local_addr)
+}
+
+/// Remove a previous run's `http.addr`. Best-effort hygiene, not a guarantee:
+/// nothing can remove the file while a crashed daemon stays down, so
+/// cross-process readers must ALSO validate identity before trusting it (the
+/// hooks preflight `/api/v1/health` and compare `data_dir`; `--status`/`ui` go
+/// through [`verify_http_addr`]). Called before bootstrap, on every HTTP
+/// startup path, when serving ends, and on clean shutdown.
+pub fn invalidate_http_addr(data_dir: &Path) {
+    let _ = std::fs::remove_file(http_addr_file_path_for(data_dir));
+}
+
+/// Read `http.addr` and verify that a MOOSEDev backend serving THIS data dir
+/// actually answers there, via `/api/v1/health`'s canonical `data_dir`. The file
+/// alone is untrustworthy: it survives crashes, and an ephemeral port can be
+/// reclaimed by an unrelated local process.
+pub async fn verify_http_addr(data_dir: &Path) -> Option<SocketAddr> {
+    let addr = read_http_addr(data_dir)?;
+    let expected = std::fs::canonicalize(data_dir).ok()?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!("http://{addr}/api/v1/health"))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let health: serde_json::Value = response.json().await.ok()?;
+    if health.get("status").and_then(serde_json::Value::as_str) != Some("ok")
+        || health
+            .get("project_graph")
+            .and_then(serde_json::Value::as_str)
+            != Some(crate::graph::PROJECT_KG_GRAPH_IRI)
+    {
+        return None;
+    }
+    let served = health.get("data_dir").and_then(serde_json::Value::as_str)?;
+    (Path::new(served) == expected).then_some(addr)
 }
 
 /// Bind the HTTP UI's TCP listener at `addr` and publish the resolved address to
@@ -488,6 +546,9 @@ async fn relay_stdio_to_stream(mut stream: UnixStream, label: &str) -> anyhow::R
 mod tests {
     use std::sync::Mutex;
 
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -570,6 +631,91 @@ mod tests {
         dir
     }
 
+    async fn serve_one_response(
+        status: &'static str,
+        headers: String,
+        body: String,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let addr = listener.local_addr().expect("test HTTP address");
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept verifier request");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write verifier response");
+        });
+        (addr, task)
+    }
+
+    fn publish_test_addr(data_dir: &Path, addr: SocketAddr) {
+        std::fs::write(http_addr_file_path_for(data_dir), format!("{addr}\n"))
+            .expect("publish test HTTP address");
+    }
+
+    fn health_body(data_dir: &Path) -> String {
+        json!({
+            "status": "ok",
+            "project_graph": crate::graph::PROJECT_KG_GRAPH_IRI,
+            "data_dir": data_dir.display().to_string(),
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn verify_http_addr_requires_direct_success_for_the_same_data_dir() {
+        let dir = scratch_dir("http-verify");
+        let expected = std::fs::canonicalize(&dir).expect("canonical test data dir");
+
+        let (matching, matching_task) =
+            serve_one_response("200 OK", String::new(), health_body(&expected)).await;
+        publish_test_addr(&dir, matching);
+        assert_eq!(verify_http_addr(&dir).await, Some(matching));
+        matching_task.await.expect("matching server task");
+
+        let other = scratch_dir("http-verify-other");
+        let other = std::fs::canonicalize(&other).expect("canonical other data dir");
+        let (mismatched, mismatched_task) =
+            serve_one_response("200 OK", String::new(), health_body(&other)).await;
+        publish_test_addr(&dir, mismatched);
+        assert_eq!(verify_http_addr(&dir).await, None);
+        mismatched_task.await.expect("mismatched server task");
+
+        let (failed, failed_task) = serve_one_response(
+            "500 Internal Server Error",
+            String::new(),
+            health_body(&expected),
+        )
+        .await;
+        publish_test_addr(&dir, failed);
+        assert_eq!(verify_http_addr(&dir).await, None);
+        failed_task.await.expect("failed server task");
+
+        let (redirect_target, redirect_target_task) =
+            serve_one_response("200 OK", String::new(), health_body(&expected)).await;
+        let (redirect, redirect_task) = serve_one_response(
+            "302 Found",
+            format!("Location: http://{redirect_target}/api/v1/health\r\n"),
+            "{}".to_string(),
+        )
+        .await;
+        publish_test_addr(&dir, redirect);
+        assert_eq!(verify_http_addr(&dir).await, None);
+        redirect_task.await.expect("redirect server task");
+        redirect_target_task.abort();
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
     #[tokio::test]
     async fn bind_http_listener_publishes_resolved_ephemeral_port() {
         let dir = scratch_dir("http-publish");
@@ -591,6 +737,23 @@ mod tests {
         );
 
         drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalidate_http_addr_removes_a_crash_stale_file() {
+        let dir = scratch_dir("http-invalidate");
+        std::fs::write(http_addr_file_path_for(&dir), "127.0.0.1:59999\n")
+            .expect("write stale addr file");
+
+        invalidate_http_addr(&dir);
+        assert!(
+            !http_addr_file_path_for(&dir).exists(),
+            "a crash-stale http.addr must be removed before any HTTP startup path"
+        );
+        // Idempotent on a missing file.
+        invalidate_http_addr(&dir);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -31,6 +31,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         ],
         declaration_name: Some(declaration_name),
     }),
+    zed_languages: &["Rust"],
 };
 
 fn detect(repo_root: &Path) -> Option<ProducerTarget> {

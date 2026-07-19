@@ -244,8 +244,12 @@ async fn initialize_negotiates_and_declares_capabilities() -> anyhow::Result<()>
     );
     assert_eq!(
         capabilities["executeCommandProvider"]["commands"],
-        json!(["moosedev.proposeLink", "moosedev.proposeJudgment"]),
-        "write-path commands declared: {capabilities}"
+        json!([
+            "moosedev.proposeLink",
+            "moosedev.proposeJudgment",
+            "moosedev.openEntity"
+        ]),
+        "write-path + openEntity commands declared: {capabilities}"
     );
 
     assert_hover_silent(&client.hover(2).await?);
