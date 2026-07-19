@@ -21,6 +21,12 @@ pub fn normalize_symbol(raw: &str) -> Option<String> {
         return None;
     }
 
+    // Producer-idiom symbols (e.g. scip-python module markers) canonicalize
+    // here — the shared identity boundary — so ingest, minting, and
+    // caller-provided raw symbols all converge on one identity.
+    let canonical = super::lang::canonical_symbol(raw);
+    let raw = canonical.as_deref().unwrap_or(raw);
+
     let mut symbol = parse_symbol(raw).ok()?;
     if let Some(package) = symbol.package.as_mut() {
         package.version.clear();
@@ -198,6 +204,44 @@ mod tests {
             logical_path(TS_FUNCTION).as_deref(),
             Some("src::pages::RecordPage.tsx::RecordPage")
         );
+    }
+
+    #[test]
+    fn python_symbols_normalize_idempotently_and_preserve_grammar() {
+        const PY_MODULE: &str = "scip-python python snapshot-util 0.1 class_nohint/__init__:";
+        const PY_CLASS: &str = "scip-python python snapshot-util 0.1 class_nohint/Example#";
+        const PY_METHOD: &str =
+            "scip-python python snapshot-util 0.1 class_nohint/Example#__init__().";
+        const PY_ATTR: &str = "scip-python python snapshot-util 0.1 class_nohint/Example#x.";
+        const PY_PARAM: &str =
+            "scip-python python snapshot-util 0.1 class_nohint/Example#__init__().(self)";
+
+        for raw in [PY_MODULE, PY_CLASS, PY_METHOD, PY_ATTR, PY_PARAM] {
+            let normalized = normalize_symbol(raw).unwrap();
+            assert!(normalized.contains(" . "), "{normalized}");
+            assert!(!normalized.contains(" 0.1 "), "{normalized}");
+            assert_eq!(
+                normalize_symbol(&normalized).as_deref(),
+                Some(normalized.as_str())
+            );
+        }
+        assert_eq!(
+            logical_path(PY_METHOD).as_deref(),
+            Some("class_nohint::Example::__init__")
+        );
+        assert_eq!(last_descriptor_name(PY_CLASS).as_deref(), Some("Example"));
+        // The raw `pkg/__init__:` marker is a Meta descriptor, not a
+        // namespace, so grammar-level classification stays honest here;
+        // the identity boundary (normalize_symbol → lang::canonical_symbol)
+        // rewrites markers to namespace module symbols before anything
+        // classifies or compares them.
+        assert!(!is_module_symbol(PY_MODULE));
+        let normalized_module = normalize_symbol(PY_MODULE).unwrap();
+        assert_eq!(
+            normalized_module,
+            "scip-python python snapshot-util . class_nohint/"
+        );
+        assert!(is_module_symbol(&normalized_module));
     }
 
     #[test]

@@ -125,7 +125,8 @@ USAGE:
     moosedev init [DIR]       Configure DIR (default .) to use MOOSEDev as memory
     moosedev bootstrap --temporal
                               Replay git history into the graph (per-commit dates)
-    moosedev index            Build the code substrate index (runs rust-analyzer scip)
+    moosedev index            Build the code substrate index (runs the detected
+                              SCIP producers: Rust, TypeScript, Python)
     moosedev mint [--apply]   Mint CodeEntity continuants from the substrate
                               (dry-run unless --apply is present)
     moosedev classify [--apply]
@@ -163,7 +164,8 @@ IMPORT OPTIONS:
 
 RESOLVE:
     Input positions are 1-based. Columns are UTF-8 byte columns.
-    MOOSEDEV_SCIP_PRODUCER overrides the SCIP producer binary used by index.
+    MOOSEDEV_SCIP_PRODUCER, MOOSEDEV_SCIP_TYPESCRIPT, and MOOSEDEV_SCIP_PYTHON
+    override the per-language SCIP producer commands used by index.
 
 INIT OPTIONS:
     --stdio                   Generate a bare-stdio MCP config (single client)

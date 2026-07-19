@@ -5,6 +5,7 @@
 //! UTF-8 position validation, range normalization, symbol interning, and
 //! occurrence sorting.
 
+use std::borrow::Cow;
 use std::collections::{hash_map::Entry, HashMap};
 use std::fs;
 use std::path::Path;
@@ -134,11 +135,15 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
     let mut symbols = Vec::<SymbolData>::new();
     let mut occurrence_count = 0usize;
     let mut definition_count = 0usize;
-    let is_scip_typescript = index
+    // Producer idiom hooks (fenced signatures, symbol canonicalization),
+    // keyed by the tool name the producer stamps into its index — which is
+    // the registry name by convention (lang::ProducerHooks).
+    let signature_fence = index
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.tool_info.as_ref())
-        .is_some_and(|tool| tool.name == "scip-typescript");
+        .and_then(|tool| super::lang::producer_hooks(&tool.name))
+        .and_then(|hooks| hooks.signature_fence);
     let mut unspecified_encoding_documents = 0usize;
 
     // Pass 1 interns declared symbol metadata before occurrences. rust-analyzer
@@ -151,9 +156,11 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
             unspecified_encoding_documents += 1;
         }
         for symbol_info in &document.symbols {
+            let symbol = canonicalize(&symbol_info.symbol);
             intern_symbol(
                 symbol_info,
-                is_scip_typescript,
+                &symbol,
+                signature_fence,
                 &mut symbol_ids,
                 &mut symbols,
             );
@@ -178,7 +185,11 @@ pub(crate) fn ingest(index: &Index) -> Result<IngestedIndex> {
             let enclosing_range = occurrence_enclosing_range(occurrence).with_context(|| {
                 format!("invalid SCIP enclosing_range in {}", document.relative_path)
             })?;
-            let symbol_id = intern_symbol_str(&occurrence.symbol, &mut symbol_ids, &mut symbols);
+            let symbol_id = intern_symbol_str(
+                &canonicalize(&occurrence.symbol),
+                &mut symbol_ids,
+                &mut symbols,
+            );
             let line_span = range.end.line.saturating_sub(range.start.line);
             max_line_span = max_line_span.max(line_span);
             if is_definition_role(occurrence.symbol_roles) {
@@ -282,9 +293,20 @@ fn validate_position_encoding(
     }
 }
 
+/// Apply producer canonicalization (identity when no rewrite applies). The
+/// same boundary fn backs `symbols::normalize_symbol`, so stored identities
+/// and caller-provided raw symbols can never drift apart.
+fn canonicalize(raw: &str) -> Cow<'_, str> {
+    match super::lang::canonical_symbol(raw) {
+        Some(rewritten) => Cow::Owned(rewritten),
+        None => Cow::Borrowed(raw),
+    }
+}
+
 fn intern_symbol(
     info: &SymbolInformation,
-    is_scip_typescript: bool,
+    symbol: &str,
+    signature_fence: Option<&str>,
     symbol_ids: &mut HashMap<String, usize>,
     symbols: &mut Vec<SymbolData>,
 ) -> usize {
@@ -298,12 +320,11 @@ fn intern_symbol(
         .as_ref()
         .and_then(|signature| empty_to_none(&signature.text))
         .or_else(|| {
-            is_scip_typescript
-                .then(|| typescript_signature_from_documentation(&info.documentation))
-                .flatten()
+            signature_fence
+                .and_then(|fence| fenced_signature_from_documentation(&info.documentation, fence))
         });
 
-    match symbol_ids.entry(info.symbol.clone()) {
+    match symbol_ids.entry(symbol.to_string()) {
         Entry::Occupied(entry) => *entry.get(),
         Entry::Vacant(entry) => {
             let id = symbols.len();
@@ -322,9 +343,9 @@ fn intern_symbol(
     }
 }
 
-fn typescript_signature_from_documentation(documentation: &[String]) -> Option<String> {
+fn fenced_signature_from_documentation(documentation: &[String], fence: &str) -> Option<String> {
     let text = documentation.first()?;
-    text.strip_prefix("```ts\n")
+    text.strip_prefix(&format!("```{fence}\n"))
         .and_then(|body| body.strip_suffix("\n```"))
         .filter(|body| !body.is_empty())
         .map(str::to_string)
