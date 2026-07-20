@@ -12,7 +12,9 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::artifacts::{
-    capitalize, date_only, md_cell, nonempty, not_recorded, required_value, select_rows,
+    date_only, fetch_lifecycle_links, md_cell, nonempty, not_recorded, render_lifecycle_status,
+    render_plain_status, render_supersedes_lines, required_value, select_rows, ArtifactRecordLink,
+    LifecycleLinks,
 };
 use crate::graph::{is_retired, AppState, PROJECT_KG_GRAPH_IRI};
 
@@ -158,6 +160,23 @@ pub fn generate_requirement_set(
     let count = count_requirements(state)?;
     let records = enumerate_requirements(state)?;
     let related = fetch_related_adrs(state, &records, options.batch_size)?;
+    let lifecycle = fetch_lifecycle_links(
+        state,
+        records.iter().map(|record| record.iri.as_str()),
+        options.batch_size,
+    )?;
+    let record_links = records
+        .iter()
+        .map(|record| {
+            (
+                record.iri.clone(),
+                ArtifactRecordLink {
+                    label: format!("REQ-{}", record.num),
+                    filename: filename(record),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if records.is_empty() {
@@ -174,10 +193,10 @@ pub fn generate_requirement_set(
 
     let requirements: Vec<RequirementDocument> = records
         .iter()
-        .map(|meta| render_requirement_document(meta, &related))
+        .map(|meta| render_requirement_document(meta, &related, &lifecycle, &record_links))
         .collect();
     let warnings = summarize_warnings(&records, &related);
-    let index_markdown = render_index(&records, &related, &generated_at);
+    let index_markdown = render_index(&records, &related, &lifecycle, &record_links, &generated_at);
 
     Ok(RequirementSet {
         generated_at,
@@ -312,14 +331,16 @@ SELECT ?req ?ad ?title ?status ?ts WHERE {{
 fn render_requirement_document(
     meta: &RequirementMeta,
     related: &HashMap<String, Vec<RelatedAdr>>,
+    lifecycle: &HashMap<String, LifecycleLinks>,
+    record_links: &HashMap<String, ArtifactRecordLink>,
 ) -> RequirementDocument {
     let adrs = related_for(related, meta);
-    let markdown = render_requirement(meta, adrs);
+    let markdown = render_requirement(meta, adrs, lifecycle, record_links);
     let addressed = requirement_addressed(adrs);
     RequirementDocument {
         num: meta.num.clone(),
         title: meta.title.clone(),
-        status: render_status(&meta.status),
+        status: render_lifecycle_status(&meta.status, &meta.iri, lifecycle, record_links, false),
         addressed,
         date: date_only(&meta.ts),
         author: not_recorded(&meta.author),
@@ -330,17 +351,27 @@ fn render_requirement_document(
     }
 }
 
-fn render_requirement(meta: &RequirementMeta, related_adrs: &[RelatedAdr]) -> String {
+fn render_requirement(
+    meta: &RequirementMeta,
+    related_adrs: &[RelatedAdr],
+    lifecycle: &HashMap<String, LifecycleLinks>,
+    record_links: &HashMap<String, ArtifactRecordLink>,
+) -> String {
     let mut lines = vec![
         format!("# REQ-{}. {}", meta.num, meta.title),
         String::new(),
-        format!("- Status: {}", render_status(&meta.status)),
+        format!(
+            "- Status: {}",
+            render_lifecycle_status(&meta.status, &meta.iri, lifecycle, record_links, true)
+        ),
         format!("- Addressed: {}", render_addressed(related_adrs)),
         format!("- Date: {}", date_only(&meta.ts)),
         format!("- Author: {}", not_recorded(&meta.author)),
-        String::new(),
-        "## Requirement".to_string(),
     ];
+
+    lines.extend(render_supersedes_lines(&meta.iri, lifecycle, record_links));
+
+    lines.extend([String::new(), "## Requirement".to_string()]);
 
     if let Some(desc) = nonempty(&meta.description) {
         lines.push(desc.to_string());
@@ -356,7 +387,7 @@ fn render_requirement(meta: &RequirementMeta, related_adrs: &[RelatedAdr]) -> St
             lines.push(format!(
                 "- {} ({}, {}) (`{}`)",
                 adr.title,
-                render_status(&adr.status),
+                render_plain_status(&adr.status),
                 date_only(&adr.ts),
                 adr.iri
             ));
@@ -378,6 +409,8 @@ fn render_requirement(meta: &RequirementMeta, related_adrs: &[RelatedAdr]) -> St
 fn render_index(
     records: &[RequirementMeta],
     related: &HashMap<String, Vec<RelatedAdr>>,
+    lifecycle: &HashMap<String, LifecycleLinks>,
+    record_links: &HashMap<String, ArtifactRecordLink>,
     generated_at: &str,
 ) -> String {
     let date = generated_at.split('T').next().unwrap_or(generated_at);
@@ -398,7 +431,13 @@ fn render_index(
             meta.num,
             md_cell(&meta.title),
             filename(meta),
-            md_cell(&render_status(&meta.status)),
+            md_cell(&render_lifecycle_status(
+                &meta.status,
+                &meta.iri,
+                lifecycle,
+                record_links,
+                false,
+            )),
             md_cell(render_addressed(adrs)),
             date_only(&meta.ts),
             adrs.len()
@@ -449,17 +488,6 @@ fn filename(meta: &RequirementMeta) -> String {
 
 fn slugify(title: &str) -> String {
     crate::artifacts::slugify(title, "requirement")
-}
-
-fn render_status(status: &str) -> String {
-    match status.to_ascii_lowercase().as_str() {
-        "accepted" => "Accepted".to_string(),
-        "proposed" => "Proposed".to_string(),
-        "deprecated" => "Deprecated".to_string(),
-        "superseded" => "Superseded".to_string(),
-        "" => "not recorded".to_string(),
-        other => capitalize(other),
-    }
 }
 
 #[cfg(test)]

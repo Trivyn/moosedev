@@ -227,6 +227,70 @@ fn requirement_addressed_requires_a_live_linked_adr() {
 }
 
 #[test]
+fn requirement_set_renders_supersession_links() {
+    let dir = temp_dir("supersession-links");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let old = record_item(
+        &state,
+        "Requirement",
+        "Original requirement",
+        "2026-06-25T00:00:00Z",
+    );
+    let replacement = graph::supersede_decision(
+        &state,
+        &SupersedeInput {
+            superseded_iri: old.clone(),
+            new: RecordInput {
+                class_iri: state.resolve_class("Requirement").unwrap(),
+                class_local: "Requirement".to_string(),
+                properties: vec![
+                    (
+                        moose::RDFS_LABEL.to_string(),
+                        "Replacement requirement".to_string(),
+                    ),
+                    (
+                        state.capture.title.clone(),
+                        "Replacement requirement".to_string(),
+                    ),
+                    (
+                        state.capture.timestamp.clone(),
+                        "2026-06-26T00:00:00Z".to_string(),
+                    ),
+                ],
+            },
+            rationale: "The requirement changed.".to_string(),
+        },
+        "test-agent",
+        Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap(),
+    )
+    .expect("supersede requirement");
+
+    let set = generate_requirement_set(&state, RequirementGenerationOptions::default())
+        .expect("generate requirements");
+    let old_doc = set
+        .requirements
+        .iter()
+        .find(|requirement| requirement.iri == old)
+        .expect("old requirement");
+    let new_doc = set
+        .requirements
+        .iter()
+        .find(|requirement| requirement.iri == replacement.new_iri)
+        .expect("replacement requirement");
+
+    assert_eq!(old_doc.status, "Superseded by REQ-0002");
+    assert!(old_doc
+        .markdown
+        .contains("- Status: Superseded by [REQ-0002](0002-replacement-requirement.md)"));
+    assert!(new_doc
+        .markdown
+        .contains("- Supersedes: [REQ-0001](0001-original-requirement.md)"));
+    assert!(set.index_markdown.contains("Superseded by REQ-0002"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn requirement_set_reports_duplicate_slugs_and_unlinked_requirements() {
     let dir = temp_dir("warnings");
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");

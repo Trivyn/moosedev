@@ -32,7 +32,7 @@ A core purpose of MOOSEDev is to reduce the gradual loss of understanding in a c
 New concepts introduced during development should be aligned to existing models rather than allowed to accumulate as disconnected or slightly inconsistent ideas. Use the alignment tools proactively.
 
 ### 5. Memory Should Be External and Queryable
-Do not rely on stuffing large amounts of history or context into the LLM’s context window. Use MOOSEDev’s session/project knowledge graph as the primary long-term memory. Prioritize tools like `get_relevant_context`, `search_session_graph`, and `get_focus_stack`.
+Do not rely on stuffing large amounts of history or context into the LLM’s context window. Use MOOSEDev’s session/project knowledge graph as the primary long-term memory. Prioritize tools like `get_relevant_context`, `query`, and `get_entity_dossier`.
 
 ### 6. Auditability Matters
 Reasoning should be traceable. When possible, surface or preserve execution traces, decision rationales, and the path that led to a conclusion. Transparency builds trust.

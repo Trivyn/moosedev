@@ -27,6 +27,7 @@ export interface ArtifactSummaryBase {
   date: string;
   author: string;
   iri: string;
+  filename: string;
   search_text: string;
 }
 
@@ -184,6 +185,16 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
   const [searchQuery, setSearchQuery] = useState('');
 
   const records = useMemo(() => (list ? recordsOf(list) : []), [list, recordsOf]);
+  const artifactTargetsByHref = useMemo(
+    () =>
+      new Map(
+        records.map((record) => [
+          record.filename,
+          { kind: artifactKind, iri: record.iri } satisfies ArtifactTarget,
+        ]),
+      ),
+    [artifactKind, records],
+  );
   const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase();
   // Filtering must not alter selection: a selected record may remain open while
   // the user searches the sidebar for another artifact.
@@ -446,7 +457,11 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
                   },
                 }}
               >
-                <LinkedMarkdown markdown={detail.markdown} onNavigateArtifact={onNavigateArtifact} />
+                <LinkedMarkdown
+                  markdown={detail.markdown}
+                  onNavigateArtifact={onNavigateArtifact}
+                  artifactTargetsByHref={artifactTargetsByHref}
+                />
               </Box>
             </Box>
           ) : (

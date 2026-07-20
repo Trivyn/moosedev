@@ -12,7 +12,9 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::artifacts::{
-    capitalize, date_only, md_cell, nonempty, not_recorded, required_value, select_rows,
+    date_only, fetch_lifecycle_links, md_cell, nonempty, not_recorded, render_lifecycle_status,
+    render_plain_status, render_supersedes_lines, required_value, select_rows, ArtifactRecordLink,
+    LifecycleLinks,
 };
 use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
 
@@ -157,6 +159,23 @@ pub fn generate_constraint_set(
     let count = count_constraints(state)?;
     let records = enumerate_constraints(state)?;
     let related = fetch_related_targets(state, &records, options.batch_size)?;
+    let lifecycle = fetch_lifecycle_links(
+        state,
+        records.iter().map(|record| record.iri.as_str()),
+        options.batch_size,
+    )?;
+    let record_links = records
+        .iter()
+        .map(|record| {
+            (
+                record.iri.clone(),
+                ArtifactRecordLink {
+                    label: format!("CST-{}", record.num),
+                    filename: filename(record),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if records.is_empty() {
@@ -173,10 +192,10 @@ pub fn generate_constraint_set(
 
     let constraints = records
         .iter()
-        .map(|meta| render_constraint_document(meta, &related))
+        .map(|meta| render_constraint_document(meta, &related, &lifecycle, &record_links))
         .collect();
     let warnings = summarize_warnings(&records, &related);
-    let index_markdown = render_index(&records, &related, &generated_at);
+    let index_markdown = render_index(&records, &related, &lifecycle, &record_links, &generated_at);
 
     Ok(ConstraintSet {
         generated_at,
@@ -317,31 +336,43 @@ SELECT ?constraint ?target ?title ?status ?ts WHERE {{
 fn render_constraint_document(
     meta: &ConstraintMeta,
     related: &HashMap<String, Vec<RelatedTarget>>,
+    lifecycle: &HashMap<String, LifecycleLinks>,
+    record_links: &HashMap<String, ArtifactRecordLink>,
 ) -> ConstraintDocument {
     let targets = related_for(related, meta);
     ConstraintDocument {
         num: meta.num.clone(),
         title: meta.title.clone(),
-        status: render_status(&meta.status),
+        status: render_lifecycle_status(&meta.status, &meta.iri, lifecycle, record_links, false),
         date: date_only(&meta.ts),
         author: not_recorded(&meta.author),
         iri: meta.iri.clone(),
         filename: filename(meta),
         related_targets: targets.len(),
-        markdown: render_constraint(meta, targets),
+        markdown: render_constraint(meta, targets, lifecycle, record_links),
     }
 }
 
-fn render_constraint(meta: &ConstraintMeta, related_targets: &[RelatedTarget]) -> String {
+fn render_constraint(
+    meta: &ConstraintMeta,
+    related_targets: &[RelatedTarget],
+    lifecycle: &HashMap<String, LifecycleLinks>,
+    record_links: &HashMap<String, ArtifactRecordLink>,
+) -> String {
     let mut lines = vec![
         format!("# CST-{}. {}", meta.num, meta.title),
         String::new(),
-        format!("- Status: {}", render_status(&meta.status)),
+        format!(
+            "- Status: {}",
+            render_lifecycle_status(&meta.status, &meta.iri, lifecycle, record_links, true)
+        ),
         format!("- Date: {}", date_only(&meta.ts)),
         format!("- Author: {}", not_recorded(&meta.author)),
-        String::new(),
-        "## Constraint".to_string(),
     ];
+
+    lines.extend(render_supersedes_lines(&meta.iri, lifecycle, record_links));
+
+    lines.extend([String::new(), "## Constraint".to_string()]);
 
     if let Some(desc) = nonempty(&meta.description) {
         lines.push(desc.to_string());
@@ -357,7 +388,7 @@ fn render_constraint(meta: &ConstraintMeta, related_targets: &[RelatedTarget]) -
             lines.push(format!(
                 "- {} ({}, {}) (`{}`)",
                 not_recorded(&target.title),
-                render_status(&target.status),
+                render_plain_status(&target.status),
                 date_only(&target.ts),
                 target.iri
             ));
@@ -379,6 +410,8 @@ fn render_constraint(meta: &ConstraintMeta, related_targets: &[RelatedTarget]) -
 fn render_index(
     records: &[ConstraintMeta],
     related: &HashMap<String, Vec<RelatedTarget>>,
+    lifecycle: &HashMap<String, LifecycleLinks>,
+    record_links: &HashMap<String, ArtifactRecordLink>,
     generated_at: &str,
 ) -> String {
     let date = generated_at.split('T').next().unwrap_or(generated_at);
@@ -398,7 +431,13 @@ fn render_index(
             meta.num,
             md_cell(&meta.title),
             filename(meta),
-            md_cell(&render_status(&meta.status)),
+            md_cell(&render_lifecycle_status(
+                &meta.status,
+                &meta.iri,
+                lifecycle,
+                record_links,
+                false,
+            )),
             date_only(&meta.ts),
             related_for(related, meta).len()
         ));
@@ -436,17 +475,6 @@ fn filename(meta: &ConstraintMeta) -> String {
 
 fn slugify(title: &str) -> String {
     crate::artifacts::slugify(title, "constraint")
-}
-
-fn render_status(status: &str) -> String {
-    match status.to_ascii_lowercase().as_str() {
-        "accepted" => "Accepted".to_string(),
-        "proposed" => "Proposed".to_string(),
-        "deprecated" => "Deprecated".to_string(),
-        "superseded" => "Superseded".to_string(),
-        "" => "not recorded".to_string(),
-        other => capitalize(other),
-    }
 }
 
 #[cfg(test)]

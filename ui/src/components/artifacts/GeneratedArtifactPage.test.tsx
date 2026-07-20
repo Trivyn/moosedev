@@ -32,6 +32,7 @@ const records: ArtifactSummaryBase[] = [
     date: '2026-07-08',
     author: 'tester',
     iri: 'https://moosedev.dev/kg/ArchitecturalDecision/adr-1',
+    filename: '0001-first-decision.md',
     search_text: '# First decision\n\nUses a metadata-only-author.',
   },
   {
@@ -41,6 +42,7 @@ const records: ArtifactSummaryBase[] = [
     date: '2026-07-09',
     author: 'tester',
     iri: 'https://moosedev.dev/kg/ArchitecturalDecision/adr-2',
+    filename: '0002-linked-decision.md',
     search_text: '# Linked decision\n\nStores its durable state in RocksDB.',
   },
 ];
@@ -146,5 +148,114 @@ describe('GeneratedArtifactPage direct links', () => {
     fireEvent.change(search, { target: { value: '' } });
     expect(within(screen.getByRole('list')).getByText('First decision')).toBeInTheDocument();
     expect(within(screen.getByRole('list')).getByText('Linked decision')).toBeInTheDocument();
+  });
+
+  it('routes supersedes and superseded-by Markdown links to their typed records', async () => {
+    const onNavigateArtifact = vi.fn();
+
+    render(
+      <GeneratedArtifactPage<ArtifactSummaryBase, TestList, null>
+        artifactKind="adrs"
+        title="ADRs"
+        emptyText="Empty"
+        selectText="Select"
+        refreshTooltip="Refresh"
+        downloadTooltip="Download"
+        archiveFilename="records.zip"
+        sidebarMinWidth={300}
+        sidebarMaxWidth={500}
+        loadList={async () => ({ records })}
+        loadDetail={async () => ({
+          summary: records[0],
+          markdown: [
+            '- Supersedes: [ADR-0001](0001-first-decision.md)',
+            '- Status: Superseded by [ADR-0002](0002-linked-decision.md)',
+          ].join('\n'),
+        })}
+        downloadArchive={async () => new Blob()}
+        recordsOf={(list) => list.records}
+        generatedFileCount={(list) => list.records.length}
+        warningsOf={() => null}
+        warningCount={() => 0}
+        renderWarningSummary={() => null}
+        onNavigateArtifact={onNavigateArtifact}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('link', { name: 'ADR-0001' }));
+    expect(onNavigateArtifact).toHaveBeenLastCalledWith({
+      kind: 'adrs',
+      iri: 'https://moosedev.dev/kg/ArchitecturalDecision/adr-1',
+    });
+
+    fireEvent.click(screen.getByRole('link', { name: 'ADR-0002' }));
+    expect(onNavigateArtifact).toHaveBeenLastCalledWith({
+      kind: 'adrs',
+      iri: 'https://moosedev.dev/kg/ArchitecturalDecision/adr-2',
+    });
+  });
+
+  it.each([
+    ['requirements' as const, 'Requirement', 'REQ'],
+    ['lessons' as const, 'Lesson', 'LSN'],
+    ['constraints' as const, 'Constraint', 'CST'],
+  ])('routes generated %s lifecycle links through their typed page', async (kind, recordKind, prefix) => {
+    const typedRecords: ArtifactSummaryBase[] = [
+      {
+        num: '0001',
+        title: `Original ${recordKind}`,
+        status: `Superseded by ${prefix}-0002`,
+        date: '2026-07-08',
+        author: 'tester',
+        iri: `https://moosedev.dev/kg/${recordKind}/old-id`,
+        filename: `0001-original-${recordKind.toLowerCase()}.md`,
+        search_text: '',
+      },
+      {
+        num: '0002',
+        title: `Replacement ${recordKind}`,
+        status: 'Accepted',
+        date: '2026-07-09',
+        author: 'tester',
+        iri: `https://moosedev.dev/kg/${recordKind}/new-id`,
+        filename: `0002-replacement-${recordKind.toLowerCase()}.md`,
+        search_text: '',
+      },
+    ];
+    const onNavigateArtifact = vi.fn();
+
+    render(
+      <GeneratedArtifactPage<ArtifactSummaryBase, TestList, null>
+        artifactKind={kind}
+        title={recordKind}
+        emptyText="Empty"
+        selectText="Select"
+        refreshTooltip="Refresh"
+        downloadTooltip="Download"
+        archiveFilename="records.zip"
+        sidebarMinWidth={300}
+        sidebarMaxWidth={500}
+        loadList={async () => ({ records: typedRecords })}
+        loadDetail={async () => ({
+          summary: typedRecords[0],
+          markdown: `- Status: Superseded by [${prefix}-0002](${typedRecords[1].filename})`,
+        })}
+        downloadArchive={async () => new Blob()}
+        recordsOf={(list) => list.records}
+        generatedFileCount={(list) => list.records.length}
+        warningsOf={() => null}
+        warningCount={() => 0}
+        renderWarningSummary={() => null}
+        onNavigateArtifact={onNavigateArtifact}
+      />,
+    );
+
+    const link = await screen.findByRole('link', { name: `${prefix}-0002` });
+    expect(link.getAttribute('href')).toBe(`#/${kind}/new-id`);
+    fireEvent.click(link);
+    expect(onNavigateArtifact).toHaveBeenCalledWith({
+      kind,
+      iri: `https://moosedev.dev/kg/${recordKind}/new-id`,
+    });
   });
 });

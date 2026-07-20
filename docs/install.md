@@ -61,7 +61,9 @@ moosedev --help      # usage
 moosedev --status    # backend + web UI status for the current data dir
 ```
 
-Then configure a project with [`moosedev init`](quickstart.md).
+Then configure a project with [`moosedev init`](quickstart.md) — the quickstart
+covers project setup and enabling the code layer + editor integration
+(`index`/`mint`, Knowledge-LSP clients).
 
 ## Upgrade
 

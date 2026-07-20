@@ -12,7 +12,7 @@
 
 MOOSEDev is a local project-memory daemon that gives coding agents and humans a reliable, **structured, queryable, long-term understanding** of a software project. Agents reach it through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), editors through a knowledge-focused LSP, and humans through the web workbench.
 
-Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph**:  architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
+Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph**: architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
 
 MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed (for now, plans to open source when it's ready).
 
@@ -261,7 +261,9 @@ backend for the same resolved socket unless `MOOSEDEV_NO_AUTOSPAWN=1` is set.
 
 A `--serve` backend also exposes the human-facing web UI on a **loopback-only,
 ephemeral port** by default, the OS picks a free port, so per-project backends
-never collide. The backend writes the resolved address to
+never collide. Besides browsing the graph, the workbench is where proposed
+records and links are **ratified** — classifier judgments and editor code-action
+proposals stay pending in its inbox until a human accepts them. The backend writes the resolved address to
 `<MOOSEDEV_DATA_DIR>/http.addr`; discover or open it with:
 
 ```bash

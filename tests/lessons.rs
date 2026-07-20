@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use moosedev::graph::{self, AppState, RecordInput};
+use moosedev::graph::{self, AppState, RecordInput, SupersedeInput};
 use moosedev::lessons::{generate_lesson_set, LessonGenerationOptions, LESSONS_INDEX_FILENAME};
 use oxigraph::model::{GraphName, NamedNode, Quad};
 
@@ -139,6 +139,65 @@ fn lesson_sources_count_both_link_directions_without_duplicates() {
         "a pair linked in both directions is one source"
     );
     assert!(set.warnings.unlinked_lessons.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lesson_set_renders_supersession_links() {
+    let dir = temp_dir("supersession-links");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let old = record_item(&state, "Lesson", "Original lesson", "2026-07-01T00:00:00Z");
+    let replacement = graph::supersede_decision(
+        &state,
+        &SupersedeInput {
+            superseded_iri: old.clone(),
+            new: RecordInput {
+                class_iri: state.resolve_class("Lesson").unwrap(),
+                class_local: "Lesson".to_string(),
+                properties: vec![
+                    (
+                        moose::RDFS_LABEL.to_string(),
+                        "Replacement lesson".to_string(),
+                    ),
+                    (
+                        state.capture.title.clone(),
+                        "Replacement lesson".to_string(),
+                    ),
+                    (
+                        state.capture.timestamp.clone(),
+                        "2026-07-02T00:00:00Z".to_string(),
+                    ),
+                ],
+            },
+            rationale: "The lesson changed.".to_string(),
+        },
+        "test-agent",
+        Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap(),
+    )
+    .expect("supersede lesson");
+
+    let set =
+        generate_lesson_set(&state, LessonGenerationOptions::default()).expect("generate lessons");
+    let old_doc = set
+        .lessons
+        .iter()
+        .find(|lesson| lesson.iri == old)
+        .expect("old lesson");
+    let new_doc = set
+        .lessons
+        .iter()
+        .find(|lesson| lesson.iri == replacement.new_iri)
+        .expect("replacement lesson");
+
+    assert_eq!(old_doc.status, "Superseded by LSN-0002");
+    assert!(old_doc
+        .markdown
+        .contains("- Status: Superseded by [LSN-0002](0002-replacement-lesson.md)"));
+    assert!(new_doc
+        .markdown
+        .contains("- Supersedes: [LSN-0001](0001-original-lesson.md)"));
+    assert!(set.index_markdown.contains("Superseded by LSN-0002"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

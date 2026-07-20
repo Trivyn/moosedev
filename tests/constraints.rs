@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 use moosedev::constraints::{
     generate_constraint_set, ConstraintGenerationOptions, CONSTRAINTS_INDEX_FILENAME,
 };
-use moosedev::graph::{self, AppState, RecordInput};
+use moosedev::graph::{self, AppState, RecordInput, SupersedeInput};
 use oxigraph::model::{GraphName, NamedNode, Quad};
 
 fn ontology_dir() -> std::path::PathBuf {
@@ -134,6 +134,70 @@ fn constraint_set_reports_duplicate_slugs_and_unlinked_constraints() {
     assert_eq!(set.constraints[1].filename, "0002-repeated-2.md");
     assert_eq!(set.warnings.unlinked_constraints, vec!["0001", "0002"]);
     assert!(set.warnings.missing_description.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn constraint_set_renders_supersession_links() {
+    let dir = temp_dir("supersession-links");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let old = record_item(
+        &state,
+        "Constraint",
+        "Original constraint",
+        "2026-07-09T00:00:00Z",
+    );
+    let replacement = graph::supersede_decision(
+        &state,
+        &SupersedeInput {
+            superseded_iri: old.clone(),
+            new: RecordInput {
+                class_iri: state.resolve_class("Constraint").unwrap(),
+                class_local: "Constraint".to_string(),
+                properties: vec![
+                    (
+                        moose::RDFS_LABEL.to_string(),
+                        "Replacement constraint".to_string(),
+                    ),
+                    (
+                        state.capture.title.clone(),
+                        "Replacement constraint".to_string(),
+                    ),
+                    (
+                        state.capture.timestamp.clone(),
+                        "2026-07-10T00:00:00Z".to_string(),
+                    ),
+                ],
+            },
+            rationale: "The constraint changed.".to_string(),
+        },
+        "test-agent",
+        Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap(),
+    )
+    .expect("supersede constraint");
+
+    let set = generate_constraint_set(&state, ConstraintGenerationOptions::default())
+        .expect("generate constraints");
+    let old_doc = set
+        .constraints
+        .iter()
+        .find(|constraint| constraint.iri == old)
+        .expect("old constraint");
+    let new_doc = set
+        .constraints
+        .iter()
+        .find(|constraint| constraint.iri == replacement.new_iri)
+        .expect("replacement constraint");
+
+    assert_eq!(old_doc.status, "Superseded by CST-0002");
+    assert!(old_doc
+        .markdown
+        .contains("- Status: Superseded by [CST-0002](0002-replacement-constraint.md)"));
+    assert!(new_doc
+        .markdown
+        .contains("- Supersedes: [CST-0001](0001-original-constraint.md)"));
+    assert!(set.index_markdown.contains("Superseded by CST-0002"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
