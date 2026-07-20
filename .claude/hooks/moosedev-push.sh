@@ -17,6 +17,14 @@ ADDR_FILE="$DIR/.moosedev/http.addr"
 ADDR=$(cat "$ADDR_FILE" 2>/dev/null) || exit 0
 [ -n "$ADDR" ] || exit 0
 
+# Identity preflight: http.addr can be crash-stale and the ephemeral port
+# since reclaimed by an unrelated local process — never send project payloads
+# without confirming a MOOSEDev backend serving THIS data dir answers there.
+EXPECT=$(cd "$DIR/.moosedev" 2>/dev/null && pwd -P) || exit 0
+SERVED=$(curl -fsS --max-time 2 "http://$ADDR/api/v1/health" 2>/dev/null \
+  | jq -r 'select(.status == "ok" and .project_graph == "https://moosedev.dev/kg/project") | .data_dir // empty' 2>/dev/null) || exit 0
+[ -n "$SERVED" ] && [ "$SERVED" = "$EXPECT" ] || exit 0
+
 FILE=$(jq -r '.tool_input.file_path // empty' <<<"$INPUT" 2>/dev/null) || exit 0
 [ -n "$FILE" ] || exit 0
 REL="${FILE#"$DIR"/}"

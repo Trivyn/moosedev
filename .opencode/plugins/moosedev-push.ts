@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 import { resolve } from "node:path"
 import { createInterface } from "node:readline"
 
@@ -421,17 +421,10 @@ async function journalCheckpoint(
   files: string[],
   warnOnce: (key: string, message: string) => void,
 ): Promise<boolean> {
-  const dataDir = process.env.MOOSEDEV_DATA_DIR || ".moosedev"
-  let addr: string
+  const baseUrl = await verifiedHttpBaseUrl(root, warnOnce)
+  if (!baseUrl) return false
   try {
-    addr = readFileSync(resolve(root, dataDir, "http.addr"), "utf8").trim()
-  } catch {
-    warnOnce("journal-addr", "no MOOSEDev http.addr; session checkpoint not journaled")
-    return false
-  }
-  if (!addr) return false
-  try {
-    const response = await fetch(`http://${addr}/api/v1/capture`, {
+    const response = await fetch(`${baseUrl}/api/v1/capture`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host: HOST, files }),
@@ -445,6 +438,48 @@ async function journalCheckpoint(
   } catch (error) {
     warnOnce("journal-http", `session checkpoint journal failed: ${error}`)
     return false
+  }
+}
+
+/// Resolve a crash-stale `http.addr` only after a direct health response proves
+/// that the listener is MOOSEDev serving this project's canonical data dir.
+async function verifiedHttpBaseUrl(
+  root: string,
+  warnOnce: (key: string, message: string) => void,
+): Promise<string | undefined> {
+  const dataDir = process.env.MOOSEDEV_DATA_DIR || ".moosedev"
+  let addr: string
+  let expectedDataDir: string
+  try {
+    addr = readFileSync(resolve(root, dataDir, "http.addr"), "utf8").trim()
+    expectedDataDir = realpathSync.native(resolve(root, dataDir))
+  } catch {
+    warnOnce("journal-addr", "no MOOSEDev http.addr; session checkpoint not journaled")
+    return undefined
+  }
+  if (!addr) return undefined
+  try {
+    const response = await fetch(`http://${addr}/api/v1/health`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(2_000),
+    })
+    if (!response.ok) {
+      warnOnce("journal-health", `MOOSEDev health check failed: HTTP ${response.status}`)
+      return undefined
+    }
+    const health = (await response.json()) as Record<string, unknown>
+    if (
+      health.status !== "ok" ||
+      health.project_graph !== "https://moosedev.dev/kg/project" ||
+      health.data_dir !== expectedDataDir
+    ) {
+      warnOnce("journal-health", "MOOSEDev health identity did not match this project")
+      return undefined
+    }
+    return `http://${addr}`
+  } catch (error) {
+    warnOnce("journal-health", `MOOSEDev health check failed: ${error}`)
+    return undefined
   }
 }
 

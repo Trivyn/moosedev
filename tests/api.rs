@@ -193,7 +193,14 @@ async fn health_reports_project_graph_and_data_dir() {
     let body = response.json::<Value>();
     assert_eq!(body["status"], "ok");
     assert_eq!(body["project_graph"], PROJECT_KG_GRAPH_IRI);
-    assert_eq!(body["data_dir"], dir.to_string_lossy().as_ref());
+    // Canonical: cross-process consumers use this field as backend identity.
+    assert_eq!(
+        body["data_dir"],
+        std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
     assert_eq!(
         body["project_name"],
         dir.file_name().unwrap().to_string_lossy().as_ref()
@@ -233,7 +240,13 @@ async fn health_reports_project_root_for_conventional_data_dir() {
             .to_string_lossy()
             .as_ref()
     );
-    assert_eq!(body["data_dir"], dir.to_string_lossy().as_ref());
+    assert_eq!(
+        body["data_dir"],
+        std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
 
     let _ = std::fs::remove_dir_all(&project);
 }

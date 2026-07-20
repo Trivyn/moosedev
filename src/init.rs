@@ -124,6 +124,9 @@ pub struct InitOptions {
     pub opencode: bool,
     /// Also write project-local Zed LSP settings.
     pub zed: bool,
+    /// Also write project-local VS Code settings for the `clients/vscode`
+    /// extension.
+    pub vscode: bool,
     /// Also install the Claude Code gate/push/capture hooks (`.claude/hooks/`
     /// + a `hooks` block merged into `.claude/settings.json`).
     pub claude_hooks: bool,
@@ -185,6 +188,9 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     }
     if opts.zed {
         write_zed_settings(opts, &mut report)?;
+    }
+    if opts.vscode {
+        write_vscode_settings(opts, &mut report)?;
     }
     if opts.claude_hooks {
         write_claude_hooks(opts, &mut report)?;
@@ -327,6 +333,79 @@ fn write_zed_settings(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
         return Ok(());
     }
     lsp.insert("moosedev".to_string(), zed_lsp_entry());
+
+    let dir = path.parent().expect("settings path has a parent");
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let serialized = format!("{}\n", serde_json::to_string_pretty(&root)?);
+    std::fs::write(&path, serialized).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    Ok(())
+}
+
+/// The `moosedev.*` keys written into `.vscode/settings.json`. A
+/// discoverability artifact, exactly parallel to [`zed_lsp_entry`]: the
+/// extension defaults to these values, but seeding them makes the dials
+/// visible in the project.
+fn vscode_settings_entries() -> Vec<(&'static str, Value)> {
+    vec![
+        ("moosedev.diagnostics.constraints", json!(true)),
+        ("moosedev.diagnostics.staleRationale", json!(true)),
+    ]
+}
+
+/// Merge MOOSEDev's optional diagnostics into project-local VS Code settings.
+/// VS Code settings are JSONC (comments and trailing commas are valid and
+/// common), which strict JSON parsing rejects — an unparseable file is
+/// SKIPPED with a note rather than aborting the whole init run, and is never
+/// overwritten.
+fn write_vscode_settings(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let path = opts.target_dir.join(".vscode/settings.json");
+    let existed = path.exists();
+
+    let mut root: Value = if existed {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        match serde_json::from_str(&text) {
+            Ok(root) => root,
+            Err(_) => {
+                report.entries.push(Entry::new(path, Outcome::Skipped));
+                report.notes.push(
+                    "`.vscode/settings.json` uses JSONC (comments/trailing commas) or is invalid, so init cannot merge into it; add the `moosedev.*` settings yourself (they all default to on — see clients/vscode/README.md)"
+                        .to_string(),
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        json!({})
+    };
+
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} must be a JSON object", path.display()))?;
+
+    report.notes.push(
+        "VS Code needs the thin extension in `clients/vscode` of the MOOSEDev source checkout: `npm install && npm run package`, then `code --install-extension moosedev-<version>.vsix`."
+            .to_string(),
+    );
+    if obj.keys().any(|key| key.starts_with("moosedev.")) && !opts.force {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
+        report.notes.push(
+            "`.vscode/settings.json` already configures `moosedev.*`; left as-is (use --force to overwrite)"
+                .to_string(),
+        );
+        return Ok(());
+    }
+    for (key, value) in vscode_settings_entries() {
+        obj.insert(key.to_string(), value);
+    }
 
     let dir = path.parent().expect("settings path has a parent");
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -857,6 +936,7 @@ mod tests {
             codex: false,
             opencode: false,
             zed: false,
+            vscode: false,
             claude_hooks: false,
         }
     }
@@ -1076,6 +1156,9 @@ mod tests {
         assert!(plugin.contains("journalCheckpoint(root, files, warnOnce)"));
         assert!(plugin.contains("isMooseDevStatePath(file)"));
         assert!(plugin.contains("resolve(root, dataDir, \"http.addr\")"));
+        assert!(plugin.contains("/api/v1/health"));
+        assert!(plugin.contains("realpathSync.native"));
+        assert!(plugin.contains("redirect: \"manual\""));
         let _ = std::fs::remove_dir_all(&target);
     }
 
@@ -1134,6 +1217,122 @@ mod tests {
         );
         assert_eq!(
             outcome_for(&report, ".zed/settings.json"),
+            Some(&Outcome::Merged)
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn vscode_settings_created_fresh() {
+        let target = temp_project("vscode-fresh");
+        let mut o = opts(&target);
+        o.vscode = true;
+        let report = init_project(&o).unwrap();
+
+        let settings = read_json(&target.join(".vscode/settings.json"));
+        assert_eq!(settings["moosedev.diagnostics.constraints"], true);
+        assert_eq!(settings["moosedev.diagnostics.staleRationale"], true);
+        assert_eq!(
+            outcome_for(&report, ".vscode/settings.json"),
+            Some(&Outcome::Created)
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("clients/vscode")),
+            "report should point to the extension packaging steps"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn vscode_settings_merge_preserves_existing() {
+        let target = temp_project("vscode-merge");
+        let vscode_dir = target.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{"editor.formatOnSave":true,"rust-analyzer.checkOnSave":false}"#,
+        )
+        .unwrap();
+        let mut o = opts(&target);
+        o.vscode = true;
+        let report = init_project(&o).unwrap();
+
+        let settings = read_json(&vscode_dir.join("settings.json"));
+        assert_eq!(settings["editor.formatOnSave"], true);
+        assert_eq!(settings["rust-analyzer.checkOnSave"], false);
+        assert_eq!(settings["moosedev.diagnostics.constraints"], true);
+        assert_eq!(
+            outcome_for(&report, ".vscode/settings.json"),
+            Some(&Outcome::Merged)
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn vscode_settings_jsonc_is_skipped_not_fatal() {
+        let target = temp_project("vscode-jsonc");
+        let vscode_dir = target.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        let jsonc = "{\n  // format on save\n  \"editor.formatOnSave\": true,\n}\n";
+        std::fs::write(vscode_dir.join("settings.json"), jsonc).unwrap();
+        let mut o = opts(&target);
+        o.vscode = true;
+
+        let report = init_project(&o).expect("JSONC settings must not abort init");
+        assert_eq!(
+            outcome_for(&report, ".vscode/settings.json"),
+            Some(&Outcome::Skipped)
+        );
+        assert!(
+            report.notes.iter().any(|note| note.contains("JSONC")),
+            "the skip must be explained: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            std::fs::read_to_string(vscode_dir.join("settings.json")).unwrap(),
+            jsonc,
+            "the user's JSONC file is left untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn vscode_settings_existing_moosedev_skipped_without_force() {
+        let target = temp_project("vscode-skip");
+        let vscode_dir = target.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{"moosedev.diagnostics.constraints":false}"#,
+        )
+        .unwrap();
+        let mut o = opts(&target);
+        o.vscode = true;
+        let report = init_project(&o).unwrap();
+
+        let settings = read_json(&vscode_dir.join("settings.json"));
+        assert_eq!(
+            settings["moosedev.diagnostics.constraints"], false,
+            "an existing user value is preserved without --force"
+        );
+        assert_eq!(
+            outcome_for(&report, ".vscode/settings.json"),
+            Some(&Outcome::Skipped)
+        );
+
+        o.force = true;
+        let report = init_project(&o).unwrap();
+        let settings = read_json(&vscode_dir.join("settings.json"));
+        assert_eq!(settings["moosedev.diagnostics.constraints"], true);
+        assert_eq!(
+            outcome_for(&report, ".vscode/settings.json"),
             Some(&Outcome::Merged)
         );
 

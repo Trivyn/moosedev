@@ -33,6 +33,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         identity_kinds: &["fn", "class"],
         declaration_name: None,
     }),
+    zed_languages: &["Python"],
 };
 
 fn detect(repo_root: &Path) -> Option<ProducerTarget> {

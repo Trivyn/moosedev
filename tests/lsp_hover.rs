@@ -501,7 +501,7 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
     let repo_root = synthetic_repo_root("utf8-root", "    build_server();");
     let data_dir = fresh_dir("utf8-data");
     let state = Arc::new(state_with_substrate("utf8-state", 4));
-    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")?;
+    state.publish_http_addr("127.0.0.1:7474".parse()?);
     let decision = record(
         &state,
         "ArchitecturalDecision",

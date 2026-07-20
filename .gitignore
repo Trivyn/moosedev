@@ -60,6 +60,11 @@ moose_sessions.db
 ui/node_modules/
 ui/dist/
 
+# --- VS Code client build output -------------------------------------------
+clients/vscode/node_modules/
+clients/vscode/dist/
+clients/vscode/*.vsix
+
 # ── Benchmark output ──────────────────────────────────────────────────────
 # The Instrument A/B harness under bench/ is committed; its regenerable run
 # output (seed-recall JSONs) is not.

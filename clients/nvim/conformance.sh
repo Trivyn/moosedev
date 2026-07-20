@@ -92,9 +92,14 @@ done
 # Pre-warm the daemon: first-start hydration of kg.nq outlives the stdio
 # shim's autospawn timeout, so start it explicitly and wait for the LSP
 # socket before Neovim connects.
+#
+# MOOSEDEV_HTTP_ADDR is pinned to an ephemeral port: the binary's dotenv
+# fallback loads the SOURCE repo's .env (compile-time manifest dir), and a
+# fixed port there would collide with the real daemon. Explicit env wins
+# over .env, and openEntity's showDocument round-trip needs a live HTTP UI.
 echo "starting scratch daemon (kg.nq hydration)…"
 cd "$SCRATCH/repo"
-nohup moosedev --serve >"$SCRATCH/serve-stdout.log" 2>&1 &
+MOOSEDEV_HTTP_ADDR="127.0.0.1:0" nohup moosedev --serve >"$SCRATCH/serve-stdout.log" 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 240); do
   if [[ -S "$SCRATCH/repo/.moosedev/moosedev-lsp.sock" ]]; then
@@ -105,6 +110,19 @@ done
 if [[ ! -S "$SCRATCH/repo/.moosedev/moosedev-lsp.sock" ]]; then
   echo "FAIL: scratch daemon never opened the LSP socket" >&2
   tail -20 "$SCRATCH/repo/.moosedev/moosedev-serve.log" 2>/dev/null || tail -20 "$SCRATCH/serve-stdout.log" >&2 || true
+  exit 1
+fi
+# The openEntity round-trip needs the workbench address; HTTP binds alongside
+# the LSP listener, so this wait is normally instant.
+for _ in $(seq 1 30); do
+  if [[ -s "$SCRATCH/repo/.moosedev/http.addr" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ ! -s "$SCRATCH/repo/.moosedev/http.addr" ]]; then
+  echo "FAIL: scratch daemon never published the HTTP addr file (openEntity needs it)" >&2
+  grep -i "http" "$SCRATCH/serve-stdout.log" >&2 || tail -20 "$SCRATCH/serve-stdout.log" >&2 || true
   exit 1
 fi
 

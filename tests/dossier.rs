@@ -273,8 +273,7 @@ fn record_summaries_include_description_and_workbench_link_when_published() {
         "Workbench constraint",
         Some("Keep this record addressable."),
     );
-    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")
-        .expect("write published HTTP address");
+    state.publish_http_addr("127.0.0.1:7474".parse().expect("socket addr"));
     link_public(&state, &constraint, "constrains");
 
     let dossier = graph::get_entity_dossier(&state, &public_position())
@@ -298,8 +297,7 @@ fn record_summaries_include_description_and_workbench_link_when_published() {
 #[test]
 fn workbench_links_use_typed_uuid_routes_with_a_generic_fallback() {
     let state = state_with_substrate("typed-workbench-links");
-    std::fs::write(state.data_dir.join("http.addr"), "127.0.0.1:7474\n")
-        .expect("write published HTTP address");
+    state.publish_http_addr("127.0.0.1:7474".parse().expect("socket addr"));
     let cases = [
         ("ArchitecturalDecision", "adrs"),
         ("Requirement", "requirements"),

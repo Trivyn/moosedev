@@ -149,6 +149,11 @@ pub struct AppState {
     /// Memo of the last rendered ADR set, keyed on `project_write_generation`
     /// (see [`crate::adrs::generate_adr_set_cached`]).
     pub adr_memo: crate::adrs::AdrSetMemo,
+    /// The address the HTTP UI is currently serving, published by
+    /// `spawn_http_if_enabled` and withdrawn if that task ends. Workbench-URL
+    /// rendering reads this — never the crash-stale `http.addr` hint used by
+    /// identity-verifying cross-process consumers.
+    http_addr: RwLock<Option<std::net::SocketAddr>>,
 }
 
 impl AppState {
@@ -255,7 +260,35 @@ impl AppState {
             enrich_lock: std::sync::Mutex::new(()),
             proposal_write_lock: std::sync::Mutex::new(()),
             adr_memo: crate::adrs::AdrSetMemo::default(),
+            http_addr: RwLock::new(None),
         })
+    }
+
+    /// Record where the HTTP UI is currently serving.
+    pub fn publish_http_addr(&self, addr: std::net::SocketAddr) {
+        *self
+            .http_addr
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(addr);
+    }
+
+    /// Withdraw an address only if it still belongs to the retiring server.
+    pub fn clear_http_addr_if(&self, addr: std::net::SocketAddr) {
+        let mut published = self
+            .http_addr
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *published == Some(addr) {
+            *published = None;
+        }
+    }
+
+    /// The live HTTP UI address for THIS daemon run, if it is serving.
+    pub fn http_addr(&self) -> Option<std::net::SocketAddr> {
+        *self
+            .http_addr
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(crate) fn lock_proposal_writes(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {

@@ -1,0 +1,80 @@
+{
+  "name": "moosedev",
+  "displayName": "MOOSEDev Knowledge-LSP",
+  "description": "Hover dossiers, knowledge diagnostics, code lenses, and proposal code actions from the MOOSEDev project knowledge graph.",
+  "version": "0.1.0",
+  "publisher": "trivyn",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Trivyn/moosedev"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:.moosedev"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "MOOSEDev",
+      "properties": {
+        "moosedev.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the moosedev binary. Empty resolves `moosedev` from PATH."
+        },
+        "moosedev.diagnostics.constraints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Information-level diagnostics on entities with attached constraints/contracts."
+        },
+        "moosedev.diagnostics.staleRationale": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hint-level diagnostics when linked rationale predates the file's last commit."
+        },
+        "moosedev.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Knowledge badges above declarations (role/criticality, record counts, why-coverage hotspots)."
+        },
+        "moosedev.nudge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Once-per-session notice when proposals await ratification in the workbench inbox."
+        },
+        "moosedev.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace LSP traffic between VS Code and the MOOSEDev daemon."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --external:vscode --platform=node --format=cjs --outfile=dist/extension.js",
+    "watch": "npm run build -- --watch",
+    "check": "tsc --noEmit",
+    "test": "esbuild test/opencode-identity.test.ts --bundle --platform=node --format=cjs --outfile=dist/opencode-identity.test.cjs && node --test dist/opencode-identity.test.cjs",
+    "package": "npm run build && npx --yes @vscode/vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.91.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}

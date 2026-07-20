@@ -214,6 +214,14 @@ struct LspSession {
     state: Arc<AppState>,
     connection: Connection,
     encoding: SessionEncoding,
+    /// Client capability flags recorded at initialize; they gate push
+    /// suppression, refresh requests, and `window/showDocument`.
+    features: ClientFeatures,
+    /// Id counter for server→client requests. Their responses are dropped at
+    /// the read loop (AD fb61ce61 — no server→client request plumbing), so
+    /// every outbound request must be fire-and-forget; the id only satisfies
+    /// the protocol.
+    next_outbound_request_id: u64,
     repo_root: PathBuf,
     diagnostics: DiagnosticsConfig,
     code_lens_enabled: bool,
@@ -343,6 +351,15 @@ impl Drop for SessionRegistration {
     fn drop(&mut self) {
         self.sessions.lock_hooks().remove(&self.id);
     }
+}
+
+/// What a `workspace/executeCommand` invocation did, so the response and the
+/// user-facing follow-up message match the command's nature.
+enum CommandOutcome {
+    /// A proposal was filed into the ratification queue (the IRI is returned).
+    Proposed(String),
+    /// The workbench was opened (or its URL surfaced); nothing was filed.
+    Opened,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -542,6 +559,8 @@ fn run_session(
         state,
         connection,
         encoding: SessionEncoding::Utf16,
+        features: ClientFeatures::default(),
+        next_outbound_request_id: 0,
         repo_root,
         diagnostics: DiagnosticsConfig::default(),
         code_lens_enabled: true,
@@ -635,6 +654,7 @@ impl LspSession {
         let (id, params) = self.connection.initialize_start()?;
         let params: InitializeParams = serde_json::from_value(params)?;
         self.encoding = negotiate_session_encoding(&params.capabilities);
+        self.features = client_feature_flags(&params.capabilities);
         self.author = proposal_author(params.client_info.as_ref());
         let options = parse_init_options(params.initialization_options);
         self.diagnostics = options.diagnostics;
@@ -808,6 +828,12 @@ impl LspSession {
     }
 
     fn publish_current_diagnostics(&mut self, uri: Uri, rel_path: &str) -> anyhow::Result<()> {
+        // A pull-capable client owns its diagnostic lifecycle (it re-pulls on
+        // its own open/change/save triggers); pushing too would double-report,
+        // since clients keep push and pull in separate namespaces.
+        if self.features.pull_diagnostics {
+            return Ok(());
+        }
         // Generation bookkeeping lives in `refresh_if_state_changed`, which
         // runs before every dispatched message.
         let diagnostics = self.file_diagnostics(rel_path);
@@ -839,7 +865,9 @@ impl LspSession {
     /// "core entity" wording when a ratified judgment marks it core/critical
     /// (spec §5.5). Driven off the same substrate + records the dossier uses
     /// (`is_debt_surface` shared with the why-coverage metric), so the lens
-    /// and the metric never disagree.
+    /// and the metric never disagree. The `moosedev.openEntity` lens command
+    /// is server-handled (see `open_entity_command`): clients route it back
+    /// via `workspace/executeCommand`, no per-editor glue.
     fn code_lenses(&self, params: serde_json::Value) -> Option<Vec<CodeLens>> {
         if !self.code_lens_enabled {
             return Some(Vec::new());
@@ -912,24 +940,19 @@ impl LspSession {
             return;
         }
         let plural = if count == 1 { "" } else { "s" };
-        let message = format!(
+        self.show_info_message(&format!(
             "MOOSEDev: {count} pending proposal{plural} awaiting ratification in the workbench inbox"
-        );
-        let _ = self.connection.sender.send(
-            Notification::new(
-                "window/showMessage".to_string(),
-                ShowMessageParams {
-                    typ: MessageType::INFO,
-                    message,
-                },
-            )
-            .into(),
-        );
+        ));
     }
 
     /// The daemon is exiting: publish an empty set for every open doc so the
     /// editor does not keep this session's squiggles alive with no server
     /// behind them. Best-effort — the process is going down either way.
+    /// Unconditional even for pull clients: an empty publish is a harmless
+    /// no-op in a namespace they never populated, and their pull-side
+    /// diagnostics clear client-side when the relay exits on socket EOF.
+    /// Never send `workspace/diagnostic/refresh` here — it would trigger
+    /// re-pulls against a dying server.
     fn retract_published_diagnostics(&self) {
         for uri in self.open_docs.keys() {
             let Ok(uri) = Uri::from_str(uri) else {
@@ -978,14 +1001,25 @@ impl LspSession {
             }
         }
 
-        let open_docs: Vec<_> = self
-            .open_docs
-            .iter()
-            .map(|(uri, document)| (uri.clone(), document.rel_path.clone()))
-            .collect();
-        for (uri, rel_path) in open_docs {
-            let diagnostics = self.file_diagnostics(&rel_path);
-            self.publish(Uri::from_str(&uri)?, diagnostics)?;
+        if self.features.pull_diagnostics {
+            // Pull clients re-fetch on their own triggers; when they support
+            // it, ask for an immediate refresh so a substrate/graph change
+            // shows up without waiting for the next edit. Skipped for the
+            // initial generation pin — a refresh at session start is noise.
+            // Fire-and-forget: the response is dropped at the read loop.
+            if self.features.diagnostics_refresh && self.last_diagnostics_generation.is_some() {
+                self.send_server_request("workspace/diagnostic/refresh", serde_json::Value::Null)?;
+            }
+        } else {
+            let open_docs: Vec<_> = self
+                .open_docs
+                .iter()
+                .map(|(uri, document)| (uri.clone(), document.rel_path.clone()))
+                .collect();
+            for (uri, rel_path) in open_docs {
+                let diagnostics = self.file_diagnostics(&rel_path);
+                self.publish(Uri::from_str(&uri)?, diagnostics)?;
+            }
         }
         self.last_diagnostics_generation = Some(generation);
         Ok(())
@@ -1246,6 +1280,38 @@ impl LspSession {
         Ok(())
     }
 
+    /// Send a server→client request. Fire-and-forget by design: the run loop
+    /// drops every client response (AD fb61ce61 — the session has no
+    /// server→client response plumbing), so callers must never depend on the
+    /// reply. Ids live in the server→client JSON-RPC namespace, disjoint from
+    /// editor request ids.
+    fn send_server_request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.next_outbound_request_id += 1;
+        let id = lsp_server::RequestId::from(format!("moosedev-{}", self.next_outbound_request_id));
+        self.connection
+            .sender
+            .send(lsp_server::Request::new(id, method.to_string(), params).into())?;
+        Ok(())
+    }
+
+    /// Best-effort `window/showMessage` info notification.
+    fn show_info_message(&self, message: &str) {
+        let _ = self.connection.sender.send(
+            Notification::new(
+                "window/showMessage".to_string(),
+                ShowMessageParams {
+                    typ: MessageType::INFO,
+                    message: message.to_string(),
+                },
+            )
+            .into(),
+        );
+    }
+
     /// Pull diagnostics (LSP 3.17, `textDocument/diagnostic`): the same
     /// per-file diagnostics the push path publishes, computed on demand.
     /// Unresolvable URIs get an honest empty full report, never an error.
@@ -1451,7 +1517,7 @@ impl LspSession {
     /// `propose_judgment`; nothing here materializes an edge or accepts
     /// anything. Argument violations are `InvalidParams` errors, never silent.
     fn handle_execute_command(
-        &self,
+        &mut self,
         id: lsp_server::RequestId,
         params: serde_json::Value,
     ) -> anyhow::Result<()> {
@@ -1459,22 +1525,18 @@ impl LspSession {
             .map_err(|e| format!("malformed executeCommand params: {e}"))
             .and_then(|params| self.execute_command(&params));
         match outcome {
-            Ok(proposal_iri) => {
+            Ok(CommandOutcome::Proposed(proposal_iri)) => {
                 self.connection.sender.send(
                     Response::new_ok(id, serde_json::json!({ "proposalIri": proposal_iri })).into(),
                 )?;
-                let _ = self.connection.sender.send(
-                    Notification::new(
-                        "window/showMessage".to_string(),
-                        ShowMessageParams {
-                            typ: MessageType::INFO,
-                            message:
-                                "MOOSEDev: filed for ratification — review in the workbench inbox"
-                                    .to_string(),
-                        },
-                    )
-                    .into(),
+                self.show_info_message(
+                    "MOOSEDev: filed for ratification — review in the workbench inbox",
                 );
+            }
+            Ok(CommandOutcome::Opened) => {
+                self.connection
+                    .sender
+                    .send(Response::new_ok(id, serde_json::Value::Null).into())?;
             }
             Err(message) => {
                 self.connection
@@ -1485,16 +1547,78 @@ impl LspSession {
         Ok(())
     }
 
-    fn execute_command(&self, params: &ExecuteCommandParams) -> Result<String, String> {
-        let argument = params
-            .arguments
-            .first()
-            .ok_or_else(|| format!("{} requires arguments[0]", params.command))?;
+    fn execute_command(&mut self, params: &ExecuteCommandParams) -> Result<CommandOutcome, String> {
+        let require_argument = || {
+            params
+                .arguments
+                .first()
+                .ok_or_else(|| format!("{} requires arguments[0]", params.command))
+        };
         match params.command.as_str() {
-            "moosedev.proposeLink" => self.propose_link_command(argument),
-            "moosedev.proposeJudgment" => self.propose_judgment_command(argument),
+            "moosedev.proposeLink" => self
+                .propose_link_command(require_argument()?)
+                .map(CommandOutcome::Proposed),
+            "moosedev.proposeJudgment" => self
+                .propose_judgment_command(require_argument()?)
+                .map(CommandOutcome::Proposed),
+            "moosedev.openEntity" => self.open_entity_command(params.arguments.first()),
             other => Err(format!("unknown command: {other}")),
         }
+    }
+
+    /// `moosedev.openEntity`: the code-lens command, server-handled so lenses
+    /// are clickable in every client with zero per-editor glue. Resolves the
+    /// entity's workbench URL and asks the client to open it externally via
+    /// `window/showDocument`; clients without that capability get the URL as
+    /// an info message instead.
+    fn open_entity_command(
+        &mut self,
+        argument: Option<&serde_json::Value>,
+    ) -> Result<CommandOutcome, String> {
+        // Lenses over unminted debt-surface entities carry no arguments; a
+        // deliberate click there deserves a reply, not an error popup.
+        let Some(argument) = argument else {
+            self.show_info_message("MOOSEDev: no knowledge entity minted for this declaration yet");
+            return Ok(CommandOutcome::Opened);
+        };
+        let entity_iri = argument
+            .as_str()
+            .ok_or_else(|| "openEntity arguments[0] must be an entity IRI string".to_string())?;
+        oxigraph::model::NamedNode::new(entity_iri)
+            .map_err(|_| format!("openEntity argument is not a valid IRI: {entity_iri}"))?;
+        // Only minted entities may be opened — this is also URL hygiene, since
+        // the IRI's uuid segment lands in a browser address.
+        let terms = CodeTerms::resolve(&self.state).map_err(|e| e.to_string())?;
+        let minted = entities_by_symbol(&self.state, &terms)
+            .map_err(|e| e.to_string())?
+            .into_values()
+            .any(|iri| iri == entity_iri);
+        if !minted {
+            return Err(format!(
+                "openEntity argument is not a minted code entity: {entity_iri}"
+            ));
+        }
+        let Some(url) = crate::graph::workbench_entity_url(&self.state, entity_iri) else {
+            self.show_info_message(
+                "MOOSEDev: the workbench is not serving — start the daemon to open entities",
+            );
+            return Ok(CommandOutcome::Opened);
+        };
+        if self.features.show_document {
+            let params = lsp_types::ShowDocumentParams {
+                uri: Uri::from_str(&url)
+                    .map_err(|_| format!("workbench URL is not a valid URI: {url}"))?,
+                external: Some(true),
+                take_focus: None,
+                selection: None,
+            };
+            let params = serde_json::to_value(params).map_err(|e| e.to_string())?;
+            self.send_server_request("window/showDocument", params)
+                .map_err(|e| e.to_string())?;
+        } else {
+            self.show_info_message(&format!("MOOSEDev: open {url} in your browser"));
+        }
+        Ok(CommandOutcome::Opened)
     }
 
     fn propose_link_command(&self, argument: &serde_json::Value) -> Result<String, String> {
@@ -1978,6 +2102,7 @@ fn server_capabilities(encoding: SessionEncoding) -> ServerCapabilities {
             commands: vec![
                 "moosedev.proposeLink".to_string(),
                 "moosedev.proposeJudgment".to_string(),
+                "moosedev.openEntity".to_string(),
             ],
             work_done_progress_options: Default::default(),
         }),
@@ -1988,6 +2113,41 @@ fn server_capabilities(encoding: SessionEncoding) -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
         ..Default::default()
+    }
+}
+
+/// Client capability flags the session gates behavior on, recorded once at
+/// initialize (the client capability set is immutable for the session).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ClientFeatures {
+    /// `textDocument.diagnostic`: the client pulls diagnostics itself, so the
+    /// push path must stay silent — clients render push and pull in separate
+    /// namespaces (Neovim 0.10+), and pushing too double-reports.
+    pull_diagnostics: bool,
+    /// `workspace.diagnostic.refreshSupport`: the client accepts
+    /// `workspace/diagnostic/refresh` when served state changes.
+    diagnostics_refresh: bool,
+    /// `window.showDocument`: the client can open the workbench URL for
+    /// `moosedev.openEntity`.
+    show_document: bool,
+}
+
+fn client_feature_flags(capabilities: &ClientCapabilities) -> ClientFeatures {
+    ClientFeatures {
+        pull_diagnostics: capabilities
+            .text_document
+            .as_ref()
+            .is_some_and(|text_document| text_document.diagnostic.is_some()),
+        diagnostics_refresh: capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.diagnostic.as_ref())
+            .is_some_and(|diagnostic| diagnostic.refresh_support == Some(true)),
+        show_document: capabilities
+            .window
+            .as_ref()
+            .and_then(|window| window.show_document.as_ref())
+            .is_some_and(|show_document| show_document.support),
     }
 }
 
@@ -2088,6 +2248,49 @@ mod tests {
         assert_eq!(
             negotiate_session_encoding(&ClientCapabilities::default()),
             SessionEncoding::Utf16
+        );
+    }
+
+    #[test]
+    fn feature_flags_default_off() {
+        assert_eq!(
+            client_feature_flags(&ClientCapabilities::default()),
+            ClientFeatures::default()
+        );
+    }
+
+    #[test]
+    fn feature_flags_reflect_client_capabilities() {
+        let capabilities: ClientCapabilities = serde_json::from_value(serde_json::json!({
+            "textDocument": { "diagnostic": {} },
+            "workspace": { "diagnostic": { "refreshSupport": true } },
+            "window": { "showDocument": { "support": true } },
+        }))
+        .expect("valid client capabilities");
+
+        assert_eq!(
+            client_feature_flags(&capabilities),
+            ClientFeatures {
+                pull_diagnostics: true,
+                diagnostics_refresh: true,
+                show_document: true,
+            }
+        );
+    }
+
+    #[test]
+    fn feature_flags_require_explicit_opt_ins() {
+        // Present-but-empty parents and refreshSupport:false stay off.
+        let capabilities: ClientCapabilities = serde_json::from_value(serde_json::json!({
+            "textDocument": {},
+            "workspace": { "diagnostic": { "refreshSupport": false } },
+            "window": { "showDocument": { "support": false } },
+        }))
+        .expect("valid client capabilities");
+
+        assert_eq!(
+            client_feature_flags(&capabilities),
+            ClientFeatures::default()
         );
     }
 
