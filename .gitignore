@@ -72,3 +72,6 @@ bench/seed_recall/
 
 # --- Python ------
 __pycache__/
+
+
+.ontocode/
