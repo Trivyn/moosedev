@@ -13,7 +13,7 @@ moose = { path = "../moose", features = ["candle-cpu", "arctic-s"] }
 
 # Same oxigraph (Trivyn fork, via [patch] below) MOOSE exposes across its public API.
 # `Store` crosses the moose API boundary, so moosedev must resolve the identical crate.
-oxigraph = { version = "0.5.6", features = ["rdf-12"] }
+oxigraph = { version = "0.5.9", features = ["rdf-12"] }
 
 # GROWL — Trivyn's OWL 2 RL reasoner (its own term model, no oxigraph dep → no [patch]
 # conflict). App-layer enrichment: materializes inferred A-box edges (inverses,
