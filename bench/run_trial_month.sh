@@ -55,7 +55,10 @@ ensure_serve() {  # $1=data_dir; starts a daemon owned by this harness and sets 
   STARTED_BINARY_SHA256=$($PY -c \
     'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
     "$BIN") || return 1
-  MOOSEDEV_DATA_DIR="$dd" MOOSEDEV_ONTOLOGY_DIR="$ONT" \
+  # Ephemeral HTTP port: the repo .env pins MOOSEDEV_HTTP_ADDR=127.0.0.1:7474 for the dogfood
+  # workbench, and dotenv only fills vars that are unset — set it here so the harness-owned serve
+  # never collides with a live daemon and still publishes http.addr for the identity check.
+  MOOSEDEV_DATA_DIR="$dd" MOOSEDEV_ONTOLOGY_DIR="$ONT" MOOSEDEV_HTTP_ADDR="127.0.0.1:0" \
     MOOSEDEV_LLM_BASE_URL="$LURL" MOOSEDEV_LLM_API_KEY="$LKEY" MOOSEDEV_LLM_MODEL="$LMODEL" \
     "$BIN" --serve >"/tmp/trial-serve-$(basename "$dd").log" 2>&1 &
   STARTED_PID=$!
