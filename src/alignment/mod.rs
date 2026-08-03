@@ -31,6 +31,16 @@ pub async fn align_concept(
         sampled_values: Vec::new(),
     };
 
+    // Ban the vacuous root: every knowledge class descends from InformationRecord,
+    // so committing there adds no alignment information. MOOSE deliberately ships
+    // no ontology-specific defaults ("calibration is the caller's responsibility"),
+    // and this is the one exclusion that can never be a correct answer. Resolved by
+    // local name so no namespace is baked into code (Constraint 19bb4d8a).
+    let config = AlignmentConfig {
+        banned_parents: vec![state.resolve_class("InformationRecord")?],
+        ..AlignmentConfig::default()
+    };
+
     // L1 + L2 only (no LLM); an empty CategoryMappings falls back cleanly.
     Ok(suggest_parent(
         &leaf,
@@ -38,7 +48,7 @@ pub async fn align_concept(
         vec_store,
         None,
         &CategoryMappings::new(),
-        &AlignmentConfig::default(),
+        &config,
     )
     .await)
 }
