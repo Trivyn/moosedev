@@ -344,7 +344,10 @@ fn autospawn_disabled() -> bool {
 /// Start a detached backend using the exact socket path the proxy resolved.
 /// Stdio is isolated from the proxy's JSON-RPC channel and appended to the
 /// per-data-dir daemon log.
-pub fn spawn_detached_backend(socket: &Path, data_dir: &Path) -> anyhow::Result<()> {
+pub fn spawn_detached_backend(
+    socket: &Path,
+    data_dir: &Path,
+) -> anyhow::Result<std::process::Child> {
     let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe: {e}"))?;
     std::fs::create_dir_all(data_dir)
         .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
@@ -374,8 +377,10 @@ pub fn spawn_detached_backend(socket: &Path, data_dir: &Path) -> anyhow::Result<
                 log_path.display()
             )
         })?;
-    drop(child);
-    Ok(())
+    // The child is already detached (`process_group(0)`, stdio redirected to the
+    // log), so returning the handle changes nothing about its lifetime — it only
+    // lets the caller ask whether it is still alive while waiting for the socket.
+    Ok(child)
 }
 
 /// Connect to a backend, auto-spawning a detached one when the rendezvous socket
@@ -395,6 +400,15 @@ pub async fn connect_or_spawn_lsp(
     connect_or_spawn_inner(lsp_socket, mcp_socket, data_dir, "Knowledge-LSP").await
 }
 
+/// Backstop for an auto-spawned backend that never begins serving.
+///
+/// NOT a readiness estimate — readiness is the socket appearing, and a dead
+/// child is detected directly. This only bounds the pathological case of a
+/// process that is alive but wedged, so it is set far above any plausible cold
+/// start (embedding-model load has been observed at 30-35s on a loaded machine,
+/// which the previous 30s budget failed at almost exactly).
+const AUTOSPAWN_BACKSTOP: Duration = Duration::from_secs(300);
+
 async fn connect_or_spawn_inner(
     connect_socket: &Path,
     spawn_socket: &Path,
@@ -403,6 +417,7 @@ async fn connect_or_spawn_inner(
 ) -> anyhow::Result<UnixStream> {
     // LSP connects to one socket but auto-spawns the daemon through the MCP
     // socket, because `--serve` owns both listeners.
+    let mut child;
     match UnixStream::connect(connect_socket).await {
         Ok(stream) => return Ok(stream),
         Err(e) if should_spawn(e.kind()) => {
@@ -417,18 +432,42 @@ async fn connect_or_spawn_inner(
                 "MOOSEDev proxy: no {surface} listening on {}; auto-spawning detached backend",
                 connect_socket.display()
             );
-            spawn_detached_backend(spawn_socket, data_dir)?;
+            child = spawn_detached_backend(spawn_socket, data_dir)?;
         }
         Err(e) => return Err(anyhow::anyhow!("connect {}: {e}", connect_socket.display())),
     }
 
     let log_path = serve_log_path_for(data_dir);
-    let deadline = tokio::time::timeout(Duration::from_secs(30), async {
+    let deadline = tokio::time::timeout(AUTOSPAWN_BACKSTOP, async {
         loop {
             match UnixStream::connect(connect_socket).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) if should_spawn(e.kind()) => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // The BACKEND, not the clock, decides this. A cold start
+                    // loads the embedding model before it binds, so how long
+                    // that takes is a property of the machine — a fixed budget
+                    // set near the typical cost fails whenever the machine is
+                    // slower than typical, and reports "failed to connect" for a
+                    // backend that comes up correctly moments later.
+                    //
+                    // So: wait as long as the child is alive, and give up
+                    // IMMEDIATELY when it is not — which is the case a timeout
+                    // was really guarding, and which it detected only by
+                    // outlasting.
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            return Err(anyhow::anyhow!(
+                                "auto-spawned MOOSEDev {surface} exited before it began serving \
+                                 on {} ({status}); see log: {}",
+                                connect_socket.display(),
+                                log_path.display()
+                            ))
+                        }
+                        // Still starting, or its status is unreadable — keep waiting.
+                        Ok(None) | Err(_) => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
                 }
                 Err(e) => return Err(anyhow::anyhow!("connect {}: {e}", connect_socket.display())),
             }
@@ -439,8 +478,10 @@ async fn connect_or_spawn_inner(
     match deadline {
         Ok(result) => result,
         Err(_) => anyhow::bail!(
-            "timed out waiting for auto-spawned MOOSEDev {surface} on {} (see log: {})",
+            "MOOSEDev {surface} on {} was still not serving after {}s, and its process is still \
+             running — it is wedged rather than slow. See log: {}",
             connect_socket.display(),
+            AUTOSPAWN_BACKSTOP.as_secs(),
             log_path.display()
         ),
     }

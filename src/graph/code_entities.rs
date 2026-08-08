@@ -102,10 +102,28 @@ pub struct EnsuredEntity {
 /// Shown when a store has an indexed substrate but nothing minted from it.
 /// Shared by the daemon log, the MCP dossier, and LSP hover so the three
 /// surfaces cannot drift apart on the same diagnosis.
-pub const UNMINTED_STORE_HINT: &str = "The code substrate is indexed, but this store has no \
-    CodeEntity records yet — so dossiers, hover, and code lenses are empty everywhere, not just \
-    here. `moosedev index` runs automatically (git hooks, editor saves); `mint` does not. Stop the \
-    backend and run `moosedev mint --apply` to create them.";
+pub const UNMINTED_STORE_HINT: &str = "The code substrate is indexed and contains definitions \
+    batch minting would cover, but this store has no CodeEntity records yet — so dossiers, hover, \
+    and code lenses are empty everywhere, not just here. `moosedev index` runs automatically (git \
+    hooks, editor saves); `mint` does not. Stop the backend and run `moosedev mint --apply` to \
+    create them.";
+
+/// True when this store looks like one where `mint` has never run: the substrate
+/// offers definitions batch minting would cover, and the graph has none of them.
+///
+/// BOTH halves matter. Zero entities alone is also the honest state of a project
+/// whose entire surface is private or test-only, where `mint --apply` is a no-op
+/// and lazy `link_code` is the real path — telling that project to run mint is
+/// advice that can never work.
+pub fn looks_unminted(state: &AppState, terms: &CodeTerms) -> anyhow::Result<bool> {
+    let Some(substrate) = state.substrate() else {
+        return Ok(false);
+    };
+    if has_any_code_entities(state, terms)? {
+        return Ok(false);
+    }
+    Ok(has_mintable_definitions(&substrate.definitions()))
+}
 
 /// True when the project graph holds at least one minted CodeEntity.
 ///
@@ -569,6 +587,21 @@ fn has_realizes(state: &AppState, terms: &CodeTerms, iri: &str) -> anyhow::Resul
         .is_some())
 }
 
+/// True when the substrate holds at least one definition batch minting would
+/// create an entity for.
+///
+/// "Zero entities" alone does NOT mean mint never ran: the scope rule
+/// deliberately skips private items and test paths (AD cb68b4de), so a project
+/// whose whole surface is private or test-only mints to zero legitimately. Told
+/// only the count, the diagnostic sent those projects to a `mint --apply` that
+/// can never change anything, instead of to the lazy `link_code` path that is
+/// actually how records attach there.
+pub fn has_mintable_definitions(definitions: &[DefinitionEntry]) -> bool {
+    definitions
+        .iter()
+        .any(|entry| (entry.is_module || entry.is_public) && !is_test_path(&entry.file))
+}
+
 /// Apply the batch minting scope rule and count the two skip classes.
 fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, usize, usize) {
     let mut kept = Vec::new();
@@ -642,6 +675,44 @@ mod tests {
             is_module,
             is_public,
         }
+    }
+
+    /// Zero entities is NOT the same as "mint never ran": a project whose whole
+    /// surface is private or test-only mints to zero legitimately, and telling
+    /// it to run `mint --apply` is advice that can never take effect.
+    #[test]
+    fn mintable_definitions_distinguish_never_minted_from_nothing_to_mint() {
+        let eligible = [
+            entry(
+                "rust-analyzer cargo x 1.0 graph/",
+                "src/graph.rs",
+                true,
+                false,
+            ),
+            entry("rust-analyzer cargo x 1.0 f().", "src/lib.rs", false, false),
+        ];
+        assert!(has_mintable_definitions(&eligible), "a module is mintable");
+
+        let nothing_to_mint = [
+            // private, non-module
+            entry(
+                "rust-analyzer cargo x 1.0 helper().",
+                "src/lib.rs",
+                false,
+                false,
+            ),
+            // public but test-only
+            entry("rust-analyzer cargo x 1.0 t().", "tests/it.rs", false, true),
+        ];
+        assert!(
+            !has_mintable_definitions(&nothing_to_mint),
+            "private + test-only definitions mint to zero legitimately"
+        );
+
+        assert!(
+            !has_mintable_definitions(&[]),
+            "no substrate, nothing to mint"
+        );
     }
 
     #[test]

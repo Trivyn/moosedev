@@ -10,18 +10,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Files whose presence marks a directory as a project root.
+/// Language manifests that mark a project root when there is no repository.
 ///
-/// `.git` covers the normal case — and is a *file* in worktrees and submodules,
-/// so this tests existence rather than file-ness; the manifests cover a checkout
-/// without git, across every language the substrate producers support.
-///
-/// Deliberately NOT shared with those producers' language detection, which
-/// answers "can I run an indexer over this directory" — TypeScript, for one,
-/// demands `tsconfig.json` *and* `package.json` first. That is a stricter and
-/// unrelated question from "where does this project keep its configuration".
-pub const PROJECT_ROOT_MARKERS: &[&str] = &[
-    ".git",
+/// A FALLBACK only — see [`project_root_from`]. Deliberately NOT shared with the
+/// substrate producers' language detection, which answers "can I run an indexer
+/// over this directory" — TypeScript, for one, demands `tsconfig.json` *and*
+/// `package.json` first. That is a stricter and unrelated question from "where
+/// does this project keep its configuration".
+pub const PROJECT_MANIFESTS: &[&str] = &[
     "Cargo.toml",
     "package.json",
     "pyproject.toml",
@@ -30,17 +26,40 @@ pub const PROJECT_ROOT_MARKERS: &[&str] = &[
     "requirements.txt",
 ];
 
-/// True when `dir` carries any [`PROJECT_ROOT_MARKERS`] entry.
-pub fn is_project_root(dir: &Path) -> bool {
-    PROJECT_ROOT_MARKERS
+/// True when `dir` is a git root. `.git` is a *file* in worktrees and
+/// submodules, so this tests existence rather than file-ness.
+pub fn is_git_root(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
+/// True when `dir` carries a language manifest.
+pub fn has_project_manifest(dir: &Path) -> bool {
+    PROJECT_MANIFESTS
         .iter()
         .any(|marker| dir.join(marker).exists())
 }
 
-/// The nearest ancestor of `start` (including itself) that looks like a project
-/// root, if any.
+/// True when `dir` could be a project root by either test.
+pub fn is_project_root(dir: &Path) -> bool {
+    is_git_root(dir) || has_project_manifest(dir)
+}
+
+/// The nearest ancestor of `start` (including itself) that is a project root.
+///
+/// THE REPOSITORY WINS. A repository is one project even when it contains many
+/// package manifests, so the git root is searched first and manifests are only
+/// consulted when there is no `.git` anywhere above — a tarball, a vendored
+/// subtree. Taking the nearest marker of either kind instead made every nested
+/// manifest its own project: in this repo alone `ui/`, `bench/`,
+/// `clients/vscode/`, and `clients/zed/` each became a separate root, so a
+/// command run from one of them skipped the repository's `.env`, opened a store
+/// under that subdirectory, and indexed only that subtree — the split store this
+/// whole notion of a project root exists to prevent.
 pub fn project_root_from(start: &Path) -> Option<&Path> {
-    start.ancestors().find(|dir| is_project_root(dir))
+    start
+        .ancestors()
+        .find(|dir| is_git_root(dir))
+        .or_else(|| start.ancestors().find(|dir| has_project_manifest(dir)))
 }
 
 /// The project this invocation belongs to: the working directory's nearest
@@ -70,12 +89,48 @@ mod tests {
 
     #[test]
     fn every_supported_language_marks_a_root() {
-        for marker in PROJECT_ROOT_MARKERS {
+        for marker in PROJECT_MANIFESTS.iter().chain([".git"].iter()) {
             let root = scratch("markers");
             std::fs::write(root.join(marker), "").expect("write marker");
             assert!(is_project_root(&root), "{marker} should mark a root");
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    /// A repository is ONE project. Nested package manifests — `ui/package.json`,
+    /// `bench/requirements.txt`, `clients/*` — must not each become their own
+    /// root, or a command run from one skips the repository's `.env` and opens a
+    /// store under that subdirectory.
+    #[test]
+    fn a_nested_manifest_never_overrides_the_enclosing_repository() {
+        let root = scratch("nested-manifest");
+        std::fs::write(root.join(".git"), "gitdir: elsewhere").expect("git marker");
+        let ui = root.join("ui");
+        std::fs::create_dir_all(ui.join("src")).expect("create ui/src");
+        std::fs::write(ui.join("package.json"), "{}").expect("nested manifest");
+
+        assert_eq!(project_root_from(&ui), Some(root.as_path()));
+        assert_eq!(project_root_from(&ui.join("src")), Some(root.as_path()));
+        assert_eq!(project_root_from(&root), Some(root.as_path()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Outside a repository the manifests are still what marks a project, so a
+    /// tarball or vendored subtree is not left rootless.
+    #[test]
+    fn manifests_still_apply_when_there_is_no_repository() {
+        let root = scratch("no-git");
+        let nested = root.join("pkg");
+        std::fs::create_dir_all(nested.join("src")).expect("create pkg/src");
+        std::fs::write(nested.join("Cargo.toml"), "").expect("manifest");
+
+        assert_eq!(
+            project_root_from(&nested.join("src")),
+            Some(nested.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

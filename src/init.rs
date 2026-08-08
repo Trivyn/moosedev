@@ -1045,7 +1045,11 @@ fn write_gitignore(
         )),
     }
     if ignore_env {
-        lines.push(".env".to_string());
+        // ANCHORED: `init` authored the root `.env` and only that one. A bare
+        // `.env` pattern is recursive, so it would also hide a nested package's
+        // own `.env` — files this command never touched and has no business
+        // ignoring. Matches the anchoring already used for the data-dir rules.
+        lines.push("/.env".to_string());
     }
     if lines.is_empty() {
         return Ok(());
@@ -1438,11 +1442,17 @@ mod tests {
         assert!(env.contains("MOOSEDEV_DATA_DIR=custom-store"), "{env}");
         assert_eq!(outcome_for(&report, ".env"), Some(&Outcome::Created));
 
-        // A `.env` we created can hold LLM API keys, so we ignore it too.
+        // A `.env` we created can hold LLM API keys, so we ignore it too —
+        // ANCHORED, since a bare `.env` would also hide nested packages' own
+        // files, which this command never authored.
         let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
         assert!(
-            gitignore.lines().any(|line| line.trim() == ".env"),
+            gitignore.lines().any(|line| line.trim() == "/.env"),
             "{gitignore}"
+        );
+        assert!(
+            !gitignore.lines().any(|line| line.trim() == ".env"),
+            "the rule must be anchored, not recursive: {gitignore}"
         );
 
         let _ = std::fs::remove_dir_all(&target);

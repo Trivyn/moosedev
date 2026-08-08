@@ -38,8 +38,8 @@ use crate::code::substrate::{
     DefinitionEntry, Position as SubstratePosition, SourceRange, Substrate,
 };
 use crate::graph::{
-    direct_records_for_entity, entities_by_symbol, get_entity_dossier, has_any_code_entities,
-    is_debt_surface, pending_count, render_markdown, AppState, CodeTerms, DossierTarget,
+    direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
+    looks_unminted, pending_count, render_markdown, AppState, CodeTerms, DossierTarget,
     ProposalKind, RecordSummary, CRITICALITY_LOCALS, ROLE_LOCALS, UNMINTED_STORE_HINT,
 };
 
@@ -228,6 +228,13 @@ struct LspSession {
     nudge_enabled: bool,
     /// Whether the pending-ratifications nudge has fired this session (once only).
     nudged: bool,
+    /// Whether the unminted-store setup notice has been shown this session.
+    ///
+    /// Once only, for the same reason as `nudged`. The condition it reports is
+    /// store-wide, so it is true for EVERY symbol at once — surfacing it per
+    /// hover replaced the editor's normal hover on every identifier in the file
+    /// until minting ran, which is noise, not a diagnosis.
+    unminted_notice_shown: bool,
     /// Author identity for editor-originated proposals, derived from the
     /// client's `clientInfo.name` at initialize (e.g. `editor:neovim`).
     author: String,
@@ -562,6 +569,7 @@ fn run_session(
         code_lens_enabled: true,
         nudge_enabled: true,
         nudged: false,
+        unminted_notice_shown: false,
         author: "editor".to_string(),
         open_docs: HashMap::new(),
         substrate: None,
@@ -1736,7 +1744,7 @@ impl LspSession {
     }
 
     fn handle_hover(
-        &self,
+        &mut self,
         id: lsp_server::RequestId,
         params: serde_json::Value,
     ) -> anyhow::Result<()> {
@@ -1748,7 +1756,7 @@ impl LspSession {
         Ok(())
     }
 
-    fn hover_response(&self, params: serde_json::Value) -> Option<Hover> {
+    fn hover_response(&mut self, params: serde_json::Value) -> Option<Hover> {
         let params: HoverParams = serde_json::from_value(params).ok()?;
         let rel_path = repo_relative_path(
             &self.repo_root,
@@ -1794,12 +1802,16 @@ impl LspSession {
     /// strictly to the store-wide case — surfacing this per unminted symbol
     /// would put a popup on every identifier in the file and break the silence
     /// rule (AD 8f20452a).
-    fn unminted_store_hover(&self) -> Option<Hover> {
-        let minted = CodeTerms::resolve(&self.state)
-            .and_then(|terms| has_any_code_entities(&self.state, &terms));
-        if !matches!(minted, Ok(false)) {
+    fn unminted_store_hover(&mut self) -> Option<Hover> {
+        if self.unminted_notice_shown {
             return None;
         }
+        let unminted =
+            CodeTerms::resolve(&self.state).and_then(|terms| looks_unminted(&self.state, &terms));
+        if !matches!(unminted, Ok(true)) {
+            return None;
+        }
+        self.unminted_notice_shown = true;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,

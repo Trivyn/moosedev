@@ -203,11 +203,15 @@ fn unminted_store_is_distinguishable_from_an_unlinked_symbol() {
     // Indexed, never minted — exactly the state both trial corpora were in.
     assert!(!state.substrate().unwrap().definitions().is_empty());
     assert!(!graph::has_any_code_entities(&state, &terms).unwrap());
+    // …and it is specifically the "mint never ran" shape: the substrate offers
+    // definitions batch minting would cover.
+    assert!(graph::looks_unminted(&state, &terms).unwrap());
 
     // Minting flips the probe; the linked-knowledge silence is unaffected,
     // so the two conditions stay independently detectable.
     let entity = pre_mint_public(&state);
     assert!(graph::has_any_code_entities(&state, &terms).unwrap());
+    assert!(!graph::looks_unminted(&state, &terms).unwrap());
     assert!(
         graph::get_entity_dossier(&state, &DossierTarget::Iri(entity))
             .unwrap()

@@ -1465,13 +1465,11 @@ impl MooseDevServer {
                 // project must be told to run `index`, and an uncovered file
                 // must get its coverage report, rather than being sent to
                 // `mint` — the discrimination AD a8f95059 exists to provide.
-                if self.state.substrate().is_some()
-                    && matches!(
-                        graph::CodeTerms::resolve(&self.state)
-                            .and_then(|terms| graph::has_any_code_entities(&self.state, &terms)),
-                        Ok(false)
-                    )
-                {
+                if matches!(
+                    graph::CodeTerms::resolve(&self.state)
+                        .and_then(|terms| graph::looks_unminted(&self.state, &terms)),
+                    Ok(true)
+                ) {
                     return Ok(tool_ok(graph::UNMINTED_STORE_HINT));
                 }
                 Ok(tool_ok(

@@ -913,14 +913,14 @@ fn warn_if_unminted(state: &graph::AppState) {
     if definitions == 0 {
         return;
     }
-    let minted = graph::CodeTerms::resolve(state)
-        .and_then(|terms| graph::has_any_code_entities(state, &terms));
-    match minted {
-        Ok(false) => tracing::warn!(
+    let unminted =
+        graph::CodeTerms::resolve(state).and_then(|terms| graph::looks_unminted(state, &terms));
+    match unminted {
+        Ok(true) => tracing::warn!(
             "{definitions} substrate definitions indexed, 0 CodeEntity records. {}",
             graph::UNMINTED_STORE_HINT
         ),
-        Ok(true) => {}
+        Ok(false) => {}
         // Never fatal: this is a diagnostic, and a store whose code vocabulary
         // has not been loaded yet is not a startup failure.
         Err(e) => tracing::debug!("skipped the CodeEntity coverage check: {e}"),
@@ -1221,7 +1221,8 @@ fn report_planned_entity(
 fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
     let repo_root = project_root();
     let substrate = Substrate::load(data_dir, &repo_root)?;
-    let relative_path = normalize_resolve_path(&repo_root, &args.file);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
+    let relative_path = resolve_input_path(&repo_root, &cwd, &args.file);
     let pos = Position {
         line: args.line - 1,
         col: args.col - 1,
@@ -1271,6 +1272,38 @@ fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
     println!("indexed commit: {}", substrate.meta().indexed_commit);
     println!("stale:          {}", resolution.stale);
     Ok(())
+}
+
+/// Interpret the CLI's `FILE` argument as a path into the substrate.
+///
+/// A relative argument is relative to the USER'S working directory, which is no
+/// longer the same thing as the project root the substrate is indexed against.
+/// Passing it through unchanged meant `moosedev resolve main.rs 10:5` from
+/// `repo/src` searched an index that only knows `src/main.rs` — something that
+/// worked before the root and the cwd were allowed to differ.
+fn resolve_input_path(repo_root: &Path, cwd: &Path, file: &Path) -> String {
+    let absolute = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        cwd.join(file)
+    };
+    normalize_resolve_path(repo_root, &lexically_normalized(&absolute))
+}
+
+/// Resolve `.` and `..` textually, without touching the filesystem — the target
+/// need not exist for a resolve to be a well-formed question.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn normalize_resolve_path(repo_root: &Path, file: &Path) -> String {
@@ -1995,6 +2028,43 @@ mod tests {
             std::env::remove_var(key);
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A relative FILE argument is relative to the USER'S cwd, which is no longer
+    /// the project root the substrate is indexed against. `moosedev resolve
+    /// main.rs 10:5` from `repo/src` must still mean `src/main.rs`.
+    #[test]
+    fn resolve_input_rebases_cwd_relative_paths_onto_the_project_root() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/src");
+
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("main.rs")),
+            "src/main.rs"
+        );
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("./main.rs")),
+            "src/main.rs"
+        );
+        // `..` is resolved lexically, without requiring the file to exist.
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("../README.md")),
+            "README.md"
+        );
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("../src/graph/mod.rs")),
+            "src/graph/mod.rs"
+        );
+        // An absolute argument is already unambiguous.
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("/repo/src/lib.rs")),
+            "src/lib.rs"
+        );
+        // Run from the root itself, a relative path is unchanged.
+        assert_eq!(
+            resolve_input_path(root, root, Path::new("src/main.rs")),
+            "src/main.rs"
+        );
     }
 
     #[test]
