@@ -99,6 +99,37 @@ pub struct EnsuredEntity {
     pub created: bool,
 }
 
+/// Shown when a store has an indexed substrate but nothing minted from it.
+/// Shared by the daemon log, the MCP dossier, and LSP hover so the three
+/// surfaces cannot drift apart on the same diagnosis.
+pub const UNMINTED_STORE_HINT: &str = "The code substrate is indexed, but this store has no \
+    CodeEntity records yet — so dossiers, hover, and code lenses are empty everywhere, not just \
+    here. `moosedev index` runs automatically (git hooks, editor saves); `mint` does not. Stop the \
+    backend and run `moosedev mint --apply` to create them.";
+
+/// True when the project graph holds at least one minted CodeEntity.
+///
+/// A store with a healthy substrate but zero entities means `mint` has never run
+/// — every dossier, hover, and code lens is then silently empty with no hint why
+/// (Requirement a0581252). Deliberately an existence probe rather than
+/// [`entities_by_symbol`], which materializes every entity into a map and is
+/// already on the per-hover path.
+pub fn has_any_code_entities(state: &AppState, terms: &CodeTerms) -> anyhow::Result<bool> {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let predicate = NamedNodeRef::new(&terms.has_substrate_symbol)?;
+    Ok(state
+        .store
+        .quads_for_pattern(
+            None,
+            Some(predicate),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .next()
+        .transpose()?
+        .is_some())
+}
+
 /// Scan CodeEntity `hasSubstrateSymbol` literals in the project graph and return
 /// normalized SCIP symbol -> subject IRI.
 pub fn entities_by_symbol(

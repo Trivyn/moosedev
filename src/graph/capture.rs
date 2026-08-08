@@ -103,7 +103,11 @@ pub fn record_instance_with_relations(
         object_props: &object_assertions,
     };
 
-    assert_instance(&state.store, &state.entity_index, &assertion, None)
+    // Trailing `None` opts out of MOOSE's living-ontology governance context,
+    // which keeps this write behaving exactly as before. Whether MOOSEDev should
+    // participate is an integration decision for when that engine work settles,
+    // not something to infer from the signature.
+    assert_instance(&state.store, &state.entity_index, &assertion, None, None)
         .map_err(|e| anyhow::anyhow!("assert_instance: {e:?}"))?;
     Ok(subject)
 }

@@ -79,7 +79,9 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
     let llm_base_url = llm_cfg.base_url.clone();
     let llm_configured = llm_cfg.configured;
     let mut state = AppState::bootstrap_with_llm_config(data_dir, ontology_dir, llm_cfg)?;
-    state.load_substrate(&std::env::current_dir()?);
+    // The project root, not the cwd: a daemon started from a subdirectory must
+    // still load the substrate covering the whole project it serves.
+    state.load_substrate(&crate::project::project_root());
     if llm_configured {
         tracing::info!(
             "MOOSEDev: LLM assistance enabled at {llm_base_url} / level {:?}",

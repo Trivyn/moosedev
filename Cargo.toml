@@ -1,6 +1,6 @@
 [package]
 name = "moosedev"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.89"
 description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
@@ -68,6 +68,11 @@ sha2 = "0.10"
 # (MOOSE exposes no public vector-write path). Same sqlite crate + version MOOSE
 # uses, so it resolves to a single build.
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# Real TOML parsing for `.codex/config.toml`: a substring scan cannot see
+# `[mcp_servers."moosedev"]` or a nested `[mcp_servers.moosedev.env]`, and missing
+# either makes `init` append a DUPLICATE table — invalid TOML, which would cost
+# Codex every MCP server it has, not just this one.
+toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 # Drive the server as an MCP *client* in integration tests (real handshake +

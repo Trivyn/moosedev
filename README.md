@@ -74,7 +74,7 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 
 ## Status
 
-The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.7.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
+The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.8.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
 
 The v1 memory foundation remains intact: typed capture and lifecycle management, symbolic query and recall, alignment, SPARQL, SHACL validation, graph import/export, shared multi-client operation, bootstrap workflows, generated documentation, and a loopback web workbench.
 
@@ -327,9 +327,13 @@ MCP tool or the web UI instead, so the operation goes through the live store.
 ### Configuration
 
 MOOSEDev is configured via environment variables (this surface is filling in as features land).
-At startup, `moosedev` also reads a repo-root `.env` when present; explicit environment variables
+At startup, `moosedev` also reads a project-root `.env` when present; explicit environment variables
 from the shell or MCP client config take precedence. This applies to `--connect` too, so an
 auto-spawned backend inherits the resolved configuration.
+
+The `.env` is looked up from the current directory upward, stopping at the first project root — a
+directory holding `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `setup.py`, `setup.cfg`,
+or `requirements.txt`. The nearest `.env` wins, and the search never escapes past the project root.
 
 - **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL` / `MOOSEDEV_LLM_ASSIST_LEVEL` (how aggressively the LLM sensor assists). When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live. Runtime state is kept out of version control except `kg.nq`, the committed canonical serialization of the project graph (see "Version-controlled memory").

@@ -90,7 +90,7 @@ fn relevant_context_lists_all_and_filters_by_topic() {
     assert!(all.iter().any(|i| i
         .properties
         .iter()
-        .any(|(k, v)| k == "hasLifecycleStatus" && v == "accepted")));
+        .any(|p| p.predicate == "hasLifecycleStatus" && p.value == "accepted")));
 
     // Topic → BM25 lexical relevance over each record's label + description
     // (moose `search_records`). "rmcp" appears in the rmcp decision's label.

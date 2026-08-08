@@ -38,9 +38,9 @@ use crate::code::substrate::{
     DefinitionEntry, Position as SubstratePosition, SourceRange, Substrate,
 };
 use crate::graph::{
-    direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
-    pending_count, render_markdown, AppState, CodeTerms, DossierTarget, ProposalKind,
-    RecordSummary, CRITICALITY_LOCALS, ROLE_LOCALS,
+    direct_records_for_entity, entities_by_symbol, get_entity_dossier, has_any_code_entities,
+    is_debt_surface, pending_count, render_markdown, AppState, CodeTerms, DossierTarget,
+    ProposalKind, RecordSummary, CRITICALITY_LOCALS, ROLE_LOCALS, UNMINTED_STORE_HINT,
 };
 
 const LSP_SOCKET_FILE_NAME: &str = "moosedev-lsp.sock";
@@ -418,13 +418,9 @@ pub async fn spawn_lsp_listener(state: Arc<AppState>, data_dir: &Path) -> Option
         return None;
     }
 
-    let repo_root = std::env::current_dir()
-        .map_err(|e| {
-            tracing::warn!(
-                "Knowledge-LSP unavailable: resolve daemon repo root from current_dir: {e}; MCP backend continues"
-            )
-        })
-        .ok()?;
+    // Same project root the substrate was indexed against, so editor paths map
+    // onto indexed documents even when the daemon was started from a subdirectory.
+    let repo_root = crate::project::project_root();
 
     spawn_lsp_listener_at(state, data_dir, repo_root).await
 }
@@ -1773,7 +1769,8 @@ impl LspSession {
         }
         let dossier =
             match get_entity_dossier(&self.state, &DossierTarget::Symbol(resolution.symbol)) {
-                Ok(dossier) => dossier?,
+                Ok(Some(dossier)) => dossier,
+                Ok(None) => return self.unminted_store_hover(),
                 Err(e) => {
                     tracing::warn!("Knowledge-LSP hover dossier lookup failed: {e}");
                     return None;
@@ -1784,6 +1781,29 @@ impl LspSession {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: render_markdown(&dossier),
+            }),
+            range: None,
+        })
+    }
+
+    /// Hover shown when this store has NO minted CodeEntities at all.
+    ///
+    /// Without it an unminted store is indistinguishable from a broken
+    /// extension: every symbol resolves through the substrate, every dossier is
+    /// empty, and hover simply never appears (Requirement a0581252). Scoped
+    /// strictly to the store-wide case — surfacing this per unminted symbol
+    /// would put a popup on every identifier in the file and break the silence
+    /// rule (AD 8f20452a).
+    fn unminted_store_hover(&self) -> Option<Hover> {
+        let minted = CodeTerms::resolve(&self.state)
+            .and_then(|terms| has_any_code_entities(&self.state, &terms));
+        if !matches!(minted, Ok(false)) {
+            return None;
+        }
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("**MOOSEDev setup**\n\n{UNMINTED_STORE_HINT}"),
             }),
             range: None,
         })

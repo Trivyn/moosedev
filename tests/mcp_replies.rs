@@ -37,9 +37,31 @@ fn fresh_data_dir(tag: &str) -> PathBuf {
 }
 
 fn build_server(data_dir: &Path, with_substrate: bool) -> MooseDevServer {
+    build_server_minted(data_dir, with_substrate, false)
+}
+
+/// `minted` mints the substrate's CodeEntities before serving. A store with a
+/// substrate but nothing minted is a real and separate state (Requirement
+/// a0581252) that answers every dossier with the mint hint, so a test about
+/// anything else has to mint first or it only ever exercises that one reply.
+fn build_server_minted(data_dir: &Path, with_substrate: bool, minted: bool) -> MooseDevServer {
     let state = AppState::bootstrap(data_dir, &ontology_dir()).expect("bootstrap app state");
     if with_substrate {
         state.set_substrate(Arc::new(synthetic_substrate()));
+    }
+    if minted {
+        let substrate = state.substrate().expect("substrate required to mint");
+        let terms = moosedev::graph::CodeTerms::resolve(&state).expect("code terms");
+        let components = moosedev::graph::load_components(&state).expect("components");
+        let plan = moosedev::graph::plan_mint(
+            &state,
+            &substrate.definitions(),
+            &terms,
+            &components,
+            Some(&substrate),
+        )
+        .expect("plan mint");
+        moosedev::graph::apply_mint(&state, &plan, &terms).expect("apply mint");
     }
     MooseDevServer::new(Arc::new(state))
 }
@@ -89,7 +111,9 @@ fn response_text(result: &CallToolResult) -> &str {
 async fn dossier_and_link_code_distinguish_substrate_coverage() {
     let data_dir = fresh_data_dir("indexed");
     let socket = runtime::socket_path_for(&data_dir);
-    let backend = spawn_backend(build_server(&data_dir, true), socket.clone()).await;
+    // Minted, so the store-wide unminted rung stays out of the way and each
+    // reply below reflects substrate COVERAGE, which is what this test is about.
+    let backend = spawn_backend(build_server_minted(&data_dir, true, true), socket.clone()).await;
     wait_for_socket(&socket).await;
     let client = connect_client(&socket).await;
 
@@ -134,6 +158,45 @@ async fn dossier_and_link_code_distinguish_substrate_coverage() {
     .await;
     assert_ne!(symbol.is_error, Some(true));
     assert_eq!(response_text(&symbol), PLAIN_REPLY);
+
+    backend.abort();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The unminted-store rung sits between the substrate rungs and the plain reply
+/// (Requirement a0581252): it must fire for every selector, but never ahead of
+/// the coverage discrimination AD a8f95059 exists to provide.
+#[tokio::test]
+async fn unminted_store_reports_mint_without_masking_coverage() {
+    let data_dir = fresh_data_dir("unminted");
+    let socket = runtime::socket_path_for(&data_dir);
+    let backend = spawn_backend(build_server(&data_dir, true), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+
+    // Anchorable position, and by symbol: both reach the new rung.
+    for args in [
+        json!({"file": "src/runtime.rs", "line": 8, "col": 5}),
+        json!({"symbol": PUBLIC_SYMBOL}),
+    ] {
+        let reply = call_raw(&client, "get_entity_dossier", args.clone()).await;
+        assert_ne!(reply.is_error, Some(true));
+        let text = response_text(&reply);
+        assert!(text.contains("mint --apply"), "{args}: {text}");
+        assert_ne!(text, PLAIN_REPLY, "{args}");
+    }
+
+    // An uncovered file still gets its coverage report, NOT the mint hint —
+    // sending someone to `mint` when the file was never indexed is wrong advice.
+    let uncovered = call_raw(
+        &client,
+        "get_entity_dossier",
+        json!({"file": "ui/src/App.tsx", "line": 1, "col": 1}),
+    )
+    .await;
+    let text = response_text(&uncovered);
+    assert!(text.contains("is not in the code substrate"), "{text}");
+    assert!(!text.contains("mint --apply"), "{text}");
 
     backend.abort();
     let _ = std::fs::remove_dir_all(&data_dir);

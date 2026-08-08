@@ -305,7 +305,7 @@ fn read_path_hides_superseded_by_default_and_surfaces_chain() {
         new_item
             .properties
             .iter()
-            .any(|(k, v)| k == "supersedes" && v == &old),
+            .any(|p| p.predicate == "supersedes" && p.value == old),
         "new item shows what it supersedes; got {:?}",
         new_item.properties
     );
@@ -313,7 +313,7 @@ fn read_path_hides_superseded_by_default_and_surfaces_chain() {
         new_item
             .properties
             .iter()
-            .any(|(k, v)| k == "rationale" && v.contains("remote")),
+            .any(|p| p.predicate == "rationale" && p.value.contains("remote")),
         "new item surfaces the rationale text; got {:?}",
         new_item.properties
     );
@@ -329,7 +329,7 @@ fn read_path_hides_superseded_by_default_and_surfaces_chain() {
         old_item
             .properties
             .iter()
-            .any(|(k, v)| k == "supersededBy" && v == &out.new_iri),
+            .any(|p| p.predicate == "supersededBy" && p.value == out.new_iri),
         "history item back-links to its replacement; got {:?}",
         old_item.properties
     );

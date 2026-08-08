@@ -22,6 +22,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod ontology;
 pub mod policy;
+pub mod project;
 pub mod provenance;
 pub mod reasoning;
 pub mod requirements;

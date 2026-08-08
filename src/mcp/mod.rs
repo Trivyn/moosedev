@@ -73,20 +73,279 @@ async fn capture_suggestion_note(state: &graph::AppState, iri: &str) -> String {
     )
 }
 
+/// Character budget for the property text of one `get_relevant_context` reply,
+/// shared out evenly across the returned records.
+///
+/// The tool advertises `limit` up to 100 and a bare list-all as the recall-first
+/// move, but rendering every record whole made exactly that call fail: a 40-50
+/// item inventory reached 80-90k characters and blew the MCP response limit, so
+/// the agent got an error instead of its memory.
+///
+/// Split evenly across the returned records; everything a record emits is
+/// charged against its share, so this bounds the whole reply rather than just
+/// its property text (`context_reply_ceiling` states the bound exactly).
+const CONTEXT_CHAR_BUDGET: usize = 40_000;
+
+/// Floor on each record's share of the budget, which overrides the even split at
+/// large `limit`. A lead too short to judge relevance by would only force a
+/// second round trip, which is what the budget exists to avoid.
+const MIN_ITEM_CHARS: usize = 400;
+
+/// Floor on one rendered value. A record stops rendering rather than emit a stub
+/// below this, which is what keeps a record's property text within its share
+/// instead of overshooting on a final clipped value.
+const MIN_VALUE_CHARS: usize = 240;
+
+/// Cap on a rendered `rdfs:label`. The label-shape contract (AD 4569aede) calls
+/// anything past 80 chars content-shaped, and ~89% of this graph's labels already
+/// are, so this bounds an unbounded field without touching well-shaped ones.
+const MAX_LABEL_CHARS: usize = 200;
+
+/// Cap on a rendered IRI. Generous — MOOSEDev's own are ~70 bytes — because a
+/// clipped IRI is a worse escape hatch than a long one; this exists only so
+/// imported RDF, where subject length is unbounded, cannot escape the ceiling.
+const MAX_IRI_CHARS: usize = 512;
+
+/// The one line a record can add beyond its share: the `… N further value(s)
+/// not shown` notice, appended after the share is already spent.
+#[cfg(test)]
+const PER_ITEM_OVERHEAD_CHARS: usize = 64;
+
+/// The reply's own preamble, outside any record's share: the
+/// `Relevant recorded knowledge (N items):` heading plus the shortening summary.
+/// Measured at ~166 bytes; rounded up so the bound stays true as the wording
+/// changes.
+#[cfg(test)]
+const GLOBAL_OVERHEAD_CHARS: usize = 256;
+
+/// Upper bound on a [`format_context`] reply for `items` records.
+///
+/// Everything a record emits — header, properties, and IRI — is charged against
+/// `per_item`, the even split of the budget or [`MIN_ITEM_CHARS`], whichever is
+/// larger. Outside that sit two things only: each record's shortening notice,
+/// and the reply's own heading and summary. Both are named here rather than
+/// waved at, because a bound that omits a term is not a bound — the earlier form
+/// left the preamble out and was still asserted as exact.
+#[cfg(test)]
+fn context_reply_ceiling(items: usize) -> usize {
+    CONTEXT_CHAR_BUDGET.max(items * MIN_ITEM_CHARS)
+        + items * PER_ITEM_OVERHEAD_CHARS
+        + GLOBAL_OVERHEAD_CHARS
+}
+
+/// Cap on values rendered per repeated predicate. A hub record accumulates
+/// inbound links without bound — one `SystemComponent` here carries ~70
+/// `isConcernedBy` IRIs — and a wall of bare IRIs costs far more context than it
+/// informs. The count is the part worth reading; the edges belong to `sparql`.
+const MAX_VALUES_PER_PREDICATE: usize = 3;
+
+/// The suffix [`clamp_value`] appends to a clipped value. Computed rather than
+/// estimated, so a caller can reserve exactly the room it needs.
+fn truncation_marker(value: &str) -> String {
+    format!("… [truncated; {} chars total]", value.chars().count())
+}
+
+/// Truncate to `max_bytes`, reporting whether anything was cut so the reply can
+/// say so rather than silently shortening recorded knowledge.
+///
+/// Budgets are byte counts (the reply is measured in bytes), but a `String` may
+/// only be split on a char boundary, so this walks back to the nearest one — a
+/// multi-byte value is clipped slightly shorter rather than overrunning.
+fn clamp_value(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (
+        format!("{}{}", &value[..end], truncation_marker(value)),
+        true,
+    )
+}
+
+/// Rendering priority for one property: lower goes first.
+///
+/// 0 — the narrative fields. A record's description and rationale are what make
+/// it judgeable for relevance; everything else is metadata or a link, and a
+/// recall reply that dropped the prose to fit more IRIs would have shortened
+/// exactly the wrong thing. Named explicitly rather than inferred, because
+/// "which field carries the meaning" is a fact about the ontology, not something
+/// the byte budget can work out.
+///
+/// 1 — other literals. 2 — named nodes, which say little without their labels
+/// and are `sparql`'s job to expand.
+///
+/// Both tests read the RDF object type rather than guessing it from the text:
+/// the predicate must match a narrative name EXACTLY and its object must be a
+/// literal, so a named-node predicate spelled like one — `descriptionLink`,
+/// `hasRationaleRef` — cannot claim prose priority and crowd out the real
+/// description. A value that merely starts with `http` is likewise no longer
+/// mistaken for a link when the store said it was a literal.
+fn property_rank(property: &graph::ContextProperty) -> u8 {
+    const NARRATIVE: &[&str] = &["hasDescription", "description", "hasRationale", "rationale"];
+    if property.is_literal && NARRATIVE.contains(&property.predicate.as_str()) {
+        0
+    } else if property.is_literal {
+        1
+    } else {
+        2
+    }
+}
+
+/// Render one `key: value` line within `room` bytes, clipping the value if it
+/// does not fit. `None` means not even a floor-length lead fits, so the caller
+/// should record the value as omitted.
+///
+/// Reserving the marker here is what makes truncation reachable at all: clipping
+/// the value to the full `room` and only then adding the marker, key, and newline
+/// pushed every clipped line back over budget, so the caller dropped it and the
+/// value vanished entirely instead of leaving the lead this promises.
+fn render_property(key: &str, value: &str, room: usize) -> Option<(String, bool)> {
+    let whole = format!("  {key}: {value}\n");
+    if whole.len() <= room {
+        return Some((whole, false));
+    }
+    let framing = "  ".len() + key.len() + ": ".len() + "\n".len();
+    let value_room = room.saturating_sub(framing + truncation_marker(value).len());
+    if value_room < MIN_VALUE_CHARS {
+        return None;
+    }
+    let (text, cut) = clamp_value(value, value_room);
+    Some((format!("  {key}: {text}\n"), cut))
+}
+
 /// Render structured context items into a readable block for the agent.
+///
+/// Bounded rather than complete: this is the shallow browse rung of the
+/// `get_relevant_context` → `query` → `sparql` ladder (AD ee900bdb), so it
+/// shortens to fit and says what it shortened, pointing at the exact tools that
+/// return the full text.
 fn format_context(items: &[graph::ContextItem]) -> String {
+    use std::collections::HashMap;
+
+    // Each record's share scales with how many came back, so a focused recall
+    // still renders in full while a 100-item inventory stays inside the limit.
+    let per_item = (CONTEXT_CHAR_BUDGET / items.len().max(1)).max(MIN_ITEM_CHARS);
+    let mut truncated = 0usize;
+    let mut omitted = 0usize;
+    let mut body = String::new();
+
+    for item in items {
+        // A label is `rdfs:label` and can be arbitrarily long on imported
+        // records, so it is clipped like any other value — charging it to the
+        // record's share without bounding it would leave the reply unbounded no
+        // matter what the properties do.
+        // Label, kind, and IRI are all graph-supplied and unbounded on imported
+        // records, so every one is clipped — AND clipped against this record's
+        // actual share, not a fixed maximum. Fixed caps alone still broke the
+        // ceiling at the advertised `limit: 100`, where the share is 400 bytes
+        // but the three constants together permit ~900: identity output alone
+        // reached ~103KB against a 46KB ceiling. Each field gets at most a
+        // quarter of the share, so identity can never crowd out the record it
+        // identifies, let alone the reply.
+        let identity_cap = per_item / 4;
+        let (label, label_cut) = clamp_value(&item.label, MAX_LABEL_CHARS.min(identity_cap));
+        let (kind, kind_cut) = clamp_value(&item.kind, MAX_LABEL_CHARS.min(identity_cap));
+        let (iri, iri_cut) = clamp_value(&item.iri, MAX_IRI_CHARS.min(identity_cap));
+        truncated += usize::from(label_cut) + usize::from(kind_cut) + usize::from(iri_cut);
+        let header = format!("\n• {kind} — \"{label}\"\n");
+        // Always emitted: the IRI is how the caller reads back whatever was left
+        // out, and it is charged to the record's share so a record with little
+        // room spends it on identity rather than on prose it cannot finish.
+        let identity = format!("  {iri}\n");
+        let mut spent = header.len() + identity.len();
+        body.push_str(&header);
+
+        // PRIORITY, not just grouping. A fair share alone cannot keep the promise
+        // that links never crowd out prose: the per-value floor means ~166
+        // distinct properties exhaust the budget on their own, and a
+        // `hasDescription` behind them gets nothing however the remainder is
+        // divided. No arithmetic fixes that — only order does.
+        //
+        // Splitting prose from links was still not enough: an 80KB literal ahead
+        // of a 3KB description defers BOTH, and the oversized one then consumed
+        // the second pass first. So the narrative fields are named explicitly and
+        // sorted first, and the rest by ascending size — which shows the most
+        // values for a bounded budget. The same order governs both passes, so
+        // nothing that survives pass one can be starved in pass two.
+        let mut ordered: Vec<&graph::ContextProperty> = item.properties.iter().collect();
+        ordered.sort_by_key(|p| (property_rank(p), p.value.len()));
+
+        let mut shown: HashMap<&str, usize> = HashMap::new();
+        let mut skipped = 0usize;
+        let mut deferred: Vec<&graph::ContextProperty> = Vec::new();
+        let mut remaining = item.properties.len();
+        for property in ordered.iter().copied() {
+            let (key, value) = (&property.predicate, &property.value);
+            let considered = remaining.max(1);
+            remaining -= 1;
+            let count = shown.entry(key.as_str()).or_default();
+            *count += 1;
+            // First pass is FAIR, not final: hold back a predicate's surplus so
+            // it cannot crowd out the other predicates on a record whose links
+            // happen to be enumerated first. Surplus is retried below rather
+            // than discarded — a `coversPath` or `weighs` list is real knowledge,
+            // and dropping its fourth value while 39KB of budget sits unused
+            // would be a cap doing more than its job.
+            if *count > MAX_VALUES_PER_PREDICATE {
+                deferred.push(property);
+                continue;
+            }
+            // The fair share GATES pass one, it does not clip it. Anything that
+            // fits whole within its share of what remains is rendered now, which
+            // spreads coverage across the properties; anything larger waits for
+            // pass two rather than being truncated to a share that was only ever
+            // provisional. Clipping here instead cut a description to 1/n of the
+            // budget while the other n-1 shares went unclaimed.
+            let room_now = per_item.saturating_sub(spent);
+            let fair = (room_now / considered).max(MIN_VALUE_CHARS).min(room_now);
+            match render_property(key, value, fair) {
+                Some((line, false)) => {
+                    spent += line.len();
+                    body.push_str(&line);
+                }
+                // Too big for a fair share, or unable to fit one at all: retried
+                // below against whatever the record's budget actually has left.
+                _ => deferred.push(property),
+            }
+        }
+        // Second pass: spend whatever the record's share still holds, on the
+        // deferred surplus and on values a fair share could not fit whole.
+        // Same priority order as pass one, so an oversized literal cannot take
+        // the remaining budget ahead of the description.
+        deferred.sort_by_key(|p| (property_rank(p), p.value.len()));
+        for property in deferred {
+            let (key, value) = (&property.predicate, &property.value);
+            let room = per_item.saturating_sub(spent);
+            let Some((line, cut)) = render_property(key, value, room) else {
+                skipped += 1;
+                continue;
+            };
+            truncated += usize::from(cut);
+            spent += line.len();
+            body.push_str(&line);
+        }
+        if skipped > 0 {
+            omitted += skipped;
+            body.push_str(&format!("  … {skipped} further value(s) not shown\n"));
+        }
+        body.push_str(&identity);
+    }
+
     let plural = if items.len() == 1 { "" } else { "s" };
     let mut out = format!(
         "Relevant recorded knowledge ({} item{plural}):\n",
         items.len()
     );
-    for item in items {
-        out.push_str(&format!("\n• {} — \"{}\"\n", item.kind, item.label));
-        for (key, value) in &item.properties {
-            out.push_str(&format!("  {key}: {value}\n"));
-        }
-        out.push_str(&format!("  {}\n", item.iri));
+    if truncated > 0 || omitted > 0 {
+        out.push_str(&format!(
+            "(shortened to fit: {truncated} value(s) truncated, {omitted} not shown. \
+             Narrow the `topic`, lower `limit`, or read a record whole with `sparql`.)\n"
+        ));
     }
+    out.push_str(&body);
     out
 }
 
@@ -570,7 +829,10 @@ impl MooseDevServer {
                 )))
             }
         };
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // The project root, not the cwd: policy anchors are located in repo files,
+        // so a daemon started from a subdirectory would resolve them against the
+        // wrong paths and return verdicts about code it never actually read.
+        let repo_root = crate::project::project_root();
         match crate::policy::evaluate_and_fire(&self.state, &repo_root, &event, &host) {
             Ok(decision) => match serde_json::to_string_pretty(&decision) {
                 Ok(json) => Ok(tool_ok(json)),
@@ -1194,6 +1456,24 @@ impl MooseDevServer {
                         )));
                     }
                 }
+                // Last rung before the plain reply: the position IS anchorable
+                // (or the selector was a symbol/IRI), yet the store holds no
+                // CodeEntity at all, so `mint` has never run (Requirement
+                // a0581252) and "attach with link_code" would misdescribe it.
+                //
+                // Strictly AFTER the substrate rungs above: a never-indexed
+                // project must be told to run `index`, and an uncovered file
+                // must get its coverage report, rather than being sent to
+                // `mint` — the discrimination AD a8f95059 exists to provide.
+                if self.state.substrate().is_some()
+                    && matches!(
+                        graph::CodeTerms::resolve(&self.state)
+                            .and_then(|terms| graph::has_any_code_entities(&self.state, &terms)),
+                        Ok(false)
+                    )
+                {
+                    return Ok(tool_ok(graph::UNMINTED_STORE_HINT));
+                }
                 Ok(tool_ok(
                     "No recorded knowledge is linked to this code; attach records with `link_code`.",
                 ))
@@ -1567,7 +1847,11 @@ impl ServerHandler for MooseDevServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_when, MooseDevServer, SERVER_INSTRUCTIONS};
+    use super::{
+        clamp_value, context_reply_ceiling, format_context, graph, property_rank, resolve_when,
+        truncation_marker, MooseDevServer, MAX_VALUES_PER_PREDICATE, MIN_VALUE_CHARS,
+        SERVER_INSTRUCTIONS,
+    };
     use rmcp::model::Tool;
     use serde_json::Value;
 
@@ -1596,6 +1880,422 @@ mod tests {
 
     fn tool_catalog() -> Vec<Tool> {
         MooseDevServer::tool_router().list_all()
+    }
+
+    fn context_item(n: usize, description_chars: usize, links: usize) -> graph::ContextItem {
+        let mut properties = vec![
+            graph::ContextProperty::literal("hasAuthor", "claude-code"),
+            graph::ContextProperty::literal("hasDescription", "d".repeat(description_chars)),
+        ];
+        for i in 0..links {
+            properties.push(graph::ContextProperty::link(
+                "isConcernedBy",
+                format!("https://moosedev.dev/kg/ArchitecturalDecision/{i:036}"),
+            ));
+        }
+        graph::ContextItem {
+            iri: format!("https://moosedev.dev/kg/Lesson/{n:036}"),
+            kind: "Lesson".to_string(),
+            label: format!("record {n}"),
+            properties,
+        }
+    }
+
+    /// A focused recall must read exactly as before — the budget exists for the
+    /// broad inventory, and must not tax the common case.
+    #[test]
+    fn small_recall_is_rendered_whole() {
+        let items: Vec<_> = (0..5).map(|n| context_item(n, 2_000, 2)).collect();
+        let out = format_context(&items);
+
+        assert!(!out.contains("shortened to fit"));
+        assert!(!out.contains("truncated"));
+        assert_eq!(out.matches("isConcernedBy:").count(), 10);
+    }
+
+    /// What a small recall gives up on a hub record: the bulk link list, never
+    /// the prose. Measured on the live graph, a `limit: 10` recall drops ~176
+    /// values and truncates none — the loss is bare IRIs, which carry no labels
+    /// and are `sparql`'s job, while every description survives intact.
+    #[test]
+    fn description_survives_whole_even_when_links_are_capped() {
+        let description = "d".repeat(3_000);
+        let hub = graph::ContextItem {
+            iri: "https://moosedev.dev/kg/SystemComponent/hub".to_string(),
+            kind: "SystemComponent".to_string(),
+            label: "hub component".to_string(),
+            // Links FIRST, as the real ordering can put them: without the
+            // per-predicate cap they would crowd the description out entirely.
+            properties: (0..70)
+                .map(|i| {
+                    graph::ContextProperty::link(
+                        "isConcernedBy",
+                        format!("https://moosedev.dev/kg/ArchitecturalDecision/{i:036}"),
+                    )
+                })
+                .chain([graph::ContextProperty::literal(
+                    "hasDescription",
+                    description.clone(),
+                )])
+                .collect(),
+        };
+
+        let out = format_context(&[hub]);
+        assert!(out.contains(&description), "prose is never sacrificed");
+        // The cap defers the surplus past the description; it does not discard
+        // it, so with budget to spare every link still lands.
+        assert_eq!(out.matches("isConcernedBy:").count(), 70);
+        assert!(!out.contains("further value(s) not shown"));
+    }
+
+    /// The reported failure: a list-all at limit 40-50 reached 80-90k chars and
+    /// exceeded the MCP response limit, so recall-first returned an error.
+    #[test]
+    fn broad_recall_stays_within_the_response_budget() {
+        let items: Vec<_> = (0..50).map(|n| context_item(n, 3_000, 70)).collect();
+
+        let unbounded: usize = items
+            .iter()
+            .map(|i| {
+                i.properties
+                    .iter()
+                    .map(|p| p.predicate.len() + p.value.len() + 4)
+                    .sum::<usize>()
+            })
+            .sum();
+        assert!(
+            unbounded > 80_000,
+            "fixture must reproduce the overflow, got {unbounded}"
+        );
+
+        let out = format_context(&items);
+        // The reported failure was 90,398 chars.
+        assert!(
+            out.len() < context_reply_ceiling(items.len()),
+            "reply must stay bounded, got {}",
+            out.len()
+        );
+        // Shortening is stated, never silent, and names the way to the full text.
+        assert!(out.contains("shortened to fit"));
+        assert!(out.contains("sparql"));
+        // Every record still appears, with its IRI intact for a follow-up read.
+        assert_eq!(out.matches("• Lesson").count(), 50);
+        assert!(out.contains(&items[49].iri));
+    }
+
+    /// The bound must hold at the advertised ceiling too — `limit: 100` of
+    /// pathologically link-heavy records is the worst case the tool permits.
+    #[test]
+    fn max_limit_of_hub_records_stays_bounded() {
+        let items: Vec<_> = (0..100).map(|n| context_item(n, 8_000, 200)).collect();
+        let out = format_context(&items);
+        assert!(
+            out.len() < context_reply_ceiling(items.len()),
+            "worst case must stay within the declared ceiling, got {}",
+            out.len()
+        );
+        // …and the ceiling itself must sit below the size that actually failed.
+        assert!(context_reply_ceiling(100) < 90_000);
+        assert_eq!(out.matches("• Lesson").count(), 100);
+    }
+
+    /// The per-predicate cap is a FAIRNESS rule, not a discard rule: it keeps a
+    /// long link list from crowding out other predicates, but surplus values are
+    /// retried against whatever budget the record has left. Dropping a fourth
+    /// `coversPath` or `weighs` while 39KB sits unused would lose real knowledge.
+    #[test]
+    fn repeated_predicate_surplus_is_retried_not_discarded() {
+        // One record, so the whole budget is available: everything fits.
+        let out = format_context(&[context_item(0, 10, 70)]);
+        assert_eq!(out.matches("isConcernedBy:").count(), 70, "{out}");
+        assert!(!out.contains("further value(s) not shown"), "{out}");
+
+        // The description is rendered before the surplus, so a link list that
+        // arrives first can never displace it.
+        let hub = graph::ContextItem {
+            iri: "https://moosedev.dev/kg/SystemComponent/hub".to_string(),
+            kind: "SystemComponent".to_string(),
+            label: "hub".to_string(),
+            // Enough links to genuinely exhaust the budget, so the stopping
+            // behaviour is exercised rather than the everything-fits case.
+            properties: (0..1_000)
+                .map(|i| {
+                    graph::ContextProperty::link("isConcernedBy", format!("https://x/{i:040}"))
+                })
+                .chain([graph::ContextProperty::literal(
+                    "hasDescription",
+                    "d".repeat(3_000),
+                )])
+                .collect(),
+        };
+        let out = format_context(&[hub]);
+        let links = out.matches("isConcernedBy:").count();
+        assert!(out.contains(&"d".repeat(3_000)), "prose survives first");
+        assert!(
+            (MAX_VALUES_PER_PREDICATE..1_000).contains(&links),
+            "surplus fills the remaining budget then stops, got {links}"
+        );
+        assert!(out.contains("further value(s) not shown"));
+    }
+
+    /// A single oversized EARLY property must not consume the record's whole
+    /// share. The per-predicate rule only governs repeats, so one huge first
+    /// value could still starve a later `hasDescription` — the prose the whole
+    /// arrangement exists to protect, lost to a different failure than the one
+    /// that was guarded.
+    #[test]
+    fn one_huge_early_property_cannot_starve_the_description() {
+        let description = "d".repeat(3_000);
+        let item = graph::ContextItem {
+            iri: "https://moosedev.dev/kg/Lesson/starve".to_string(),
+            kind: "Lesson".to_string(),
+            label: "starve".to_string(),
+            properties: vec![
+                // One value larger than the entire per-record share, first.
+                graph::ContextProperty::literal("hasSomeHugeField", "H".repeat(80_000)),
+                graph::ContextProperty::literal("hasDescription", description.clone()),
+            ],
+        };
+
+        let out = format_context(&[item]);
+        assert!(
+            out.contains("hasDescription:"),
+            "description must appear: {out}"
+        );
+        let lead: String = out
+            .split("hasDescription: ")
+            .nth(1)
+            .unwrap()
+            .chars()
+            .take_while(|c| *c == 'd')
+            .collect();
+        assert!(
+            lead.len() >= MIN_VALUE_CHARS,
+            "description needs a usable lead, got {}",
+            lead.len()
+        );
+    }
+
+    /// Grouping prose ahead of links is not enough on its own: an oversized
+    /// literal defers alongside the description and then takes the second pass
+    /// first. The narrative fields therefore rank explicitly, in BOTH passes.
+    #[test]
+    fn an_oversized_literal_cannot_take_the_second_pass_ahead_of_prose() {
+        let description = "d".repeat(3_000);
+        let mut properties = vec![
+            // A literal far larger than the whole share, listed first.
+            graph::ContextProperty::literal("hasSomeHugeLiteral", "H".repeat(80_000)),
+            graph::ContextProperty::literal("hasDescription", description.clone()),
+        ];
+        properties.extend(
+            (0..20).map(|i| {
+                graph::ContextProperty::link("isConcernedBy", format!("https://x/{i:040}"))
+            }),
+        );
+
+        let out = format_context(&[graph::ContextItem {
+            iri: "https://moosedev.dev/kg/Lesson/deferred".to_string(),
+            kind: "Lesson".to_string(),
+            label: "deferred".to_string(),
+            properties,
+        }]);
+
+        assert!(
+            out.contains(&description),
+            "the description must not lose the second pass to a bigger literal"
+        );
+    }
+
+    /// Rank reads the RDF object type the store reported, and matches narrative
+    /// predicates EXACTLY. Inferring either from the text let a named-node
+    /// predicate spelled like a narrative one claim prose priority.
+    #[test]
+    fn narrative_rank_uses_the_rdf_type_not_the_text() {
+        use graph::ContextProperty as P;
+
+        assert_eq!(property_rank(&P::literal("hasDescription", "text")), 0);
+        assert_eq!(property_rank(&P::literal("rationale", "text")), 0);
+        assert_eq!(property_rank(&P::literal("hasRationale", "text")), 0);
+        assert_eq!(property_rank(&P::literal("hasAuthor", "claude-code")), 1);
+        assert_eq!(
+            property_rank(&P::link("isConcernedBy", "https://example.org/x")),
+            2
+        );
+
+        // A named node whose predicate merely CONTAINS a narrative word is a
+        // link, not prose — it must not outrank the real description.
+        assert_eq!(property_rank(&P::link("descriptionLink", "https://x/1")), 2);
+        assert_eq!(property_rank(&P::link("hasRationaleRef", "https://x/2")), 2);
+        // A literal that merely looks like a URL is still a literal.
+        assert_eq!(
+            property_rank(&P::literal("seeAlso", "https://example.org/x")),
+            1
+        );
+    }
+
+    /// The end-to-end consequence: a misleading named-node predicate cannot
+    /// crowd the real description out of the reply.
+    #[test]
+    fn a_link_predicate_named_like_prose_cannot_displace_the_description() {
+        use graph::ContextProperty as P;
+        let description = "d".repeat(3_000);
+        let mut properties: Vec<P> = (0..300)
+            .map(|i| P::link("descriptionLink", format!("https://x/{i:060}")))
+            .collect();
+        properties.push(P::literal("hasDescription", description.clone()));
+
+        let out = format_context(&[graph::ContextItem {
+            iri: "https://moosedev.dev/kg/Lesson/misleading".to_string(),
+            kind: "Lesson".to_string(),
+            label: "misleading".to_string(),
+            properties,
+        }]);
+
+        assert!(
+            out.contains(&description),
+            "the real description must survive"
+        );
+    }
+
+    /// High cardinality is the case arithmetic alone cannot solve: with a
+    /// per-value floor, ~166 distinct properties exhaust the budget by
+    /// themselves, so a `hasDescription` behind them gets nothing however the
+    /// remainder is divided. Prose is therefore ordered ahead of links.
+    #[test]
+    fn hundreds_of_earlier_links_cannot_starve_the_description() {
+        let description = "d".repeat(2_000);
+        let mut properties: Vec<graph::ContextProperty> = (0..400)
+            .map(|i| {
+                graph::ContextProperty::link(
+                    format!("hasLink{i}"),
+                    format!("https://example.org/{i:060}"),
+                )
+            })
+            .collect();
+        // Last in the list, behind every one of them.
+        properties.push(graph::ContextProperty::literal(
+            "hasDescription",
+            description.clone(),
+        ));
+
+        let out = format_context(&[graph::ContextItem {
+            iri: "https://moosedev.dev/kg/SystemComponent/wide".to_string(),
+            kind: "SystemComponent".to_string(),
+            label: "wide".to_string(),
+            properties,
+        }]);
+
+        assert!(
+            out.contains(&description),
+            "prose must survive: {}",
+            &out[..200]
+        );
+        assert!(out.contains("hasLink"), "links still render too");
+    }
+
+    /// Identity fields are graph-supplied and unbounded on imported RDF, so they
+    /// are clipped against the record's SHARE, not just a fixed maximum. At the
+    /// advertised `limit: 100` the share is 400 bytes while the three constants
+    /// together allow ~900 — enough for identity alone to carry the reply past
+    /// the ceiling. Exercised at full advertised size with every field
+    /// pathological at once, which the per-field tests do not do.
+    #[test]
+    fn pathological_identity_cannot_break_the_ceiling_at_max_limit() {
+        for count in [1, 20, 100] {
+            let items: Vec<_> = (0..count)
+                .map(|n| graph::ContextItem {
+                    iri: format!("https://example.org/{}#{n}", "x".repeat(50_000)),
+                    kind: "K".repeat(20_000),
+                    label: "L".repeat(20_000),
+                    properties: vec![graph::ContextProperty::literal(
+                        "hasDescription",
+                        "d".repeat(20_000),
+                    )],
+                })
+                .collect();
+
+            let out = format_context(&items);
+            assert!(
+                out.len() < context_reply_ceiling(count),
+                "at {count} records: got {} vs ceiling {}",
+                out.len(),
+                context_reply_ceiling(count)
+            );
+            assert_eq!(out.matches("• ").count(), count, "every record appears");
+        }
+    }
+
+    #[test]
+    fn clamp_value_cuts_on_a_char_boundary() {
+        // Budgets are bytes; a cut lands on the nearest boundary at or below it,
+        // never past — splitting mid-codepoint would panic.
+        for max_bytes in 1..12 {
+            let (text, cut) = clamp_value("héllo wörld", max_bytes);
+            assert!(cut, "11-char value must be cut at {max_bytes} bytes");
+            let head = text
+                .strip_suffix(&truncation_marker("héllo wörld"))
+                .unwrap();
+            assert!(head.len() <= max_bytes, "overran at {max_bytes}: {head:?}");
+            assert!("héllo wörld".starts_with(head));
+        }
+
+        let (text, cut) = clamp_value("héllo", "héllo".len());
+        assert!(!cut);
+        assert_eq!(text, "héllo");
+    }
+
+    /// The bug this guards: clipping the value to the whole remaining room and
+    /// only then adding the marker, key, and newline pushed every truncated line
+    /// back over budget, so it was dropped instead — a long description vanished
+    /// rather than leaving the lead the reply advertises.
+    #[test]
+    fn a_long_value_is_truncated_not_dropped() {
+        let item = graph::ContextItem {
+            iri: "https://moosedev.dev/kg/Lesson/long".to_string(),
+            kind: "Lesson".to_string(),
+            label: "long record".to_string(),
+            properties: vec![graph::ContextProperty::literal(
+                "hasDescription",
+                "d".repeat(50_000),
+            )],
+        };
+
+        let out = format_context(std::slice::from_ref(&item));
+        assert!(out.contains("truncated; 50000 chars total"), "{out}");
+        assert!(
+            out.matches('d').count() > MIN_VALUE_CHARS,
+            "a usable lead must survive, got {} chars",
+            out.matches('d').count()
+        );
+        assert!(out.contains("1 value(s) truncated"), "{out}");
+        assert!(
+            !out.contains("further value(s) not shown"),
+            "the value was truncated, not dropped"
+        );
+    }
+
+    /// `rdfs:label` is unbounded on imported records, so it is clipped too —
+    /// otherwise the declared ceiling holds only for well-behaved data.
+    #[test]
+    fn a_pathological_label_cannot_break_the_ceiling() {
+        let items: Vec<_> = (0..20)
+            .map(|n| graph::ContextItem {
+                iri: format!("https://moosedev.dev/kg/Lesson/{n:036}"),
+                kind: "Lesson".to_string(),
+                label: "L".repeat(20_000),
+                properties: vec![graph::ContextProperty::literal(
+                    "hasDescription",
+                    "d".repeat(5_000),
+                )],
+            })
+            .collect();
+
+        let out = format_context(&items);
+        assert!(
+            out.len() < context_reply_ceiling(items.len()),
+            "long labels must not escape the bound, got {}",
+            out.len()
+        );
     }
 
     fn tool<'a>(catalog: &'a [Tool], name: &str) -> &'a Tool {

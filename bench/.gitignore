@@ -1,7 +1,8 @@
 .venv/
-runs/
-corpus/
-scale/
+# Anchored: raw working dirs stay ignored, but the reviewed release/ copies are tracked.
+/runs/
+/corpus/
+/scale/
 __pycache__/
 *.pyc
 

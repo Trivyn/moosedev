@@ -205,7 +205,7 @@ fn read_path_hides_retracted_by_default_and_history_surfaces_rationale() {
     assert!(
         item.properties
             .iter()
-            .any(|(k, v)| k == "rationale" && v.contains("folded")),
+            .any(|p| p.predicate == "rationale" && p.value.contains("folded")),
         "history item surfaces the retraction rationale text; got {:?}",
         item.properties
     );
