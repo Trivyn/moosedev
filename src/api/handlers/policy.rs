@@ -21,6 +21,7 @@ use crate::api::error::ApiError;
 use crate::graph::AppState;
 use crate::policy::fires::{append_fire, FireEvent};
 use crate::policy::{evaluate_and_fire, PolicyDecision, PolicyEvent};
+use crate::project::project_root as moosedev_project_root;
 
 /// Request body: the host identity plus the flattened tagged event, e.g.
 /// `{"host":"opencode","kind":"edit_proposed","file":"src/x.rs","anchor":"fn x"}`.
@@ -42,8 +43,10 @@ pub async fn evaluate_policy(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PolicyEvalRequest>,
 ) -> Result<Json<PolicyDecision>, ApiError> {
-    let repo_root = std::env::current_dir()
-        .map_err(|e| ApiError::internal(format!("cannot resolve daemon repo root: {e}")))?;
+    // Same project root every other repository-scoped operation uses (AD e43baa99);
+    // deriving it from the cwd here would let the HTTP surface disagree with the
+    // MCP one about which files a policy anchor refers to.
+    let repo_root = moosedev_project_root();
     let decision = evaluate_and_fire(&state, &repo_root, &req.event, &req.host)?;
     Ok(Json(decision))
 }

@@ -192,6 +192,34 @@ fn normalize(symbol: &str) -> String {
 
 /// Direct links of different record classes are ordered deterministically and
 /// rendered in Markdown with entity metadata.
+/// The trial-store failure (Requirement a0581252): a healthy substrate with zero
+/// minted entities. Every surface must be able to tell that apart from "this
+/// symbol has no linked knowledge", which is a legitimate silence.
+#[test]
+fn unminted_store_is_distinguishable_from_an_unlinked_symbol() {
+    let state = state_with_substrate("unminted");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+
+    // Indexed, never minted — exactly the state both trial corpora were in.
+    assert!(!state.substrate().unwrap().definitions().is_empty());
+    assert!(!graph::has_any_code_entities(&state, &terms).unwrap());
+    // …and it is specifically the "mint never ran" shape: the substrate offers
+    // definitions batch minting would cover.
+    assert!(graph::looks_unminted(&state, &terms).unwrap());
+
+    // Minting flips the probe; the linked-knowledge silence is unaffected,
+    // so the two conditions stay independently detectable.
+    let entity = pre_mint_public(&state);
+    assert!(graph::has_any_code_entities(&state, &terms).unwrap());
+    assert!(!graph::looks_unminted(&state, &terms).unwrap());
+    assert!(
+        graph::get_entity_dossier(&state, &DossierTarget::Iri(entity))
+            .unwrap()
+            .is_none(),
+        "a minted entity with no records is still silent"
+    );
+}
+
 #[test]
 fn full_dossier_ordering_and_markdown() {
     let state = state_with_substrate("full");

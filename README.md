@@ -74,7 +74,7 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 
 ## Status
 
-The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.7.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
+The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.8.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
 
 The v1 memory foundation remains intact: typed capture and lifecycle management, symbolic query and recall, alignment, SPARQL, SHACL validation, graph import/export, shared multi-client operation, bootstrap workflows, generated documentation, and a loopback web workbench.
 
@@ -86,6 +86,18 @@ v2 adds the code-aware and active layers:
 - **v2.3 — ratified editor writes:** LSP code actions propose record links, roles, and criticality; every change goes through the ratification queue, with no direct LSP graph-write path. Push/pull diagnostic parity and the real Neovim conformance client are covered by tests.
 
 The phase definitions and acceptance criteria are in [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md). Delivered editor clients: Zed, Neovim, VS Code, and Emacs (eglot/lsp-mode) — all thin stanzas over the same server.
+
+### Upgrading to 0.8.0
+
+Most of 0.8.0 fixes cases where MOOSEDev *looked* configured and silently was not, so the visible effect is usually a store or an index becoming correct. Two changes can move where your data lives, so check them before upgrading a project you care about.
+
+**Your `.env` may start taking effect.** `.env` discovery previously required the directory to contain a `Cargo.toml`, so in a Python, TypeScript, or any non-Rust project it silently did nothing — every documented key was ignored. It now works. If such a project has an `.env` setting `MOOSEDEV_DATA_DIR`, MOOSEDev will begin honouring it and will use **that** store rather than the one it has been using. That is the intended behaviour, but it is a change of store, so look at any `.env` in a non-Rust project before you upgrade.
+
+**One project, one store.** The project root is now the enclosing repository (the nearest `.git`), and it drives both configuration and every repository-scoped operation — index, mint, classify, resolve, LSP paths. Previously the *nearest* directory with any language manifest won, so in a repo containing e.g. `ui/package.json` a command run from `ui/` opened a store under `ui/` and indexed only that subtree. Those stray sub-stores are now unused; the repository's own store is used from anywhere inside it. Relative paths in a `.env` also now resolve against that file's directory rather than your shell's working directory, and `.env` files layer from the working directory up to the root (nearest wins per key). Outside a repository, language manifests still mark the root.
+
+Smaller behaviour changes: `moosedev init` now writes `MOOSEDEV_DATA_DIR` into a project-root `.env` (appending, never overwriting) so the CLI and MCP clients cannot drift onto different stores, and gitignores that file only when it created it; `init` now declines and explains rather than editing configuration it cannot safely rewrite; `get_relevant_context` bounds large replies and states what it shortened; a store that has been indexed but never minted now says so instead of returning empty dossiers; and `--connect` auto-spawn now waits for the backend to come up rather than a fixed 30 seconds, while failing immediately if it dies.
+
+**Library API.** These affect only code depending on the `moosedev` crate, not users of the binary: `ContextItem.properties` is now `Vec<ContextProperty>` (carrying whether each RDF object was a literal or a named node, instead of flattening both to strings); `InitReport` gained an `actions` field and is now `#[non_exhaustive]`; and `toml` is a new dependency.
 
 ## Getting started
 
@@ -327,9 +339,13 @@ MCP tool or the web UI instead, so the operation goes through the live store.
 ### Configuration
 
 MOOSEDev is configured via environment variables (this surface is filling in as features land).
-At startup, `moosedev` also reads a repo-root `.env` when present; explicit environment variables
+At startup, `moosedev` also reads a project-root `.env` when present; explicit environment variables
 from the shell or MCP client config take precedence. This applies to `--connect` too, so an
 auto-spawned backend inherits the resolved configuration.
+
+The `.env` is looked up from the current directory upward, stopping at the first project root — a
+directory holding `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `setup.py`, `setup.cfg`,
+or `requirements.txt`. The nearest `.env` wins, and the search never escapes past the project root.
 
 - **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL` / `MOOSEDEV_LLM_ASSIST_LEVEL` (how aggressively the LLM sensor assists). When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live. Runtime state is kept out of version control except `kg.nq`, the committed canonical serialization of the project graph (see "Version-controlled memory").

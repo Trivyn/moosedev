@@ -60,12 +60,27 @@ def runs_files() -> list[Path]:
     return sorted(p for p in paths if p.exists())
 
 
+def invalid_ids(path: Path) -> set[str]:
+    """Run IDs from a runs_invalid.jsonl sibling, if present: an explicit validity manifest
+    (condition-violating rows, e.g. the dead-MCP-window B2 rows in the release bundle).
+    Manifest rows are excluded from the regraded matrix entirely."""
+    manifest = path.with_name("runs_invalid.jsonl")
+    if not manifest.exists():
+        return set()
+    return {json.loads(l)["run_id"] for l in manifest.read_text().splitlines() if l.strip()}
+
+
 def regrade_all() -> list[dict]:
     """Regrade every runs file in place (writing a sibling *_regraded.jsonl) and return all
-    regraded rows."""
+    regraded rows. Rows listed in a runs_invalid.jsonl sibling are excluded."""
     all_rows, changed, skipped = [], 0, 0
     for path in runs_files():
         rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        bad = invalid_ids(path)
+        if bad:
+            n0 = len(rows)
+            rows = [r for r in rows if r["run_id"] not in bad]
+            print(f"  {path.name}: excluded {n0 - len(rows)} manifest-invalid rows (runs_invalid.jsonl)")
         out = []
         for row in rows:
             new = regrade_row(row, path.parent)
@@ -86,11 +101,13 @@ def regrade_all() -> list[dict]:
 
 
 def currency_summary(rows: list[dict], as_md: bool = False) -> None:
-    """Currency (STRICT) = the answer asserts the CURRENT state (full must_include_any coverage)
-    AND does NOT assert the superseded state (no negation-aware `stale` marker). The AND-not-stale
-    guard is essential: coverage alone is fooled by a NEGATED current marker ("not routing through
-    MOOSE") and by binary-choice prompt echoes — the trivyn local_embeddings B1-notes case scored
-    coverage 1.0 while actually serving the stale Candle answer (Lesson 046bc2d8/9fc21dc0)."""
+    """Currency = the answer asserts the CURRENT state: full must_include_any coverage of the
+    current markers. The `stale` keyword flag is a NON-AUTHORITATIVE HINT, never a gate
+    (Lesson 9fc21dc0; RESULTS.md "Grading (corrected)"): a correct current answer naturally
+    names the old state to deny it, and even the negation-aware matcher cannot distinguish
+    narration of history from serving-stale — hence coverage, not the marker list, is the
+    verdict. (An earlier version of this summary gated on AND-not-stale and under-counted,
+    e.g. glrc B1-rag pooled 5/24 vs the correct 11/24.)"""
     cur = [r for r in rows if r["task_id"].endswith("currency")]
     by = collections.defaultdict(lambda: collections.defaultdict(list))
     for r in cur:
@@ -104,8 +121,8 @@ def currency_summary(rows: list[dict], as_md: bool = False) -> None:
         for arm in sorted(by[task]):
             rs = by[task][arm]
             n = len(rs)
-            current = sum(1 for r in rs if (r["metrics"] or {}).get("coverage") == 1.0
-                           and not (r["metrics"] or {}).get("stale"))  # STRICT: current AND not-stale
+            current = sum(1 for r in rs if (r["metrics"] or {}).get("coverage") == 1.0)
+            # stale is reported below as a hint column only, never gated on (Lesson 9fc21dc0)
             mean = sum(r["score"] for r in rs) / n
             staleflag = sum(1 for r in rs if (r["metrics"] or {}).get("stale"))
             pct = round(100 * current / n)

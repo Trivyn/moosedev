@@ -167,3 +167,52 @@ async fn connect_respects_no_autospawn() {
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+/// A backend that DIES during startup must fail the proxy immediately, not by
+/// outlasting a clock.
+///
+/// This is what the timeout was really guarding, and it detected it only by
+/// waiting the whole budget out. Now the child's exit is the signal, so the
+/// backstop can be long enough for a genuinely slow cold start without making a
+/// doomed spawn hang for minutes.
+#[tokio::test]
+async fn connect_fails_fast_when_the_spawned_backend_dies() {
+    let data_dir = fresh_data_dir("autospawn-dies");
+    let started = std::time::Instant::now();
+
+    let output = tokio::process::Command::new(binary())
+        .arg("--connect")
+        .env("MOOSEDEV_DATA_DIR", &data_dir)
+        // Bootstrap cannot succeed against a nonexistent ontology dir, so the
+        // detached `--serve` exits instead of ever binding the socket.
+        .env("MOOSEDEV_ONTOLOGY_DIR", data_dir.join("no-such-ontologies"))
+        .env_remove("MOOSEDEV_SOCKET")
+        .env_remove("MOOSEDEV_NO_AUTOSPAWN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("run moosedev --connect");
+
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "proxy must fail when the backend dies; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("exited before it began serving"),
+        "must report the child's death, not a timeout: {stderr}"
+    );
+    // Far below the 300s backstop: the exit is what ended the wait.
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "should fail fast on a dead child, took {elapsed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

@@ -136,8 +136,7 @@ enum Verdict {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -163,13 +162,7 @@ async fn main() -> anyhow::Result<()> {
     let positives = CASES.iter().filter(|c| !c.gold.is_empty()).count();
 
     for case in CASES {
-        let outcome = align_concept(
-            &state,
-            case.label,
-            Some(case.definition),
-            Vec::new(),
-        )
-        .await?;
+        let outcome = align_concept(&state, case.label, Some(case.definition), Vec::new()).await?;
 
         let (verdict, detail) = match &outcome {
             AlignmentOutcome::Resolved { iri, sensor, .. } => {
@@ -189,10 +182,7 @@ async fn main() -> anyhow::Result<()> {
                 top_candidates,
                 ..
             } => {
-                let ranked: Vec<&str> = top_candidates
-                    .iter()
-                    .map(|c| local_name(&c.iri))
-                    .collect();
+                let ranked: Vec<&str> = top_candidates.iter().map(|c| local_name(&c.iri)).collect();
                 // Where did the gold class land in the surfaced candidate list?
                 let gold_rank = case
                     .gold
@@ -203,7 +193,10 @@ async fn main() -> anyhow::Result<()> {
                     .unwrap_or_else(|| "gold ABSENT from candidates".into());
                 (
                     Verdict::Abstained,
-                    format!("undecided [{}] — {gold_rank}\n      {reason}", ranked.join(", ")),
+                    format!(
+                        "undecided [{}] — {gold_rank}\n      {reason}",
+                        ranked.join(", ")
+                    ),
                 )
             }
             other => (Verdict::Abstained, format!("{other:?}")),

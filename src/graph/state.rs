@@ -226,6 +226,10 @@ impl AppState {
             clarification_provenance_writer: None,
             training_mode: false,
             domain_adapters: Vec::new(),
+            // Opt out of MOOSE's living-ontology governance for now, keeping
+            // engine behaviour as it was. Adopting it is an integration decision
+            // for when that engine work settles, not a default to inherit.
+            living_ontology: None,
         };
 
         Ok(Self {

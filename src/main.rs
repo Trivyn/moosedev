@@ -23,8 +23,9 @@
 //!   backend if none is live.
 //!
 //! `SOCKET` is optional; it otherwise comes from `MOOSEDEV_SOCKET`, else is
-//! derived per data dir. Configure with `.env` in the repo root, or environment
-//! variables such as `MOOSEDEV_DATA_DIR` / `MOOSEDEV_ONTOLOGY_DIR`. Set
+//! derived per data dir. Configure with `.env` in the project root (the nearest
+//! ancestor holding `.git` or a language manifest — see [`PROJECT_ROOT_MARKERS`]),
+//! or environment variables such as `MOOSEDEV_DATA_DIR` / `MOOSEDEV_ONTOLOGY_DIR`. Set
 //! `MOOSEDEV_NO_AUTOSPAWN=1` to make `--connect` require a pre-running backend.
 
 use std::io::Write;
@@ -36,6 +37,7 @@ use moosedev::export::{export_graph, ExportFormat, ExportScope};
 use moosedev::graph;
 use moosedev::graph_import::{import_graph as import_rdf_graph, ImportFormat, ImportMode};
 use moosedev::init;
+use moosedev::project::{is_project_root, project_root};
 use moosedev::runtime;
 
 mod temporal;
@@ -143,8 +145,11 @@ SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
 The web UI binds an ephemeral loopback port by default (discoverable via
 --status / ui); set MOOSEDEV_HTTP_ADDR for a stable port or network exposure,
 or MOOSEDEV_NO_HTTP=1 to disable it.
-Configuration: repo-root .env plus environment variables. Explicit environment
-values win. Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
+Configuration: project-root .env plus environment variables. Explicit environment
+values win. The .env is looked up from the current directory upward, stopping at
+the first project root (a dir holding .git, Cargo.toml, package.json,
+pyproject.toml, setup.py, setup.cfg, or requirements.txt).
+Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
 MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_LSP,
 MOOSEDEV_NO_AUTOSPAWN.
 LLM assistance is disabled unless MOOSEDEV_LLM_BASE_URL is explicitly set;
@@ -650,31 +655,107 @@ fn load_dotenv_file(path: &Path) -> anyhow::Result<bool> {
         .map_err(|e| anyhow::anyhow!("load dotenv {}: {e}", path.display()))
 }
 
-fn repo_dotenv_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join(".env")];
-
-    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()]
-        .into_iter()
-        .flatten()
-    {
-        for ancestor in start.ancestors() {
-            if ancestor.join("Cargo.toml").is_file() {
-                let candidate = ancestor.join(".env");
-                if !candidates.contains(&candidate) {
-                    candidates.push(candidate);
-                }
-                break;
-            }
+/// Candidate `.env` paths, nearest first, for a process started in `start`.
+///
+/// Walks up from the start directory and stops at the first project root. Gating
+/// this on `Cargo.toml` alone (as it once did) meant a Python or TypeScript
+/// project — both first-class targets — never had its `.env` read at all, so every
+/// documented key silently did nothing.
+///
+/// There is deliberately NO `CARGO_MANIFEST_DIR` fallback. That path is baked in
+/// at compile time, so a dev build run in a project with no `.env` of its own
+/// would load MOOSEDev's — its data dir and its LLM credentials — and operate on
+/// MOOSEDev's store from inside someone else's repo. Inside the MOOSEDev repo the
+/// walk finds that same `.env` anyway, so the fallback only ever reached cases
+/// where it was wrong.
+fn repo_dotenv_candidates_from(start: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<&Path> = Vec::new();
+    for ancestor in start.ancestors() {
+        dirs.push(ancestor);
+        if is_project_root(ancestor) {
+            break;
         }
     }
-
-    candidates
+    // No project root anywhere above `start`: keep only `start` itself, so the
+    // walk cannot reach `$HOME` or `/`, where one stray `.env` would silently
+    // configure every unrelated run on the machine.
+    if !dirs.last().is_some_and(|dir| is_project_root(dir)) {
+        dirs.truncate(1);
+    }
+    dirs.iter().map(|dir| dir.join(".env")).collect()
 }
 
+fn repo_dotenv_candidates() -> Vec<PathBuf> {
+    match std::env::current_dir() {
+        Ok(cwd) => repo_dotenv_candidates_from(&cwd),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Path-valued keys whose relative values name a location in the project, not a
+/// location relative to wherever the process happened to start.
+///
+/// `MOOSEDEV_SOCKET` belongs here for the same reason as the rest, with sharper
+/// consequences: `--serve` at the root and `--connect` from a subdirectory would
+/// otherwise resolve one relative socket path two ways and never meet, which is
+/// precisely the rendezvous failure of Constraint `ea2a00f5`.
+const DOTENV_PATH_KEYS: &[&str] = &[
+    "MOOSEDEV_DATA_DIR",
+    "MOOSEDEV_ONTOLOGY_DIR",
+    "MOOSEDEV_SOCKET",
+];
+
+/// Re-anchor relative path values loaded from `.env` to the directory that file
+/// lives in.
+///
+/// `MOOSEDEV_DATA_DIR=.moosedev` in a project-root `.env` means *that project's*
+/// store. Left relative it resolves against the process cwd, so running
+/// `moosedev --status` from `project/src` would create `project/src/.moosedev` —
+/// a second store, which is the split this `.env` exists to prevent. Only values
+/// this file supplied are rewritten: an explicit environment variable already
+/// won (AD 510c5585) and stays exactly as the caller wrote it.
+fn anchor_dotenv_paths(dotenv: &Path, before: &[(&str, Option<String>)]) {
+    let Some(base) = dotenv.parent() else {
+        return;
+    };
+    for (key, prior) in before {
+        // Untouched by this file — the value was already in the environment.
+        if let (Some(prior), Ok(now)) = (prior, std::env::var(key)) {
+            if *prior == now {
+                continue;
+            }
+        }
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        let path = Path::new(&value);
+        if value.is_empty() || path.is_absolute() {
+            continue;
+        }
+        std::env::set_var(key, base.join(path));
+    }
+}
+
+/// Load every `.env` from the working directory up to the project root, nearest
+/// first, anchoring each file's own relative paths to its own directory.
+///
+/// LAYERED, not first-match. dotenvy only fills variables that are unset, so
+/// walking nearest-first gives the closest file precedence per key while parents
+/// still supply the keys it does not mention. Stopping at the first file that
+/// merely *existed* meant an unrelated `project/src/.env` — an application's own
+/// settings, with no MOOSEDev keys at all — shadowed the project-root `.env` that
+/// held `MOOSEDEV_DATA_DIR`, so the run silently fell through to the default and
+/// used a different store than the same command one directory up.
 fn load_repo_dotenv() -> anyhow::Result<()> {
     for candidate in repo_dotenv_candidates() {
+        // Snapshot per file, so each key is anchored to the file that set it
+        // rather than to whichever file happened to be read last.
+        let before: Vec<(&str, Option<String>)> = DOTENV_PATH_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
         if load_dotenv_file(&candidate)? {
-            break;
+            anchor_dotenv_paths(&candidate, &before);
         }
     }
     Ok(())
@@ -700,9 +781,17 @@ async fn main() -> anyhow::Result<()> {
     // (mirrored by .mcp.json, .codex/config.toml, start-moosedev.sh, and the README).
     // The default must agree so a bare `--serve` in any repo honors the convention
     // instead of spawning a stray `data/`.
-    let data_dir = PathBuf::from(
-        std::env::var("MOOSEDEV_DATA_DIR").unwrap_or_else(|_| ".moosedev".to_string()),
-    );
+    //
+    // The DEFAULT hangs off the project root, not the working directory: resolving
+    // it against cwd meant a bare invocation from `project/src` created a second
+    // store there while the same command at the root used `project/.moosedev` —
+    // two stores for one project, which is Constraint ea2a00f5 arrived at without
+    // anyone configuring anything. An explicit `MOOSEDEV_DATA_DIR` is the caller's
+    // own words and is still honoured verbatim.
+    let data_dir = match std::env::var("MOOSEDEV_DATA_DIR") {
+        Ok(explicit) => PathBuf::from(explicit),
+        Err(_) => project_root().join(".moosedev"),
+    };
 
     match mode {
         // The proxy never opens the store (no RocksDB lock, no model load) — it
@@ -727,10 +816,11 @@ async fn main() -> anyhow::Result<()> {
             // port while this one is still coming up.
             runtime::invalidate_http_addr(&data_dir);
             let state = runtime::build_state(&data_dir, &ontology_dir()).await?;
+            warn_if_unminted(&state);
             // Save-triggered background reindex: daemon-global, one scheduler
             // shared by every LSP session; index.lock remains the cross-process
             // guard against hook/manual runs.
-            let reindex = std::env::current_dir().ok().and_then(|repo_root| {
+            let reindex = Some(project_root()).and_then(|repo_root| {
                 moosedev::code::substrate::scheduler::spawn_save_reindex(
                     repo_root,
                     data_dir.clone(),
@@ -808,8 +898,37 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Warn when the substrate is indexed but nothing has been minted from it.
+///
+/// `index` is automated end to end (git hooks, the didSave scheduler) while
+/// `mint` is a manual CLI step, so a project can index for months and still hold
+/// zero CodeEntities — at which point every dossier, hover, and code lens is
+/// empty and nothing says why (Requirement a0581252). Advisory only: mint needs
+/// the write lock this process is about to take, so it cannot run from here.
+fn warn_if_unminted(state: &graph::AppState) {
+    let Some(substrate) = state.substrate() else {
+        return;
+    };
+    let definitions = substrate.stats().definitions;
+    if definitions == 0 {
+        return;
+    }
+    let unminted =
+        graph::CodeTerms::resolve(state).and_then(|terms| graph::looks_unminted(state, &terms));
+    match unminted {
+        Ok(true) => tracing::warn!(
+            "{definitions} substrate definitions indexed, 0 CodeEntity records. {}",
+            graph::UNMINTED_STORE_HINT
+        ),
+        Ok(false) => {}
+        // Never fatal: this is a diagnostic, and a store whose code vocabulary
+        // has not been loaded yet is not a startup failure.
+        Err(e) => tracing::debug!("skipped the CodeEntity coverage check: {e}"),
+    }
+}
+
 fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
-    let repo_root = std::env::current_dir()?;
+    let repo_root = project_root();
     let report = substrate::producer::run_index(&repo_root, data_dir)?;
     println!("substrate index");
     println!("  commit:      {}", report.commit);
@@ -842,7 +961,7 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
 /// Plan or apply CodeEntity minting from the previously built code substrate.
 async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
-    let repo_root = std::env::current_dir()?;
+    let repo_root = project_root();
     let substrate = Substrate::load(data_dir, &repo_root)
         .with_context(|| "load code substrate for mint; run `moosedev index` first")?;
     let state = match runtime::build_state(data_dir, &ontology_dir()).await {
@@ -894,7 +1013,7 @@ async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
 /// Plan or apply role/criticality judgment proposals from evidence.
 async fn classify_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
-    let repo_root = std::env::current_dir()?;
+    let repo_root = project_root();
     let substrate = Substrate::load(data_dir, &repo_root)
         .with_context(|| "load code substrate for classify; run `moosedev index` first")?;
     let state = match runtime::build_state(data_dir, &ontology_dir()).await {
@@ -1100,9 +1219,10 @@ fn report_planned_entity(
 }
 
 fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
-    let repo_root = std::env::current_dir()?;
+    let repo_root = project_root();
     let substrate = Substrate::load(data_dir, &repo_root)?;
-    let relative_path = normalize_resolve_path(&repo_root, &args.file);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
+    let relative_path = resolve_input_path(&repo_root, &cwd, &args.file);
     let pos = Position {
         line: args.line - 1,
         col: args.col - 1,
@@ -1152,6 +1272,38 @@ fn resolve_mode(data_dir: &Path, args: ResolveArgs) -> anyhow::Result<()> {
     println!("indexed commit: {}", substrate.meta().indexed_commit);
     println!("stale:          {}", resolution.stale);
     Ok(())
+}
+
+/// Interpret the CLI's `FILE` argument as a path into the substrate.
+///
+/// A relative argument is relative to the USER'S working directory, which is no
+/// longer the same thing as the project root the substrate is indexed against.
+/// Passing it through unchanged meant `moosedev resolve main.rs 10:5` from
+/// `repo/src` searched an index that only knows `src/main.rs` — something that
+/// worked before the root and the cwd were allowed to differ.
+fn resolve_input_path(repo_root: &Path, cwd: &Path, file: &Path) -> String {
+    let absolute = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        cwd.join(file)
+    };
+    normalize_resolve_path(repo_root, &lexically_normalized(&absolute))
+}
+
+/// Resolve `.` and `..` textually, without touching the filesystem — the target
+/// need not exist for a resolve to be a well-formed question.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn normalize_resolve_path(repo_root: &Path, file: &Path) -> String {
@@ -1478,6 +1630,14 @@ fn print_init_report(opts: &init::InitOptions, report: &init::InitReport, path_n
     for note in &report.notes {
         println!("note: {note}");
     }
+    // Last and visually distinct: these are the things `init` could NOT do, and
+    // each leaves the setup quietly incomplete until the user acts.
+    if !report.actions.is_empty() {
+        println!("\nAction required:");
+        for action in &report.actions {
+            println!("  ! {action}");
+        }
+    }
     println!("\nNext steps:");
     println!("  1. Reload MCP servers in your client (restart Claude Code, or /mcp reconnect).");
     println!(
@@ -1674,6 +1834,237 @@ mod tests {
         std::env::remove_var(missing_key);
         std::env::remove_var(existing_key);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fresh, empty scratch directory for one test (unique per test AND per
+    /// process — every test in this binary shares a pid).
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "moosedev-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// The regression this whole change exists for: gating the walk on
+    /// `Cargo.toml` meant a Python project's `.env` was never even a candidate,
+    /// so every documented key silently did nothing.
+    #[test]
+    fn dotenv_candidates_find_non_rust_project_roots() {
+        for marker in ["pyproject.toml", "package.json", "setup.py", ".git"] {
+            let root = scratch_dir("dotenv-nonrust");
+            std::fs::write(root.join(marker), "").expect("write marker");
+
+            let candidates = repo_dotenv_candidates_from(&root);
+            assert_eq!(
+                candidates.first(),
+                Some(&root.join(".env")),
+                "{marker} should mark a project root"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn dotenv_candidates_walk_up_to_the_project_root_nearest_first() {
+        let root = scratch_dir("dotenv-nested");
+        let nested = root.join("src").join("deep");
+        std::fs::create_dir_all(&nested).expect("create nested dirs");
+        std::fs::write(root.join("pyproject.toml"), "").expect("write marker");
+
+        let candidates = repo_dotenv_candidates_from(&nested);
+        let repo_local: Vec<&PathBuf> = candidates
+            .iter()
+            .filter(|path| path.starts_with(&root))
+            .collect();
+        assert_eq!(
+            repo_local,
+            vec![
+                &nested.join(".env"),
+                &root.join("src").join(".env"),
+                &root.join(".env"),
+            ],
+            "nearest first, stopping at the project root"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Without this bound, one stray `~/.env` would silently configure every
+    /// unrelated run on the machine.
+    #[test]
+    fn dotenv_candidates_do_not_escape_a_markerless_directory() {
+        let root = scratch_dir("dotenv-markerless");
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("create nested dirs");
+
+        let candidates = repo_dotenv_candidates_from(&nested);
+        assert_eq!(
+            candidates,
+            vec![nested.join(".env")],
+            "no project root above: consider only the start dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A dev build must never reach MOOSEDev's own `.env` from inside someone
+    /// else's project: that would hand it MOOSEDev's data dir and LLM
+    /// credentials and point it at the wrong store. Inside the MOOSEDev repo the
+    /// ordinary walk finds that file anyway, so the old `CARGO_MANIFEST_DIR`
+    /// fallback only ever fired where it was wrong.
+    #[test]
+    fn dotenv_candidates_never_escape_to_the_build_time_manifest_dir() {
+        let manifest_env = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env");
+
+        // Another project, with and without a `.env` of its own.
+        let other = scratch_dir("dotenv-other-project");
+        std::fs::write(other.join("pyproject.toml"), "").expect("write marker");
+        assert_eq!(
+            repo_dotenv_candidates_from(&other),
+            vec![other.join(".env")]
+        );
+        assert!(!repo_dotenv_candidates_from(&other).contains(&manifest_env));
+
+        // A bare directory with no project markers at all.
+        let bare = scratch_dir("dotenv-bare");
+        assert!(!repo_dotenv_candidates_from(&bare).contains(&manifest_env));
+
+        // Inside the MOOSEDev repo the normal walk still finds its `.env`.
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            repo_dotenv_candidates_from(&manifest_dir),
+            vec![manifest_env],
+            "the crate dir is its own project root"
+        );
+
+        let _ = std::fs::remove_dir_all(&other);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// `MOOSEDEV_DATA_DIR=.moosedev` in a project-root `.env` names THAT
+    /// project's store. Left relative it resolves against the process cwd, so a
+    /// run from `project/src` would quietly create a second store there.
+    #[test]
+    fn dotenv_relative_paths_anchor_to_the_env_file_not_the_cwd() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let root = scratch_dir("dotenv-anchor");
+        let dotenv = root.join(".env");
+        let key = "MOOSEDEV_DATA_DIR";
+
+        std::fs::write(&dotenv, format!("{key}=.moosedev\n")).expect("write .env");
+        std::env::remove_var(key);
+        let before = vec![(key, None)];
+        assert!(load_dotenv_file(&dotenv).expect("load"));
+        anchor_dotenv_paths(&dotenv, &before);
+        assert_eq!(
+            std::env::var(key).ok().map(PathBuf::from),
+            Some(root.join(".moosedev")),
+            "relative value must anchor to the .env's own directory"
+        );
+
+        // An absolute value is already unambiguous and is left alone.
+        std::env::set_var(key, "/tmp/explicit-store");
+        let before = vec![(key, Some("/tmp/explicit-store".to_string()))];
+        anchor_dotenv_paths(&dotenv, &before);
+        assert_eq!(std::env::var(key).as_deref(), Ok("/tmp/explicit-store"));
+
+        // A value the caller set explicitly outranks the file (AD 510c5585) and
+        // must survive verbatim, relative or not.
+        std::env::set_var(key, "shell-relative");
+        let before = vec![(key, Some("shell-relative".to_string()))];
+        anchor_dotenv_paths(&dotenv, &before);
+        assert_eq!(std::env::var(key).as_deref(), Ok("shell-relative"));
+
+        std::env::remove_var(key);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A nearer `.env` with no MOOSEDev keys must not shadow the project-root one
+    /// that has them. Stopping at the first file that merely existed meant an
+    /// application's own `project/src/.env` hid `MOOSEDEV_DATA_DIR`, so the run
+    /// fell through to the default and used a different store than the same
+    /// command one directory up.
+    #[test]
+    fn dotenv_layers_so_an_unrelated_nearer_file_cannot_shadow_the_root() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let root = scratch_dir("dotenv-layered");
+        let nested = root.join("src");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        std::fs::write(root.join(".git"), "").expect("root marker");
+        std::fs::write(
+            root.join(".env"),
+            "MOOSEDEV_DATA_DIR=root-store\nA=from-root\n",
+        )
+        .expect("root .env");
+        std::fs::write(nested.join(".env"), "A=from-nested\n").expect("nested .env");
+
+        for key in ["MOOSEDEV_DATA_DIR", "A"] {
+            std::env::remove_var(key);
+        }
+        for candidate in repo_dotenv_candidates_from(&nested) {
+            let before: Vec<(&str, Option<String>)> = DOTENV_PATH_KEYS
+                .iter()
+                .map(|k| (*k, std::env::var(k).ok()))
+                .collect();
+            if load_dotenv_file(&candidate).expect("load") {
+                anchor_dotenv_paths(&candidate, &before);
+            }
+        }
+
+        // Nearest wins per key…
+        assert_eq!(std::env::var("A").as_deref(), Ok("from-nested"));
+        // …while the root still supplies the key it alone declares, anchored to
+        // the root rather than to the directory the process started in.
+        assert_eq!(
+            std::env::var("MOOSEDEV_DATA_DIR").ok().map(PathBuf::from),
+            Some(root.join("root-store"))
+        );
+
+        for key in ["MOOSEDEV_DATA_DIR", "A"] {
+            std::env::remove_var(key);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A relative FILE argument is relative to the USER'S cwd, which is no longer
+    /// the project root the substrate is indexed against. `moosedev resolve
+    /// main.rs 10:5` from `repo/src` must still mean `src/main.rs`.
+    #[test]
+    fn resolve_input_rebases_cwd_relative_paths_onto_the_project_root() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/src");
+
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("main.rs")),
+            "src/main.rs"
+        );
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("./main.rs")),
+            "src/main.rs"
+        );
+        // `..` is resolved lexically, without requiring the file to exist.
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("../README.md")),
+            "README.md"
+        );
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("../src/graph/mod.rs")),
+            "src/graph/mod.rs"
+        );
+        // An absolute argument is already unambiguous.
+        assert_eq!(
+            resolve_input_path(root, cwd, Path::new("/repo/src/lib.rs")),
+            "src/lib.rs"
+        );
+        // Run from the root itself, a relative path is unchanged.
+        assert_eq!(
+            resolve_input_path(root, root, Path::new("src/main.rs")),
+            "src/main.rs"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! `moosedev init` — configure a project to use MOOSEDev as its long-term memory.
 //!
 //! Collapses the manual onboarding (hand-editing MCP-client JSON, writing the
-//! `.gitignore` memory-cache rule, copying the CLAUDE.md template) into one
-//! command. Every artifact write is **non-clobbering**: an existing file is
+//! `.env` and `.gitignore` memory-cache rules, copying the CLAUDE.md template)
+//! into one command. Every artifact write is **non-clobbering**: an existing file is
 //! preserved (and reported as [`Outcome::Skipped`]) unless `--force`, so
 //! re-running `init`, or running it in a repo that already has a `.mcp.json` /
 //! `CLAUDE.md`, never destroys the user's work. `.mcp.json` is *merged* — the
@@ -158,9 +158,19 @@ impl Entry {
 
 /// The result of an `init` run: what was written and any advisory notes
 /// (existing files left alone, PATH caveats, custom-data-dir warnings).
+///
+/// `#[non_exhaustive]` because this grew an `actions` field in 0.7.1: the report
+/// is a description of what `init` did, and that list is expected to keep
+/// growing, so callers must not depend on today's shape.
+#[non_exhaustive]
 pub struct InitReport {
     pub entries: Vec<Entry>,
     pub notes: Vec<String>,
+    /// Things `init` could not do for the user and that leave the setup
+    /// incomplete until they act. Kept separate from `notes` so the caller can
+    /// print them prominently: a note buried in a list of twenty create/keep
+    /// lines is a note nobody reads.
+    pub actions: Vec<String>,
 }
 
 /// Configure `opts.target_dir` to use MOOSEDev as project memory. Idempotent and
@@ -170,6 +180,7 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     let mut report = InitReport {
         entries: Vec::new(),
         notes: Vec::new(),
+        actions: Vec::new(),
     };
 
     std::fs::create_dir_all(&opts.target_dir)
@@ -177,7 +188,10 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
 
     write_data_dir(opts, &mut report)?;
     write_mcp_json(opts, &mut report)?;
-    write_gitignore(opts, &mut report)?;
+    // Before `write_gitignore`, which needs to know whether we authored the
+    // `.env` (and therefore whether ignoring it is our call to make).
+    let created_env = write_env(opts, &mut report)?;
+    write_gitignore(opts, &mut report, created_env)?;
     write_claude_md(opts, &mut report)?;
     write_skills(opts, &mut report)?;
     if opts.codex {
@@ -195,6 +209,7 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     if opts.claude_hooks {
         write_claude_hooks(opts, &mut report)?;
     }
+    check_data_dir_agreement(opts, &mut report)?;
     offer_reindex_hooks(opts, &mut report)?;
 
     Ok(report)
@@ -215,6 +230,363 @@ fn write_data_dir(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result
         },
     ));
     Ok(())
+}
+
+/// Header for a `.env` this command creates. Deliberately short — `.env.example`
+/// is the full key reference; this only has to say what the file is.
+const ENV_HEADER: &str = "\
+# MOOSEDev configuration. Explicit environment variables win over anything here.
+";
+
+/// Explains the appended line when the project already had its own `.env`.
+const ENV_APPEND_HEADER: &str = "\
+\n# MOOSEDev: keep the CLI (index, mint, --status, ui) on the same store the\n\
+# MCP clients use.\n";
+
+/// Read the data dir a config file actually declares, ignoring what this run
+/// intended — the point is to see what a *process* will resolve.
+fn declared_data_dir(path: &Path, read: impl Fn(&str) -> Option<String>) -> Option<String> {
+    read(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Report when `.mcp.json` and `.env` name different stores.
+///
+/// Every writer here is non-clobbering, which is right on its own but composes
+/// badly: an existing `.mcp.json` is preserved while a fresh `.env` is written
+/// (or the reverse), and each is individually correct while together they point
+/// the CLI and the MCP clients at different graphs — the split store of Constraint
+/// `ea2a00f5`, arrived at by two "safe" decisions. `init` cannot resolve this
+/// without clobbering something the user owns, so it reports it instead: this is
+/// the one situation where the report has to say the setup is not consistent.
+fn check_data_dir_agreement(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let mcp = declared_data_dir(&opts.target_dir.join(".mcp.json"), |raw| {
+        serde_json::from_str::<Value>(raw).ok()?["mcpServers"]["moosedev"]["env"]
+            ["MOOSEDEV_DATA_DIR"]
+            .as_str()
+            .map(str::to_string)
+    });
+    // A `.env` that does not parse is one MOOSEDev will refuse to load at
+    // startup; reporting agreement about it would be worse than saying nothing.
+    let env_path = opts.target_dir.join(".env");
+    let env = match std::fs::read_to_string(&env_path) {
+        Ok(raw) => match env_data_dir(&raw) {
+            Ok(value) => value,
+            Err(e) => {
+                report.actions.push(format!(
+                    "{} does not parse as a dotenv file ({e}), so MOOSEDev will fail to \
+                     start while loading it. Fix that line first.",
+                    env_path.display()
+                ));
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let codex = declared_data_dir(&opts.target_dir.join(".codex/config.toml"), codex_data_dir);
+
+    // Every declaration a real process could read, so a disagreement is reported
+    // no matter which pair holds it.
+    let declared = [
+        (".mcp.json", mcp),
+        (".env", env),
+        (".codex/config.toml", codex),
+    ];
+    let present: Vec<(&str, &str)> = declared
+        .iter()
+        .filter_map(|(name, value)| value.as_deref().map(|v| (*name, v)))
+        .collect();
+
+    if let Some((_, first)) = present.first() {
+        if present.iter().any(|(_, value)| value != first) {
+            let listing = present
+                .iter()
+                .map(|(name, value)| format!("\x20     {name:<20} → {value}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            report.actions.push(format!(
+                "These name DIFFERENT stores, so MCP clients and the CLI (index, mint, \
+                 --status, ui) will use different graphs:\n{listing}\n    \
+                 They are all yours, so nothing was changed — edit them to match, \
+                 or re-run with --force to set them to {:?}.",
+                opts.data_dir
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every `MOOSEDEV_DATA_DIR` a dotenv loader would see, in file order.
+///
+/// Accepts the forms dotenvy accepts, not just the one `init` writes: an
+/// `export ` prefix and whitespace around `=` both parse (verified against
+/// 0.15). Matching only the bare prefix meant an existing `export
+/// MOOSEDEV_DATA_DIR=old` went unseen, so `init` appended a second declaration —
+/// and since the FIRST wins, the loader kept using `old` while the agreement
+/// check read the appended one and reported success. A silent split store,
+/// produced by the very code meant to prevent it.
+/// The `MOOSEDEV_DATA_DIR` a dotenv loader would actually resolve from `raw`,
+/// or `None` when the file declares none.
+///
+/// Delegates to dotenvy rather than reading the text ourselves. Three rounds of
+/// hand-rolled matching each missed a different construct the loader accepts —
+/// `export` with arbitrary whitespace, inline `#` comments, `$VAR` substitution
+/// (applied bare and double-quoted, literal single-quoted, escapable as `\$`) —
+/// and every miss had the same consequence: `init` appended a second
+/// declaration, dotenvy kept using the first, and the agreement check compared
+/// the wrong one and reported success. The parser is the only thing that cannot
+/// drift from the parser.
+///
+/// The BOM is stripped first because dotenvy is inconsistent about it: its
+/// loader (`from_path`) accepts a BOM-prefixed first line, while its iterator
+/// rejects the same line. Stripping makes the iterator agree with the loader
+/// MOOSEDev actually runs at startup, rather than trading one divergence for its
+/// mirror image.
+fn env_data_dir(raw: &str) -> anyhow::Result<Option<String>> {
+    Ok(dotenv_pairs(raw)?
+        .into_iter()
+        .find(|(key, _)| key == "MOOSEDEV_DATA_DIR")
+        .map(|(_, value)| value))
+}
+
+/// Every key/value a dotenv loader would read from `raw`, in file order.
+///
+/// Errors are propagated, never skipped. `.flatten()` dropped them, which made
+/// this reader MORE tolerant than the loader: a malformed line makes
+/// `dotenvy::from_path` fail outright at startup, so a file this answered
+/// confidently about could be one MOOSEDev then refuses to load.
+///
+/// The BOM is stripped because dotenvy is inconsistent about it — its loader
+/// accepts a BOM-prefixed first line while its iterator rejects the same line —
+/// and matching the loader is what matters.
+fn dotenv_pairs(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let body = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut pairs = Vec::new();
+    for entry in dotenvy::from_read_iter(std::io::Cursor::new(body)) {
+        pairs.push(entry?);
+    }
+    Ok(pairs)
+}
+
+/// The data dir declared in a `.codex/config.toml`, matching the `env = { … }`
+/// inline table [`codex_block`] writes.
+///
+/// Not a TOML parser — pulling one in for a single lookup would be out of
+/// proportion for a patch release — but strict enough not to be fooled by the
+/// two things a loose substring search gets wrong: a COMMENTED-OUT value earlier
+/// in the file masking the live one, and a key that merely contains
+/// `MOOSEDEV_DATA_DIR` as a substring. Single-quoted TOML literals are accepted
+/// too, since TOML permits them where we only ever emit double quotes.
+fn codex_data_dir(raw: &str) -> Option<String> {
+    codex_moosedev_server(raw)?
+        .get("env")?
+        .get("MOOSEDEV_DATA_DIR")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The `mcp_servers.moosedev` entry, parsed as TOML, if the file both parses and
+/// declares one.
+///
+/// Parsed, not scanned. TOML spells one table many ways —
+/// `[mcp_servers."moosedev"]`, a nested `[mcp_servers.moosedev.env]`, an inline
+/// `env = { … }`, quoted keys, escaped values — and a substring search sees only
+/// the spelling it was written for. That mattered twice over: it read a value
+/// belonging to a different server, and, worse, it made [`write_codex_config`]
+/// believe no MOOSEDev entry existed and append a SECOND `[mcp_servers.moosedev]`
+/// table. Duplicate tables are invalid TOML, so that turns "MOOSEDev is already
+/// configured" into "Codex has no MCP servers at all".
+fn codex_moosedev_server(raw: &str) -> Option<toml::Value> {
+    let server = raw
+        .parse::<toml::Table>()
+        .ok()?
+        .get("mcp_servers")?
+        .get("moosedev")
+        .cloned()?;
+    // Must be a TABLE to count as configured. `mcp_servers = { moosedev = false }`
+    // is valid TOML but not a usable server, and treating any value as "already
+    // configured" made `init` report success while leaving the project with no
+    // working entry — a silent no-op exactly where the user asked for setup.
+    server.is_table().then_some(server)
+}
+
+/// True when this LINE declares `MOOSEDEV_DATA_DIR`, for the `--force` rewrite.
+///
+/// Locating a line is the one thing [`env_data_dir`] cannot do — dotenvy reports
+/// keys and values, not positions. This is therefore a best-effort scan over the
+/// ordinary forms, and its caller treats "parser saw a value but no line matched"
+/// as a refusal to write rather than as absence. A BOM is stripped because
+/// dotenvy's loader accepts one on the first line.
+fn is_data_dir_line(line: &str) -> bool {
+    let line = line.strip_prefix('\u{feff}').unwrap_or(line).trim_start();
+    let line = match line.strip_prefix("export") {
+        Some(rest) if rest.starts_with([' ', '\t']) => rest.trim_start(),
+        _ => line,
+    };
+    line.split_once('=')
+        .is_some_and(|(key, _)| key.trim_end() == "MOOSEDEV_DATA_DIR")
+}
+
+/// Serialize a value for a `.env` line, quoting when the raw form would not
+/// round-trip. Unquoted dotenv values end at `#`, so `data # dir` would silently
+/// become `data`, and spaces or `$` are read inconsistently across parsers — a
+/// mangled data dir is exactly the split-store failure `write_env` exists to
+/// prevent, so it must not be introduced by the write itself.
+fn dotenv_value(raw: &str) -> String {
+    let needs_quoting = raw.is_empty()
+        || raw
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '#' | '$' | '"' | '\'' | '\\' | '`'));
+    if !needs_quoting {
+        return raw.to_string();
+    }
+    // Backticks are quoted but NOT escaped: dotenvy has no command substitution,
+    // so a backtick inside double quotes is already literal, while `\`` is not a
+    // recognised escape and makes the whole file fail to parse — turning a
+    // cosmetic path oddity into a store that never loads again. Verified against
+    // dotenvy 0.15: `K="a\`b"` errors, `K="a`b"` reads back as `a`b`.
+    let escaped = raw
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$");
+    format!("\"{escaped}\"")
+}
+
+/// Write `MOOSEDEV_DATA_DIR` into a project-root `.env` so the CLI and the MCP
+/// clients resolve the same store.
+///
+/// `.mcp.json` and `.codex/config.toml` carry the data dir in their `env` blocks,
+/// but those are applied only by an MCP client spawning the server. A plain
+/// `moosedev index` / `mint` / `--status` / `ui` in the same project reads the
+/// process environment instead, so without this a custom `--data-dir` silently
+/// splits into two stores — the failure mode recorded in Constraint `ea2a00f5`.
+///
+/// Append-only. An existing `.env` keeps every line it already had: projects put
+/// their own application settings here, and overwriting one would destroy them.
+/// Returns true when this call created the file, so the caller can decide whether
+/// adding it to `.gitignore` is MOOSEDev's call to make.
+fn write_env(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<bool> {
+    let path = opts.target_dir.join(".env");
+    let existed = path.exists();
+    // A read failure on a file that EXISTS is fatal, never an empty string: this
+    // function rewrites the file, so treating an unreadable or non-UTF-8 `.env`
+    // as empty would truncate it and destroy the project's own settings —
+    // possibly secrets. Refusing to touch what we cannot read is the only safe
+    // reading of the non-clobbering promise in the module docs.
+    let existing = if existed {
+        std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "read {} — refusing to rewrite a .env this run cannot read (is it valid UTF-8?)",
+                path.display()
+            )
+        })?
+    } else {
+        String::new()
+    };
+    let setting = format!("MOOSEDEV_DATA_DIR={}", dotenv_value(&opts.data_dir));
+
+    // Presence is decided by dotenvy, so a declaration in any form it accepts is
+    // seen and never duplicated. Rewriting still needs a LINE, which the parser
+    // does not report — so the two are kept separate, and the mismatch between
+    // them is handled explicitly below rather than silently appending.
+    if let Some(current) = env_data_dir(&existing)? {
+        if current == opts.data_dir || !opts.force {
+            report.entries.push(Entry::new(path, Outcome::Skipped));
+            return Ok(false);
+        }
+        // Rewrite ONE line in place, keeping every separator as it was. Going
+        // through `lines()` and re-joining with "\n" silently converted a CRLF
+        // file to LF and appended a trailing newline it may not have had — a
+        // whole-file reformat as a side effect of changing one setting, and a
+        // spurious diff in someone's repository.
+        let mut out = String::with_capacity(existing.len() + setting.len());
+        let mut rest = existing.as_str();
+        while !rest.is_empty() {
+            let (line, sep, tail) = match rest.find('\n') {
+                Some(idx) => {
+                    let (head, tail) = rest.split_at(idx + 1);
+                    let line = head.strip_suffix('\n').unwrap_or(head);
+                    let (line, sep) = match line.strip_suffix('\r') {
+                        Some(line) => (line, "\r\n"),
+                        None => (line, "\n"),
+                    };
+                    (line, sep, tail)
+                }
+                // Final line with no terminator: keep it unterminated.
+                None => (rest, "", ""),
+            };
+            if is_data_dir_line(line) {
+                out.push_str(&setting);
+            } else {
+                out.push_str(line);
+            }
+            out.push_str(sep);
+            rest = tail;
+        }
+
+        // VERIFY, don't predict — and verify the WHOLE file, not just our key.
+        // A line scan has no quote state, so a line that merely looks like a
+        // declaration can sit inside another key's multi-line value; rewriting it
+        // there silently edits that value, and a check that only asked "is
+        // MOOSEDEV_DATA_DIR right now?" still passed. Comparing every key before
+        // and after closes that off without the scan needing to understand
+        // quoting: the only difference permitted is the one intended.
+        let rewritten_ok = match (dotenv_pairs(&existing), dotenv_pairs(&out)) {
+            (Ok(before), Ok(after)) => {
+                let intended = |(key, value): &(String, String)| {
+                    key != "MOOSEDEV_DATA_DIR" || value == &opts.data_dir
+                };
+                after.iter().all(intended)
+                    && after.iter().any(|(k, _)| k == "MOOSEDEV_DATA_DIR")
+                    // Every other key keeps the value it had, and none appear or
+                    // vanish.
+                    && before.len() == after.len()
+                    && before
+                        .iter()
+                        .zip(after.iter())
+                        .all(|((bk, bv), (ak, av))| {
+                            bk == ak && (bk == "MOOSEDEV_DATA_DIR" || bv == av)
+                        })
+            }
+            _ => false,
+        };
+        if !rewritten_ok {
+            report.actions.push(format!(
+                "{} declares MOOSEDEV_DATA_DIR={current:?} in a form this command \
+                 cannot rewrite safely (a multi-line or otherwise unusual value), so \
+                 --force changed nothing. Edit it by hand to {:?} if you want the CLI \
+                 on that store.",
+                path.display(),
+                opts.data_dir
+            ));
+            report.entries.push(Entry::new(path, Outcome::Skipped));
+            return Ok(false);
+        }
+        std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+        report.entries.push(Entry::new(path, Outcome::Merged));
+        return Ok(false);
+    }
+
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(if existed {
+        ENV_APPEND_HEADER
+    } else {
+        ENV_HEADER
+    });
+    out.push_str(&setting);
+    out.push('\n');
+    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    Ok(!existed)
 }
 
 /// The `mcpServers.moosedev` value written into `.mcp.json`.
@@ -601,8 +973,17 @@ fn offer_reindex_hooks(opts: &InitOptions, report: &mut InitReport) -> anyhow::R
             {
                 report.entries.push(Entry::new(path, Outcome::Skipped));
             } else {
-                report.notes.push(format!(
-                    "{name} hook exists without MOOSEDev; append this line manually: nohup moosedev index >/dev/null 2>&1 &"
+                // A hook we did not author (git-lfs is the common one). Refusing
+                // to touch it is correct, but silence is not: without the line,
+                // the code substrate never refreshes on commit, and the resulting
+                // stale dossiers give no hint why. `--force` deliberately does
+                // not override this — it governs files MOOSEDev owns.
+                report.actions.push(format!(
+                    "{} already exists and is not MOOSEDev's, so it was left untouched \
+                     (--force does not override this).\n    Until this line is appended, \
+                     the code substrate will not refresh after a commit:\n\
+                     \x20     nohup moosedev index >/dev/null 2>&1 &",
+                    path.display()
                 ));
             }
             continue;
@@ -645,14 +1026,34 @@ fn gitignore_lines(data_dir: &str) -> Option<[String; 2]> {
 }
 
 /// Append the cache-ignore lines to `.gitignore` iff missing (idempotent).
-fn write_gitignore(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
-    let Some(lines) = gitignore_lines(&opts.data_dir) else {
-        report.notes.push(format!(
+///
+/// `ignore_env` is set only when this run authored the `.env` itself. A `.env`
+/// can hold LLM API keys, so leaving one we just created untracked is the safe
+/// default — but a project that deliberately commits its own `.env` keeps that
+/// choice, which is why we never add the rule for a pre-existing file.
+fn write_gitignore(
+    opts: &InitOptions,
+    report: &mut InitReport,
+    ignore_env: bool,
+) -> anyhow::Result<()> {
+    let mut lines: Vec<String> = Vec::new();
+    match gitignore_lines(&opts.data_dir) {
+        Some(cache_lines) => lines.extend(cache_lines),
+        None => report.notes.push(format!(
             "data dir {:?} is absolute — add your own ignore rule to keep the derived cache out of git",
             opts.data_dir
-        ));
+        )),
+    }
+    if ignore_env {
+        // ANCHORED: `init` authored the root `.env` and only that one. A bare
+        // `.env` pattern is recursive, so it would also hide a nested package's
+        // own `.env` — files this command never touched and has no business
+        // ignoring. Matches the anchoring already used for the data-dir rules.
+        lines.push("/.env".to_string());
+    }
+    if lines.is_empty() {
         return Ok(());
-    };
+    }
     let path = opts.target_dir.join(".gitignore");
     let existed = path.exists();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -674,7 +1075,7 @@ fn write_gitignore(opts: &InitOptions, report: &mut InitReport) -> anyhow::Resul
     }
     if fresh_block {
         out.push_str(
-            "\n# MOOSEDev: ignore the derived store/vector cache,\n# but commit the canonical project-graph text (kg.nq).\n",
+            "\n# MOOSEDev: ignore the derived store/vector cache and local config,\n# but commit the canonical project-graph text (kg.nq).\n",
         );
     }
     for line in &missing {
@@ -773,12 +1174,37 @@ fn write_codex_config(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("config.toml");
     let existed = path.exists();
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    // A read failure on a file that EXISTS is fatal, never an empty string —
+    // appending onto content we could not read is how a config gets mangled.
+    let existing = if existed {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("read {} (is it valid UTF-8?)", path.display()))?
+    } else {
+        String::new()
+    };
 
-    if existing.contains("[mcp_servers.moosedev]") {
+    // Refuse to append to a file we cannot parse: we would have no idea whether
+    // it already declares this server, and a duplicate table is invalid TOML.
+    if !existing.trim().is_empty() && existing.parse::<toml::Table>().is_err() {
+        report
+            .entries
+            .push(Entry::new(path.clone(), Outcome::Skipped));
+        report.actions.push(format!(
+            "{} is not valid TOML, so it was left untouched. Fix it and re-run \
+             `moosedev init --codex`, or add the [mcp_servers.moosedev] block by hand.",
+            path.display()
+        ));
+        return Ok(());
+    }
+
+    // Parsed, not substring-matched: `[mcp_servers."moosedev"]` is the same table
+    // as `[mcp_servers.moosedev]`, and appending a second one would invalidate
+    // the whole file — costing Codex every server it has.
+    if codex_moosedev_server(&existing).is_some() {
         report.entries.push(Entry::new(path, Outcome::Skipped));
         report.notes.push(
-            "`.codex/config.toml` already has [mcp_servers.moosedev]; left as-is".to_string(),
+            "`.codex/config.toml` already configures the moosedev MCP server; left as-is"
+                .to_string(),
         );
         return Ok(());
     }
@@ -791,6 +1217,28 @@ fn write_codex_config(opts: &InitOptions, report: &mut InitReport) -> anyhow::Re
         out.push('\n');
     }
     out.push_str(&codex_block(opts));
+
+    // VERIFY the result parses before committing it, the same discipline the
+    // `.env` rewrite uses. Appending a `[mcp_servers.moosedev]` header is only
+    // valid when `mcp_servers` is a standard table; if the file declares it
+    // INLINE — `mcp_servers = { other = { … } }` — TOML forbids extending it that
+    // way and the append silently produces a config Codex cannot read. The
+    // parsed form does not record inline-ness, so rather than try to detect the
+    // shape, generate the candidate and ask the parser.
+    if out.parse::<toml::Table>().is_err() {
+        report
+            .entries
+            .push(Entry::new(path.clone(), Outcome::Skipped));
+        report.actions.push(format!(
+            "{} declares `mcp_servers` in a form this command cannot extend (an inline \
+             table), so it was left untouched — appending would have made the file \
+             invalid TOML and cost Codex every server in it. Add the moosedev entry to \
+             the existing `mcp_servers` table by hand.",
+            path.display()
+        ));
+        return Ok(());
+    }
+
     std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
     report.entries.push(Entry::new(
         path,
@@ -975,6 +1423,481 @@ mod tests {
         assert!(claude.contains(MEMORY_BEGIN), "carries the managed marker");
         assert!(target.join(".moosedev").is_dir());
         assert_eq!(outcome_for(&report, ".mcp.json"), Some(&Outcome::Created));
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The CLI (`index`, `mint`, `--status`, `ui`) reads the process environment,
+    /// not `.mcp.json`, so without a `.env` a custom data dir splits into two
+    /// stores (Constraint ea2a00f5).
+    #[test]
+    fn writes_env_carrying_the_data_dir() {
+        let target = temp_project("env-fresh");
+        let mut options = opts(&target);
+        options.data_dir = "custom-store".to_string();
+
+        let report = init_project(&options).unwrap();
+
+        let env = std::fs::read_to_string(target.join(".env")).unwrap();
+        assert!(env.contains("MOOSEDEV_DATA_DIR=custom-store"), "{env}");
+        assert_eq!(outcome_for(&report, ".env"), Some(&Outcome::Created));
+
+        // A `.env` we created can hold LLM API keys, so we ignore it too —
+        // ANCHORED, since a bare `.env` would also hide nested packages' own
+        // files, which this command never authored.
+        let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
+        assert!(
+            gitignore.lines().any(|line| line.trim() == "/.env"),
+            "{gitignore}"
+        );
+        assert!(
+            !gitignore.lines().any(|line| line.trim() == ".env"),
+            "the rule must be anchored, not recursive: {gitignore}"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// A project's `.env` is its own — trivyn's holds live application settings —
+    /// so the data dir is APPENDED and nothing already there may change.
+    #[test]
+    fn appends_to_an_existing_env_without_disturbing_it() {
+        let target = temp_project("env-existing");
+        let original = "AI_PROVIDER=openai\nBIND_ADDR=127.0.0.1:8080\n";
+        std::fs::write(target.join(".env"), original).unwrap();
+
+        let report = init_project(&opts(&target)).unwrap();
+
+        let env = std::fs::read_to_string(target.join(".env")).unwrap();
+        assert!(
+            env.starts_with(original),
+            "original lines survive verbatim: {env}"
+        );
+        assert!(env.contains("MOOSEDEV_DATA_DIR=.moosedev"), "{env}");
+        assert_eq!(outcome_for(&report, ".env"), Some(&Outcome::Merged));
+
+        // We did not author this file, so ignoring it is not our call.
+        let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
+        assert!(
+            !gitignore.lines().any(|line| line.trim() == ".env"),
+            "{gitignore}"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// An unreadable `.env` must abort, never be treated as empty — the write
+    /// that follows would truncate the file and destroy settings or secrets.
+    #[test]
+    fn an_unreadable_env_aborts_instead_of_truncating() {
+        let target = temp_project("env-unreadable");
+        let path = target.join(".env");
+        let raw: &[u8] = b"AI_PROVIDER=openai\nSECRET=\xff\xfe not utf8\n";
+        std::fs::write(&path, raw).unwrap();
+
+        let err = match init_project(&opts(&target)) {
+            Err(err) => err,
+            Ok(_) => panic!("must refuse to rewrite a .env it cannot read"),
+        };
+        assert!(format!("{err:#}").contains(".env"), "{err:#}");
+        assert_eq!(std::fs::read(&path).unwrap(), raw, "file left untouched");
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// An unquoted dotenv value ends at `#`, so a mangled data dir would produce
+    /// the very split store this write exists to prevent.
+    #[test]
+    fn data_dir_values_are_dotenv_escaped() {
+        assert_eq!(dotenv_value(".moosedev"), ".moosedev");
+        assert_eq!(dotenv_value("/abs/path-1.2"), "/abs/path-1.2");
+        assert_eq!(dotenv_value("data # dir"), "\"data # dir\"");
+        assert_eq!(dotenv_value("with space"), "\"with space\"");
+        assert_eq!(dotenv_value("$HOME/store"), "\"\\$HOME/store\"");
+        assert_eq!(dotenv_value(r#"say "hi""#), r#""say \"hi\"""#);
+        // Quoted but NOT escaped: dotenvy 0.15 REJECTS `\` inside double quotes,
+        // so escaping it would make the whole `.env` fail to parse on every
+        // subsequent launch. Inside quotes a backtick is already literal.
+        assert_eq!(dotenv_value("odd`name"), "\"odd`name\"");
+
+        let target = temp_project("env-escape");
+        let mut options = opts(&target);
+        options.data_dir = "my store # 1".to_string();
+        init_project(&options).unwrap();
+        let env = std::fs::read_to_string(target.join(".env")).unwrap();
+        assert!(env.contains(r#"MOOSEDEV_DATA_DIR="my store # 1""#), "{env}");
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// dotenvy accepts an `export ` prefix and whitespace around `=`, and takes
+    /// the FIRST declaration of a key. Matching only the bare prefix meant an
+    /// existing declaration went unseen, a second was appended, and the loader
+    /// kept using the first while the agreement check read the second and
+    /// reported success — a split store built by the split-store guard.
+    #[test]
+    fn existing_data_dir_is_seen_in_every_form_dotenvy_accepts() {
+        for (form, expected) in [
+            ("MOOSEDEV_DATA_DIR=plain\n", "plain"),
+            ("export MOOSEDEV_DATA_DIR=exported\n", "exported"),
+            ("  MOOSEDEV_DATA_DIR = spaced \n", "spaced"),
+            ("export MOOSEDEV_DATA_DIR=\"quoted\"\n", "quoted"),
+        ] {
+            assert_eq!(
+                env_data_dir(form).unwrap().as_deref(),
+                Some(expected),
+                "form {form:?}"
+            );
+        }
+        // Every construct dotenvy accepts, because the reader IS dotenvy now.
+        // Each of these was missed by a previous hand-rolled matcher, and each
+        // miss appended a duplicate the loader then ignored.
+        for (form, expected) in [
+            ("export  MOOSEDEV_DATA_DIR=v\n", "v"),
+            ("export\tMOOSEDEV_DATA_DIR=v\n", "v"),
+            ("\u{feff}MOOSEDEV_DATA_DIR=bom\n", "bom"),
+            ("MOOSEDEV_DATA_DIR=v # trailing comment\n", "v"),
+            ("MOOSEDEV_DATA_DIR=\"kept # inside\"\n", "kept # inside"),
+            ("MOOSEDEV_DATA_DIR='$NOT_EXPANDED'\n", "$NOT_EXPANDED"),
+            ("MOOSEDEV_DATA_DIR=\"\\$HOME/store\"\n", "$HOME/store"),
+        ] {
+            assert_eq!(
+                env_data_dir(form).unwrap().as_deref(),
+                Some(expected),
+                "form {form:?}"
+            );
+        }
+        // `exportK=v` is NOT a declaration — dotenvy does not read it either.
+        assert_eq!(env_data_dir("exportMOOSEDEV_DATA_DIR=v\n").unwrap(), None);
+
+        // First wins, matching dotenvy's duplicate-key behaviour.
+        assert_eq!(
+            env_data_dir("export MOOSEDEV_DATA_DIR=first\nMOOSEDEV_DATA_DIR=second\n")
+                .unwrap()
+                .as_deref(),
+            Some("first")
+        );
+        // A near-miss key must not be mistaken for ours.
+        assert_eq!(
+            env_data_dir("MOOSEDEV_DATA_DIRECTORY=nope\n").unwrap(),
+            None
+        );
+
+        // End to end: an `export`ed declaration is preserved, not duplicated.
+        let target = temp_project("env-export");
+        std::fs::write(
+            target.join(".env"),
+            "export MOOSEDEV_DATA_DIR=their-store\n",
+        )
+        .unwrap();
+        let report = init_project(&opts(&target)).unwrap();
+        let env = std::fs::read_to_string(target.join(".env")).unwrap();
+        assert_eq!(env, "export MOOSEDEV_DATA_DIR=their-store\n", "{env}");
+        assert_eq!(outcome_for(&report, ".env"), Some(&Outcome::Skipped));
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// A malformed line makes `dotenvy::from_path` fail at STARTUP, so a reader
+    /// that skipped it would answer confidently about a file MOOSEDev refuses to
+    /// load — tolerating what the loader rejects, the mirror of the bug this
+    /// whole reader exists to avoid.
+    #[test]
+    fn a_dotenv_parse_error_is_propagated_not_skipped() {
+        // dotenvy rejects `\` inside a double-quoted value.
+        let broken = "MOOSEDEV_DATA_DIR=fine\nOTHER=\"a\\`b\"\n";
+        assert!(
+            env_data_dir(broken).is_err(),
+            "a line the loader rejects must not be silently skipped"
+        );
+
+        let target = temp_project("env-broken");
+        std::fs::write(target.join(".env"), broken).unwrap();
+        // init must not rewrite a file it cannot fully parse.
+        assert!(init_project(&opts(&target)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            broken,
+            "left untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// A valid multi-line quoted value cannot be rewritten by editing one
+    /// physical line — the remainder is orphaned and the file is corrupted. The
+    /// write verifies by re-parsing, so the unsupported case declines instead.
+    #[test]
+    fn a_multiline_declaration_is_never_corrupted_by_force() {
+        let target = temp_project("env-multiline");
+        let original = "MOOSEDEV_DATA_DIR=\"first\nsecond\"\nOTHER=keep\n";
+        std::fs::write(target.join(".env"), original).unwrap();
+        assert_eq!(
+            env_data_dir(original).unwrap().as_deref(),
+            Some("first\nsecond"),
+            "dotenvy reads it as one multi-line value"
+        );
+
+        let mut forced = opts(&target);
+        forced.force = true;
+        let report = init_project(&forced).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            original,
+            "must be left byte-identical rather than half-rewritten"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("cannot rewrite safely")),
+            "the refusal must be reported: {:?}",
+            report.actions
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Changing one setting must not reformat the file. Re-joining `lines()`
+    /// with "\n" converted CRLF to LF throughout and appended a trailing
+    /// newline — a whole-file diff as a side effect of a one-line edit.
+    #[test]
+    fn force_preserves_crlf_and_a_missing_final_newline() {
+        let target = temp_project("env-crlf");
+        // CRLF throughout, and deliberately no terminator on the last line.
+        let original = "A=one\r\nMOOSEDEV_DATA_DIR=old\r\nB=two";
+        std::fs::write(target.join(".env"), original).unwrap();
+
+        let mut forced = opts(&target);
+        forced.force = true;
+        init_project(&forced).unwrap();
+
+        let after = std::fs::read_to_string(target.join(".env")).unwrap();
+        assert_eq!(
+            after, "A=one\r\nMOOSEDEV_DATA_DIR=.moosedev\r\nB=two",
+            "{after:?}"
+        );
+        assert_eq!(after.matches("\r\n").count(), 2, "separators preserved");
+        assert!(!after.ends_with('\n'), "no newline invented at EOF");
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// A line scan has no quote state, so a line that merely LOOKS like a
+    /// declaration can sit inside another key's multi-line value. Rewriting it
+    /// there edits that value, and a check that only asked "is MOOSEDEV_DATA_DIR
+    /// right now?" still passed — so verification compares every key.
+    #[test]
+    fn force_never_edits_a_lookalike_line_inside_another_value() {
+        let target = temp_project("env-lookalike");
+        let original = "OTHER=\"first\nMOOSEDEV_DATA_DIR=decoy\nlast\"\nMOOSEDEV_DATA_DIR=real\n";
+        std::fs::write(target.join(".env"), original).unwrap();
+
+        let before = dotenv_pairs(original).unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .find(|(k, _)| k == "OTHER")
+                .map(|(_, v)| v.as_str()),
+            Some("first\nMOOSEDEV_DATA_DIR=decoy\nlast"),
+            "the decoy really is inside OTHER's value"
+        );
+
+        let mut forced = opts(&target);
+        forced.force = true;
+        let report = init_project(&forced).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            original,
+            "OTHER must not be silently altered"
+        );
+        assert!(report
+            .actions
+            .iter()
+            .any(|a| a.contains("cannot rewrite safely")));
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// TOML forbids extending an INLINE table with a `[header]`, so appending
+    /// would produce a config Codex cannot read at all.
+    #[test]
+    fn an_inline_mcp_servers_table_is_refused_not_corrupted() {
+        let target = temp_project("codex-inline");
+        let dir = target.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "mcp_servers = { other = { command = \"other\" } }\n";
+        std::fs::write(dir.join("config.toml"), original).unwrap();
+
+        let mut options = opts(&target);
+        options.codex = true;
+        let report = init_project(&options).unwrap();
+
+        let after = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert_eq!(after, original, "left untouched rather than invalidated");
+        assert!(after.parse::<toml::Table>().is_ok(), "still valid TOML");
+        assert!(
+            report.actions.iter().any(|a| a.contains("inline table")),
+            "the refusal must be reported: {:?}",
+            report.actions
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The three ways an unscoped text scan misreads TOML: a commented-out
+    /// value masking the live one, a longer key matching as a substring, and —
+    /// the one scoping fixes — a value belonging to a DIFFERENT MCP server.
+    #[test]
+    fn codex_data_dir_is_scoped_to_the_moosedev_table() {
+        let live = "\
+# env = { MOOSEDEV_DATA_DIR = \"stale-commented-out\" }
+[mcp_servers.other]
+env = { MOOSEDEV_DATA_DIR = \"someone-elses-store\" }
+
+[mcp_servers.moosedev]
+command = \"moosedev\"
+env = { MOOSEDEV_DATA_DIR = \"real-store\" }
+";
+        assert_eq!(codex_data_dir(live).as_deref(), Some("real-store"));
+
+        // Single-quoted TOML literals are valid even though we never emit them.
+        assert_eq!(
+            codex_data_dir("[mcp_servers.moosedev]\nenv = { MOOSEDEV_DATA_DIR = 'literal' }\n")
+                .as_deref(),
+            Some("literal")
+        );
+        // A key that merely starts with ours is a different key.
+        assert_eq!(
+            codex_data_dir(
+                "[mcp_servers.moosedev]\nenv = { MOOSEDEV_DATA_DIRECTORY = \"nope\" }\n"
+            ),
+            None
+        );
+        // Declared, but only for another server: not ours to report.
+        assert_eq!(
+            codex_data_dir("[mcp_servers.other]\nenv = { MOOSEDEV_DATA_DIR = \"x\" }\n"),
+            None
+        );
+        assert_eq!(
+            codex_data_dir("[mcp_servers.other]\ncommand = \"x\"\n"),
+            None
+        );
+
+        // TOML spells one table several ways; all of these ARE mcp_servers.moosedev.
+        for raw in [
+            "[mcp_servers.\"moosedev\"]\nenv = { MOOSEDEV_DATA_DIR = \"s\" }\n",
+            "[mcp_servers.moosedev]\n[mcp_servers.moosedev.env]\nMOOSEDEV_DATA_DIR = \"s\"\n",
+            "[mcp_servers]\nmoosedev = { env = { MOOSEDEV_DATA_DIR = \"s\" } }\n",
+        ] {
+            assert_eq!(
+                codex_data_dir(raw).as_deref(),
+                Some("s"),
+                "spelling {raw:?}"
+            );
+            assert!(codex_moosedev_server(raw).is_some(), "spelling {raw:?}");
+        }
+    }
+
+    /// A duplicate `[mcp_servers.moosedev]` is INVALID TOML — appending one
+    /// because the existing entry was spelled differently would cost Codex every
+    /// server it has, not just this one.
+    #[test]
+    fn codex_config_is_never_given_a_duplicate_server_table() {
+        let target = temp_project("codex-quoted");
+        let dir = target.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "[mcp_servers.\"moosedev\"]\ncommand = \"moosedev\"\nenv = { MOOSEDEV_DATA_DIR = \".moosedev\" }\n";
+        std::fs::write(dir.join("config.toml"), original).unwrap();
+
+        let mut options = opts(&target);
+        options.codex = true;
+        init_project(&options).unwrap();
+
+        let after = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert_eq!(after, original, "already configured — left as-is");
+        assert!(after.parse::<toml::Table>().is_ok(), "still valid TOML");
+
+        // An unparseable config is refused rather than appended to.
+        std::fs::write(dir.join("config.toml"), "not = [valid\n").unwrap();
+        let report = init_project(&options).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            "not = [valid\n"
+        );
+        assert!(report.actions.iter().any(|a| a.contains("not valid TOML")));
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Two individually-correct non-clobbering decisions can still leave the CLI
+    /// and MCP clients on different stores (Constraint ea2a00f5). `init` cannot
+    /// fix that without clobbering, so it must at least say so.
+    #[test]
+    fn disagreeing_mcp_json_and_env_raise_an_action() {
+        let target = temp_project("env-divergent");
+        std::fs::write(target.join(".env"), "MOOSEDEV_DATA_DIR=from-env\n").unwrap();
+        std::fs::write(
+            target.join(".mcp.json"),
+            r#"{"mcpServers":{"moosedev":{"command":"moosedev","args":[],"env":{"MOOSEDEV_DATA_DIR":"from-mcp"}}}}"#,
+        )
+        .unwrap();
+
+        let report = init_project(&opts(&target)).unwrap();
+        let action = report
+            .actions
+            .iter()
+            .find(|a| a.contains("DIFFERENT stores"))
+            .unwrap_or_else(|| panic!("no divergence action in {:?}", report.actions));
+        assert!(
+            action.contains("from-env") && action.contains("from-mcp"),
+            "{action}"
+        );
+
+        // Agreement is silent.
+        let quiet = temp_project("env-agreeing");
+        let report = init_project(&opts(&quiet)).unwrap();
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|a| a.contains("DIFFERENT stores")),
+            "{:?}",
+            report.actions
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+        let _ = std::fs::remove_dir_all(&quiet);
+    }
+
+    #[test]
+    fn existing_data_dir_in_env_is_preserved_unless_forced() {
+        let target = temp_project("env-preserve");
+        std::fs::write(target.join(".env"), "MOOSEDEV_DATA_DIR=their-store\n").unwrap();
+
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            "MOOSEDEV_DATA_DIR=their-store\n"
+        );
+        assert_eq!(outcome_for(&report, ".env"), Some(&Outcome::Skipped));
+
+        // --force rewrites only the managed line, leaving the rest alone.
+        std::fs::write(
+            target.join(".env"),
+            "AI_PROVIDER=openai\nMOOSEDEV_DATA_DIR=their-store\nBIND_ADDR=x\n",
+        )
+        .unwrap();
+        let mut forced = opts(&target);
+        forced.force = true;
+        let report = init_project(&forced).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            "AI_PROVIDER=openai\nMOOSEDEV_DATA_DIR=.moosedev\nBIND_ADDR=x\n"
+        );
+        assert_eq!(outcome_for(&report, ".env"), Some(&Outcome::Merged));
 
         let _ = std::fs::remove_dir_all(&target);
     }
@@ -1508,10 +2431,21 @@ mod tests {
 
         let report = init_project(&opts(&target)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), custom);
+        // Reported as an ACTION, not a note: the setup stays incomplete until
+        // the user appends the line themselves.
+        let action = report
+            .actions
+            .iter()
+            .find(|action| action.contains("post-commit"))
+            .expect("foreign post-commit hook must raise an action");
+        assert!(
+            action.contains("nohup moosedev index"),
+            "the action must carry the exact line to paste: {action}"
+        );
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("post-commit hook exists without MOOSEDev")));
+            .all(|note| !note.contains("post-commit")));
         assert!(outcome_for(&report, ".git/hooks/post-commit").is_none());
         // A foreign hook on one event never blocks installing the others.
         assert_eq!(

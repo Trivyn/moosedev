@@ -21,7 +21,42 @@ pub struct ContextItem {
     pub iri: String,
     pub kind: String,
     pub label: String,
-    pub properties: Vec<(String, String)>,
+    pub properties: Vec<ContextProperty>,
+}
+
+/// One property of a [`ContextItem`], carrying whether the RDF object was a
+/// LITERAL or a named node.
+///
+/// The distinction is known here — the store hands back `Term::Literal` or
+/// `Term::NamedNode` — and used to be thrown away by flattening both into a
+/// string pair. Consumers then had to re-infer it from the text, so a named-node
+/// predicate spelled like a narrative one (`descriptionLink`) could be treated as
+/// prose. Kept rather than guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextProperty {
+    pub predicate: String,
+    pub value: String,
+    /// True when the RDF object was a literal (prose, dates, counts) rather than
+    /// a named node (a link to another record).
+    pub is_literal: bool,
+}
+
+impl ContextProperty {
+    pub fn literal(predicate: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            predicate: predicate.into(),
+            value: value.into(),
+            is_literal: true,
+        }
+    }
+
+    pub fn link(predicate: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            predicate: predicate.into(),
+            value: value.into(),
+            is_literal: false,
+        }
+    }
 }
 
 impl ContextItem {
@@ -31,7 +66,7 @@ impl ContextItem {
     pub fn is_historical(&self) -> bool {
         self.properties
             .iter()
-            .any(|(k, v)| k == "hasLifecycleStatus" && !in_working_set(v))
+            .any(|p| p.predicate == "hasLifecycleStatus" && !in_working_set(&p.value))
     }
 }
 
@@ -196,7 +231,8 @@ pub fn relevant_context(
                 if !include_history && item.is_historical() {
                     continue; // stay in the current working set
                 }
-                item.properties.insert(0, ("linkedVia".to_string(), pred));
+                item.properties
+                    .insert(0, ContextProperty::link("linkedVia", pred));
                 expanded.push(item);
                 next.push(neighbor_iri);
                 if expanded.len() >= EXPAND_MAX {
@@ -698,7 +734,7 @@ fn build_context_item(state: &AppState, iri: String, class_iri: String) -> Conte
     let store = &state.store;
     let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let mut label = String::new();
-    let mut properties: Vec<(String, String)> = Vec::new();
+    let mut properties: Vec<ContextProperty> = Vec::new();
     let mut rationale_iri: Option<String> = None;
 
     if let Ok(subject) = NamedNodeRef::new(&iri) {
@@ -720,14 +756,14 @@ fn build_context_item(state: &AppState, iri: String, class_iri: String) -> Conte
                     label = lit.value().to_string();
                 }
                 Term::Literal(lit) => {
-                    properties.push((local_name(pred).to_string(), lit.value().to_string()));
+                    properties.push(ContextProperty::literal(local_name(pred), lit.value()));
                 }
                 Term::NamedNode(obj) => {
                     let pname = local_name(pred);
                     if pname == "hasRationale" {
                         rationale_iri = Some(obj.as_str().to_string());
                     }
-                    properties.push((pname.to_string(), obj.as_str().to_string()));
+                    properties.push(ContextProperty::link(pname, obj.as_str()));
                 }
                 _ => {}
             }
@@ -737,14 +773,14 @@ fn build_context_item(state: &AppState, iri: String, class_iri: String) -> Conte
     // Surface the rationale *text* (the why), not just the link to its node.
     if let Some(rat) = &rationale_iri {
         if let Some(text) = first_literal(store, rat, &state.capture.description) {
-            properties.push(("rationale".to_string(), text));
+            properties.push(ContextProperty::literal("rationale", text));
         }
     }
 
     // For a retired record, surface what replaced it (inverse `supersedes`).
     let is_historical = properties
         .iter()
-        .any(|(k, v)| k == "hasLifecycleStatus" && is_retired(v));
+        .any(|p| p.predicate == "hasLifecycleStatus" && is_retired(&p.value));
     if is_historical {
         if let (Ok(subject), Ok(pred)) = (
             NamedNodeRef::new(&iri),
@@ -761,7 +797,7 @@ fn build_context_item(state: &AppState, iri: String, class_iri: String) -> Conte
                     .flatten()
                 {
                     if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject {
-                        properties.push(("supersededBy".to_string(), s.as_str().to_string()));
+                        properties.push(ContextProperty::link("supersededBy", s.as_str()));
                     }
                 }
             }
