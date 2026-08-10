@@ -2644,7 +2644,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "oxigraph"
 version = "0.5.9"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
@@ -2681,7 +2681,7 @@ checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
 [[package]]
 name = "oxjsonld"
 version = "0.2.5"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "json-event-parser",
  "oxiri",
@@ -2693,7 +2693,7 @@ dependencies = [
 [[package]]
 name = "oxrdf"
 version = "0.3.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "hex",
  "oxilangtag",
@@ -2707,7 +2707,7 @@ dependencies = [
 [[package]]
 name = "oxrdfio"
 version = "0.2.5"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "oxjsonld",
  "oxrdf",
@@ -2719,7 +2719,7 @@ dependencies = [
 [[package]]
 name = "oxrdfxml"
 version = "0.2.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "oxilangtag",
  "oxiri",
@@ -2731,7 +2731,7 @@ dependencies = [
 [[package]]
 name = "oxrocksdb-sys"
 version = "0.5.9"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "bindgen",
  "cc",
@@ -2740,7 +2740,7 @@ dependencies = [
 [[package]]
 name = "oxsdatatypes"
 version = "0.2.2"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -2748,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "oxttl"
 version = "0.2.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "memchr",
  "oxilangtag",
@@ -3872,9 +3872,9 @@ dependencies = [
 
 [[package]]
 name = "snarl-shacl"
-version = "0.4.1"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3788902332067a491138219d17b176f2b14de8f76dfab6bcb9f1e7d3d157b8a"
+checksum = "40882508ac614abb0698714df912eb09744774c73a6f3291428da323dff4f03b"
 dependencies = [
  "cc",
 ]
@@ -3903,7 +3903,7 @@ dependencies = [
 [[package]]
 name = "sparesults"
 version = "0.3.3"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "json-event-parser",
  "memchr",
@@ -3915,7 +3915,7 @@ dependencies = [
 [[package]]
 name = "spareval"
 version = "0.2.6"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "hex",
  "json-event-parser",
@@ -3937,7 +3937,7 @@ dependencies = [
 [[package]]
 name = "spargebra"
 version = "0.4.6"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "oxilangtag",
  "oxiri",
@@ -3950,7 +3950,7 @@ dependencies = [
 [[package]]
 name = "sparopt"
 version = "0.3.6"
-source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9#d553fb64dcbc246f30ac6695d5675c7da46aa047"
+source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
  "oxrdf",
  "rand 0.9.4",
