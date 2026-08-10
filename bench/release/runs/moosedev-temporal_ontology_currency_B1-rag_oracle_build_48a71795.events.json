@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-b310-7c91-811c-778ca1f1b201"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The current architecture ontology is the **generated production ontology** (`ontologies/software-architecture.ttl` from Trivyn v0.8.0), not the temporary hand-written stub.  \nThe stub was explicitly marked temporary and replaced as part of M2, and the active namespace is now `https://trivyn.io/ontologies/software/architecture/domain/` (with SHACL shapes in `ontologies/software-architecture_shapes.ttl`)."}}
+{"type":"turn.completed","usage":{"input_tokens":11240,"cached_input_tokens":9600,"output_tokens":534,"reasoning_output_tokens":437}}

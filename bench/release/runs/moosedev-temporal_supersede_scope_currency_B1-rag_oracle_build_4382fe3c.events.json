@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-db0a-71e1-834f-5b4fc485f12b"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`supersede_decision` can currently supersede **any `InformationRecord` (including any subclass), not just `ArchitecturalDecision`**, with the precondition now walking subclass ancestry to require an `InformationRecord` type."}}
+{"type":"turn.completed","usage":{"input_tokens":11877,"cached_input_tokens":9600,"output_tokens":305,"reasoning_output_tokens":252}}

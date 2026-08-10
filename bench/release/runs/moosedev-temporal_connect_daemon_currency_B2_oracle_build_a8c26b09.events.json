@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-6c15-7fa3-94a8-f87d699e2788"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"It no longer requires a manual `--serve`: `--connect` will auto-spawn a detached `--serve` backend on the resolved socket if none is already running (unless `MOOSEDEV_NO_AUTOSPAWN=1` is set)."}}
+{"type":"turn.completed","usage":{"input_tokens":12299,"cached_input_tokens":9600,"output_tokens":202,"reasoning_output_tokens":145}}

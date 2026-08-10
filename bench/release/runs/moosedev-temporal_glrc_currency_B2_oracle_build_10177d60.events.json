@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee239-9287-7bf2-bf26-31916089cc61"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`get_relevant_context` now uses symbolic BM25 retrieval via `entity_index.search_records()` over the topic’s record text, weighting `rdfs:label` 2.0x and the record description 1.0x, then ranking and returning the top-k matches. It no longer uses the old `search_classes()` label-only path or an absolute relevance floor, so zero-term matches are excluded by BM25 itself. This is based on the recorded decisions **“get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)”** and **“get_relevant_context: BM25 search_records replaces entity-index absolute floor for noise rejection.”**"}}
+{"type":"turn.completed","usage":{"input_tokens":12934,"cached_input_tokens":8064,"output_tokens":274,"reasoning_output_tokens":125}}

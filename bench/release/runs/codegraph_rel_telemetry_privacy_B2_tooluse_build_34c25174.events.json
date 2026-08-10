@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"019ef5c1-5048-7b40-be9e-e94147a66b9d"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’m checking the project memory tool for the telemetry/privacy policy entry, then I’ll answer directly from that record."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"moosedev","tool":"list_mcp_resources","arguments":{"server":"moosedev"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"moosedev","tool":"list_mcp_resources","arguments":{"server":"moosedev"},"result":null,"error":{"message":"resources/list failed: failed to get client: MCP startup failed: No such file or directory (os error 2)"},"status":"failed"}}
+{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"result":{"content":[{"type":"text","text":"{\"resources\":[]}"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"The dedicated memory endpoint isn’t surfaced in the current tool list, so I’m checking whether there’s an accessible project-memory integration under a different name."}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"I couldn’t access the moosedev project-memory tool in this environment, so I can’t verify codegraph’s telemetry/privacy stance from recorded project knowledge. If you expose that memory entry, I can answer precisely in 2-3 sentences from the source."}}
+{"type":"turn.completed","usage":{"input_tokens":57246,"cached_input_tokens":55680,"output_tokens":1094,"reasoning_output_tokens":848}}

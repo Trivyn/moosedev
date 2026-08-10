@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-f7a6-7e53-a6d1-2ca02b9c6219"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"It **auto-spawns** a `--serve` backend automatically on the same resolved socket when none is running, so you do **not** need to start `--serve` yourself first (unless you set `MOOSEDEV_NO_AUTOSPAWN=1`, which disables that behavior)."}}
+{"type":"turn.completed","usage":{"input_tokens":11107,"cached_input_tokens":9600,"output_tokens":261,"reasoning_output_tokens":196}}

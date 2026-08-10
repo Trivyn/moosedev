@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee248-0c30-7f33-af66-1bfd5787ace9"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`supersede_decision` currently supersedes **any kind of `InformationRecord` (and subclasses), not just `ArchitecturalDecision`** — it now validates the target is an `InformationRecord` ancestor via subclass traversal before minting a type-preserving replacement."}}
+{"type":"turn.completed","usage":{"input_tokens":11874,"cached_input_tokens":9600,"output_tokens":331,"reasoning_output_tokens":270}}

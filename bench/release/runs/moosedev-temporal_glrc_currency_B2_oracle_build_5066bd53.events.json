@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee238-f109-7813-b4ac-55552e3d7c8f"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`get_relevant_context` currently does a symbolic BM25 lookup with `entity_index.search_records()` over each record’s `rdfs:label` and description, weighting the label `2.0` and the description `1.0`, then returns the top-ranked matches for the topic. It no longer uses the older label-only `search_classes` path or any absolute relevance floor. [get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)](https://moosedev.dev/kg/ArchitecturalDecision/c8bce03b-6902-491a-9068-469f53b05928)"}}
+{"type":"turn.completed","usage":{"input_tokens":12934,"cached_input_tokens":8064,"output_tokens":252,"reasoning_output_tokens":108}}

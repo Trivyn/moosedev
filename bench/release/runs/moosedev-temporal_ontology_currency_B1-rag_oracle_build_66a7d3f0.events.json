@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-7b40-7593-968b-ab47f5bcedd7"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"It is a **generated production ontology**, not the temporary hand-written stub.  \n`ontologies/software-architecture.ttl` (Trivyn v0.8.0 output, commit `7f015a32`) replaced the earlier stub `ontologies/architecture.ttl`, and the namespace is now `https://trivyn.io/ontologies/software/architecture/domain/`."}}
+{"type":"turn.completed","usage":{"input_tokens":11249,"cached_input_tokens":8192,"output_tokens":401,"reasoning_output_tokens":317}}

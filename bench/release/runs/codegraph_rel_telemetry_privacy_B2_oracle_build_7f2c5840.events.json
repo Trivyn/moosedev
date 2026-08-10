@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ef5d8-b61e-7fc0-b27f-b814129f0f8c"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"CodeGraph’s telemetry is strictly anonymous and allowlisted: it collects aggregate usage signals like commands, MCP tools, indexed languages, connected agents, version/platform mix, and similar usage/error counts, but not project content. The recorded stance guarantees that user code never leaves the machine, and that telemetry never collects source code, file paths, repo names, symbol names, query/search terms, or anything derived from indexed contents. When telemetry is off, it records nothing, sends nothing, and deletes buffered data, per the entries “Local-first privacy promise,” “No project-content telemetry,” and “Telemetry off deletes buffers.”"}}
+{"type":"turn.completed","usage":{"input_tokens":14555,"cached_input_tokens":8576,"output_tokens":249,"reasoning_output_tokens":121}}

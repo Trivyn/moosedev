@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-be14-7281-868e-e8d1ad7535e5"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The architecture ontology is currently the **generated production ontology** (`ontologies/software-architecture.ttl`), not a temporary hand-written stub.  \nThe prior stub (`ontologies/architecture.ttl`) was retired in commit `7f015a32`, replaced by Trivyn-generated output (v0.8.0) with the production namespace `https://trivyn.io/ontologies/software/architecture/domain/`."}}
+{"type":"turn.completed","usage":{"input_tokens":11878,"cached_input_tokens":7936,"output_tokens":379,"reasoning_output_tokens":287}}

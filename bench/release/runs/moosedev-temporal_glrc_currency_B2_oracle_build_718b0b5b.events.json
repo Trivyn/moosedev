@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee238-14b3-73e2-92ad-8811e242d0da"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`get_relevant_context` currently uses symbolic BM25 retrieval over `search_records`, not `search_classes`: it searches each record’s `rdfs:label` with higher weight and its description with lower weight, then ranks results and returns the top-k matches for the topic. It does not use an LLM on the retrieval path, and it no longer applies an absolute relevance floor."}}
+{"type":"turn.completed","usage":{"input_tokens":12940,"cached_input_tokens":8064,"output_tokens":167,"reasoning_output_tokens":83}}

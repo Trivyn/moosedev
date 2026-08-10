@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-c3a8-7fd1-ac4e-f42912a3f2da"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`supersede_decision` can currently supersede **any record that is an `InformationRecord` (or subclass), not just `ArchitecturalDecision`**—it was generalized with a transitive, cycle-safe subclass check and now preserves the original type on the replacement."}}
+{"type":"turn.completed","usage":{"input_tokens":11877,"cached_input_tokens":9600,"output_tokens":229,"reasoning_output_tokens":167}}

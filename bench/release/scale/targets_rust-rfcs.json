@@ -1,0 +1,244 @@
+[
+  {
+    "title": "RFC 212: restore int fallback",
+    "query": "Rust first REMOVED the integer-literal inference fallback and then later RESTORED it. Explain (a) why the fallback was removed, (b) why it was restored, and (c) what unconstrained integer literals default to NOW. Answer in 3-4 sentences, and cite the recorded decision title(s) you relied on.",
+    "source": "anchor",
+    "overlap_title": 0.024,
+    "feat_share": 0.0,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1: private fields",
+    "query": "In Rust, why are struct fields private by default (including tuple-struct fields) rather than inheriting the struct's visibility or being public? Give the design rationale in 2-3 sentences, and cite the recorded decision's title if you can.",
+    "source": "anchor",
+    "overlap_title": 0.056,
+    "feat_share": 0.0,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 243: trait based exception handling",
+    "query": "What does Rust's `?` operator do for a Result value, and why was explicit `?`-based propagation chosen over fully-automatic exception propagation like most languages have? Answer in 2-3 sentences, and cite the recorded decision's title if you can.",
+    "source": "anchor",
+    "overlap_title": 0.048,
+    "feat_share": 0.0,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 71: const block expr",
+    "query": "const block expr",
+    "source": "sentinel",
+    "overlap_title": 1.0,
+    "feat_share": 1.0,
+    "sentinel": true
+  },
+  {
+    "title": "RFC 2707: dotdot patterns",
+    "query": "What was the reasoning behind treating this specific syntax as a standalone pattern rather than a sub-component of other patterns?",
+    "source": "llm",
+    "overlap_title": 0.043,
+    "feat_share": 0.5,
+    "overlap_text": 0.107,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 341: remove virtual structs",
+    "query": "What was the reasoning behind moving away from allowing one data structure to inherit fields from another, and is there a preferred alternative for managing hierarchical data types?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.086,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 2316: safe unsafe trait methods",
+    "query": "Why must a method be marked as requiring an unsafe block during invocation if its specific implementation for a type is guaranteed to uphold all safety invariants without using any unsafe code?",
+    "source": "llm",
+    "overlap_title": 0.029,
+    "feat_share": 0.25,
+    "overlap_text": 0.096,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1653: assert_ne",
+    "query": "What was the reasoning behind not simply providing a way to invert the comparison logic in existing macros instead of introducing a new dedicated macro for inequality checks?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.043,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1040: duration reform",
+    "query": "Why did we choose to limit the initial implementation of this time-interval type to a high-precision representation rather than providing a more comprehensive API that handles human-centric units like days or months?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.07,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 3817: promote aarch64 pc windows msvc to tier 1",
+    "query": "What was the reasoning behind expanding full support for this specific architecture to include host toolchain capabilities?",
+    "source": "llm",
+    "overlap_title": 0.038,
+    "feat_share": 0.0,
+    "overlap_text": 0.051,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 50: assert",
+    "query": "How should we distinguish between checks that are essential for correctness in all environments and those that are intended only to catch errors during development without impacting production performance?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.074,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 3491: remove implicit features",
+    "query": "What was the reasoning behind moving away from automatically exposing optional dependencies as public feature flags?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.029,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1607: style rfcs",
+    "query": "What was the reasoning behind decoupling the governance and decision-making process for code style from the main language evolution workflow?",
+    "source": "llm",
+    "overlap_title": 0.045,
+    "feat_share": 0.5,
+    "overlap_text": 0.035,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1758: repr transparent",
+    "query": "Why can't we guarantee that a single-field wrapper will have the exact same memory layout and ABI calling convention as its underlying type when interfacing with foreign code?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.079,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 2437: rustfmt stability",
+    "query": "How can we ensure that updates to the tool don't cause unexpected diffs in automated environments, and what mechanism allows us to evolve the formatting logic without forcing immediate, breaking changes on all users?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.071,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1191: hir",
+    "query": "What was the reasoning behind introducing a separate internal representation to decouple the compiler's core logic from the syntax-heavy tree used by external tools?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.06,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 533: no array elem moves",
+    "query": "Why was support for moving individual elements in and out of partially initialized fixed-size arrays removed instead of implementing more complex code generation to handle those states?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.093,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 2008: non exhaustive",
+    "query": "What was the reasoning behind requiring wildcard patterns for all matches on these types, and how does this approach balance forward compatibility with the ability to handle specific cases?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.064,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 2115: argument lifetimes",
+    "query": "What was the reasoning behind allowing lifetimes to be bound directly within function signatures and return types rather than requiring them to be declared in the header?",
+    "source": "llm",
+    "overlap_title": 0.037,
+    "feat_share": 0.5,
+    "overlap_text": 0.042,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1102: rename connect to join",
+    "query": "Was the naming convention for combining elements with a separator chosen to prioritize consistency with mainstream imperative languages, or were there historical language constraints that prevented using the more common terminology?",
+    "source": "llm",
+    "overlap_title": 0.029,
+    "feat_share": 0.0,
+    "overlap_text": 0.058,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 980: read exact",
+    "query": "Why was it decided to standardize a specific error type for cases where a stream ends before a requested buffer is fully populated, rather than leaving that behavior to individual implementations?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.043,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 3533: combine infra and release teams",
+    "query": "What was the reasoning behind nesting this specific functional group under a broader organizational umbrella rather than maintaining it as an independent entity with its own direct governance rights?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.037,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 446: es6 unicode escapes",
+    "query": "Why did we decide to move away from the fixed-length hexadecimal escape sequences in favor of a single, variable-length syntax for representing higher-plane Unicode code points?",
+    "source": "llm",
+    "overlap_title": 0.031,
+    "feat_share": 0.333,
+    "overlap_text": 0.084,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 3809: derive from",
+    "query": "What was the reasoning behind limiting this automatic conversion implementation strictly to single-field structures?",
+    "source": "llm",
+    "overlap_title": 0.0,
+    "feat_share": 0.0,
+    "overlap_text": 0.028,
+    "leaky": false,
+    "sentinel": false
+  },
+  {
+    "title": "RFC 1331: grammar is canonical",
+    "query": "What was the reasoning behind moving toward a formal, canonical specification for language syntax rather than relying on implementation-specific behavior?",
+    "source": "llm",
+    "overlap_title": 0.04,
+    "feat_share": 0.5,
+    "overlap_text": 0.06,
+    "leaky": false,
+    "sentinel": false
+  }
+]

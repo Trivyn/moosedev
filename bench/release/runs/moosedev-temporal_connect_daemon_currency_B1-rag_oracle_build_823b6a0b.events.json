@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-dd33-7703-beba-e67b9c9e8a09"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"With current MOOSEDev behavior, `--connect` **auto-spawns** a detached `--serve` backend on the resolved socket if none is already listening (so you do **not** have to start `--serve` yourself), unless you disable it with `MOOSEDEV_NO_AUTOSPAWN=1`."}}
+{"type":"turn.completed","usage":{"input_tokens":11110,"cached_input_tokens":8064,"output_tokens":336,"reasoning_output_tokens":265}}
