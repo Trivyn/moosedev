@@ -139,6 +139,7 @@ USAGE:
     moosedev resolve FILE LINE:COL
                               Resolve a source position to a code entity (debug)
     moosedev skills           List the shipped agent workflow docs (bootstrap, …)
+    moosedev --version        Print the version (matches the /api/v1/health version)
     moosedev --help           Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
@@ -214,8 +215,14 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
             println!("{USAGE}");
             std::process::exit(0);
         }
+        // Same constant the health endpoint and the MCP server_impl report, so a
+        // build can be identified without starting a daemon and binding a port.
+        Some("--version" | "-V") => {
+            println!("moosedev {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, lsp, --serve, --connect, --status, ui, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, lsp, --serve, --connect, --status, ui, --version, --help, or no arguments (stdio)"
         ),
     }
 }

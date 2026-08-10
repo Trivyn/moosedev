@@ -1,6 +1,6 @@
 [package]
 name = "moosedev"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.89"
 description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
