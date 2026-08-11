@@ -1,4 +1,4 @@
-"""Capability benchmark report: B2 (graph) vs B1-rag (flat RAG) vs B0 (cold), trivyn-temporal.
+"""Capability benchmark report: B2 (graph) vs B1-rag (flat RAG) vs B0 (cold).
 
 BOTH metric families co-primary. ACCURACY: mean set F1 / recall / precision + pass-rate (Wilson 95%).
 EFFICIENCY: median agent tokens, B2's internal NLQ tokens (added into its total so it's never free),
@@ -14,7 +14,9 @@ import statistics
 import config
 from hybrid_ab_report import wilson
 
-CORPUS = "trivyn-temporal"
+# Default = the PUBLIC corpus shipped in bench/release, so a clone reproduces the published
+# capability table with no extra data. `--corpus trivyn-temporal` for the private one.
+CORPUS = "codegraph"
 CLASSES = ["set_completeness", "negation", "supersession", "multi_hop"]
 HARD = {"set_completeness", "negation", "multi_hop"}  # where the categorical win is pre-registered
 
@@ -81,7 +83,7 @@ def main() -> None:
     global CORPUS
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default="trivyn-temporal")
+    ap.add_argument("--corpus", default=CORPUS)
     CORPUS = ap.parse_args().corpus
     rows = load()
     if not rows:
