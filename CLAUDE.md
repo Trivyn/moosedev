@@ -137,6 +137,14 @@ project knowledge graph. When its tools are available, prefer them over re-deriv
   by the call. That link is what makes the dossier (and editor hover) find it later.
 - **Keep questions to MOOSEDev short** — the `query` (NLQ) tool wants one focused question per call, a
   single sentence ideally, not a paragraph.
+- **Approve a spec before implementing it** — when work starts on a spec ("implement X", "let's build
+  X"), first check whether its `Requirement`s are in the graph. If they are not, extract the
+  Requirements and Constraints the spec *states*, show them, and capture them as `accepted` records
+  **before** the implementation decisions land — a decision captured first has no hub to be
+  `isMotivatedBy`, and backfilling the edge later rarely happens. Being asked to implement a spec is
+  **not** approval: show what would be written and get an explicit yes. Skip specs written *from* an
+  existing decision cluster (they cite record IRIs, or say the graph wins on disagreement) — mining
+  those duplicates the graph. In Claude Code the `approve-spec` skill runs this loop.
 - **Capture as you go** — record durable knowledge with `record_important_decision` (`kind`:
   `ArchitecturalDecision`, `Lesson`, `Constraint`, `Pattern`, `AntiPattern`, `Requirement`); capture the
   decision and its rationale, not transient chatter.
