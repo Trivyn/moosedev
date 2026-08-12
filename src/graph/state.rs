@@ -547,6 +547,10 @@ impl AppState {
                 (self.capture.description.clone(), 1.0),
             ]),
             clarification: Default::default(),
+            // Re-project session RDF only when the freshness probe finds drift
+            // (RebuildPolicy::WhenDrifted). `true` is for restore paths, which
+            // MOOSEDev does not have — its graph import never touches session graphs.
+            session_rebuild_always: false,
         });
         self.session_db = Some(Arc::new(session_db));
         Ok(())

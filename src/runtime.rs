@@ -97,7 +97,10 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
     // query, context, provenance) must still start.
     tracing::info!("MOOSEDev: building ontology alignment index (embedding vectors)…");
     if let Err(e) = state.build_alignment_index().await {
-        tracing::warn!(
+        // error!, not warn!: the vector store silently regenerates itself on a
+        // layout change, so this line is the only place a *failed* regeneration
+        // surfaces. A warning here is how a silent loss of alignment hides.
+        tracing::error!(
             "alignment index unavailable — align_concepts/suggest_mappings disabled: {e}"
         );
     }
