@@ -6,7 +6,20 @@
 //! ([`VecStore::write_stamp`]). Vectors are embedded with the **document-side**
 //! recipe (label + definition + altLabels, no query prefix), matching what
 //! MOOSE's query side compares against (template: MOOSE `…/chinook.rs`).
+//!
+//! Owning the writer means owning the table's contract. Every row carries a
+//! `namespace` (the pool a read scopes to) and an `owning_graph` (the domain graph
+//! the term was declared in), and no two rows may share an `(element_type, iri)` —
+//! MOOSE rejects the entire store at open if two loaded rows collide.
+//!
+//! These rows are *derived* — a pure function of the shipped ontologies and the
+//! embedding backbone — so this store is never migrated in place. It records the
+//! layout generation it was written with in `store_meta`, and is regenerated whole
+//! whenever that does not match `MOOSEDEV_VECTOR_SCHEMA`. That makes a jump across
+//! several generations no different from a single one. Bump that constant when
+//! changing the DDL, the columns written, or the namespace.
 
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -24,6 +37,28 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 /// `SKOS_ALT_LABEL`/`SKOS_PREF_LABEL` constants but not this one).
 const SKOS_DEFINITION: &str = "http://www.w3.org/2004/02/skos/core#definition";
 
+/// The `namespace` every row this producer writes carries, and the pool label a
+/// read scopes to. MOOSE assigns no meaning to the string — it is an exact-match
+/// SQL filter — but it is a *storage contract*: changing it strands every store
+/// written under the old value until it is rebuilt.
+pub const ONTOLOGY_VECTOR_NAMESPACE: &str = "domain";
+
+/// The scope every read of this store must pass. A `const` (not a runtime
+/// `Vec<&str>`) so call sites have no borrow to bind.
+pub const ONTOLOGY_VECTOR_SCOPE: &[&str] = &[ONTOLOGY_VECTOR_NAMESPACE];
+
+/// Layout generation of the `ontology_vectors` table this producer writes,
+/// recorded in `store_meta` under [`MOOSEDEV_VECTOR_SCHEMA_KEY`]. A store stamped
+/// with anything else — older, newer, or absent — is regenerated rather than
+/// migrated, which is why no version-to-version upgrade path is needed.
+const MOOSEDEV_VECTOR_SCHEMA: &str = "2";
+
+/// MOOSEDev's own `store_meta` key. Deliberately *not* Trivyn's
+/// `trivyn_vector_schema`: MOOSE hard-errors on any value of that key other than
+/// its own expected one and keeps the constants private, so MOOSEDev could not
+/// track a future bump. MOOSE ignores keys it does not know.
+const MOOSEDEV_VECTOR_SCHEMA_KEY: &str = "moosedev_vector_schema";
+
 /// One ontology element's embed inputs: the identity we store and the exact text
 /// we embed. Collected once and used for **both** the freshness fingerprint and
 /// the build, so the cache key can never drift from what actually goes into the
@@ -33,6 +68,10 @@ struct EmbedInput {
     element_type: ElementType,
     label: String,
     content: String,
+    /// The domain graph this element was declared in, written verbatim to the row's
+    /// `owning_graph`. Provenance only — MOOSE carries it through for diagnostics
+    /// and never matches on it.
+    owning_graph: String,
 }
 
 /// Build the ontology vector store at `db_path` from the given domain graphs and
@@ -87,9 +126,16 @@ pub async fn build_and_open(
         .connect_with(opts)
         .await
         .map_err(|e| anyhow::anyhow!("open vector db for writing: {e}"))?;
+    // `NOT NULL` on the first four is load-bearing, not decoration: MOOSE decodes
+    // them into non-optional `String`s, so a NULL is a decode error at read time.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS ontology_vectors \
-         (id TEXT, element_type TEXT, metadata TEXT, embedding BLOB)",
+         (namespace TEXT NOT NULL, \
+          owning_graph TEXT NOT NULL, \
+          id TEXT NOT NULL, \
+          element_type TEXT NOT NULL, \
+          metadata TEXT, \
+          embedding BLOB NOT NULL)",
     )
     .execute(&pool)
     .await
@@ -101,9 +147,12 @@ pub async fn build_and_open(
             .map_err(|e| anyhow::anyhow!("embed {}: {e}", input.iri))?;
         let metadata = serde_json::json!({ "label": input.label }).to_string();
         sqlx::query(
-            "INSERT INTO ontology_vectors (id, element_type, metadata, embedding) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO ontology_vectors \
+             (namespace, owning_graph, id, element_type, metadata, embedding) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
+        .bind(ONTOLOGY_VECTOR_NAMESPACE)
+        .bind(&input.owning_graph)
         .bind(&input.iri)
         .bind(input.element_type.as_db_value())
         .bind(metadata)
@@ -125,6 +174,10 @@ pub async fn build_and_open(
     .await
     .map_err(|e| anyhow::anyhow!("stamp vector store: {e}"))?;
 
+    // Record the layout generation, so a future build can tell at a glance whether
+    // this store's shape is one it still writes.
+    write_schema_version(db_path).await?;
+
     // Record the fingerprint last: a store is only advertised as fresh once its
     // rows and model stamp are fully written.
     std::fs::write(&fp_path, &fingerprint)
@@ -136,9 +189,57 @@ pub async fn build_and_open(
         db_path.display()
     );
 
-    VecStore::open(None, Some(db_path))
+    VecStore::open(None, Some((db_path, ONTOLOGY_VECTOR_SCOPE)))
         .await
         .map_err(|e| anyhow::anyhow!("open vector store: {e}"))
+}
+
+/// Stamp the layout generation this producer just wrote into `store_meta`.
+/// `VecStore::write_stamp` has already created that table by the time this runs,
+/// but the `IF NOT EXISTS` keeps the two independent.
+async fn write_schema_version(db_path: &Path) -> anyhow::Result<()> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
+        .map_err(|e| anyhow::anyhow!("vector db path {}: {e}", db_path.display()))?
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(opts)
+        .await
+        .map_err(|e| anyhow::anyhow!("open vector db to stamp schema version: {e}"))?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("create store_meta: {e}"))?;
+    sqlx::query(
+        "INSERT INTO store_meta(key, value) VALUES(?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(MOOSEDEV_VECTOR_SCHEMA_KEY)
+    .bind(MOOSEDEV_VECTOR_SCHEMA)
+    .execute(&pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("stamp schema version: {e}"))?;
+    pool.close().await;
+    Ok(())
+}
+
+/// Read this producer's layout stamp from a persisted store. Anything that stops
+/// us reaching it — no file, no `store_meta`, no key — reads as `None`, which the
+/// caller treats exactly like a mismatch and rebuilds. There is deliberately no
+/// error path: an unreadable stamp and a wrong stamp warrant the same response.
+async fn read_schema_version(db_path: &Path) -> Option<String> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
+        .ok()?
+        .create_if_missing(false)
+        .read_only(true);
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.ok()?;
+    let found: Option<(String,)> = sqlx::query_as("SELECT value FROM store_meta WHERE key = ?")
+        .bind(MOOSEDEV_VECTOR_SCHEMA_KEY)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
+    pool.close().await;
+    found.map(|(value,)| value)
 }
 
 /// Try to reuse a persisted store: returns the opened store iff the fingerprint
@@ -149,7 +250,22 @@ async fn try_reuse(db_path: &Path, fp_path: &Path, fingerprint: &str) -> Option<
     if !db_path.exists() || std::fs::read_to_string(fp_path).ok().as_deref() != Some(fingerprint) {
         return None;
     }
-    match VecStore::open(None, Some(db_path)).await {
+    // Layout gate, before the content gate. A store written by a different
+    // generation of this producer is regenerated wholesale rather than migrated:
+    // the rows are derived, so a rebuild is total and lossless however many
+    // generations were skipped, in either direction.
+    match read_schema_version(db_path).await {
+        Some(found) if found == MOOSEDEV_VECTOR_SCHEMA => {}
+        found => {
+            tracing::info!(
+                "[vectors] cached store is schema {}, this build writes {}; rebuilding",
+                found.as_deref().unwrap_or("<unstamped>"),
+                MOOSEDEV_VECTOR_SCHEMA
+            );
+            return None;
+        }
+    }
+    match VecStore::open(None, Some((db_path, ONTOLOGY_VECTOR_SCOPE))).await {
         Ok(vec_store) if vec_store.is_enabled() => Some(vec_store),
         Ok(_) => {
             tracing::info!("[vectors] cached store has no vectors; rebuilding");
@@ -170,6 +286,7 @@ fn collect_embed_inputs(
     domain_graph_iris: &[&str],
 ) -> anyhow::Result<Vec<EmbedInput>> {
     let mut inputs = Vec::new();
+    let mut seen: HashSet<(&'static str, String)> = HashSet::new();
     for graph_iri in domain_graph_iris {
         let vocab = extract_compact_vocabulary(store, graph_iri, None)
             .map_err(|e| anyhow::anyhow!("extract_compact_vocabulary({graph_iri}): {e:?}"))?;
@@ -178,6 +295,17 @@ fn collect_embed_inputs(
             (&vocab.datatype_properties, ElementType::DatatypeProperty),
         ] {
             for entry in entries {
+                // MOOSE refuses a store in which two loaded rows share an
+                // (element_type, iri), so a term re-declared across graphs has to
+                // be resolved here rather than at open. First declaration wins,
+                // which makes the winner a function of the caller's graph order.
+                if !seen.insert((kind.as_db_value(), entry.iri.clone())) {
+                    tracing::warn!(
+                        "[vectors] {} re-declared in {graph_iri}; keeping the first declaration",
+                        entry.iri
+                    );
+                    continue;
+                }
                 inputs.push(EmbedInput {
                     iri: entry.iri.clone(),
                     element_type: kind,
@@ -186,6 +314,7 @@ fn collect_embed_inputs(
                         .clone()
                         .unwrap_or_else(|| entry.local_name.clone()),
                     content: embed_text(store, graph_iri, entry)?,
+                    owning_graph: (*graph_iri).to_string(),
                 });
             }
         }

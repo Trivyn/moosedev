@@ -67,7 +67,7 @@ a typed graph returns them in one query.
 **Ladder of evidence:**
 - **Stage 0 — tool ceiling ($0, trivyn):** for answer sets ≥16, negations, and traversals, B1 BM25 recall@5 ≈ 0.00–0.11 (needle in a 416-record haystack); reaching completeness needs ingesting the whole ~63K-token corpus; B2 returns the exact set in one SPARQL. Lesson `392855d0`.
 - **Stage 1 — agentic (trivyn, N=3):** pooled hard-class **B2 F1 0.94 / recall ~0.99** vs B1-rag 0.25 vs B0 ~0. Lesson `6a70b02e`.
-- **Stage 2 — neutral public corpus (codegraph, N=2):** **reproduces** — pooled **B2 0.89** vs B1-rag 0.34 vs B0 0, on someone else's docs with a richer graph than ours. Lesson `243c6c89`.
+- **Stage 2 — neutral public corpus (codegraph, N=2):** **reproduces** — pooled **B2 0.90** (0.8994 on the released matrix; `capability_report.py`) vs B1-rag 0.34 vs B0 0, on someone else's docs with a richer graph than ours. Lesson `243c6c89`.
 
 **The definitive test — vs a REAL competitor (this session, codegraph).** Replaces the graph-derived baseline with
 the *actual* tools, captured **whole-system**: B1-mem0 = mem0 ingesting the raw docs its own way (553 memories,
