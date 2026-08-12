@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-60b0-7751-b8b0-9617d6bc8501"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`moosedev --connect` now auto-spawns the backend daemon itself when no listener is found (so you no longer must start `--serve` manually), unless `MOOSEDEV_NO_AUTOSPAWN=1` is set."}}
+{"type":"turn.completed","usage":{"input_tokens":11107,"cached_input_tokens":9600,"output_tokens":242,"reasoning_output_tokens":187}}

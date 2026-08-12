@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ef5d8-4ac3-7943-8f14-d490a3a1b5ba"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"CodeGraph’s telemetry is explicitly anonymous and aggregate-focused: it records usage signals like commands, MCP tools, indexed languages, connected agents, version/platform mix, and similar operational counts, with a field-by-field allowlist contract. It guarantees that user code and project contents never leave the machine: it must not collect source code, file paths, repository names, symbols, queries, or anything derived from indexed content. When telemetry is turned off, it records nothing, sends nothing, and deletes any buffered data, preserving the local-first privacy promise."}}
+{"type":"turn.completed","usage":{"input_tokens":14549,"cached_input_tokens":8576,"output_tokens":214,"reasoning_output_tokens":100}}

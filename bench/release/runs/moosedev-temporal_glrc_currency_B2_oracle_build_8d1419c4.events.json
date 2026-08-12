@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee236-425d-7391-9c0f-c8b517a5374e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`get_relevant_context` currently does BM25 retrieval over `search_records`, not `search_classes`: it scores each record using `rdfs:label` weighted `2.0` plus the record description weighted `1.0`, then ranks and returns the top-k matches. There is no absolute relevance floor; zero-term matches are excluded by the search itself, and the no-topic path still falls back to list-all via SPARQL.\n\nSource: **“get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)”**"}}
+{"type":"turn.completed","usage":{"input_tokens":12940,"cached_input_tokens":9600,"output_tokens":240,"reasoning_output_tokens":115}}

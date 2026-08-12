@@ -13,7 +13,7 @@ Private-corpus note: `trivyn` is private, only aggregate numbers appear; `rust-r
 
 > **MOOSEDev's demonstrable value is completeness/structure + currency — NOT retrieval precision.** Against
 > a *real* competitor (mem0) on a neutral public corpus, structured memory answers **completeness, negation,
-> and traversal** questions that vector/free-text memory **structurally cannot** (B2 1.00 vs mem0 ~0.15), while
+> and traversal** questions that vector/free-text memory **structurally cannot** (B2 ~1.0 vs mem0 ~0.2), while
 > **tying** mem0 on its home turf (relevance recall, currency). It is a **superset**, not a sidegrade. The
 > longitudinal "fights comprehension debt over months" thesis, the project's actual purpose, remains
 > **unmeasured**.
@@ -21,7 +21,7 @@ Private-corpus note: `trivyn` is private, only aggregate numbers appear; `rust-r
 | dimension | instrument | result | status |
 |---|---|---|---|
 | Retrieval precision | hybrid A/B, scale-degradation, decomposition | constant offset, no compounding, saturates on clean data | **≈ parity** (3 nulls) |
-| **Capability** (completeness / negation / traversal) | Stage 0–2 + **real-competitor test vs mem0** | B2 sweeps; mem0 ~0.15, real-docs-grep ~0.05; reproduced on 2 corpora | **categorical win** |
+| **Capability** (completeness / negation / traversal) | Stage 0–2 + **real-competitor test vs mem0** | B2 sweeps; mem0 ~0.2, real-docs-grep ~0.07; reproduced on 2 corpora | **categorical win** |
 | Relevance + currency (vs mem0) | balanced competitor matrix | both arms call their tool reliably at ~35–40k tok; equal coverage | **tie** (superset) |
 | Currency / anti-staleness | H4 reversal pairs | B2 100% current; free-text collapses on rank-inverted reversals | **proven** (rare-trigger) |
 | Longitudinal (comprehension debt / months) | — | the actual thesis | **untested** |
@@ -76,13 +76,21 @@ verified faithful); B1-notes = the agent grepping the real shipped docs. Graded 
 
 | class | B2 | B1-mem0 (fair) | B1-notes (fair) |
 |---|---|---|---|
-| set-completeness | **1.00** | 0.15 | 0.02 |
-| negation | **1.00** | 0.17 | 0.01 |
-| supersession | **1.00** | 0.15 | 0.15 |
+| set-completeness | **1.00** | 0.18 | 0.08 |
+| negation | **0.98** | 0.06 | 0.00 |
+| supersession | **0.98** | 0.27 | 0.12 |
 
-mem0 surfaces ~15% of a large set (its top-k slice) and **never the whole** — and it's **capture-clean** (mem0
-*holds* the 553 facts; it just can't enumerate/negate/traverse them). This is the strongest external-validity
-result we have: the categorical gap survives a real tool, on a public corpus, fairly graded.
+Scores are the mean of **three logged judging passes** (2026-08-10, `regrade_judge.py --repeat`;
+per-item verdicts in `runs/judge_verdicts.jsonl`, shipped with the release artifact). An earlier
+unlogged pass (2026-06-23) produced cell deviations of at most 0.12, in both directions, changing
+no conclusion; its judging environment was not recorded, which is why it was superseded. B2 sits
+slightly below 1.00 because the judge sometimes declines abbreviated titles the strict grader
+matches exactly (`judge_report.py` prints the per-class envelopes and the B2-vs-strict validation).
+
+mem0 surfaces ~6–27% of a large set depending on class (its top-k slice) and **never the whole** —
+and it's **capture-clean** (mem0 *holds* the 553 facts; it just can't enumerate/negate/traverse
+them). This is the strongest external-validity result we have: the categorical gap survives a real
+tool, on a public corpus, fairly graded.
 
 ---
 
@@ -93,7 +101,7 @@ currency), with mem0 at full multi-signal strength (semantic + BM25 + entity):
 
 | dimension | B2 | mem0 | verdict |
 |---|---|---|---|
-| completeness / negation / supersession | 1.00 (via `sparql`, ~78–167k tok) | ~0.15 | **B2 categorical** |
+| completeness / negation / supersession | 0.98–1.00 (via `sparql`, ~78–167k tok) | ~0.2 | **B2 categorical** |
 | simple relevance | cov 0.82 (`get_relevant_context` 4/4, ~35k tok) | cov 0.67–0.90 (~40k tok) | **tie** |
 | currency (real CHANGELOG reversal) | 1.00 | 1.00 | **tie** (cold 0.00) |
 

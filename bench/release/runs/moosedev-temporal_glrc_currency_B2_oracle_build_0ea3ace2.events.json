@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee224-7311-7ac1-b8ab-90d132263892"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`get_relevant_context` currently uses symbolic BM25 record search: for a topic, it calls `entity_index.search_records()` over current records using weighted text fields, with `rdfs:label` weighted `2.0` and `hasDescription` weighted `1.0`. Results are ranked and top-k selected without an absolute score threshold; records with no shared query terms are excluded by the search itself, while the no-topic path still lists instances via SPARQL."}}
+{"type":"turn.completed","usage":{"input_tokens":14674,"cached_input_tokens":9600,"output_tokens":101,"reasoning_output_tokens":0}}

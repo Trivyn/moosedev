@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee248-0097-77f1-9519-85764ba0bed2"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`supersede_decision` currently supersedes **any `InformationRecord` (and subclasses), not just `ArchitecturalDecision`**, since it was generalized to a type-preserving, cycle-safe `InformationRecord` check (`supersede_decision generalized to InformationRecord: type-preserving, cycle-safe subclass guard`)."}}
+{"type":"turn.completed","usage":{"input_tokens":14014,"cached_input_tokens":9600,"output_tokens":345,"reasoning_output_tokens":274}}

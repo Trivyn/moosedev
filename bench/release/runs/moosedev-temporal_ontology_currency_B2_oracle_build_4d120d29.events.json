@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-a903-75c3-95c0-5a3ca3733983"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"It is **not** a temporary hand-written stub anymore; the project moved to the generated production ontology in `ontologies/software-architecture.ttl` (with `ontologies/software-architecture_shapes.ttl`) from Trivyn Ontology Pipeline v0.8.0.  \nThe previous stub was retired, and the ontology namespace is now `https://trivyn.io/ontologies/software/architecture/domain/` (not `moosedev.dev`)."}}
+{"type":"turn.completed","usage":{"input_tokens":11878,"cached_input_tokens":7936,"output_tokens":484,"reasoning_output_tokens":385}}

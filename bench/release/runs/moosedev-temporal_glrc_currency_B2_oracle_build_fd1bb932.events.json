@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee237-71d4-7362-9fad-eb505a034892"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`get_relevant_context` now does a symbolic BM25 search over records, not a class-only lookup: it calls `entity_index.search_records()` against the topic using `rdfs:label` weighted 2x and `description` weighted 1x, then ranks and returns the top-k matches. There is no absolute score floor; zero-term matches are excluded by the search itself, and the retrieval path stays purely symbolic with no LLM involvement.  \nSources: “get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)”, “get_relevant_context: BM25 search_records replaces entity-index absolute floor for noise rejection”"}}
+{"type":"turn.completed","usage":{"input_tokens":12931,"cached_input_tokens":8064,"output_tokens":227,"reasoning_output_tokens":81}}

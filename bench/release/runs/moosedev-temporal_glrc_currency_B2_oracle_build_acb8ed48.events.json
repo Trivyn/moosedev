@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee228-f57c-7c61-9d5d-8efc96c04d0c"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"For a topic query, `get_relevant_context` now uses a **symbolic BM25 retrieval** path: it calls `entity_index.search_records` (not `search_classes`), passing the topic plus class filters and weighted text fields `(rdfs:label, weight 2.0)` and `(description predicate, weight 1.0)`, then takes the top‑k ranked hits.  \nIt no longer applies a fixed score threshold; records without shared query terms are excluded by `search_records`, so matching is purely query-term BM25 ranking over indexed label/description text."}}
+{"type":"turn.completed","usage":{"input_tokens":12745,"cached_input_tokens":4736,"output_tokens":856,"reasoning_output_tokens":731}}

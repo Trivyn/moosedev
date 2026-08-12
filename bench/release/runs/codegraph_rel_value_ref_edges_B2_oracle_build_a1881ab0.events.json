@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ef5d8-f2a7-7c81-88d2-9ca3fb7ddc6f"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"CodeGraph emits value-reference edges to make impact analysis see the symbols that read file-scope constants, config objects, and lookup tables, since calls/imports/inheritance alone miss that change-impact path and can undercount the affected set. It keeps them precise by adding same-file `references` edges with `metadata.valueRef: true` from reader symbols to file-scope `const`/`var` targets, deduping per reader-target pair, never creating nodes, and enforcing the documented precision guards and shadow-pruning rules from the value-ref validation records."}}
+{"type":"turn.completed","usage":{"input_tokens":16140,"cached_input_tokens":8576,"output_tokens":411,"reasoning_output_tokens":292}}

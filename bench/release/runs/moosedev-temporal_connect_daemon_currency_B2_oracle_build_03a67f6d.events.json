@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-4e4c-7ec3-8a9c-3ec82b9f9148"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`--connect` now auto-spawns a detached `--serve` backend for you when none is listening (unless `MOOSEDEV_NO_AUTOSPAWN=1` is set), so you do **not** need to start `--serve` first."}}
+{"type":"turn.completed","usage":{"input_tokens":12302,"cached_input_tokens":9600,"output_tokens":333,"reasoning_output_tokens":274}}

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee237-ee51-7782-b8d8-c0534754aa2f"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"For a non-empty topic, `get_relevant_context` currently does a pure-symbolic lookup through the cache-coherent entity index (`entity_index.search_classes()`), then filters topic hits by a relevance floor before returning `ContextItem`s; it does not call an LLM on the retrieval path. That matches the recorded entry **“get_relevant_context: pure-symbolic context retrieval via entity index (topic) or list-all (no topic)”** and the follow-up note **“get_relevant_context: relevance floor (0.45) drops noise hits; topic-aware empty-state is honest”**."}}
+{"type":"turn.completed","usage":{"input_tokens":11815,"cached_input_tokens":8064,"output_tokens":345,"reasoning_output_tokens":216}}

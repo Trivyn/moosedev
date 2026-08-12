@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-d058-72a1-8b40-183123642d32"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"`supersede_decision` currently supersedes any subject that is an `InformationRecord` (or subclass), not just `ArchitecturalDecision`."}}
+{"type":"turn.completed","usage":{"input_tokens":14017,"cached_input_tokens":8064,"output_tokens":344,"reasoning_output_tokens":308}}

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ef5d9-3068-7313-bf66-06990f34452d"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"CodeGraph emits value-reference edges to make impact analysis see when a file-scope constant, config object, or lookup table change should reach the same-file symbols that read it, since calls/imports/inheritance alone miss that class of dependency. This is the “Value-reader impact reachability” problem, and the intended win is correct blast-radius computation, not fewer reads.  \n\nIt keeps the edges precise by emitting only additive `references` edges from reader symbols to same-file `const`/`var` targets, deduping per reader-target pair, and applying shadow-pruning guards so obvious false positives are dropped while node counts stay unchanged."}}
+{"type":"turn.completed","usage":{"input_tokens":16526,"cached_input_tokens":10624,"output_tokens":232,"reasoning_output_tokens":97}}

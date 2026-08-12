@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-2c11-7741-b8d9-345b7351dcb7"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"With `--connect`, you do **not** need to start `--serve` yourself first—if no backend is listening, the server now auto-spawns a detached `--serve` process (opt-out via `MOOSEDEV_NO_AUTOSPAWN=1`, as recorded in the current `--serve/--connect` architectural decision)."}}
+{"type":"turn.completed","usage":{"input_tokens":12296,"cached_input_tokens":9600,"output_tokens":427,"reasoning_output_tokens":351}}

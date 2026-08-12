@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee246-c829-7b03-94dd-fd1a6536fdbf"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The current ontology is the generated production ontology, not the temporary hand-written stub.  \n`ontologies/software-architecture.ttl` (Trivyn Ontology Pipeline v0.8.0 output) and its shapes file are now used, while the old `ontology/architecture.ttl` stub was a temporary placeholder that was retired."}}
+{"type":"turn.completed","usage":{"input_tokens":11240,"cached_input_tokens":9600,"output_tokens":429,"reasoning_output_tokens":355}}

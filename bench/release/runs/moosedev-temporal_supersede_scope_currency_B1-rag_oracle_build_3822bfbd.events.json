@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019ee247-f46f-7fd1-96a1-05e0072755f1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"It can supersede **any** record that is (or is a subclass of) `InformationRecord`, not just `ArchitecturalDecision` records."}}
+{"type":"turn.completed","usage":{"input_tokens":11874,"cached_input_tokens":9600,"output_tokens":351,"reasoning_output_tokens":315}}

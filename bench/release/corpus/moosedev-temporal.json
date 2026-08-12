@@ -1,0 +1,548 @@
+[
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d9771258-544c-4e00-8f5c-4f903b19fa22",
+    "title": "--serve/--connect shared daemon mode: --connect auto-spawns backend when none is listening",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# --serve/--connect shared daemon mode: --connect auto-spawns backend when none is listening\n\nCommit 69f8f01389 (README.md diff). Prior claim: \"Lifecycle is manual for now (you start --serve yourself); transparent auto-spawn is planned (M5).\" New behaviour: `--connect` auto-spawns a detached `--serve` backend for the same resolved socket whenever no backend is listening; opt-out via `MOOSEDEV_NO_AUTOSPAWN=1`. Auto-spawned backends inherit the resolved configuration (including the repo-root .env, see companion decision). The one-backend-per-data-dir model (Unix socket keyed by data dir) and single-writer RocksDB constraint are unchanged."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/172d724e-21ab-4362-b50f-77757b666c7d",
+    "title": "--serve/--connect shared daemon mode: one backend per data-dir over a per-project Unix socket",
+    "kind": "ArchitecturalDecision",
+    "status": "superseded",
+    "text": "# --serve/--connect shared daemon mode: one backend per data-dir over a per-project Unix socket\n\nCommit e7c7f07dae (\"daemon spawning work\"). To allow multiple MCP clients (e.g. Claude Code + Codex) to share a single live project graph, a backend daemon mode is introduced: `moosedev --serve` holds the RocksDB store and listens on a Unix socket derived per data dir (`<MOOSEDEV_DATA_DIR>/moosedev.sock`, overridable via `MOOSEDEV_SOCKET`); `moosedev --connect` is a thin proxy that never opens the store or loads the model \u2014 it routes tool calls to the running backend. Lifecycle is manual (user starts `--serve`; transparent auto-spawn is planned, referenced in tasks/todo.md M5). Separate projects each get their own backend with no cross-talk (socket is keyed by data dir). New tokio features added: `io-util`, `net`, `time`; `tokio-stream` dependency added. This mode is additive \u2014 the default stdio spawn-per-client mode is unchanged."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Pattern/55cc6afa-7941-415f-89ba-ec15268cdd1b",
+    "title": "Agent recall-first protocol for self-hosted MCP: get_relevant_context \u2192 short NLQ \u2192 record \u2192 align_concepts \u2192 validate",
+    "kind": "Pattern",
+    "status": "accepted",
+    "text": "# Agent recall-first protocol for self-hosted MCP: get_relevant_context \u2192 short NLQ \u2192 record \u2192 align_concepts \u2192 validate\n\nCommit 85cd7821cc (CLAUDE.md \"Dogfooding MOOSEDev\" section). Codifies the operating discipline for agents using the self-hosted MCP: (1) Recall first \u2014 get_relevant_context or query before non-trivial work; (2) Keep NLQ questions short \u2014 one focused sentence per query call; (3) Capture as you go \u2014 record_important_decision with kind ArchitecturalDecision/Lesson/Constraint/Pattern/AntiPattern/Requirement; capture decision + rationale, not transient chatter; (4) Align new concepts with align_concepts before introducing a new term to prevent model graph drift (Invariant #4); (5) Verify with validate_against_architecture after capturing; use sparql for precise deterministic reads. Rationale: makes agent use of MOOSEDev reliable and disciplined \u2014 recall prevents duplication, alignment prevents drift, validation ensures consistency. Explicitly stated: \"When its tools are available, prefer them over re-deriving context (invariant #5).\""
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c86cff6e-d73e-4fe1-a1d6-480820a95736",
+    "title": "Alignment index built at startup via AppState::build_alignment_index, non-fatal on model-load failure; also wired into EngineConfig",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Alignment index built at startup via AppState::build_alignment_index, non-fatal on model-load failure; also wired into EngineConfig\n\nCommit fbe9777ed8 (M2 fixes, src/graph/mod.rs, src/main.rs). AppState::build_alignment_index() is a separate async method (not part of bootstrap) called at startup in main.rs. Separation from bootstrap keeps non-aligning code paths (e.g., M1 capture/query tests) free from the embedding-backbone load. Non-fatal by design: if the embedding model can't load (offline with no bundled weights), a tracing::warn is emitted but the server continues \u2014 only align_concepts/suggest_mappings are disabled; capture, query, context, and provenance tools are unaffected. The built VecStore is stored on AppState.vector_store (Arc) and also wired into engine_config.embedding_store, which additionally sharpens query-time class disambiguation beyond its primary alignment role. Rationale for startup build vs. precompute script: simpler deployment (no separate CLI step); fresh-rebuild each start keeps the index coherent with the loaded ontologies."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/458c660c-4fe4-4cf7-bfd5-5b2214a6013d",
+    "title": "Apache License 2.0 selected for MOOSEDev; copyright held by Trivyn, Inc.",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Apache License 2.0 selected for MOOSEDev; copyright held by Trivyn, Inc.\n\nCommit 875fe02262 adds LICENSE \u2014 the full Apache License Version 2.0 text, copyright 2026 Trivyn, Inc. This operationalises the open-source boundary decision (Design Invariant #11): MOOSEDev (MCP server, tools, prompts, ontology, docs) is open source under Apache 2.0. Apache 2.0 was chosen over alternatives (MIT, GPL) \u2014 it grants perpetual, royalty-free copyright and patent licences to recipients, requires preservation of attribution notices, and does not impose copyleft on derivative works, making it compatible with the project's goal of broad adoption while keeping the closed MOOSE engine unaffected. No rationale text appears in the commit message; the choice is evident from the diff itself."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c8555107-fa11-4da0-882f-2e643fdd451a",
+    "title": "Architecture ontology brief: two CCO-grounded sibling modules; lexical surface heavy; taxonomy shallow",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Architecture ontology brief: two CCO-grounded sibling modules; lexical surface heavy; taxonomy shallow\n\nCommit 64f9fbf1b7 adds spec/architecture-ontology-brief.md \u2014 the generation brief for Trivyn's ontology generator. Key structural decisions: (1) Two sibling domain modules under CCO (not a stack): software-engineering (thin in v1 \u2014 range of relations and extension seam for v2 language-specific ontology) and architecture-knowledge (the v1 focus, all \u2291 cco:InformationContentEntity): ArchitecturalDecision, Rationale, Alternative, Constraint, Lesson, AntiPattern. (2) Detail posture: lexical surface HEAVY (rdfs:label, skos:altLabel, skos:hiddenLabel, skos:definition on every class/property \u2014 this is the MOOSE alignment signal); relations HIGH (domain/range on all object properties); taxonomy SHALLOW (alignment attaches subtypes at runtime); SHACL SELECTIVE. (3) Integration contract: Turtle, oxigraph-parseable, CCO-subclassed, stable namespace IRIs. One deferred question: how to ground software artifacts in CCO (designed-artifact continuant vs. ICE)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/208ae784-cbfb-44a4-9d10-b99e4f1e9150",
+    "title": "Architecture ontology namespace is https://trivyn.io/ontologies/software/architecture/domain/ (not moosedev.dev)",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Architecture ontology namespace is https://trivyn.io/ontologies/software/architecture/domain/ (not moosedev.dev)\n\nCommit 7f015a32 (M2): the production ontology's base IRI and default prefix `:` resolve to `https://trivyn.io/ontologies/software/architecture/domain/`. This is the stable, canonical namespace for all domain classes (ArchitecturalDecision, Constraint, Lesson, etc.) and object/datatype properties. The prior stub used `https://moosedev.dev/ontologies/architecture#`. Code that resolves class or property IRIs from the vocabulary MUST use the local_name and look them up in the loaded graph \u2014 never hardcode either the old or new namespace. The Trivyn synthesis activity IRI is `https://trivyn.io/ontologies/software/architecture/domain/synthesis-activity`. Rationale: the ontology is generated and owned by the Trivyn pipeline; its namespace lives in the trivyn.io domain. Stable published IRIs are required for oxigraph-parseable Turtle and for MOOSE alignment correctness."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/d174467b-14fb-44b3-8cf7-b9fa3a0a3cc2",
+    "title": "Benchmark arm isolation: identical compaction config across all arms so memory is the only variable",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Benchmark arm isolation: identical compaction config across all arms so memory is the only variable\n\nCommit 29cac60c28 (`bench/run.py` `arm_opencode_config()`). All arms now receive an identical `\"compaction\": {\"auto\": true, \"prune\": true, \"reserved\": 16384}` block in the per-run `opencode.json`. Rationale: opencode's auto-compaction requires a `reserved` headroom buffer to fire *before* a turn overflows the context window; without it, a read-heavy agent silently hits LM Studio TruncateMiddle (server-side middle-truncation), corrupting the run with no visible signal. `prune` drops old accumulated tool outputs to prevent context balloon. These settings are frozen and identical across all arms \u2014 memory is the only independent variable. Context management behavior must not confound the comparison."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/35870813-9425-4e3d-b0e8-3c884f6cf9fa",
+    "title": "Benchmark content parity: B1 chunks carry description + lifecycle status; parity verified by containment",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Benchmark content parity: B1 chunks carry description + lifecycle status; parity verified by containment\n\nCommit 29cac60c28 (`bench/export_corpus.py`, `bench/parity_check.py`), superseding Constraint 26300710. B1 export now bakes lifecycle status into each chunk: `text = f\"# {title}{status_line}\\n\\n{desc}\"`. Rationale: B1 (free-text) must carry the same currency signal as B2 (graph) so that a B2 currency win reflects the agent *acting on* superseded status \u2014 not information withholding. `parity_check.py` now verifies that `hasDescription` text is *contained in* the chunk (not equal): the chunk is intentionally richer, prepending a title heading and lifecycle status line. SPARQL enumeration uses `rdfs:label` (canonical, covers all record kinds including SystemComponent). B1 must still cover exactly the same record set as the graph (count + IRI matching unchanged)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/26300710-383d-4f8d-9f89-2483aed9d7f6",
+    "title": "Benchmark content parity: B1 export carries exactly the records B2 reads from the graph",
+    "kind": "Constraint",
+    "status": "superseded",
+    "text": "# Benchmark content parity: B1 export carries exactly the records B2 reads from the graph\n\nCommit 7633402925 (`bench/export_corpus.py`, `bench/parity_check.py`). The B1 free-text chunks and the B2 graph arm must carry **identical knowledge** \u2014 the same records, same descriptions \u2014 so the headline B2\u2212B1 comparison isolates retrieval mechanism rather than knowledge content. \n\nImplementation: `export_corpus.py` pulls every record from the project graph via a deterministic SPARQL SELECT over `kg/project` (predicates matched by local-name via STRENDS, per the decouple-code-from-ontology-ttl lesson). It deliberately does NOT use `get_relevant_context` for this, because that tool is relevance-ranked and hard-capped at 100 items (`src/mcp/mod.rs: clamp(1,100)`) \u2014 it is a retrieval surface, not a bulk dump. SPARQL is the correct bulk-read primitive here.\n\n`parity_check.py` enforces the invariant: chunk count == graph record count, every chunk IRI exists in the graph, and each chunk's body text matches the graph's `hasDescription` for that record. A mismatch means B1 and B2 would not carry identical knowledge \u2014 confounding the experiment."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c4ea9084-3676-4f2e-83b2-fefad70c4577",
+    "title": "Benchmark four-arm design: B0 (none) / B1-md (markdown) / B1-rag (BM25) / B2 (MOOSEDev graph)",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Benchmark four-arm design: B0 (none) / B1-md (markdown) / B1-rag (BM25) / B2 (MOOSEDev graph)\n\nCommit 7633402925 (\"initial benchmark work\") introduces the `bench/` harness with four evaluation arms, each receiving the same questions but with different agent-memory configurations:\n\n- **B0** (baseline): no memory tool \u2014 the agent answers from raw project files only. AGENTS.md instructs \"answer as accurately as you can from the information available to you.\"\n- **B1-md**: project knowledge exported as markdown files under `docs/decisions/`; agent is told to grep/read those files before answering. Tests text-based recall from a flat file system.\n- **B1-rag**: same knowledge as B2, exported as text chunks and served via a BM25 `recall` MCP tool (`bench/freetext_mcp/server.py`). Tests lexical free-text retrieval over the same record set.\n- **B2**: MOOSEDev graph arm \u2014 agent uses `get_relevant_context`, `sparql`, and `query` tools against the real graph.\n\nRationale: the B0 baseline measures the model's raw knowledge; B1-md measures structured-docs-without-recall-tools; B1-rag and B2 carry **identical knowledge content** (content parity, see companion Constraint) so the B2\u2212B1-rag gap isolates the symbolic retrieval layer's contribution over equivalent free-text RAG. BM25 is the initial B1 retriever (skeleton); upgrade to embedding retriever is noted in the code for the full matrix."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/801c2fa4-05fd-47e7-a2e2-e5d7277e36c2",
+    "title": "Benchmark grading anti-circularity: ground truth is the source corpus, never the in-graph records",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Benchmark grading anti-circularity: ground truth is the source corpus, never the in-graph records\n\nCommit 7633402925 (`bench/grade.py`, `bench/grade_code.py`, `bench/bootstrap_rust_rfcs.py`). A fundamental grading principle: the benchmark's ground truth is the **original source corpus** (the codebase, RFC texts, etc.) \u2014 never the in-graph records. This prevents circularity: if the in-graph records were themselves used to define ground truth, B2 would be scored against the very content it retrieves, trivially winning.\n\nFrom `grade_code.py`: \"Ground truth is the codebase's own canonical pattern \u2014 checked against the patch \u2014 never the in-graph record, so there's no circularity (capture policy).\"\n\nFrom `bootstrap_rust_rfcs.py`: \"Grading ground truth is the RFC text itself in the working tree, never this record (capture policy: primary-source ground truth, no circularity).\"\n\nThis constraint governs task authoring: Q&A answer keys and code task ground truth must be derived from primary sources (source files, docs, RFC texts) and never from the captured graph records \u2014 even when those records faithfully reflect the source."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/49bde203-68f6-47ec-99c7-2e109ef88a62",
+    "title": "Benchmark oracle mode: harness-side retrieval isolates knowledge-value from fetch-willingness",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Benchmark oracle mode: harness-side retrieval isolates knowledge-value from fetch-willingness\n\nCommit 29cac60c28 (`bench/run.py`). A `mode=\"oracle\"` parameter on `run_cell()` causes the harness to retrieve relevant knowledge and prepend it verbatim to the prompt, without giving the agent a live memory tool. This isolates two confounds: H8 (fetch-willingness \u2014 whether the agent chooses to call the memory tool) and knowledge-value (whether the knowledge itself helps). If oracle does not beat B0, the captured knowledge has no value; if live-tool < oracle, the gap is fetch-willingness alone.\n\nImplementation: `oracle_context()` calls `get_relevant_context` for B2 (current-only, symbolic BM25); `freetext_oracle_context()` runs BM25 over the exported chunk file for B1 arms (currency-blind \u2014 superseded chunks are retrievable, same as what a B1-rag agent would get). Topic is `task[\"memory_topic\"] or task[\"prompt\"]` \u2014 a focused subject phrase so the retrieval signal is unambiguous.\n\nOracle asymmetry is intentional: the B2\u2212B1 oracle delta isolates B2's currency-awareness (the agent acting on lifecycle status) rather than information withholding (B1 oracle would also retrieve superseded chunks, so if B2 oracle correctly ignores a superseded record and B1 oracle uses it, that gap is earned)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/455debfe-07e8-4261-8307-fa36f7f2b4c0",
+    "title": "Benchmark programmatic grading: Q&A (keyword-group coverage + citation) and code (implement/violate/comply) axes",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Benchmark programmatic grading: Q&A (keyword-group coverage + citation) and code (implement/violate/comply) axes\n\nCommit 7633402925 (`bench/grade.py`, `bench/grade_code.py`). Two task types are graded programmatically without LLM involvement:\n\n**Q&A tasks** (`grade.py`): scored on keyword-group coverage (70%) + decision-title citation (30%). Each ground-truth entry has `must_include_any` groups (lists of synonymous terms; at least one term from each group must appear) and a `decision_title` that the answer must cite. Score = 0.7 \u00d7 (groups_hit / total_groups) + 0.3 \u00d7 (1 if title cited else 0). Pass threshold: score \u2265 0.7.\n\n**Code tasks** (`grade_code.py`): the agent produces a unified diff (patch); grader checks three axes on the added lines:\n- `implemented`: did the agent make the relevant change and touch the expected files?\n- `violated`: did it use the known-wrong pattern that recorded memory warns against (e.g. hardcoding an ontology namespace)?\n- `complied`: did it use the recorded-correct pattern?\n\nScoring: not implemented \u2192 0.0; violated \u2192 0.0; complied \u2192 1.0; implemented but neither \u2192 0.4 (partial). Pass threshold: score \u2265 0.7. Sandbox/test execution is out of scope; grading is patch-level only. Rationale: programmatic grading is deterministic, fast, and avoids introducing an LLM judge as a confound in the evaluation of LLM-based memory tools."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/7bb454c9-7126-4726-9144-d1c107979e6f",
+    "title": "Bootstrap edge anti-confabulation: evidence-or-skip per edge; under-link rather than over-link",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Bootstrap edge anti-confabulation: evidence-or-skip per edge; under-link rather than over-link\n\nskills/bootstrap-existing-codebase.md \"Anti-confabulation discipline\" section (commit 9114ee7a73): \"Edges are not SHACL-required, and get_relevant_context tells agents to TRUST recorded knowledge \u2014 so a fabricated edge is a durable false claim. Therefore: Evidence-or-skip, per edge. Cite the doc line / code fact / commit that states the relationship (X drove / violates / resulted-in Y) \u2014 not merely that both nodes exist. If you can't point to it, don't draw the edge. Prefer not-linking over guessing. A missing edge is honest comprehension debt; a wrong one is served as truth forever. Under-link rather than over-link. No transitive invention.\" Evidence for a relationship must be the relationship itself, not mere co-presence of nodes."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/0332082c-ef5d-442e-9964-a21d3849f3d7",
+    "title": "Bootstrap instance dedup: link-or-mint \u2014 query before minting; reuse Requirement/Constraint as graph hubs",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Bootstrap instance dedup: link-or-mint \u2014 query before minting; reuse Requirement/Constraint as graph hubs\n\nskills/bootstrap-existing-codebase.md \"Link-or-mint grounding\" section (commit 9114ee7a73): \"Before creating a node, check whether an equivalent instance already exists: get_relevant_context(topic: '&lt;the node's concept in 3-6 words&gt;') and inspect returns of the same kind. Match: reuse the existing IRI \u2014 do not mint. No match: mint and capture the new IRI. Test: 'Would a maintainer say these are the same requirement/constraint, or two different ones?' Bias toward reuse for Requirement/Constraint \u2014 they recur across many decisions, and reuse is what creates the hub nodes that make the graph multi-hop. Bias toward mint for Consequence/Alternative \u2014 usually specific to one decision.\""
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Requirement/28135f6e-34cd-4328-aa9c-ae5df7ecaac9",
+    "title": "Bootstrap must produce typed edges so relational expansion reaches lexically-distant context",
+    "kind": "Requirement",
+    "status": "accepted",
+    "text": "# Bootstrap must produce typed edges so relational expansion reaches lexically-distant context\n\nskills/bootstrap-existing-codebase.md (commit 9114ee7a73, intro rewrite): \"only a linked graph lets you follow 'why?' from a decision to rationale that lives in a lexically-distant record. Flat keyword retrieval finds a single record; only a linked graph lets you follow.\" The bootstrap workflow exists partly to seed the graph for get_relevant_context relational expansion \u2014 but expansion only reaches linked neighbors; if bootstrap produces only isolated nodes, the expansion step is useless. Therefore the bootstrap must write typed edges, not just typed nodes."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/0c9fc648-de59-4bd4-809e-db4244af3a3a",
+    "title": "Bootstrap skill v2: cluster capture with explicit LINK phase produces traversable linked graph",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Bootstrap skill v2: cluster capture with explicit LINK phase produces traversable linked graph\n\nskills/bootstrap-existing-codebase.md (commit 9114ee7a73 \u2014 \"Rewrite bootstrap skill to build a linked knowledge graph\"). The workflow is restructured from flat record capture (Phase 0\u20136) to decision-cluster capture (Phase 0\u20137): (1) Phase 2 now shapes clusters as node table + link plan, with per-node AND per-edge evidence; (2) Phase 4 adds link-or-mint grounding (query before minting, reuse Requirement/Constraint as hub nodes); (3) Phase 5 is a new distinct LINK step that calls relate() per the predicate\u2192endpoint map for every link-plan row; (4) Phase 6 proves connectivity via edge histogram SPARQL, edge-type matrix conformance lint, and orphan check \u2014 0 SHACL violations is necessary but not sufficient; (5) Phase 7 proves traversability via competency questions and MOOSEDEV_EXPAND_HOPS A/B; (6) Anti-confabulation discipline is made explicit: evidence-or-skip per edge. Done-checklist: edge:node \u2273 1.0, competency questions answered, relational expansion A/B demonstrates traversal value. The prior skill targeted \"a handful of high-signal typed records with 0 violations\"; the new skill targets a connected, traversable cluster graph."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Consequence/101d036b-c92e-4874-8278-58b5b3322c19",
+    "title": "Bootstrap verification criterion shifts: 0 SHACL violations is necessary but not sufficient to prove a linked graph",
+    "kind": "Consequence",
+    "status": "accepted",
+    "text": "# Bootstrap verification criterion shifts: 0 SHACL violations is necessary but not sufficient to prove a linked graph\n\nskills/bootstrap-existing-codebase.md Phase 6 (commit 9114ee7a73): \"validate_against_architecture \u2014 expect 0 violations. Necessary, not sufficient: it checks required fields and edge types-if-present but never requires edges, so a flat graph also passes.\" The new done-checklist requires the edge:node ratio \u2273 1.0, edge histogram over typed predicates, orphan check (records with no typed edge in or out \u2248 0), edge-type matrix conformance, competency-question traversal, and MOOSEDEV_EXPAND_HOPS A/B to demonstrate relational expansion value. These prove the graph is connected, not merely valid."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/30ee0f1e-662e-450d-b6cf-2bdfdc764cec",
+    "title": "Cargo.lock is committed: moosedev is a binary application, not a library",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Cargo.lock is committed: moosedev is a binary application, not a library\n\nEstablished in .gitignore (initial commit 455628e081). moosedev is a BINARY application (the MCP server), so Cargo.lock IS committed for reproducible builds \u2014 the oxigraph-trivyn fork is pinned by git rev and the project builds offline against it. The sibling `moose` library ignores Cargo.lock; this project intentionally diverges. Cargo.lock must NOT be added to .gitignore. Rationale: binary application build reproducibility; pinned fork dependency requires lockfile."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Lesson/1e6de474-3d0e-41ed-9c4a-dc6e6e8be36d",
+    "title": "Decouple-code-from-ontology discipline extends to write-path validation and labeling",
+    "kind": "Lesson",
+    "status": "accepted",
+    "text": "# Decouple-code-from-ontology discipline extends to write-path validation and labeling\n\nCommit cd490bc (tasks/lessons.md mirror of Lesson 51b09e67 from the graph). Pattern: `relate()`'s `require_information_record` guard and capture's hardcoded `hasTitle` baked ontological assumptions into Rust \u2014 \"every linkable node is an InformationRecord,\" \"every class is labeled by `hasTitle`\" \u2014 instead of deferring to what the ontology declares. The guard wrongly rejected legitimate decision/constraint \u2192 SystemComponent links; the hardcoded label meant a minted SystemComponent (whose label property is `hasComponentName`) could not satisfy SHACL.\n\nRule: The decouple-code-from-ontology discipline (resolve IRIs by local name, never hardcode namespaces) governs VALIDATION and LABELING too, not just IRI strings. Derive write-path constraints/conventions from the loaded ontology/shapes at runtime: `relate()` reads the predicate's SHACL shape contract (`sh:targetClass` / `sh:class`) for valid endpoint kinds; capture reads each class's `labelProperty` annotation, mirroring `rdfs:label` into the typed property. A blunt type guard is a coupling smell \u2014 the ontology is the regenerable source of truth, and hardcoded assumptions silently reject valid data or rot on ontology change."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dca4be78-0dbe-44c1-b4af-9b6e1f42e5ad",
+    "title": "Distribution via pre-built binaries for users without MOOSE engine source access",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Distribution via pre-built binaries for users without MOOSE engine source access\n\nFrom README.md (commit 25e66e88d5). Building MOOSEDev from source requires the private MOOSE engine repository and its patched oxigraph fork. For the open-source community (who cannot access those), pre-built binaries published on GitHub Releases are the primary distribution route. This is a direct consequence of the open-source boundary (Design Invariant #11): the MCP server binary is the artifact that bridges the closed engine and the open community."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Lesson/4ef94c50-7412-49a9-a963-52ad9118e607",
+    "title": "Don't index instance data for A-box recall \u2014 MOOSE walk planning beats vector search for precision and auditability",
+    "kind": "Lesson",
+    "status": "accepted",
+    "text": "# Don't index instance data for A-box recall \u2014 MOOSE walk planning beats vector search for precision and auditability\n\nCommit 17bcfda8 / tasks/lessons.md addition. Pattern surfaced during investigation of `get_relevant_context` imprecision: the temptation was to improve recall quality via embedding-ranked A-box recall or embedding-based instance dedup \u2014 building a vector index over recorded instance content. This contradicts a deliberate MOOSE design choice: MOOSE deliberately does NOT index instance data; walk planning was devised to avoid the vector-index/RAG trap and deliver more precise, auditable retrieval.\n\nRule: when recall, dedup, or contradiction detection seems to need \"semantic search\" over recorded instances, reach for the symbolic path first \u2014 `query` (walk planning) and `sparql` for retrieval precision; LLM-as-sensor + typed conflict for contradiction \u2014 not a nearest-neighbor index over instances. Embeddings in MOOSEDev are confined to T-box term alignment (`suggest_parent`) over the static ontology (class placement, not instance retrieval). `get_relevant_context` is a shallow lexical anchor/browse tool by construction; fix its imprecision with an honesty floor + tool-selection guidance, not vector search."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5e1dae27-324e-490e-ab35-b3f05894f0e6",
+    "title": "InformationRecord is the root superclass for all knowledge artifact classes in the architecture ontology",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# InformationRecord is the root superclass for all knowledge artifact classes in the architecture ontology\n\nCommit 7f015a32 (M2): the production ontology (ontologies/software-architecture.ttl) defines `:InformationRecord` (domain: `https://trivyn.io/ontologies/software/architecture/domain/InformationRecord`) as the common superclass for all knowledge artifact classes: ArchitecturalDecision, Rationale, Alternative, Consequence, Constraint, Requirement, Lesson, Pattern, AntiPattern. All subclass of InformationRecord via `rdfs:subClassOf`. InformationRecord itself is `rdfs:subClassOf cco:ont00000958` (Information Content Entity) with confidence 0.75. Shared datatype properties (hasAuthor, hasLifecycleStatus, hasTimestamp, hasTitle, hasDescription) are declared on InformationRecord and inherited by all subtypes. Rationale: a single root class allows MOOSE alignment to treat all recorded artifacts uniformly and simplifies SHACL shape inheritance. The brief specified \"taxonomy shallow\" \u2014 InformationRecord is the one and only mid-level grouping."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/485c8279-7070-4afb-a457-8378eec666e7",
+    "title": "KG IRI conventions: named graph kg/project; instances at kg/{class}/{uuid}",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# KG IRI conventions: named graph kg/project; instances at kg/{class}/{uuid}\n\nCommit 64f9fbf1b7 (src/graph/mod.rs: PROJECT_KG_GRAPH_IRI, mint_instance_iri). Two stable IRI conventions established: (1) all recorded knowledge instances live in the named graph https://moosedev.dev/kg/project \u2014 this is the data graph passed to execute_graph_walk_nlq_with_context and targeted by SPARQL queries; (2) instance IRIs are minted as https://moosedev.dev/kg/{class_local}/{uuid4}, e.g. https://moosedev.dev/kg/ArchitecturalDecision/&lt;uuid&gt;. Rationale: predictable, collision-free IRIs; class name in the IRI aids human readability and allows SPARQL queries to filter by path prefix; the named graph isolates project knowledge from the ontology/vocabulary graphs loaded into the same Store."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ac92be76-ae76-47e2-b8d0-6c0ca72444be",
+    "title": "LLM integration uses OpenAI-compatible API endpoint; local-first, cloud opt-in",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# LLM integration uses OpenAI-compatible API endpoint; local-first, cloud opt-in\n\nFrom README.md (commit 25e66e88d5). MOOSEDev's NLQ/query functionality is configured via an OpenAI-compatible base_url / api_key / model \u2014 users can point it at a local runtime (Ollama, LM Studio) or a hosted provider. Local-first by default; cloud is opt-in. Rationale: satisfies Design Invariant #9 (must remain fully usable locally and under user control) while leaving hosted LLMs as a voluntary upgrade path."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Lesson/0ac9f422-6d47-4a81-994a-32b14ecfb2b0",
+    "title": "Lesson: export_corpus.py must query rdfs:label, not hasTitle, to enumerate all record kinds",
+    "kind": "Lesson",
+    "status": "accepted",
+    "text": "# Lesson: export_corpus.py must query rdfs:label, not hasTitle, to enumerate all record kinds\n\nCommit 29cac60c28 (`bench/export_corpus.py`). The prior SPARQL query joined on `?s a ?kind ; ?tp ?title . FILTER(STRENDS(STR(?tp), \"hasTitle\"))`, which required a `hasTitle` triple. SystemComponent records carry `hasComponentName` as their typed label property (not `hasTitle`) and have no `hasTitle` triple \u2014 so they were silently excluded from the B1 corpus export, creating a hidden parity violation: B1 was missing a class of records that B2 could retrieve.\n\nFix: query on `<http://www.w3.org/2000/01/rdf-schema#label>` directly \u2014 the canonical label MOOSE writes for every captured record, across all kinds. This mirrors the B2 retrieval-side switch to rdfs:label (search_records text fields). Rule: the SPARQL export must anchor on rdfs:label for enumeration; type-specific title predicates (hasTitle, hasComponentName) vary by class and cause silent gaps. The decouple-code-from-ontology discipline applies to the export side as much as the retrieval side."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2b3e3c89-ed23-487e-afac-5808b1f11e0d",
+    "title": "MCP transport is stdio; rmcp 1.7; protocol 2025-06-18",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# MCP transport is stdio; rmcp 1.7; protocol 2025-06-18\n\nFrom README.md (commit 25e66e88d5). MOOSEDev speaks MCP over stdio (not HTTP/SSE). The MCP server is implemented with rmcp 1.7, negotiating protocol `2025-06-18`. M0 verified end-to-end: `initialize` \u2192 `tools/list` \u2192 `tools/call` (ping). stdio was chosen to keep deployment simple, enable local-first use with zero networking configuration, and match the standard MCP client configuration pattern (command + args in .mcp.json or Claude Desktop config)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/38109fbf-a52e-40bc-90e0-3d6c2d8399f3",
+    "title": "MOOSE Ask 1 (label_sets cache invalidation) and Ask 2 (assert_instance) delivered; M1 write path unblocked",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# MOOSE Ask 1 (label_sets cache invalidation) and Ask 2 (assert_instance) delivered; M1 write path unblocked\n\nCommit 64f9fbf1b7 updates spec/core-moose-asks.md to mark both outstanding MOOSE core asks as \u2705 DELIVERED. Ask 1 (cache invalidation for label_sets): invalidate_graph/invalidate_all now evict label_sets/label_order too, via a global+per-graph epoch mechanism preventing stale-index races. Ask 2 (cache-coherent write primitive): moose::kg::assert_instance landed \u2014 transactional typed-instance write (rdf:type + datatype + IRI-valued object props) into a named graph, with optional AssertionValidator and post-commit cache invalidation. MOOSEDev's graph/mod.rs now builds directly on assert_instance for its record_instance write path. Deferred from Ask 2: retract/supersede lifecycle, ProvenanceWriter generalization, incremental index maintenance."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/07af9c80-26fd-4111-8148-e2ea8de72a33",
+    "title": "MOOSE engine provides read/reason; MOOSEDev provides write/serve",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# MOOSE engine provides read/reason; MOOSEDev provides write/serve\n\nFrom README.md (commit 25e66e88d5). The architecture is split into two layers: MOOSE (engine, closed) provides NLQ query + execution traces, the alignment engine (3-tier sensor sieve), the focus stack, and local embeddings (Snowflake Arctic-Embed-S via Candle). MOOSEDev (host, open source) provides the MCP server, the durable knowledge graph and its typed write path, the SPARQL endpoint, lightweight validation, and the bootstrap workflow. MOOSE is a sensor/reasoner; MOOSEDev is the application layer that persists and serves knowledge. This division keeps core neurosymbolic logic inside MOOSE (invariant #8) while keeping the MCP-facing surface open and composable."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/f1cf3e5d-1a34-4251-a17b-f97e495e891f",
+    "title": "MOOSEDev builds ontology vector store directly via sqlx; MOOSE has no public vector-write path",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# MOOSEDev builds ontology vector store directly via sqlx; MOOSE has no public vector-write path\n\nCommit fbe9777ed8 (M2 fixes, src/vectors/mod.rs, Cargo.toml). MOOSE's VecStore::open reads an `ontology_vectors` SQLite table but exposes no public *write* path. MOOSEDev builds this table itself using MOOSE's public encoding (`embedding_to_blob`, `VecStore::write_stamp`) and the `sqlx` crate (same version as MOOSE uses, so they resolve to a single build artifact). `src/vectors/mod.rs::build_and_open()` drops and recreates the table fresh each call, embeds every `owl:Class` and `owl:DatatypeProperty` (object properties skipped \u2014 not ranked on) using the document-side recipe (label + definition + altLabels), stamps with the active model ID, then opens with `VecStore::open(None, Some(db_path))`. `sqlx = { version = \"0.8\", features = [\"runtime-tokio\", \"sqlite\"] }` added to Cargo.toml with an explanatory comment. Trade-off: tight coupling to MOOSE's internal SQLite schema; mitigated by using MOOSE's own public encoding API (`embedding_to_blob`, `VecStore::write_stamp`) rather than inventing a schema from scratch."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/cbad3803-0762-4885-9bfc-6d3b4c6eff1e",
+    "title": "MOOSEDev dogfoods itself: self-hosted MCP for project memory, store at /.moosedev/ (MOOSEDEV_DATA_DIR)",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# MOOSEDev dogfoods itself: self-hosted MCP for project memory, store at /.moosedev/ (MOOSEDEV_DATA_DIR)\n\nCommit 85cd7821cc (.gitignore + CLAUDE.md \"Dogfooding MOOSEDev\" section). The moosedev repo uses its own local MCP server as its long-term agent memory \u2014 \"This repo uses itself for long-term memory: a local moosedev MCP server exposes the durable project knowledge graph.\" The live dogfood store lives at /.moosedev/ (controlled by the MOOSEDEV_DATA_DIR env var) and is gitignored to keep runtime data out of version control. Rationale: validates the tool against real usage (dogfooding), satisfies Invariant #5 (memory must be external and queryable), and provides a persistent growing project KG without committing transient data to git."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/3e734993-5e87-429c-baef-fe59e70ac6f6",
+    "title": "MOOSEDev must remain fully usable locally and under user control",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# MOOSEDev must remain fully usable locally and under user control\n\nDesign Invariant #9 from CLAUDE.md (initial commit 455628e081). MOOSEDev should remain fully usable locally and under user control. Features that require cloud services or remove user agency should be avoided or clearly marked as non-goals. This is a hard constraint on the deployment model and feature scope."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/461e2fdf-81bf-486e-a67a-e89c3ccc650c",
+    "title": "MOOSEDev: neurosymbolic MCP server to combat comprehension debt",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# MOOSEDev: neurosymbolic MCP server to combat comprehension debt\n\nMOOSEDev is designed as a neurosymbolic MCP server whose core purpose is to combat comprehension debt \u2014 the gradual loss of understanding of why a codebase is structured the way it is. It serves as an early example of a domain-specific, epistemically grounded AI application. Built on top of the closed-source MOOSE neurosymbolic engine; MOOSEDev itself is open source. Rationale: push back against LLMs that optimize for sounding correct rather than being correct, by emphasizing symbolic reasoning, structured typed knowledge, auditability, and a living project knowledge graph. Established in CLAUDE.md (initial commit 455628e081)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Requirement/93ba017a-8e1c-48db-aa8b-cded8fda8103",
+    "title": "Memory must be external and queryable, not stuffed into context window",
+    "kind": "Requirement",
+    "status": "accepted",
+    "text": "# Memory must be external and queryable, not stuffed into context window\n\nDesign Invariant #5 from CLAUDE.md (initial commit 455628e081). Do not rely on stuffing large amounts of history or context into the LLM's context window. Use MOOSEDev's session/project knowledge graph as the primary long-term memory. Prioritize tools like get_relevant_context, search_session_graph, and get_focus_stack. Rationale: reducing dependence on ever-growing context windows is a core project goal; the knowledge graph must be the authoritative store."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/1476e1fb-6fc9-4041-a296-29038e9e8a83",
+    "title": "Ontology regeneration orphans existing records: migration story required before real data accrues (P1)",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Ontology regeneration orphans existing records: migration story required before real data accrues (P1)\n\nCommit fbe9777ed8 (M2 fixes, tasks/todo.md \"Known limitations\" section). Instances in the durable KG carry the full class IRI as rdf:type. If a regenerated ontology changes class IRIs or namespace, prior durable records stop being returned by relevant_context/query because those tools build candidate sets from the current arch_vocab. Zero impact today (no persistent production data), but this becomes a data-loss risk before real data accrues. Required mitigation: a deliberate migration story (re-type instances on ontology change via a mapping \u2014 NOT hardcoded old namespaces, which would violate the namespace convention decision). Lighter partial step identified: make list-all enumerate by actual rdf:type in the project graph rather than the current vocab. Classified P1 (must be resolved before real data accrues)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/033d2683-c245-4575-b125-fa5f6531e6bc",
+    "title": "Open source boundary: MOOSEDev is open, MOOSE engine is closed",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Open source boundary: MOOSEDev is open, MOOSE engine is closed\n\nDesign Invariant #11 from CLAUDE.md (initial commit 455628e081). MOOSEDev (the MCP server, tools, prompts, ontology, and documentation) is open source. The core MOOSE engine remains closed. Features should be designed with this boundary in mind \u2014 contributions to the open parts are welcome; deep changes to MOOSE behaviour are not in scope for external contributors. This constrains what can be modified by the community and what must be composed via the MOOSE API."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/e6128acd-2e13-49d3-8faa-586c5f123558",
+    "title": "PROV-O edit provenance: companion graph, agent from MCP clientInfo, best-effort post-write",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# PROV-O edit provenance: companion graph, agent from MCP clientInfo, best-effort post-write\n\nCommit a3d3df7129 adds src/provenance/mod.rs \u2014 a PROV-O-based edit provenance module that records who/what asserted each knowledge instance and when, into a companion named graph (https://moosedev.dev/kg/provenance) kept separate from the domain graph (https://moosedev.dev/kg/project) to preserve domain graph cleanliness. Key design choices: (1) PROV-O vocabulary (prov:Activity, prov:SoftwareAgent, prov:wasGeneratedBy, prov:wasAttributedTo, prov:generatedAtTime, prov:endedAtTime, prov:wasAssociatedWith); (2) agent identity sourced from the MCP RequestContext peer.peer_info().client_info.name \u2014 the MCP client's self-reported name, not a user-supplied parameter, so the asserting agent is structurally captured with no API friction; (3) best-effort post-write semantics: provenance failure logs a tracing::warn but does not fail the record call, mirroring MOOSE's intended ProvenanceWriter contract; (4) get_provenance MCP tool added for reading provenance back by IRI; (5) per-write-tool wiring in v1 (only record_important_decision is wired), with an inline comment noting it should be folded into graph::record_instance once more write tools exist so every write is provenanced by construction; (6) deterministic agent IRI keyed by name (kg/agent/{slug}) so repeat edits by the same agent share one prov:Agent node; (7) chrono 0.4 added for RFC3339 timestamps. This realizes auditability (invariant #6: \"reasoning should be traceable\") and prototypes MOOSE core Ask 2 scope A (ProvenanceWriter generalization) at the MOOSEDev layer. The generalization in core MOOSE remains deferred; retract/supersede lifecycle and incremental index maintenance are still outstanding from Ask 2 scope A. Verified by tests/provenance.rs (hermetic: record instance \u2192 write provenance \u2192 read back, asserting agent name, non-empty timestamp, and Activity IRI prefix)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/4053e919-8e2d-458f-9b79-9737879dbfc4",
+    "title": "Private corpus data isolation: tasks and run artifacts live outside the open repo",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Private corpus data isolation: tasks and run artifacts live outside the open repo\n\nCommit 29cac60c28 (`bench/config.py` `corpus_tasks_path()` / `corpus_runs_path()`). Task specs and run artifacts (JSONL rows, patches, transcripts) for private corpora (e.g. trivyn) are stored under `BENCH_HOME/{corpus}/tasks|runs` \u2014 physically outside the open repo \u2014 not under `bench/tasks_public/` or `bench/runs/`. Rationale: patches and `final_text` fields carry private source code; being gitignored inside the open repo is not sufficient containment \u2014 they must be outside it. Public corpora (moosedev, burrow) use the in-repo gitignored paths. The `corpus.get(\"private\")` flag drives the routing."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/bbe4b769-7dac-4b33-af08-98f97e965b77",
+    "title": "Rationale: --serve/--connect shared daemon mode: --connect auto-spawns backend when none is listening",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: --serve/--connect shared daemon mode: --connect auto-spawns backend when none is listening\n\nCommit 69f8f01389 (\"env fix\") removes the \"lifecycle is manual; auto-spawn is planned (M5)\" language from README.md and replaces it with implemented behaviour: when no backend is listening, `--connect` auto-spawns a detached `--serve` process on the same resolved socket unless `MOOSEDEV_NO_AUTOSPAWN=1` is set. The prior record's manual-lifecycle claim is no longer accurate."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/abecd285-65f2-428f-ad1b-681e21e77bbc",
+    "title": "Rationale: Benchmark content parity: B1 chunks carry description + lifecycle status; parity verified by containment",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: Benchmark content parity: B1 chunks carry description + lifecycle status; parity verified by containment\n\nCommit 29cac60c28 changes both the chunk schema and the parity check. The original constraint stated \"each chunk's body text matches the graph's hasDescription for that record\" (exact equality). The new implementation intentionally makes chunks richer \u2014 `text = \"# {title}\\n\\nLifecycle status: {status}\\n\\n{desc}\"` \u2014 to give B1 the same currency signal B2 carries. Exact equality fails because the chunk prepends title and status lines. Parity is now verified by hasDescription *containment* in chunk text. Additionally the SPARQL title join switched from STRENDS(hasTitle) to rdfs:label (to include SystemComponents). These changes invalidate the original constraint's implementation description."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/699184bb-3493-4e0e-b62c-7b88a3047703",
+    "title": "Rationale: Bootstrap skill v2: cluster capture with explicit LINK phase produces traversable linked graph",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: Bootstrap skill v2: cluster capture with explicit LINK phase produces traversable linked graph\n\nThe M4 bootstrap skill delivered a flat-record capture workflow (Phase 0\u20136) whose done criterion was \"0 SHACL violations.\" Commit 9114ee7a73 rewrites the skill because 0 violations is necessary but not sufficient: a flat graph \u2014 no edges at all \u2014 also passes. The relate() tool (commit 5dc4a3ba00) made typed edges writable, but the bootstrap skill hadn't been updated to use them. The rewrite makes graph connectivity (edge:node \u2265 1.0, competency-question traversal, EXPAND_HOPS A/B) the acceptance criterion, adds a dedicated LINK phase, and adds anti-confabulation and link-or-mint disciplines."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/dc18ef51-21f2-4e44-b4f2-53872a1b5a5f",
+    "title": "Rationale: Trivyn-generated production architecture ontology delivered; stub ontology retired (M2)",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: Trivyn-generated production architecture ontology delivered; stub ontology retired (M2)\n\nCommit 7f015a32 (M2) deletes ontologies/architecture.ttl (the temporary stub, namespace https://moosedev.dev/ontologies/architecture#) and replaces it with ontologies/software-architecture.ttl generated by Trivyn Ontology Pipeline v0.8.0. The stub was always explicitly temporary (see \u26a0\ufe0f TEMPORARY STUB header). The generated ontology is CCO/BFO-grounded, lexically rich, SHACL-validated, and produced from spec/architecture-ontology-brief.md. No code changes were needed because the ontology loader (ontology::load_architecture) is content-agnostic \u2014 exactly as previously decided."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/e704b8d5-a56f-4518-b340-e954ca406458",
+    "title": "Rationale: get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)\n\nentity_index.search_classes() with LABEL_PREDICATES matched only rdfs:label tokens \u2014 too narrow. A topic appearing only in a record's description would be missed entirely. Commit caa6e387e6 switches to entity_index.search_records() with BM25 weighted text fields (rdfs:label \u00d7 2.0, hasDescription \u00d7 1.0), covering both the primary label and the richer description content. The symbolic (no-LLM) constraint is preserved; only the matching surface expands."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/89c6a1a5-cd5f-44e6-a375-fd689e6539c6",
+    "title": "Rationale: get_relevant_context: BM25 search_records replaces entity-index absolute floor for noise rejection",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: get_relevant_context: BM25 search_records replaces entity-index absolute floor for noise rejection\n\nTOPIC_RELEVANCE_FLOOR = 0.45 (absolute score threshold calibrated to entity-index scoring) is removed in commit caa6e387e6. BM25 over rdfs:label (weight 2.0) + hasDescription (weight 1.0) via search_records excludes zero-match records intrinsically, making the constant unnecessary. The floor was fragile: calibrated to one scoring scale and brittle across search-method changes. BM25 corpus-relative ranking + top-k provides stronger, more portable noise rejection without an arbitrary cutoff, while preserving the honest empty-state invariant (#6)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Rationale/c88db4c1-a9bb-42d7-ac48-01fef52b6025",
+    "title": "Rationale: supersede_decision generalized to InformationRecord: type-preserving, cycle-safe subclass guard",
+    "kind": "Rationale",
+    "status": "accepted",
+    "text": "# Rationale: supersede_decision generalized to InformationRecord: type-preserving, cycle-safe subclass guard\n\nCommit 42ce076f85: the original implementation was hardcoded to ArchitecturalDecision as the precondition class, so Requirement, Constraint, Lesson, and every other InformationRecord subclass could not be corrected or retired through the lifecycle. Since InformationRecord is the common root of all knowledge artifact classes, the guard and replacement-minting logic must be kind-agnostic: any InformationRecord (or subclass) should be supersedable."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Lesson/ce90dcfb-7527-4b77-b728-fa5e1762a967",
+    "title": "Recall-first means list-all: a topic-scoped empty result is not an empty graph",
+    "kind": "Lesson",
+    "status": "accepted",
+    "text": "# Recall-first means list-all: a topic-scoped empty result is not an empty graph\n\nCommit 2145d71c95 (tasks/lessons.md). During the M4 bootstrap-skill dry-run, `get_relevant_context` was called with a specific topic, returned \"No recorded knowledge relevant to \u2026\", and the agent concluded the graph was empty \u2014 then recorded decisions that already existed, creating duplicates. Rule: the recall-first step must be a list-all call (`get_relevant_context` with no `topic` parameter). A topic-scoped call returns only records whose embeddings align to that topic; it can silently miss related records that were captured under different framing. List-all is the only safe dedup check before recording. Apply at the start of every capture session and every temporal-bootstrap episode."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/f28b0186-bd10-4b8c-b2d8-64c06b30f2da",
+    "title": "Relational expansion in get_relevant_context must be bounded: budgeted reach, not neighborhood dump",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Relational expansion in get_relevant_context must be bounded: budgeted reach, not neighborhood dump\n\nCommit 5dc4a3ba00 (src/graph/mod.rs, EXPAND_FROM_TOP/EXPAND_MAX_HOPS/EXPAND_MAX constants). Relational expansion in get_relevant_context is a budgeted reach to the few linked records that complete an answer \u2014 specifically the lexically-distant neighbor that BM25 alone misses \u2014 without dumping the full neighborhood. Concretely: expansion seeds from only the top-N BM25 hits (EXPAND_FROM_TOP=3), walks at most EXPAND_MAX_HOPS=2 hops outward, and appends at most EXPAND_MAX=5 total linked records. Context efficiency is the whole point of get_relevant_context: returning the entire reachable neighborhood would negate the retrieval tool's purpose of surfacing the most relevant records without overwhelming the caller's context window. Expansion is skipped entirely for list-all calls and when MOOSEDEV_EXPAND_HOPS=0."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/bc706230-9102-468b-953e-1bb514fe26e6",
+    "title": "Repo-root .env loaded at startup via dotenvy; explicit env vars take precedence",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Repo-root .env loaded at startup via dotenvy; explicit env vars take precedence\n\nCommit 69f8f01389 (Cargo.toml + src/main.rs). `dotenvy = \"0.15\"` added. `load_repo_dotenv()` is called at the top of `main()` before the tracing subscriber or any config reads. It walks a candidate list \u2014 compile-time CARGO_MANIFEST_DIR, then exe-parent and cwd ancestors up to the first that contains Cargo.toml \u2014 and loads the first `.env` file found. `dotenvy::from_path` honours the \"don't override already-set vars\" semantics, so explicit env vars from the shell or MCP client config always win. Because `--connect` auto-spawns `--serve` from the same binary, the auto-spawned backend inherits the same resolved configuration. Rationale: removes the friction of setting many env vars by hand in every shell session while keeping explicit config (MCP client JSON, shell) authoritative. A unit test in `src/main.rs::tests` verifies the override semantics (missing key filled from file; existing key preserved)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/53e238f8-d9ba-4fa5-a02b-9a51385fad1b",
+    "title": "Repo-scoped MCP client configs (.mcp.json, .codex/config.toml) checked in, using --connect mode",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Repo-scoped MCP client configs (.mcp.json, .codex/config.toml) checked in, using --connect mode\n\nCommit e7c7f07dae. Two repo-scoped client config files are checked in: `.mcp.json` (Claude Code) and `.codex/config.toml` (Codex), both pointing `./target/release/moosedev --connect` with `MOOSEDEV_DATA_DIR=./.moosedev`. The `.gitignore` comment is updated from \"Claude Code / MCP local files (matches moose repo convention; a local .mcp.json will often point an MCP client at the moosedev binary). .mcp.json\" to \"Agent client local state. Repo-scoped MCP config is intentionally checked in via .mcp.json (Claude) and .codex/config.toml (Codex).\" This reverses the prior convention of gitignoring `.mcp.json` as a local/personal file; the configs are now canonical for repo contributors. Using `--connect` in the checked-in configs means contributors run the shared daemon rather than spawning isolated server instances."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/dffb6dcd-fbe0-4d5e-9345-df9a873d92b5",
+    "title": "RocksDB is single-writer: only one process can hold a project store open at a time",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# RocksDB is single-writer: only one process can hold a project store open at a time\n\nREADME.md shared-mode section (commit e7c7f07dae): \"The durable graph is RocksDB-backed, which is single-writer: only one process can hold a project's store open at a time.\" With the default stdio mode each MCP client spawns its own server process, so a second client (e.g. Codex alongside Claude Code) on the same project fails to start because both try to open the same RocksDB store. This is the direct motivation for the --serve/--connect shared daemon architecture introduced in this commit."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/4c04f1a3-8a68-4038-ac69-fcc7036bdabb",
+    "title": "Structured knowledge over free text: typed records are the source of truth",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Structured knowledge over free text: typed records are the source of truth\n\nDesign Invariant #2 from CLAUDE.md (initial commit 455628e081). Prefer typed, structured representations (ArchitecturalDecision, Lesson, Constraint, AntiPattern, etc.) over unstructured text in markdown files. Free-text notes (like lessons.md) are acceptable as a human-readable view, but the source of truth must be structured data in the project knowledge graph. This constrains how all durable knowledge is persisted throughout the project."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a748ff21-7cac-4978-bcd5-4e52f25c95e8",
+    "title": "Stub architecture.ttl is intentionally temporary; ontology loader is content-agnostic",
+    "kind": "ArchitecturalDecision",
+    "status": "superseded",
+    "text": "# Stub architecture.ttl is intentionally temporary; ontology loader is content-agnostic\n\nCommit 64f9fbf1b7 adds ontologies/architecture.ttl with an explicit \u26a0\ufe0f TEMPORARY STUB warning in its header. The stub (classes: ArchitecturalDecision, Constraint, Component; namespace https://moosedev.dev/ontologies/architecture#) exists solely to exercise the MOOSEDev ontology loader and M1 write/query plumbing end-to-end. It is intentionally minimal, is NOT BFO/CCO-grounded, and is not the real domain ontology. The real ontology will be produced by Trivyn's ontology generator from the spec in spec/architecture-ontology-brief.md. Swapping in the generated TTL requires no code changes because the loader (ontology::load_architecture) is content-agnostic. Anti-pattern to avoid: treating the stub classes/predicates as stable \u2014 they will be replaced."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/49d02d6e-b322-4584-9ce1-7f3c777ff055",
+    "title": "Symbolic layer is primary: LLM is a sensor, not the controller",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# Symbolic layer is primary: LLM is a sensor, not the controller\n\nDesign Invariant #1 from CLAUDE.md (initial commit 455628e081). The LLM is a sensor, not the controller. Whenever possible, prefer deterministic symbolic mechanisms (alignment, typed knowledge capture, session graph, focus stack, validation) over relying on the LLM to reason or remember correctly. The strength of MOOSEDev comes from the symbolic layer, not from making the LLM do more work. This is the primary guiding constraint on all tool and pipeline design."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a6082453-324b-44ad-91f1-6f4716e83de8",
+    "title": "Trivyn-generated production architecture ontology delivered; stub ontology retired (M2)",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# Trivyn-generated production architecture ontology delivered; stub ontology retired (M2)\n\nCommit 7f015a32 (M2): ontologies/architecture.ttl deleted; ontologies/software-architecture.ttl and ontologies/software-architecture_shapes.ttl added. The production ontology is generated by Trivyn v0.8.0 from the brief in spec/architecture-ontology-brief.md, which specified two CCO-grounded sibling modules with heavy lexical surface and shallow taxonomy. The new file carries provenance metadata (dcterms:creator \"Trivyn Ontology Pipeline\", dcterms:created \"2026-06-17T15:27:51Z\", owl:versionInfo \"0.8.0\"). An accompanying SHACL shapes file (software-architecture_shapes.ttl) enforces class constraints. The namespace shifts from https://moosedev.dev/ontologies/architecture# to https://trivyn.io/ontologies/software/architecture/domain/. The loader is content-agnostic, so no code changes were required."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c445c161-8ced-46eb-8dde-7f8ca82b0175",
+    "title": "align_concepts and suggest_mappings run L1+L2 sensor sieve only; LLM alignment tier deliberately disabled",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# align_concepts and suggest_mappings run L1+L2 sensor sieve only; LLM alignment tier deliberately disabled\n\nCommit fbe9777ed8 (M2 fixes, src/alignment/mod.rs, src/mcp/mod.rs). alignment::align_concept invokes MOOSE's suggest_parent with an empty CategoryMappings::new() and AlignmentConfig::default() \u2014 this enables L1 keyword + L2 embedding tiers and keeps the LLM (L3) tier off. Result: alignment is deterministic and fully offline. The format_outcome helper preserves the deciding sensor and rationale (resolved) or ranked candidates with cosine scores (undecided) so reasoning is auditable (invariant #6). Verified live: \"Design Decision\" \u2192 ArchitecturalDecision via L1 exact match; ambiguous concepts produce ranked candidate output. Tests: tests/alignment.rs (end-to-end L1+L2, hermetic). CategoryMappings (L0 \u2192 CCO roots) is a deferred refinement; alignment works without it."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/eacee52f-ee86-461c-893b-af171ea076df",
+    "title": "context_qa tasks materialize docs-stripped code tree so cold agent actively searches and fails",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# context_qa tasks materialize docs-stripped code tree so cold agent actively searches and fails\n\nCommit 29cac60c28 (`bench/run.py`): `TREE_TASK_TYPES = {\"constraint_code\", \"context_qa\"}`. Q&A tasks typed `context_qa` now receive a materialized, docs-stripped working tree (same `materialize_tree()` as code tasks) rather than an empty workdir. Rationale: the comprehension-debt premise requires that a cold/memory-less agent actively searches code and *fails to find* stripped rationale \u2014 not that the code is simply absent from the workdir. With the code tree present, a cold arm \"flails hunting for the stripped rationale\"; the memory arm short-circuits that search. Graded on final assistant message text (not a patch diff), so no `git_baseline()` is needed. Tasks may opt out with `\"materialize_tree\": false` for pure memory-currency Q&A where even the code tree is unnecessary."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/122d4bd2-0c7e-4a72-8faa-227285e157ae",
+    "title": "get_focus_stack deferred (M4); bootstrap workflow delivered instead",
+    "kind": "ArchitecturalDecision",
+    "status": "superseded",
+    "text": "# get_focus_stack deferred (M4); bootstrap workflow delivered instead\n\nCommit 2145d71c95 (README.md, skills/bootstrap-existing-codebase.md). `get_focus_stack` was planned as the M4 deliverable but is now explicitly deferred. Rationale (from README footnote): MOOSE's focus stack is conversational state populated by the chat pipeline, but a coding agent issues discrete, self-contained queries \u2014 it is its own multi-turn layer \u2014 so an ephemeral within-session focus stack is low value for the MCP use case. M4 effort was redirected to the bootstrap workflow instead. The delivered artifact is `skills/bootstrap-existing-codebase.md`: a phased workflow (Phase 0\u20136: connect+recall \u2192 survey \u2192 extract candidates \u2192 align new terms \u2192 capture typed instances \u2192 validate \u2192 verify queryability) for recovering comprehension debt from an existing codebase and seeding the project knowledge graph. This is MOOSEDev's end-to-end exercise of the capture \u2192 align \u2192 validate \u2192 query loop on a project with accumulated history, satisfying design invariant #10 (bootstrap and evolution)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/c8bce03b-6902-491a-9068-469f53b05928",
+    "title": "get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# get_relevant_context topic search: search_records (BM25 over label + description) replaces search_classes (label-only)\n\nCommit caa6e387e6 (Merge search-records-integration). src/graph/mod.rs relevant_context(): entity_index.search_classes(t, &class_iris, &state.store, &data_graphs, moose::LABEL_PREDICATES, limit) replaced by entity_index.search_records(t, &class_iris, &state.store, &data_graphs, &text_fields, limit). text_fields = [(moose::RDFS_LABEL, 2.0_f32), (state.capture.description.as_str(), 1.0_f32)] \u2014 rdfs:label weighted 2\u00d7 because every record carries it as its title; description weighted 1\u00d7. Searching rdfs:label rather than hasTitle ensures label-only records (no hasTitle) are still found and the title text isn't double-counted. BM25 is raw/corpus-relative \u2014 results are ranked and top-k selected rather than filtered by an absolute score. List-all path (no topic \u2192 list_instances via SPARQL) is unchanged. Tool remains purely symbolic: no LLM on the retrieval path."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/19e2082a-10a5-4683-92a9-b7c53bff7a5d",
+    "title": "get_relevant_context: BM25 search_records replaces entity-index absolute floor for noise rejection",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# get_relevant_context: BM25 search_records replaces entity-index absolute floor for noise rejection\n\nCommit caa6e387e6 (Merge search-records-integration). src/graph/mod.rs: TOPIC_RELEVANCE_FLOOR constant deleted; .filter(|h| h.score >= TOPIC_RELEVANCE_FLOOR) removed from the topic-hit pipeline. Replaced by text_fields = [(RDFS_LABEL, 2.0), (state.capture.description, 1.0)] passed to entity_index.search_records(). BM25 scores are corpus-relative \u2014 results ranked top-k, no absolute threshold. Records sharing no query term are excluded by search_records itself, preserving invariant #6 (be correct, don't sound correct) without a fragile constant. tests/context.rs: noise-rejection test updated from \"transport tuning methodology\" (single incidental token overlap) to \"kubernetes helm rollout\" (genuinely zero shared terms), verifying BM25 exclusion rather than the old score floor. Comment updated: \"rank and take top-k rather than applying an absolute floor; records sharing no query term are excluded by search_records, preserving the honest empty state.\""
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/527e2c4c-eb58-493b-b81e-1adf5a25a487",
+    "title": "get_relevant_context: bounded relational expansion follows record\u2192record edges from BM25 seeds",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# get_relevant_context: bounded relational expansion follows record\u2192record edges from BM25 seeds\n\nCommit 5dc4a3ba00 (src/graph/mod.rs relevant_context() + record_neighbors()). After BM25 retrieval produces a ranked seed set, get_relevant_context performs a bounded hop-walk over outbound record\u2192record edges (record_neighbors()) to surface lexically-distant records that are linked to the seeds but would be missed by pure keyword matching. Implementation details:\n\n- record_neighbors(iri): enumerates all outbound quads from a project-graph subject in the project KG graph. Skips rdf:type, prov: metadata firehose, and hasRationale (its text is already inlined by build_context_item). Returns (predicate_local, neighbor_iri, neighbor_class) for neighbors that pass require_information_record \u2014 only recorded knowledge items, not arbitrary graph nodes.\n\n- Expansion loop: seeds from the top EXPAND_FROM_TOP=3 BM25 hits; walks up to EXPAND_MAX_HOPS=2 hops; appends at most EXPAND_MAX=5 total neighbor items to the result (hard cap). Each appended item gets a \"linkedVia\" synthetic property showing which predicate led to it.\n\n- Guards: skipped entirely for list-all calls (topic=None or whitespace-only) and when MOOSEDEV_EXPAND_HOPS=0 (or env var override to any other value). include_history filter applies to expanded items too.\n\nRationale: BM25 ranks by shared tokens \u2014 a Constraint whose title shares no tokens with the query but is linked via isMotivatedBy from a matching ArchitecturalDecision is invisible to BM25 alone. Traversal reaches it in one hop. The bounded budget (Constraint f28b0186) ensures this does not become a neighborhood dump that defeats context efficiency. The symbolic-layer principle is preserved: no LLM involvement on the expansion path."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d83a971e-37a6-4bd5-84f2-7adabe05e3bc",
+    "title": "get_relevant_context: pure-symbolic context retrieval via entity index (topic) or list-all (no topic)",
+    "kind": "ArchitecturalDecision",
+    "status": "superseded",
+    "text": "# get_relevant_context: pure-symbolic context retrieval via entity index (topic) or list-all (no topic)\n\nCommit bddba142 (M1 completion) adds the `get_relevant_context` MCP tool and its supporting graph layer: `relevant_context()`, `list_instances()`, `build_context_item()`, and the public `ContextItem` struct. When a non-empty topic is provided the tool searches via the cache-coherent entity index (`entity_index.search_classes()`); when the topic is omitted or blank it enumerates all instances of the ontology's classes in the project KG graph via SPARQL quad iteration. Explicitly pure-symbolic: no LLM call on the retrieval path (tool description: \"Symbolic \u2014 no LLM\"). Returns structured ContextItem objects (kind, label, literal properties, IRI) formatted as a readable block by `format_context()`. Limit is clamped to 1\u2013100 at the MCP layer. Test: `tests/context.rs` (hermetic, two-decision fixture; both list-all and topic-filtered paths exercised). Completes M1: live tools are `ping`, `record_important_decision`, `query` (+trace), `get_relevant_context`; 5 tests green, clippy clean. Record \u2192 restart \u2192 read-back across two separate processes (shared data dir) also verified."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/03d8d242-c154-4b55-8b3b-781289fbcb6c",
+    "title": "get_relevant_context: relevance floor (0.45) drops noise hits; topic-aware empty-state is honest",
+    "kind": "ArchitecturalDecision",
+    "status": "superseded",
+    "text": "# get_relevant_context: relevance floor (0.45) drops noise hits; topic-aware empty-state is honest\n\nCommit 17bcfda8 (PR #1). Two coordinated changes to `get_relevant_context` / `relevant_context()` in src/graph/mod.rs + src/mcp/mod.rs:\n\n(1) **Relevance floor**: `TOPIC_RELEVANCE_FLOOR = 0.45` is applied as a `.filter()` on entity-index topic hits before they are returned. The floor sits just above the single-token-overlap noise ceiling (~0.4, where a multi-word topic that shares only one incidental token with a record is scaled down by the overlap fraction) and well below exact-token (~0.75) or strong multi-token-coverage (~0.8) matches. The concrete failure mode being fixed: searching for \"alignment\" surfaced socket/lifecycle records because one token matched incidentally. Surfacing those under a \"Relevant recorded knowledge\" header asserts relevance the symbolic layer cannot support \u2014 a direct violation of invariant #6 (be correct, don't sound correct).\n\n(2) **Honest empty-state**: when a non-empty topic is provided and no items clear the floor, the MCP tool returns `\"No recorded knowledge relevant to \\\"{topic}\\\"\"` rather than `\"No recorded knowledge found.\"`. The distinction matters: after the floor, silence means *nothing cleared the bar* (the topic exists but nothing is relevant), not *the graph is empty*. Conflating the two causes agents to treat an unsettled topic as implicitly confirmed by silence.\n\nBoth changes are tested in tests/context.rs: the prior `rmcp` exact-token test asserts a score ~0.75 passes the floor; a new `\"transport tuning methodology\"` test asserts that a single-incidental-token overlap is filtered and returns empty."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/8b4dd9ba-d1f4-4fce-9c60-81f805258da3",
+    "title": "moosedev restructured as library+binary crate: all logic in lib, binary is thin stdio wrapper",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# moosedev restructured as library+binary crate: all logic in lib, binary is thin stdio wrapper\n\nCommit 64f9fbf1b7 (\"simplify pass, plus most of M1\") introduces src/lib.rs, making moosedev a combined library+binary crate. All substantive modules (graph, llm, mcp, ontology) live in the lib crate; src/main.rs remains a thin wrapper that serves MooseDevServer over stdio. Rationale: every module is reachable from integration tests in tests/ \u2014 the lib boundary is the test seam. Previously the project was binary-only, which would have made integration testing impossible without re-exposing internals."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/028e8f80-3ce1-452f-b9c6-5fda59aefb41",
+    "title": "normalize_capture_literal_props: class-specific label property resolved from ontology labelProperty annotation",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# normalize_capture_literal_props: class-specific label property resolved from ontology labelProperty annotation\n\nCommit 5dc4a3ba00 (src/graph/mod.rs). Prior to this commit, the write path used CAPTURE_TITLE_LOCAL = \"hasTitle\" as the universal label property for all capture classes, with a code comment acknowledging this was a v1 pragmatic choice because MOOSE's VocabularyEntry.label_property stayed unpopulated for these annotations. This commit removes that comment and implements class_label_mirror_property_iri(): it reads the class node's triples in the loaded ontology store looking for a quad whose predicate's local name is \"labelProperty\" (the trivyn:labelProperty annotation); if found, returns the annotation's value as the class-specific label property IRI; otherwise falls back to capture.title (hasTitle). normalize_capture_literal_props() then uses this to:\n- Strip the hasTitle triple if the class has a different label property.\n- Mirror the canonical title value into the class-specific property (e.g. SystemComponent.hasComponentName) so that SHACL sh:minCount 1 shapes are satisfied.\n- Keep hasTitle as both the write key and the fallback for InformationRecord subclasses with no annotation.\n\nRationale: SystemComponent and similar non-InformationRecord capture targets require their own label property to satisfy SHACL validation. Reading this from the ontology annotation rather than hardcoding means adding a new class with a different label property is sufficient \u2014 no code change needed (decouple-code-from-ontology-ttl, invariants #7 and #8). The approach preserves backward compatibility: all existing InformationRecord subclasses have no labelProperty annotation and continue to write hasTitle."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/dc4e0a38-f12d-4d16-98f2-9dfa6a7086f3",
+    "title": "query() adds PureSymbolic fallback when SchemaQuerySpec internal error leaks into answer; query_with_llm_client seam enables LLM injection in tests",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# query() adds PureSymbolic fallback when SchemaQuerySpec internal error leaks into answer; query_with_llm_client seam enables LLM injection in tests\n\nCommit 69f8f01389 (src/graph/mod.rs, tests/query.rs). `query()` is refactored into three layers: private `execute_query()` takes explicit `llm` + `engine_config` refs; public `query()` calls `execute_query` with the state's own llm/model/engine_config; `#[doc(hidden)]` pub `query_with_llm_client()` accepts an injected `&dyn LlmClient` for test determinism. The fallback logic lives in `query_with_llm_client`: if the assist level is not PureSymbolic and the returned answer contains the internal sentinel string `SCHEMA_QUERY_SPEC_INTERNAL_ERROR` (\"Schema query intent set but no SchemaQuerySpec was attached\"), the pipeline retries with `llm_assist_level = LlmAssistLevel::PureSymbolic` on a cloned config. Rationale: `execute_graph_walk_nlq_with_context` can emit that sentinel as a diagnostic when a schema-query intent is resolved but no SchemaQuerySpec is attached, and without the fallback that internal error leaks verbatim to the MCP caller. The regression test `query_does_not_surface_schema_spec_internal_error_for_project_records` uses `MetaIntentLlm` (a stub that returns a meta-intent JSON response) to trigger the code path and assert that (a) the error string never reaches the answer, and (b) the trace confirms PureSymbolic was used on the retry."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/ca5dc91d-577e-4e24-bd6c-ed5edb2e6164",
+    "title": "record_instance write path is domain-neutral: caller maps fields to predicate IRIs",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# record_instance write path is domain-neutral: caller maps fields to predicate IRIs\n\nCommit 64f9fbf1b7 (src/graph/mod.rs). The RecordInput struct is domain-neutral: it carries a class IRI and a Vec of (predicate_iri, value) pairs. The caller is responsible for mapping its logical fields (title, description, status, \u2026) onto architecture-ontology predicate IRIs before passing them in. record_instance() then delegates to MOOSE's cache-coherent assert_instance. Rationale: new knowledge classes (Lesson, AntiPattern, Constraint, \u2026) can be captured without any changes to the writer \u2014 adding a class to the ontology is sufficient. This keeps the write path open and composable (invariants #7, #8)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/29e27afa-7021-49fe-8f08-e7ee400a1f62",
+    "title": "record_instance: server-side defaults for author, timestamp, and lifecycle status when caller omits them",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# record_instance: server-side defaults for author, timestamp, and lifecycle status when caller omits them\n\nCommit bda5f872 (M3 complete, src/graph/mod.rs): graph::record_instance gains `author: &str` and `when: DateTime<Utc>` parameters. If the caller's RecordInput.properties does not already include hasAuthor, hasTimestamp (xsd:dateTime literal), or hasLifecycleStatus, the write path injects server-side defaults: the supplied agent name as author, the supplied timestamp as an RFC3339 xsd:dateTime literal, and \"proposed\" as the initial lifecycle status. The guard is `has_property()` \u2014 a linear scan of the property vec checking predicate IRI equality \u2014 so callers can override all three by explicitly including them in the properties vec. The function becomes `mut` over its property vec, extending but not removing the core domain-neutral design (Vec<(predicate_iri, value)> interface unchanged). Rationale: the MCP handler is the right place to know agent identity (from RequestContext peer_info) and current time; injecting them into record_instance avoids every write-tool caller having to supply boilerplate fields and ensures consistent stamping across all current and future write tools. This extends the previously domain-neutral write path (see ArchitecturalDecision ca5dc91d) without retiring its core design. DEFAULT_LIFECYCLE_STATUS = \"proposed\"; XSD_DATETIME = \"http://www.w3.org/2001/XMLSchema#dateTime\" are new named constants added at this commit."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/df21af6e-a7bf-4ad3-9609-7a907feb3c87",
+    "title": "record_instance_with_relations: object-property write path enabled; object_property_iri resolves from vocab by local name",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# record_instance_with_relations: object-property write path enabled; object_property_iri resolves from vocab by local name\n\nCommit e7c7f07dae (src/graph/mod.rs). The write path previously hardcoded `object_props: &[]` in every `assert_instance` call \u2014 no IRI-valued relation could be written. This commit adds `record_instance_with_relations(state, input, object_props: &[(String, String)], author, when)` which maps the `(predicate_iri, object_iri)` pairs into `ObjectAssertion` values and passes them through. The original `record_instance` is now a thin wrapper calling `record_instance_with_relations` with an empty slice, preserving all existing call sites. A new `object_property_iri(vocab, local)` helper resolves a relation's full IRI from `CompactVocabulary.object_properties` by local name \u2014 the exact mirror of `datatype_property_iri` \u2014 keeping the volatile namespace out of code (decouple-code-from-ontology invariant). `AppState::resolve_object_property(local)` exposes this publicly. Also adds `capture_instance_quads()` \u2014 builds owned `Vec<Quad>` for an instance so that a supersede can commit several instances plus a status mutation in one transaction."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/2da3ba5a-f925-44ab-9c54-0fc395b82b13",
+    "title": "relate(): typed graph-linking MCP tool with SHACL-validated endpoints, predicate resolved by local name",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# relate(): typed graph-linking MCP tool with SHACL-validated endpoints, predicate resolved by local name\n\nCommit 5dc4a3ba00 (src/graph/mod.rs, src/mcp/mod.rs, tests/relate.rs). relate(subject_iri, predicate_local, object_iri) is a new public primitive and MCP tool that asserts a typed relationship edge between two existing project-graph nodes. Three design choices:\n\n(1) Predicate resolved from loaded ontology by local name via AppState::resolve_object_property() \u2014 same pattern as datatype_property_iri. This keeps volatile namespaces out of caller code (decouple-code-from-ontology-ttl), and restricts edges to declared object properties, rejecting ad-hoc or misspelled predicates before the transaction.\n\n(2) SHACL endpoint validation before write (validate_relation_endpoints): reads the predicate's shape constraints via SPARQL over both SE_SHAPES_GRAPH_IRI and ARCH_SHAPES_GRAPH_IRI (sh:targetClass for subject domain, sh:property/sh:or branches for sh:class on the object range). If the predicate has no SHACL constraint, falls back to the safe default: both endpoints must be InformationRecords. A rejected edge writes nothing \u2014 no silent bad writes.\n\n(3) One quad inserted atomically via Oxigraph transaction; idempotent (re-asserting existing edge is a no-op). Entity index invalidated on success.\n\nRationale: supersede_decision was the only write path that ever wrote object-property edges (one hardcoded pair). relate() turns capture from a typed *list* into a traversable *graph* \u2014 the ontology already declared these relations (supersedes, violates, isMotivatedBy, concerns, dependsOn, \u2026) but none were writable externally. tests/relate.rs covers: IR\u2192IR accept, SystemComponent accept (SHACL-matched non-IR), out-of-range reject (no write), and SystemComponent label-property capture + validation."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/d570281c-f4b4-4c2c-bb0e-0609aebd9c49",
+    "title": "retract_decision: deprecated-without-replacement lifecycle, atomic, history-preserving",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# retract_decision: deprecated-without-replacement lifecycle, atomic, history-preserving\n\nCommit 2145d71c95 (src/graph/mod.rs, src/mcp/mod.rs). `retract_decision` implements the \"abandoned without successor\" lifecycle transition: it flips the target's lifecycle status to `deprecated` (dropping it from the current working set) while preserving the record and all its triples as history \u2014 nothing is deleted. A `Rationale` node is minted, linked via `hasRationale` off the retracted record itself (not a successor record), and the operation commits atomically: rationale quads + hasRationale edge + status update in one transaction. Precondition: subject must already be an `InformationRecord` (or subclass) in the project graph, enforced via the new shared `require_information_record()` helper \u2014 errors and writes nothing if the precondition fails. Provenance is wired best-effort (same pattern as `record_important_decision`). Design contrast with `supersede_decision`: retract is for duplicates or decisions abandoned with no replacement; supersede is used when a replacement record exists and type-preserving minting is needed. The retract/supersede lifecycle was explicitly deferred from MOOSE Ask 2 scope A (commit 64f9fbf1b7); this commit fulfills it."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/Constraint/a941babd-fce8-45e3-ac1d-60031bbcf7b6",
+    "title": "rmcp dispatches tool calls concurrently; cross-call read-after-write relies on client sequencing \u2014 deferred past v1",
+    "kind": "Constraint",
+    "status": "accepted",
+    "text": "# rmcp dispatches tool calls concurrently; cross-call read-after-write relies on client sequencing \u2014 deferred past v1\n\nExplicitly noted in tasks/todo.md as part of commit bddba142 (M1 completion): \"rmcp dispatches tool calls concurrently; cross-call read-after-write relies on the client awaiting each response (true for real MCP clients). Not a concern for v1; revisit if batched/streamed calls are added.\" A tool call sequence such as record_important_decision immediately followed by get_relevant_context is only correct if the client awaits the first response before issuing the second \u2014 true for all LLM-driven MCP clients that serialize their tool calls. Accepted as a known limitation; not a defect in v1. Must be revisited if MOOSEDev ever adds support for batched or streamed MCP calls, which would require explicit write-before-read ordering guarantees."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/a7982584-f66f-46b4-8ee7-4c2ec4382b29",
+    "title": "sparql MCP tool: read-only Oxigraph SPARQL, union-graph default, SPARQL JSON + N-Triples output",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# sparql MCP tool: read-only Oxigraph SPARQL, union-graph default, SPARQL JSON + N-Triples output\n\nCommit bda5f872 (M3 complete, src/sparql.rs + src/mcp/mod.rs): run_query() uses SparqlEvaluator::new().parse_query() against the Oxigraph Store. If the query does not specify an explicit dataset, set_default_graph_as_union() is applied so queries see the full store contents by default. Output serialization: SELECT and ASK \u2192 SPARQL JSON (QueryResultsFormat::Json); CONSTRUCT/DESCRIBE \u2192 N-Triples (RdfFormat::NTriples). The MCP tool wrapper rejects empty queries before calling run_query. Tool description in the MCP initialize response enumerates key graph IRIs (project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, shapes https://moosedev.dev/kg/ontology/software-architecture/shapes) so agents can write targeted FROM clauses without separate discovery. This delivers the SPARQL endpoint responsibility attributed to MOOSEDev in the layer-split architectural decision. Validates invariant #1 (Symbolic layer is primary): agents now have deterministic, query-time, read-only access to the full graph without LLM involvement. The module also exposed pub(crate) in lib.rs at this commit."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/5e83ed2f-e801-4a07-ba48-0056436243ba",
+    "title": "supersede_decision generalized to InformationRecord: type-preserving, cycle-safe subclass guard",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# supersede_decision generalized to InformationRecord: type-preserving, cycle-safe subclass guard\n\nCommit 42ce076f85 (src/graph/mod.rs, src/mcp/mod.rs, tests/supersede.rs). Three coordinated changes: (1) Guard: instead of checking `rdf:type = ArchitecturalDecision`, the implementation now reads ALL rdf:type quads for the superseded subject and walks `rdfs:subClassOf` transitively (bounded, cycle-safe, via the new `is_subclass_of()` helper) until it finds `:InformationRecord` as an ancestor \u2014 errors and writes nothing if no such type is found. (2) Type-preserving minting: the replacement instance is minted with the SAME class as the superseded item (the actual `rdf:type` found in step 1, e.g. `Requirement`), not the caller-supplied `kind` field. `SupersedeArgs.kind` is now documented as ignored and kept only for backward compatibility; `RecordInput.class_iri/class_local` in the internal `SupersedeInput` are set to empty strings and overridden inside `graph::supersede_decision`. (3) Atomicity and history-preservation semantics from the original design are unchanged: new item + Rationale node + supersedes/hasRationale edges + old status flip all commit in one transaction; old record is never deleted. Test: `supersede_preserves_type_for_non_decision_records` in tests/supersede.rs verifies a Requirement superseded with a caller-supplied ArchitecturalDecision kind is minted as a Requirement and conforms to SHACL."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/770a9c7f-7b0e-4b69-a4c8-973ed5d73bf8",
+    "title": "supersede_decision: atomic lifecycle \u2014 new decision + Rationale node + supersedes/hasRationale edges + old status flip in one transaction",
+    "kind": "ArchitecturalDecision",
+    "status": "superseded",
+    "text": "# supersede_decision: atomic lifecycle \u2014 new decision + Rationale node + supersedes/hasRationale edges + old status flip in one transaction\n\nCommit e7c7f07dae (src/graph/mod.rs, spec/supersede-and-relations.md). `supersede_decision(state, input: &SupersedeInput, author, when)` is a new domain function and MCP tool (kept separate from `record_important_decision`, whose contract is \"record a fresh item\"). Key design decisions: (1) Atomicity \u2014 new decision, Rationale node, `supersedes`/`hasRationale` edges, and old decision's `hasLifecycleStatus` flip to \"superseded\" all commit in one transaction; entity index invalidated once on success. (2) The old record is NEVER deleted \u2014 it is preserved as history with status \"superseded\"; \"what we used to think, what we think now, and why\" becomes a walkable subgraph. (3) Rationale is a first-class `Rationale` node (not a plain string) \u2014 the why is independently queryable and linkable (invariant #2). (4) Precondition: `superseded_iri` must exist in the project graph and be an ArchitecturalDecision (or subclass); errors + writes nothing if violated. (5) The spec (spec/supersede-and-relations.md) describes three phases: Phase 1 (object-property plumbing) and Phase 2 (supersede_decision) are implemented in this commit; Phase 3 (lifecycle-aware read path \u2014 exclude superseded from default get_relevant_context) is outstanding."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/9c612062-c10f-43b6-b961-c5d7eb9ef13c",
+    "title": "supersedes and hasRationale rdfs:domain lifted to InformationRecord; SHACL shapes migrated from ArchitecturalDecisionShape to InformationRecordShape",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# supersedes and hasRationale rdfs:domain lifted to InformationRecord; SHACL shapes migrated from ArchitecturalDecisionShape to InformationRecordShape\n\nCommit 42ce076f85 (ontologies/software-architecture.ttl, ontologies/software-architecture_shapes.ttl). Two ontology changes that mirror the InformationRecord lifecycle generalization in the implementation: (1) OWL property domains: `:supersedes` rdfs:domain changed from `:ArchitecturalDecision` to `:InformationRecord`; `:supersedes` rdfs:range changed from `:ArchitecturalDecision` to `:InformationRecord`. `:hasRationale` rdfs:domain changed from `:ArchitecturalDecision` to `:InformationRecord` (range `:Rationale` unchanged). (2) SHACL shapes: the `sh:property` blocks for `domain:hasRationale` (sh:class domain:Rationale) and `domain:supersedes` (sh:class domain:InformationRecord) are removed from `shape:ArchitecturalDecisionShape` and added to `shape:InformationRecordShape`, so SHACL enforcement applies to all subclasses rather than only ArchitecturalDecision. Rationale: domain/range declarations on OWL object properties and SHACL property shapes must match the actual structural invariant \u2014 since any InformationRecord can supersede another and carry a Rationale, restricting these to ArchitecturalDecision was ontologically incorrect and caused SHACL conformance failures when these predicates were used on non-decision subjects. These are mechanical follow-ons to the InformationRecord root-class decision (see https://moosedev.dev/kg/ArchitecturalDecision/5e1dae27-324e-490e-ab35-b3f05894f0e6)."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/45a9bda6-b7e8-4c58-bc16-6d0600dab2ca",
+    "title": "templates/CLAUDE.md: distributable agent-config template encoding graph-first workflow for MOOSEDev-adopting projects",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# templates/CLAUDE.md: distributable agent-config template encoding graph-first workflow for MOOSEDev-adopting projects\n\nCommit 5d688415ad adds templates/CLAUDE.md \u2014 a reusable, drop-in CLAUDE.md template for any project that adopts the MOOSEDev MCP server as long-term memory. The template encodes the full graph-first workflow: (1) recall-first (list-all get_relevant_context before non-trivial work; a topic-scoped empty result is not an empty graph); (2) capture as typed records (record_important_decision with appropriate kind, including rationale and rejected alternatives; always report what was written); (3) align before coining new terms (align_concepts / suggest_mappings); (4) correct via supersede_decision or retract_decision \u2014 never silently duplicate; (5) validate with validate_against_architecture after capturing. Includes a tool-selection ladder (get_relevant_context \u2192 query \u2192 sparql, cheap \u2192 precise), a capture-kinds cheat sheet (ArchitecturalDecision, Constraint, Requirement, Pattern, AntiPattern, Lesson), and standard engineering practice sections (plan mode, subagent strategy, self-improvement loop targeting the graph, verification, elegance, autonomous bug fixing). README.md directory listing updated to include templates/. Intentionally scoped to workflow instructions for the consuming project \u2014 MOOSEDev's own design invariants are NOT copied into the template, keeping it lean. Rationale: consumable projects should not have to reverse-engineer the graph-first discipline from MOOSEDev's own CLAUDE.md; the template is how MOOSEDev propagates correct tool usage to the broader ecosystem of adopting projects."
+  },
+  {
+    "iri": "https://moosedev.dev/kg/ArchitecturalDecision/61383362-0d89-445a-8162-f4547216c9d2",
+    "title": "validate_against_architecture: honest SHACL subset \u2014 minCount + datatype enforced, all other constraints counted as skipped",
+    "kind": "ArchitecturalDecision",
+    "status": "accepted",
+    "text": "# validate_against_architecture: honest SHACL subset \u2014 minCount + datatype enforced, all other constraints counted as skipped\n\nCommit bda5f872 (M3 complete, src/validation.rs + src/mcp/mod.rs): on-demand SHACL validation of the project knowledge graph. Deliberately implements only two constraint types: (1) sh:minCount 1 \u2014 detects nodes of the target class hierarchy that are missing the required predicate entirely; (2) sh:datatype \u2014 detects existing predicate values that are not literals with the shape-declared datatype. All other declared constraints (sh:class, sh:node, sh:in, sh:maxCount, sh:qualifiedValueShape) are counted per property shape and reported as skipped. Node-level sh:or constraints are also counted separately. RDFS subclass traversal is performed inside SPARQL (rdf:type/rdfs:subClassOf* property paths) because Oxigraph does not perform RDF inference. Reads shapes from both SE_SHAPES_GRAPH_IRI and ARCH_SHAPES_GRAPH_IRI. ValidationReport always reports shapes_checked, skipped, and violations counts \u2014 never implies full SHACL coverage. Exposed as the validate_against_architecture MCP tool. Key design choice: a partial validator that admits its scope is more trustworthy than one that silently ignores constraints (invariant #6: auditability). The module is exposed pub(crate) in lib.rs and format_report() provides a human-readable block for MCP output."
+  }
+]
