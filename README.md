@@ -1,20 +1,25 @@
+<p align="center">
+  <a href="https://trivyn.io/blog/introducing-moosedev/">
+    <img src="docs/images/moosedev_banner.png" alt="MOOSEDev: typed, auditable memory for coding agents, built on the MOOSE neurosymbolic engine" width="880">
+  </a>
+</p>
+
 # MOOSEDev
 
-**Structured, long-term project memory for coding agents — a neurosymbolic daemon that fights comprehension debt.**
+**Structured, long-term project memory for coding agents built on neurosymbolic AI**
 
-> Status: **v2.x scope complete; active pre-production development.** See [Status](#status).
-
-*NOTE*: MOOSEDev is in **very** early development, and is not to be considered production ready.
+*NOTE*: MOOSEDev is in ***early development***, and is not to be considered production ready.
 
 ---
 
 ## What is MOOSEDev?
 
-MOOSEDev is a local project-memory daemon that gives coding agents and humans a reliable, **structured, queryable, long-term understanding** of a software project. Agents reach it through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), editors through a knowledge-focused LSP, and humans through the web workbench.
+MOOSEDev is a local project-memory daemon that gives coding agents and humans a reliable, **structured, queryable, long-term understanding** of a software project. Agents reach it through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), editors through a knowledge-focused LSP, and humans through the a web interface.
 
-Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable **project knowledge graph**: architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
+Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable ontology-grounded 
+**project knowledge graph**: architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
 
-MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed (for now, plans to open source when it's ready).
+MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed. 
 
 ## Why it's different
 
@@ -74,7 +79,7 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 
 ## Status
 
-The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.8.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
+The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.9.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
 
 The v1 memory foundation remains intact: typed capture and lifecycle management, symbolic query and recall, alignment, SPARQL, SHACL validation, graph import/export, shared multi-client operation, bootstrap workflows, generated documentation, and a loopback web workbench.
 
