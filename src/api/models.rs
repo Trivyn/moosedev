@@ -49,6 +49,9 @@ pub struct RecordDetailResponse {
     pub status: Option<String>,
     pub timestamp: Option<String>,
     pub author: Option<String>,
+    /// The sole current SystemComponent whose Story can be launched from this
+    /// record, selected by the daemon's lifecycle and relation policy.
+    pub story_component_iri: Option<String>,
     pub outgoing: Vec<RecordOutgoingEdge>,
     pub incoming: Vec<RecordIncomingEdge>,
 }
@@ -95,6 +98,8 @@ pub struct WhyCoverageResponse {
 #[derive(Serialize)]
 pub struct ComponentCoverageDto {
     pub iri: Option<String>,
+    /// Present when the component is eligible for Story generation.
+    pub story_component_iri: Option<String>,
     pub name: String,
     pub numerator: usize,
     pub denominator: usize,

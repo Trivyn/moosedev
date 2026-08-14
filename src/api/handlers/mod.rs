@@ -11,6 +11,7 @@ pub mod records;
 pub mod requirements;
 pub mod sparql;
 pub mod static_files;
+pub mod stories;
 
 pub use adrs::*;
 pub use chat::*;
@@ -24,3 +25,4 @@ pub use proposals::*;
 pub use records::*;
 pub use requirements::*;
 pub use sparql::*;
+pub use stories::*;

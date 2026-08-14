@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Box, CircularProgress, Typography } from '@mui/material';
 import ArticleIcon from '@mui/icons-material/Article';
 import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
@@ -9,6 +9,7 @@ import InsightsIcon from '@mui/icons-material/Insights';
 import MoveToInboxIcon from '@mui/icons-material/MoveToInbox';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import SchoolIcon from '@mui/icons-material/School';
+import AutoStoriesIcon from '@mui/icons-material/AutoStories';
 import AppShell, { PageKey } from './components/layout/AppShell';
 import AdrsPage from './pages/AdrsPage';
 import ChatPage from './pages/ChatPage';
@@ -20,6 +21,7 @@ import LessonsPage from './pages/LessonsPage';
 import RequirementsPage from './pages/RequirementsPage';
 import RecordPage from './pages/RecordPage';
 import SparqlPage from './pages/SparqlPage';
+import StoriesPage from './pages/StoriesPage';
 import { api } from './api/client';
 import { HealthResponse } from './api/types';
 import {
@@ -34,9 +36,37 @@ interface AppProps {
   onToggleThemeMode: () => void;
 }
 
+export function confirmStoryNavigation(
+  hasUnsavedChanges: boolean,
+  confirmDiscard: () => boolean = () => window.confirm('Discard your unsaved Story changes?'),
+): boolean {
+  return !hasUnsavedChanges || confirmDiscard();
+}
+
+export function confirmStoryHashNavigation(
+  hasUnsavedChanges: boolean,
+  nextRoute: RecordRoute | null,
+  restoreAcceptedLocation: () => void,
+  confirmDiscard?: () => boolean,
+): boolean {
+  if (!nextRoute || confirmStoryNavigation(hasUnsavedChanges, confirmDiscard)) {
+    return true;
+  }
+  restoreAcceptedLocation();
+  return false;
+}
+
 export interface RecordRoute {
   kind: ArtifactKind | 'record';
   uuid: string;
+}
+
+export function pageNavigationIsNoop(
+  currentPage: PageKey,
+  nextPage: PageKey,
+  activeRoute: RecordRoute | null,
+): boolean {
+  return currentPage === nextPage && activeRoute === null;
 }
 
 type ArtifactRoute = RecordRoute & { kind: ArtifactKind };
@@ -78,6 +108,17 @@ export function recordRouteForIri(iri: string): RecordRoute | null {
   return iri.startsWith('https://moosedev.dev/kg/') ? { kind: 'record', uuid } : null;
 }
 
+export function recordRouteForPage(iri: string, page: PageKey): RecordRoute | null {
+  const route = recordRouteForIri(iri);
+  if (!route || page !== 'stories') {
+    return route;
+  }
+  // Evidence inspection is a transient view inside the Story workspace. Keep
+  // even typed artifacts on the generic record route so StoriesPage stays
+  // mounted with its quiz and curation state intact.
+  return { kind: 'record', uuid: route.uuid };
+}
+
 function routeForArtifact(target: ArtifactTarget): ArtifactRoute | null {
   const uuid = uuidFromIri(target.iri);
   return uuid ? { kind: target.kind, uuid } : null;
@@ -94,6 +135,21 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   const [recordRoute, setRecordRoute] = useState<RecordRoute | null>(() =>
     recordRouteFromHash(window.location.hash),
   );
+  const [storyComponentIri, setStoryComponentIri] = useState<string | null>(null);
+  const [storyDirty, setStoryDirty] = useState(false);
+  const storyDirtyRef = useRef(storyDirty);
+  const acceptedHashRef = useRef(window.location.hash);
+  storyDirtyRef.current = storyDirty;
+
+  useEffect(() => {
+    if (!storyDirty) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', preventUnload);
+    return () => window.removeEventListener('beforeunload', preventUnload);
+  }, [storyDirty]);
 
   useEffect(() => {
     api
@@ -105,6 +161,15 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   useEffect(() => {
     const syncRecordHash = () => {
       const route = recordRouteFromHash(window.location.hash);
+      if (
+        !confirmStoryHashNavigation(storyDirtyRef.current, route, () => {
+          const acceptedUrl = `${window.location.pathname}${window.location.search}${acceptedHashRef.current}`;
+          window.history.pushState(null, '', acceptedUrl);
+        })
+      ) {
+        return;
+      }
+      acceptedHashRef.current = window.location.hash;
       setRecordRoute(route);
       if (route && route.kind !== 'record') {
         setPage(route.kind);
@@ -125,6 +190,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
     },
     { key: 'lessons' as const, label: 'Lessons', icon: <SchoolIcon fontSize="small" /> },
     { key: 'constraints' as const, label: 'Constraints', icon: <GavelIcon fontSize="small" /> },
+    { key: 'stories' as const, label: 'Stories', icon: <AutoStoriesIcon fontSize="small" /> },
     { key: 'debt' as const, label: 'Debt', icon: <InsightsIcon fontSize="small" /> },
     {
       key: 'ratifications' as const,
@@ -143,7 +209,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   };
 
   const navigateRecord = (iri: string) => {
-    const route = recordRouteForIri(iri);
+    const route = recordRouteForPage(iri, page);
     if (route) {
       window.location.hash = hashForRoute(route);
     }
@@ -160,11 +226,26 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   };
 
   const navigatePage = (nextPage: PageKey) => {
+    if (pageNavigationIsNoop(page, nextPage, recordRoute)) return;
+    if (!confirmStoryNavigation(storyDirty)) {
+      return;
+    }
+    if (window.location.hash) {
+      window.location.hash = '';
+    }
+    setStoryDirty(false);
+    setRecordRoute(null);
+    setStoryComponentIri(null);
+    setPage(nextPage);
+  };
+
+  const navigateStory = (componentIri: string) => {
     if (window.location.hash) {
       window.location.hash = '';
     }
     setRecordRoute(null);
-    setPage(nextPage);
+    setStoryComponentIri(componentIri);
+    setPage('stories');
   };
 
   return (
@@ -190,12 +271,32 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
             </Typography>
           </Box>
         </Box>
+      ) : page === 'stories' ? (
+        <Box sx={{ height: '100%' }}>
+          <Box sx={{ display: recordRoute?.kind === 'record' ? 'none' : 'block', height: '100%' }}>
+            <StoriesPage
+              onNavigateRecord={navigateRecord}
+              initialComponentIri={storyComponentIri}
+              onDirtyChange={setStoryDirty}
+            />
+          </Box>
+          {recordRoute?.kind === 'record' && (
+            <RecordPage
+              uuid={recordRoute.uuid}
+              onNavigateArtifact={(target) => navigateRecord(target.iri)}
+              onNavigateRecord={navigateRecord}
+              onTellStory={navigateStory}
+              resolveArtifacts={false}
+            />
+          )}
+        </Box>
       ) : recordRoute?.kind === 'record' ? (
         <RecordPage
           uuid={recordRoute.uuid}
           onNavigateArtifact={navigateArtifact}
           onNavigateRecord={navigateRecord}
           onResolveArtifact={replaceLegacyRecordRoute}
+          onTellStory={navigateStory}
         />
       ) : page === 'chat' ? (
         <ChatPage />
@@ -224,7 +325,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
           onNavigateRecord={navigateRecord}
         />
       ) : page === 'debt' ? (
-        <DebtPage onNavigateRecord={navigateRecord} />
+        <DebtPage onNavigateRecord={navigateRecord} onTellStory={navigateStory} />
       ) : page === 'ratifications' ? (
         <RatificationsPage onNavigateRecord={navigateRecord} />
       ) : page === 'sparql' ? (

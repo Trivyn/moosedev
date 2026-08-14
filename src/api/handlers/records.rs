@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -7,7 +8,8 @@ use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
 use crate::api::error::ApiError;
 use crate::api::models::{RecordDetailResponse, RecordIncomingEdge, RecordOutgoingEdge};
 use crate::graph::{
-    asserted_project_types, first_literal, local_name, AppState, PROJECT_KG_GRAPH_IRI,
+    asserted_project_types, first_literal, in_working_set, local_name, AppState,
+    PROJECT_KG_GRAPH_IRI,
 };
 
 pub async fn get_record(
@@ -23,24 +25,68 @@ pub async fn get_record(
     let record = NamedNode::new(&iri)
         .map_err(|e| ApiError::internal(format!("invalid stored record IRI {iri:?}: {e}")))?;
 
-    let kind = asserted_project_types(&state, &record)
-        .into_iter()
-        .next()
-        .map(|class| local_name(&class).to_string())
-        .unwrap_or_else(|| "Record".to_string());
+    let kind = preferred_kind(&state, &record, "Record");
     let title = record_title_for(&state, &iri);
+    let status = first_literal(&state.store, &iri, &state.capture.status);
+    let outgoing = outgoing_edges(&state, &record);
+    let incoming = incoming_edges(&state, &record);
+    let story_component_iri =
+        story_component_for_record(&state, &iri, &kind, status.as_deref(), &outgoing, &incoming);
 
     Ok(Json(RecordDetailResponse {
         iri: iri.clone(),
         kind,
         title,
         description: first_literal(&state.store, &iri, &state.capture.description),
-        status: first_literal(&state.store, &iri, &state.capture.status),
+        status,
         timestamp: first_literal(&state.store, &iri, &state.capture.timestamp),
         author: first_literal(&state.store, &iri, &state.capture.author),
-        outgoing: outgoing_edges(&state, &record),
-        incoming: incoming_edges(&state, &record),
+        story_component_iri,
+        outgoing,
+        incoming,
     }))
+}
+
+fn story_component_for_record(
+    state: &AppState,
+    record_iri: &str,
+    record_kind: &str,
+    record_status: Option<&str>,
+    outgoing: &[RecordOutgoingEdge],
+    incoming: &[RecordIncomingEdge],
+) -> Option<String> {
+    if record_kind == "SystemComponent" && status_is_current(record_status) {
+        return Some(record_iri.to_string());
+    }
+
+    let mut candidates = outgoing
+        .iter()
+        .filter(|edge| edge.predicate == "concerns" && edge.target_kind == "SystemComponent")
+        .map(|edge| edge.target_iri.as_str())
+        .chain(
+            incoming
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == "isConcernedBy" && edge.source_kind == "SystemComponent"
+                })
+                .map(|edge| edge.source_iri.as_str()),
+        )
+        .filter(|iri| {
+            let status = first_literal(&state.store, iri, &state.capture.status);
+            status_is_current(status.as_deref())
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+
+    if candidates.len() == 1 {
+        candidates.pop_first()
+    } else {
+        None
+    }
+}
+
+fn status_is_current(status: Option<&str>) -> bool {
+    status.is_none_or(in_working_set)
 }
 
 pub(crate) fn record_iri_for_uuid(state: &AppState, uuid: &str) -> Option<String> {
@@ -162,9 +208,30 @@ fn record_title_for(state: &AppState, iri: &str) -> String {
 }
 
 fn kind_for(state: &AppState, node: &NamedNode) -> String {
-    asserted_project_types(state, node)
+    preferred_kind(state, node, "Unknown")
+}
+
+fn preferred_kind(state: &AppState, node: &NamedNode, fallback: &str) -> String {
+    let mut kinds = asserted_project_types(state, node)
+        .into_iter()
+        .map(|class| local_name(&class).to_string())
+        .collect::<Vec<_>>();
+    kinds.sort_by(|left, right| {
+        record_kind_rank(left)
+            .cmp(&record_kind_rank(right))
+            .then(left.cmp(right))
+    });
+    kinds.dedup();
+    kinds
         .into_iter()
         .next()
-        .map(|class| local_name(&class).to_string())
-        .unwrap_or_else(|| "Unknown".to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn record_kind_rank(kind: &str) -> usize {
+    match kind {
+        "SystemComponent" => 0,
+        "InformationRecord" | "ProjectEntity" | "NamedIndividual" => 2,
+        _ => 1,
+    }
 }

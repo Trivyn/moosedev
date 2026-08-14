@@ -28,5 +28,6 @@ pub mod reasoning;
 pub mod requirements;
 pub mod runtime;
 pub mod sparql;
+pub mod stories;
 pub mod validation;
 pub mod vectors;

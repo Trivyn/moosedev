@@ -36,6 +36,14 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+struct CleanupDir(std::path::PathBuf);
+
+impl Drop for CleanupDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn test_server(state: AppState) -> TestServer {
     TestServer::new(build_routes(Arc::new(state))).expect("build test server")
 }
@@ -143,7 +151,20 @@ async fn records_detail_returns_record_metadata_and_edges() {
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
     let decision = record_api_decision(&state, "Record detail decision");
     let lesson = record_api_lesson(&state, "Record detail lesson");
+    state
+        .store
+        .insert(&oxigraph::model::Quad::new(
+            oxigraph::model::NamedNode::new(&lesson).unwrap(),
+            oxigraph::model::NamedNode::new(moose::RDF_TYPE).unwrap(),
+            oxigraph::model::NamedNode::new(state.resolve_class("SystemComponent").unwrap())
+                .unwrap(),
+            oxigraph::model::GraphName::NamedNode(
+                oxigraph::model::NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap(),
+            ),
+        ))
+        .unwrap();
     graph::relate(&state, &decision, "yieldsLesson", &lesson).expect("link outgoing lesson");
+    graph::relate(&state, &decision, "concerns", &lesson).expect("link Story component");
     graph::relate(&state, &lesson, "learnedFrom", &decision).expect("link incoming lesson");
     let uuid = decision.rsplit('/').next().expect("record uuid");
     let server = test_server(state);
@@ -159,10 +180,18 @@ async fn records_detail_returns_record_metadata_and_edges() {
         body["description"],
         "Decision description for Record detail decision"
     );
-    assert_eq!(body["outgoing"][0]["predicate"], "yieldsLesson");
-    assert_eq!(body["outgoing"][0]["target_iri"], lesson);
+    assert_eq!(body["story_component_iri"], lesson);
+    let outgoing = body["outgoing"].as_array().expect("outgoing array");
+    let yields = outgoing
+        .iter()
+        .find(|edge| edge["predicate"] == "yieldsLesson")
+        .expect("yieldsLesson edge");
+    assert_eq!(yields["target_iri"], lesson);
+    assert_eq!(yields["target_kind"], "SystemComponent");
+    assert!(yields.get("target_status").is_none());
     assert_eq!(body["incoming"][0]["predicate"], "learnedFrom");
     assert_eq!(body["incoming"][0]["source_iri"], lesson);
+    assert!(body["incoming"][0].get("source_status").is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -249,6 +278,498 @@ async fn health_reports_project_root_for_conventional_data_dir() {
     );
 
     let _ = std::fs::remove_dir_all(&project);
+}
+
+#[tokio::test]
+async fn health_uses_configured_repository_root_as_canonical_identity() {
+    let project = temp_dir("health-configured-project-root");
+    let data_dir = temp_dir("health-configured-data");
+    std::fs::create_dir_all(&project).unwrap();
+    let _project_cleanup = CleanupDir(project.clone());
+    let _data_cleanup = CleanupDir(data_dir.clone());
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap app state");
+    state.load_substrate(&project);
+    let server = test_server(state);
+
+    let body = server.get("/api/v1/health").await.json::<Value>();
+    assert_eq!(
+        body["project_root"],
+        std::fs::canonicalize(&project)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+}
+
+fn record_story_component(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("SystemComponent").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "SystemComponent".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+            ],
+        },
+        "story-test",
+        Utc::now(),
+    )
+    .expect("record Story component")
+}
+
+fn project_quads(state: &AppState) -> std::collections::BTreeSet<String> {
+    state
+        .store
+        .quads_for_pattern(
+            None,
+            None,
+            None,
+            Some(oxigraph::model::GraphNameRef::NamedNode(
+                oxigraph::model::NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap(),
+            )),
+        )
+        .flatten()
+        .map(|quad| quad.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
+    let project = temp_dir("stories");
+    let _cleanup = CleanupDir(project.clone());
+    let data_dir = project.join(".moosedev");
+    let state = Arc::new(
+        AppState::bootstrap_with_llm_config(&data_dir, &ontology_dir(), unconfigured_llm())
+            .expect("bootstrap Story state"),
+    );
+    let graph_component = record_story_component(&state, "Graph Store");
+    let api_component = record_story_component(&state, "Graph API");
+    let requirement = record_api_requirement(&state, "Preserve durable project knowledge");
+    graph::relate(&state, &graph_component, "isConcernedBy", &requirement)
+        .expect("link inverse Story evidence");
+    let distractor = record_api_requirement(&state, "Zeta cross-linked API knowledge");
+    graph::relate(&state, &distractor, "concerns", &api_component).expect("link Story distractor");
+    graph::relate(&state, &distractor, "concerns", &graph_component)
+        .expect("also link overlapping record to target");
+    let safe_distractor = record_api_requirement(&state, "Keep API clients thin");
+    graph::relate(&state, &safe_distractor, "concerns", &api_component)
+        .expect("link safe Story distractor");
+    let before_generate = project_quads(&state);
+    let server = TestServer::new(build_routes(state.clone())).expect("build Story test server");
+
+    server
+        .get("/api/v1/stories/bad!id")
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/bad!id/publish")
+        .json(&json!({"updated_at":"stale"}))
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/does-not-exist/publish")
+        .json(&json!({"updated_at":"missing"}))
+        .await
+        .assert_status_not_found();
+    server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"recipe_id":"bad!id", "assist_level":0}))
+        .await
+        .assert_status_bad_request();
+
+    let ambiguous = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"prompt":"graph", "assist_level":0}))
+        .await;
+    ambiguous.assert_status_ok();
+    let ambiguous_body = ambiguous.json::<Value>();
+    assert_eq!(ambiguous_body["outcome"], "ambiguous");
+    assert_eq!(ambiguous_body["candidates"].as_array().unwrap().len(), 2);
+
+    let generated = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"component_iri":graph_component, "assist_level":0}))
+        .await;
+    generated.assert_status_ok();
+    let generated_body = generated.json::<Value>();
+    assert_eq!(generated_body["outcome"], "story");
+    assert_eq!(generated_body["story"]["narration_mode"], "symbolic");
+    assert_eq!(
+        generated_body["story"]["beats"].as_array().unwrap().len(),
+        5
+    );
+    assert_eq!(project_quads(&state), before_generate);
+
+    let presentation_only = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "component_iri":graph_component,
+            "assist_level":0,
+            "include_checks":false
+        }))
+        .await;
+    presentation_only.assert_status_ok();
+    let presentation_body = presentation_only.json::<Value>();
+    assert!(presentation_body["story"]["checks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        presentation_body["story"]["gaps"],
+        generated_body["story"]["gaps"]
+    );
+
+    let check = &generated_body["story"]["checks"][0];
+    assert!(uuid::Uuid::parse_str(check["id"].as_str().unwrap()).is_ok());
+    assert!(check["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|option| uuid::Uuid::parse_str(option["id"].as_str().unwrap()).is_ok()));
+    let correct_option = check["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["label"] == "Preserve durable project knowledge")
+        .unwrap();
+    let grade = server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({
+            "check_id": check["id"],
+            "selected_option_ids": [correct_option["id"].as_str().unwrap()]
+        }))
+        .await;
+    grade.assert_status_ok();
+    assert_eq!(grade.json::<Value>()["correct"], true);
+    let wrong_option = check["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["id"] != correct_option["id"])
+        .unwrap();
+    let wrong_grade = server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({
+            "check_id": check["id"],
+            "selected_option_ids": [wrong_option["id"].as_str().unwrap()]
+        }))
+        .await;
+    wrong_grade.assert_status_ok();
+    let wrong_grade_body = wrong_grade.json::<Value>();
+    assert_eq!(wrong_grade_body["correct"], false);
+    assert_eq!(wrong_grade_body["revisit_beat_id"], "purpose");
+    assert_eq!(wrong_grade_body["evidence_iris"], json!([requirement]));
+
+    server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({"check_id": check["id"], "selected_option_ids": [uuid::Uuid::new_v4().to_string()]}))
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({"check_id": "not-a-handle", "selected_option_ids": []}))
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({"check_id": uuid::Uuid::new_v4().to_string(), "selected_option_ids": []}))
+        .await
+        .assert_status_not_found();
+
+    server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"component_iri":graph_component, "assist_level":2}))
+        .await
+        .assert_status_bad_request();
+
+    let draft = json!({
+        "id":"graph-store",
+        "title":"The Graph Store",
+        "subject_component_iri":graph_component,
+        "goal":"Understand durable storage",
+        "audience":"reboarding",
+        "beats":[{
+            "id":"purpose", "title":"Purpose", "intent":"purpose",
+            "record_iris":[], "code_symbols":[]
+        }],
+        "status":"draft",
+        "curator":"maintainer"
+    });
+    let put = server.put("/api/v1/stories/graph-store").json(&draft).await;
+    put.assert_status_ok();
+    let put_body = put.json::<Value>();
+    assert_eq!(put_body["recipe"]["id"], "graph-store");
+
+    // Action routes live below an extra segment, so ordinary recipe IDs such
+    // as `generate` remain addressable by every resource method.
+    let mut generate_recipe = draft.clone();
+    generate_recipe["id"] = json!("generate");
+    generate_recipe["title"] = json!("ZZ Generate recipe");
+    server
+        .put("/api/v1/stories/generate")
+        .json(&generate_recipe)
+        .await
+        .assert_status_ok();
+    let generated_recipe = server.get("/api/v1/stories/generate").await;
+    generated_recipe.assert_status_ok();
+    assert_eq!(generated_recipe.json::<Value>()["recipe"]["id"], "generate");
+
+    let recipe_ambiguity = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "recipe_id":"graph-store",
+            "component_iri":"graph",
+            "assist_level":0
+        }))
+        .await;
+    recipe_ambiguity.assert_status_bad_request();
+
+    let get = server.get("/api/v1/stories/graph-store").await;
+    get.assert_status_ok();
+    assert_eq!(get.json::<Value>()["recipe"]["status"], "draft");
+    let list = server.get("/api/v1/stories").await;
+    list.assert_status_ok();
+    let list_body = list.json::<Value>();
+    assert_eq!(list_body["stories"][0]["subject_label"], "Graph Store");
+    assert_eq!(list_body["stories"][0]["drifted"], false);
+
+    let invalid_publish = server
+        .post("/api/v1/stories/graph-store/publish")
+        .json(&json!({"updated_at":put_body["recipe"]["updated_at"]}))
+        .await;
+    invalid_publish.assert_status_bad_request();
+
+    let mut publishable = draft;
+    publishable["updated_at"] = put_body["recipe"]["updated_at"].clone();
+    publishable["beats"] = json!([
+        {"id":"purpose", "title":"Purpose", "intent":"purpose", "record_iris":[requirement], "code_symbols":[]},
+        {"id":"governance", "title":"Governance", "intent":"governance", "record_iris":[requirement], "code_symbols":[]},
+        {"id":"risk", "title":"Risk", "intent":"risk", "record_iris":[requirement], "code_symbols":[]}
+    ]);
+    let updated = server
+        .put("/api/v1/stories/graph-store")
+        .json(&publishable)
+        .await;
+    updated.assert_status_ok();
+    let updated_body = updated.json::<Value>();
+    let stale_put = server
+        .put("/api/v1/stories/graph-store")
+        .json(&publishable)
+        .await;
+    assert_eq!(stale_put.status_code(), axum::http::StatusCode::CONFLICT);
+
+    let stale_publish = server
+        .post("/api/v1/stories/graph-store/publish")
+        .json(&json!({"updated_at":put_body["recipe"]["updated_at"]}))
+        .await;
+    assert_eq!(
+        stale_publish.status_code(),
+        axum::http::StatusCode::CONFLICT
+    );
+    let published = server
+        .post("/api/v1/stories/graph-store/publish")
+        .json(&json!({"updated_at":updated_body["recipe"]["updated_at"]}))
+        .await;
+    published.assert_status_ok();
+    assert_eq!(published.json::<Value>()["recipe"]["status"], "published");
+
+    let preferred = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"component_iri":graph_component, "assist_level":0}))
+        .await;
+    preferred.assert_status_ok();
+    let preferred_body = preferred.json::<Value>();
+    assert_eq!(preferred_body["story"]["trust_state"], "published");
+    assert_eq!(preferred_body["story"]["recipe_id"], "graph-store");
+
+    let replayed = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "recipe_id":"graph-store",
+            "component_iri":api_component,
+            "assist_level":0
+        }))
+        .await;
+    replayed.assert_status_bad_request();
+
+    let fresh = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "component_iri":graph_component,
+            "fresh":true,
+            "assist_level":0
+        }))
+        .await;
+    fresh.assert_status_ok();
+    let fresh_body = fresh.json::<Value>();
+    assert_eq!(fresh_body["story"]["trust_state"], "generated");
+    assert!(fresh_body["story"].get("recipe_id").is_none());
+
+    let drifted = json!({
+        "id":"drifted",
+        "title":"Drifted Story",
+        "subject_component_iri":"https://example.test/missing-component",
+        "goal":"Repair a stale route",
+        "audience":"reboarding",
+        "beats":[{
+            "id":"purpose", "title":"Purpose", "intent":"purpose",
+            "record_iris":["https://example.test/missing-record"], "code_symbols":[]
+        }],
+        "status":"draft",
+        "curator":"maintainer"
+    });
+    server
+        .put("/api/v1/stories/drifted")
+        .json(&drifted)
+        .await
+        .assert_status_ok();
+    let drifted_run = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"recipe_id":"drifted", "assist_level":0}))
+        .await;
+    drifted_run.assert_status_ok();
+    let drifted_body = drifted_run.json::<Value>();
+    assert_eq!(
+        drifted_body["story"]["subject"]["iri"],
+        "https://example.test/missing-component"
+    );
+    assert_eq!(
+        drifted_body["story"]["subject"]["label"],
+        "https://example.test/missing-component"
+    );
+    assert!(drifted_body["story"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["id"] == "subject-drift"));
+
+    let ungrounded = json!({
+        "id":"ungrounded",
+        "title":"Ungrounded draft",
+        "subject_component_iri":graph_component,
+        "goal":"Surface curator drift",
+        "audience":"reboarding",
+        "beats":[{
+            "id":"purpose", "title":"Purpose", "intent":"purpose",
+            "record_iris":[safe_distractor], "code_symbols":[]
+        }],
+        "status":"draft",
+        "curator":"maintainer"
+    });
+    let ungrounded_put = server
+        .put("/api/v1/stories/ungrounded")
+        .json(&ungrounded)
+        .await;
+    ungrounded_put.assert_status_ok();
+    let mut ungrounded_published = ungrounded.clone();
+    ungrounded_published["updated_at"] =
+        ungrounded_put.json::<Value>()["recipe"]["updated_at"].clone();
+    ungrounded_published["status"] = json!("published");
+    ungrounded_published["beats"] = json!([
+        {"id":"purpose", "title":"Purpose", "intent":"purpose", "record_iris":[safe_distractor], "code_symbols":[]},
+        {"id":"governance", "title":"Governance", "intent":"governance", "record_iris":[safe_distractor], "code_symbols":[]},
+        {"id":"risk", "title":"Risk", "intent":"risk", "record_iris":[safe_distractor], "code_symbols":[]}
+    ]);
+    server
+        .put("/api/v1/stories/ungrounded")
+        .json(&ungrounded_published)
+        .await
+        .assert_status_bad_request();
+    let ungrounded_run = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"recipe_id":"ungrounded", "assist_level":0}))
+        .await;
+    ungrounded_run.assert_status_ok();
+    let ungrounded_body = ungrounded_run.json::<Value>();
+    assert!(ungrounded_body["story"]["beats"][0]["evidence"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(ungrounded_body["story"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["title"] == "Story record does not concern this subject"));
+    assert_eq!(
+        project_quads(&state),
+        before_generate,
+        "Story reads, recipe lifecycle, and grading must not mutate the project graph"
+    );
+}
+
+#[tokio::test]
+async fn story_recipe_io_failures_are_server_errors() {
+    let project = temp_dir("story-io-error");
+    let _cleanup = CleanupDir(project.clone());
+    let data_dir = project.join(".moosedev");
+    let state = Arc::new(
+        AppState::bootstrap_with_llm_config(&data_dir, &ontology_dir(), unconfigured_llm())
+            .expect("bootstrap Story I/O state"),
+    );
+    std::fs::write(project.join("stories"), "not a directory")
+        .expect("block the Story repository directory");
+    let server = TestServer::new(build_routes(state)).expect("build Story I/O test server");
+    let response = server
+        .put("/api/v1/stories/io-failure")
+        .json(&json!({
+            "id":"io-failure",
+            "title":"I/O failure",
+            "subject_component_iri":"https://example.test/component",
+            "goal":"Exercise error mapping",
+            "audience":"reboarding",
+            "beats":[],
+            "status":"draft",
+            "curator":"tester"
+        }))
+        .await;
+    response.assert_status_internal_server_error();
+}
+
+#[tokio::test]
+async fn corrupt_story_is_excluded_from_list_and_get_is_server_error() {
+    let project = temp_dir("story-corrupt");
+    let _cleanup = CleanupDir(project.clone());
+    let data_dir = project.join(".moosedev");
+    let state = Arc::new(
+        AppState::bootstrap_with_llm_config(&data_dir, &ontology_dir(), unconfigured_llm())
+            .expect("bootstrap corrupt Story state"),
+    );
+    std::fs::create_dir_all(project.join("stories")).unwrap();
+    std::fs::write(project.join("stories/corrupt.json"), "{bad json").unwrap();
+    let server = TestServer::new(build_routes(state)).expect("build Story test server");
+
+    let list = server.get("/api/v1/stories").await;
+    list.assert_status_ok();
+    assert!(list.json::<Value>()["stories"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    server
+        .get("/api/v1/stories/corrupt")
+        .await
+        .assert_status_internal_server_error();
+    server
+        .post("/api/v1/stories/corrupt/publish")
+        .json(&json!({"updated_at":"corrupt"}))
+        .await
+        .assert_status_internal_server_error();
+    server
+        .put("/api/v1/stories/corrupt")
+        .json(&json!({
+            "id":"corrupt",
+            "title":"Replacement",
+            "subject_component_iri":"https://example.test/component",
+            "goal":"Replace corrupt storage",
+            "audience":"reboarding",
+            "beats":[],
+            "status":"draft",
+            "curator":"tester",
+            "updated_at":"corrupt"
+        }))
+        .await
+        .assert_status_internal_server_error();
 }
 
 #[tokio::test]
@@ -981,6 +1502,7 @@ async fn debt_and_proposals_endpoints() {
         .expect("foo component");
     assert_eq!(row["denominator"], 1);
     assert_eq!(row["numerator"], 0);
+    assert_eq!(row["status"], "accepted");
 
     // Inbox lists the pending proposal.
     let list = server.get("/api/v1/proposals?status=proposed").await;

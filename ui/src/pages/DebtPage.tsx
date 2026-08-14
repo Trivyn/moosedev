@@ -5,6 +5,7 @@ import {
   Box,
   Chip,
   CircularProgress,
+  IconButton,
   Stack,
   Table,
   TableBody,
@@ -15,11 +16,13 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import AutoStoriesIcon from '@mui/icons-material/AutoStories';
 import { api } from '../api/client';
 import { ComponentCoverage, WhyCoverageResponse } from '../api/types';
 
 interface DebtPageProps {
   onNavigateRecord: (iri: string) => void;
+  onTellStory?: (componentIri: string) => void;
 }
 
 /** 0/0 (no public surface) sorts as fully covered — there is nothing to document. */
@@ -54,7 +57,7 @@ function CoverageBar({ ratio }: { ratio: number }) {
   );
 }
 
-export default function DebtPage({ onNavigateRecord }: DebtPageProps) {
+export default function DebtPage({ onNavigateRecord, onTellStory }: DebtPageProps) {
   const [data, setData] = useState<WhyCoverageResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -108,6 +111,7 @@ export default function DebtPage({ onNavigateRecord }: DebtPageProps) {
                 </Tooltip>
               </TableCell>
               <TableCell sx={{ width: '40%' }}>Coverage</TableCell>
+              <TableCell align="right">Story</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -143,6 +147,22 @@ export default function DebtPage({ onNavigateRecord }: DebtPageProps) {
                   </TableCell>
                   <TableCell>
                     {empty ? '—' : <CoverageBar ratio={coverageValue(component)} />}
+                  </TableCell>
+                  <TableCell align="right">
+                    {component.story_component_iri && onTellStory ? (
+                      <Tooltip title={`Tell the Story of ${component.name}`}>
+                        <IconButton
+                          size="small"
+                          aria-label={`Tell the Story of ${component.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onTellStory(component.story_component_iri!);
+                          }}
+                        >
+                          <AutoStoriesIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    ) : null}
                   </TableCell>
                 </TableRow>
               );

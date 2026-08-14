@@ -157,7 +157,8 @@ async fn builds_vector_store_for_shipped_ontologies() {
         );
     }
     assert!(
-        rows.iter().all(|r| GRAPHS.contains(&r.owning_graph.as_str())),
+        rows.iter()
+            .all(|r| GRAPHS.contains(&r.owning_graph.as_str())),
         "owning_graph must be one of the embedded domain graphs"
     );
 
@@ -198,20 +199,22 @@ async fn reuses_cached_store_when_ontology_unchanged() {
         .await
         .expect("first build");
     let mtime_after_build = std::fs::metadata(&db_path).unwrap().modified().unwrap();
-    let count_after_build = moose::embeddings::read_ontology_vectors(&db_path, vectors::ONTOLOGY_VECTOR_SCOPE)
-        .await
-        .unwrap()
-        .len();
+    let count_after_build =
+        moose::embeddings::read_ontology_vectors(&db_path, vectors::ONTOLOGY_VECTOR_SCOPE)
+            .await
+            .unwrap()
+            .len();
 
     // Same ontology, same model → cache hit. Read-only open must not rewrite the DB.
     vectors::build_and_open(&store, GRAPHS, &db_path)
         .await
         .expect("second build (expected cache hit)");
     let mtime_after_reuse = std::fs::metadata(&db_path).unwrap().modified().unwrap();
-    let count_after_reuse = moose::embeddings::read_ontology_vectors(&db_path, vectors::ONTOLOGY_VECTOR_SCOPE)
-        .await
-        .unwrap()
-        .len();
+    let count_after_reuse =
+        moose::embeddings::read_ontology_vectors(&db_path, vectors::ONTOLOGY_VECTOR_SCOPE)
+            .await
+            .unwrap()
+            .len();
 
     assert_eq!(
         mtime_after_build, mtime_after_reuse,
@@ -263,7 +266,10 @@ async fn regenerates_store_from_any_other_schema() {
         let vs = vectors::build_and_open(&store, GRAPHS, &db_path)
             .await
             .unwrap_or_else(|e| panic!("{name}: stale store should regenerate, got {e}"));
-        assert!(vs.is_enabled(), "{name}: regenerated store should have vectors");
+        assert!(
+            vs.is_enabled(),
+            "{name}: regenerated store should have vectors"
+        );
 
         let cols = columns(&db_path).await;
         for required in ["namespace", "owning_graph"] {

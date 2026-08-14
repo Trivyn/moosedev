@@ -92,6 +92,13 @@ v2 adds the code-aware and active layers:
 
 The phase definitions and acceptance criteria are in [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md). Delivered editor clients: Zed, Neovim, VS Code, and Emacs (eglot/lsp-mode) — all thin stanzas over the same server.
 
+The human workbench also includes **Story**, a concise guided view that projects
+current, accepted graph knowledge into an ordered explanation of a subsystem,
+with evidence and code anchors kept visible. Story remains symbolic without an
+LLM and can use a configured model only to polish the narration; curated routes
+stay outside the authoritative project graph. See the
+[Story feature specification](./spec/MOOSEDev_story_spec.md).
+
 ## Getting started
 
 ### Use a release binary (recommended)

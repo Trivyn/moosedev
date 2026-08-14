@@ -9,8 +9,145 @@ export interface HealthResponse {
   llm_assist_level: string;
 }
 
+export type StoryStatus = 'draft' | 'published';
+export type StoryTrustState = 'generated' | StoryStatus;
+export type StoryAssistLevel = 0 | 1;
+export type StoryBeatIntent = 'purpose' | 'boundary' | 'core-code' | 'governance' | 'risk';
+
+export interface StoryGenerateRequest {
+  prompt?: string;
+  component_iri?: string;
+  recipe_id?: string;
+  fresh?: boolean;
+  include_checks?: boolean;
+  assist_level: StoryAssistLevel;
+}
+
+export interface StoryBeatRecipe {
+  id: string;
+  title: string;
+  intent: StoryBeatIntent;
+  record_iris: string[];
+  code_symbols: string[];
+  curator_note?: string;
+}
+
+export interface StoryRecipe {
+  id: string;
+  title: string;
+  subject_component_iri: string;
+  goal: string;
+  audience: 'reboarding';
+  beats: StoryBeatRecipe[];
+  status: StoryStatus;
+  curator: string;
+  updated_at?: string | null;
+}
+
+export interface StorySummary {
+  id: string;
+  title: string;
+  subject_component_iri: string;
+  subject_label: string;
+  goal: string;
+  audience: 'reboarding';
+  status: StoryStatus;
+  curator: string;
+  beat_count: number;
+  updated_at?: string | null;
+  drifted?: boolean;
+}
+
+export interface StoryListResponse {
+  stories: StorySummary[];
+}
+
+export interface StoryRecipeResponse {
+  recipe: StoryRecipe;
+}
+
+export interface StorySubjectCandidate {
+  iri: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface StoryEvidence {
+  iri: string;
+  title: string;
+  kind: string;
+  status: string;
+}
+
+export interface StoryCodeAnchor {
+  symbol: string;
+  label: string;
+  entity_iri?: string | null;
+  path?: string | null;
+  line?: number | null;
+}
+
+export interface StoryBeat {
+  id: string;
+  title: string;
+  intent: StoryBeatIntent;
+  narrative: string;
+  evidence: StoryEvidence[];
+  code_anchors: StoryCodeAnchor[];
+  gap?: string | null;
+  curator_note?: string | null;
+}
+
+export interface StoryGap {
+  id: string;
+  title: string;
+  detail: string;
+  beat_intent?: StoryBeatIntent | null;
+}
+
+export interface StoryCheckOption {
+  id: string;
+  label: string;
+}
+
+export interface StoryCheck {
+  id: string;
+  question: string;
+  options: StoryCheckOption[];
+}
+
+export interface StoryRun {
+  recipe_id?: string | null;
+  trust_state: StoryTrustState;
+  narration_mode: 'symbolic' | 'llm';
+  title: string;
+  subject: { iri: string; label: string };
+  goal: string;
+  overview: string;
+  beats: StoryBeat[];
+  gaps: StoryGap[];
+  checks: StoryCheck[];
+}
+
+export type StoryGenerateResponse =
+  | { outcome: 'story'; story: StoryRun }
+  | {
+      outcome: 'ambiguous';
+      prompt: string;
+      recipe_id?: string | null;
+      candidates: StorySubjectCandidate[];
+    };
+
+export interface StoryCheckGradeResponse {
+  correct: boolean;
+  feedback: string;
+  revisit_beat_id?: string | null;
+  evidence_iris: string[];
+}
+
 export interface ComponentCoverage {
   iri: string | null;
+  story_component_iri: string | null;
   name: string;
   numerator: number;
   denominator: number;
@@ -222,6 +359,7 @@ export interface RecordDetailResponse {
   status: string | null;
   timestamp: string | null;
   author: string | null;
+  story_component_iri: string | null;
   outgoing: RecordOutgoingEdge[];
   incoming: RecordIncomingEdge[];
 }

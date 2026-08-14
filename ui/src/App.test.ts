@@ -1,6 +1,27 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
-import { recordRouteForIri, recordRouteFromHash, recordUuidFromHash } from './App';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  confirmStoryHashNavigation,
+  confirmStoryNavigation,
+  pageNavigationIsNoop,
+  recordRouteForIri,
+  recordRouteForPage,
+  recordRouteFromHash,
+  recordUuidFromHash,
+} from './App';
+
+describe('pageNavigationIsNoop', () => {
+  it('treats the active page as a navigation target when a deep link is open', () => {
+    expect(pageNavigationIsNoop('stories', 'stories', null)).toBe(true);
+    expect(
+      pageNavigationIsNoop('stories', 'stories', {
+        kind: 'record',
+        uuid: 'evidence-1',
+      }),
+    ).toBe(false);
+    expect(pageNavigationIsNoop('stories', 'debt', null)).toBe(false);
+  });
+});
 
 describe('recordRouteFromHash', () => {
   it.each([
@@ -47,5 +68,38 @@ describe('recordRouteForIri', () => {
 
   it('does not navigate external graph nodes', () => {
     expect(recordRouteForIri('https://example.com/entity/one')).toBeNull();
+  });
+});
+
+describe('recordRouteForPage', () => {
+  it('keeps typed evidence on the generic record route inside Stories', () => {
+    const iri = 'https://moosedev.dev/kg/Requirement/req-1';
+    expect(recordRouteForPage(iri, 'stories')).toEqual({ kind: 'record', uuid: 'req-1' });
+    expect(recordRouteForPage(iri, 'requirements')).toEqual({
+      kind: 'requirements',
+      uuid: 'req-1',
+    });
+  });
+});
+
+describe('confirmStoryNavigation', () => {
+  it('allows clean navigation without prompting and honors the dirty-editor choice', () => {
+    const confirmDiscard = vi.fn(() => false);
+    expect(confirmStoryNavigation(false, confirmDiscard)).toBe(true);
+    expect(confirmDiscard).not.toHaveBeenCalled();
+    expect(confirmStoryNavigation(true, confirmDiscard)).toBe(false);
+    confirmDiscard.mockReturnValue(true);
+    expect(confirmStoryNavigation(true, confirmDiscard)).toBe(true);
+  });
+
+  it('restores the accepted location when dirty hash navigation is rejected', () => {
+    const restore = vi.fn();
+    const rejectDiscard = vi.fn(() => false);
+    const route = { kind: 'record' as const, uuid: 'record-1' };
+
+    expect(confirmStoryHashNavigation(true, route, restore, rejectDiscard)).toBe(false);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(confirmStoryHashNavigation(true, null, restore, rejectDiscard)).toBe(true);
+    expect(rejectDiscard).toHaveBeenCalledOnce();
   });
 });

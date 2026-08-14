@@ -118,3 +118,9 @@ and open it with:
 moosedev --status   # shows the URL
 moosedev ui         # opens it in a browser
 ```
+
+The **Stories** view can generate a concise, evidence-linked subsystem
+walkthrough in pure-symbolic mode, or use a configured LLM to polish the same
+planner-selected evidence. Useful routes can be saved as draft or published
+curated recipes without copying authoritative project claims out of the graph;
+see the [Story feature specification](../spec/MOOSEDev_story_spec.md).

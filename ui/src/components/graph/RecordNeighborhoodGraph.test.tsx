@@ -31,6 +31,7 @@ function record(overrides: Partial<RecordDetailResponse> = {}): RecordDetailResp
     status: 'accepted',
     timestamp: null,
     author: null,
+    story_component_iri: null,
     outgoing: [],
     incoming: [],
     ...overrides,
