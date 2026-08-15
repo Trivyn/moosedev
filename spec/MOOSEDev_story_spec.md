@@ -1,182 +1,316 @@
-# Spec — Story: Human-facing subsystem comprehension
+# Spec — Story: Cohesive, evidence-backed project narratives
 
-> Satisfies `Requirement/52721e84-313e-4fa2-a26e-d6a7685e793c` and implements
-> `ArchitecturalDecision/768665cb-8f3a-4a9b-b89b-b83903050dea`, constrained by
-> `Constraint/66d15437-2afd-4459-9707-d7e5c5423fa6` and the existing one-brain
-> `Constraint/2ba76439-e146-425d-b18a-4d46f7418cb8`.
+> Satisfies `Requirement/9327d3b1-d868-4f37-9d0d-eb7ee3f054de` and implements
+> `ArchitecturalDecision/53720fee-d7ff-43d3-943f-64acff2fe112`, constrained by
+> `Constraint/c1b8a8db-6904-4c33-a7d0-7734ad9de0ed` and informed by
+> `Lesson/f0c35d76-67ef-472e-a74b-d44f084b37f9`.
 >
 > **Status:** accepted for implementation. If this document and the project knowledge graph
 > disagree, the graph wins and this document has a bug.
 
 ## Goal
 
-Story helps an experienced developer quickly recover a working mental model of an unfamiliar or
-forgotten subsystem. It turns current, accepted project knowledge into a concise guided explanation
-of what the subsystem does, where its boundaries are, which code matters, why it is shaped that way,
-and what to be careful about when changing it.
+Story helps an experienced developer recover a working mental model of a project subject. It turns
+the subject's connected project knowledge, lifecycle history, and code evidence into one cohesive,
+causal, chronological account: what the subject is, why it exists, how it evolved, how it works now,
+and what remains uncertain.
 
-Story is a projection over existing knowledge, not a new knowledge type or a second source of truth.
+Story is a read-only projection over existing knowledge. It is not a knowledge type, capture path,
+or second source of truth. This feature requires no ontology changes.
 
 ## Reader experience
 
-The workbench has a **Stories** page with separate **Entity** and **Topic** entry modes plus a list
-of draft and published recipes. Entity mode searches current `SystemComponent`, `InformationRecord`,
-and `CodeEntity` nodes and submits their canonical IRIs. Topic mode uses the existing bounded
-project-context retriever to assemble an evidence cluster without minting a Topic ontology node.
-Both modes may be saved, curated, and published.
+The workbench has a **Stories** page with separate **Entity** and **Topic** entry modes plus a library
+of draft and published recipes.
 
-A Story contains three to five ordered beats chosen by its deterministic subject-family planner.
-Component Stories retain the original route:
+- Entity mode offers the complete current catalog of `SystemComponent`, `InformationRecord`, and
+  `CodeEntity` subjects and submits canonical IRIs.
+- Topic mode uses the existing bounded project-context retriever. A topic is a query over existing
+  entities and never mints a Topic ontology node.
 
-1. purpose,
-2. boundary,
-3. core code,
-4. governing decisions or constraints, and
-5. risks or extension points.
+An opened Story is a single article rather than a stack of evidence cards. It contains:
 
-Record Stories explain the claim, context, relationships, impact, and history or risk. Code Stories
-explain role, ownership, governing knowledge, connections, and change risk. Topic Stories explain
-orientation, drivers, decisions, implementation, and risks. Unsupported beats are omitted or shown
-as explicit gaps; they are never filled with invented prose.
+1. a brief orientation;
+2. one flowing narrative with only the applicable light headings: **Orientation**, **Evolution**,
+   **Current state**, **Implementation**, and **Implications**;
+3. a deterministic chronological timeline, including explicit supersession paths;
+4. linked evidence and code references;
+5. a separate, prominent **Knowledge gaps** section; and
+6. one or two symbolic comprehension checks when the graph supports nontrivial questions.
 
-Only beats supported by current accepted evidence are shown. Missing evidence is an explicit
-knowledge gap, never invented connective tissue. Each beat exposes its source records, lifecycle
-state, and resolvable code anchors. When the graph contains enough distinct authoritative evidence,
-the Story ends with one or two structured questions whose answers are graded symbolically from
-accepted graph relationships. If a nontrivial question cannot be formed without inventing a
-distractor, Story exposes that limitation as an explicit gap instead. Question options are ordered
-independently for each run. Client-visible option IDs and check handles are opaque: the designated
-answer exists only in a bounded, expiring daemon grant and is revalidated, together with the subject
-and every offered option, against the current graph when answered.
+The prose may cite evidence inline, but evidence inspection is not allowed to fragment the reading
+experience. The evidence appendix is collapsible and grouped by entity type. It exposes full
+descriptions, lifecycle status, timestamps, relationships, and code anchors. Links navigate to the
+typed ADR, Requirement, Lesson, Constraint, component, or code surface rather than a generic record
+page when a typed route exists.
 
 Every run has a visible trust state:
 
-- **Generated** — assembled on demand from current graph state.
-- **Draft** — a generated route saved for maintainer curation.
-- **Published** — a route reviewed and shared by a maintainer.
+- **Generated** — assembled on demand from the current graph.
+- **Draft** — generated focus and presentation metadata saved for maintainer curation.
+- **Published** — a recipe reviewed and shared by a maintainer.
 
 A matching published recipe is preferred, but a reader can always request a fresh generated Story.
+The page remains text-led and does not add a decorative Story illustration.
 
-## Generation and narration
+## Deterministic Story dossier
 
-One deterministic backend planner serves every surface. It resolves the component, selects the
-bounded route, orders accepted evidence, resolves code anchors, and derives comprehension checks
-before any prose generation occurs.
+One backend planner constructs a typed `StoryDossier` before any prose generation. It starts from the
+exact entity subject, or from at most 64 topic matches above the existing relevance floor, and
+collects the deterministic closure needed to explain that subject:
 
-Story remains usable in pure symbolic mode through plain-language deterministic summaries. A
-configured LLM is **strongly recommended** for guided reboarding narration: two to four sentences per
-evidence-bearing beat, necessary terminology explained on first use, and an explicit connection to
-why the evidence matters when changing the subject. The LLM receives only planner-selected evidence
-and acts as a presentation sensor: its prose is never accepted project knowledge. Missing, invalid,
-timed-out, or failed narration falls back to symbolic rendering, and the reader persistently shows
-whether narration was assisted, intentionally symbolic, or a fallback.
+- all subject literal properties, lifecycle metadata, authorship, timestamp, and incoming and
+  outgoing typed relationships;
+- every directly connected project entity;
+- the typed knowledge cluster around connected records: rationales, motivating requirements,
+  alternatives, consequences, constraints and violations, lessons and their sources, components,
+  and code relationships;
+- code anchors and their architectural relationships, including `realizes`, `satisfies`, and
+  `embodies`; and
+- complete supersession history in both directions, including branches, with cycle protection.
 
-The workbench renders the symbolic Story first, then may apply assisted prose only when the second
-response has the same structural and evidence fingerprint. The presentation-only request does not
-mint a second set of comprehension-check grants. Only narration mode and beat narrative text change;
-curator notes remain visible exactly once, and the symbolic run, evidence, gaps, and issued
-comprehension checks remain authoritative.
-A mismatched or late narration response cannot replace the Story, reset quiz progress, or restore a
-Story after the reader navigates away or begins another request.
+This is a typed closure, not an unrestricted recursive graph crawl. Neighbors unrelated to one of
+the listed explanatory relationships are not expanded recursively.
 
-Generating, reading, or completing a Story never writes the project graph. A discovered gap enters
-the existing proposal and ratification workflow only through an explicit user action.
+The planner records why each entity entered the dossier and produces a stable evidence order and
+fingerprint. It derives the applicable narrative outline, timeline, gaps, and comprehension checks
+before narration. Current working-set knowledge supports present-tense claims. Superseded and
+deprecated records support explicitly historical claims. Rejected records appear only as rejected
+events. Proposed records appear only as knowledge gaps, never as established evidence.
 
-## Curated recipes
+The closure is bounded to 512 entities or 4 MiB of serialized dossier data. Reaching either ceiling
+stops expansion deterministically, records a `closure-truncated` gap, and prevents any claim that the
+Story is complete.
 
-Generated runs are ephemeral unless saved. Draft and published recipes are typed, version-controlled
-JSON files loaded, validated, and written by the daemon. They live outside the project knowledge graph
-and contain only instructional metadata and references:
+## Cohesive narration
+
+Pure symbolic mode renders the outline as one continuous article using deterministic extracts,
+relationships, and chronology. It remains a complete, usable fallback when no LLM is configured.
+
+Assisted narration receives only the deterministic dossier and outline. It may make the prose more
+cohesive and readable, explain necessary terminology on first use, and connect evidence to the
+consequences of changing the subject. It may not alter the subject, evidence, chronology, lifecycle
+classification, gaps, checks, or trust state. Curator context is displayed separately and is not
+evidence or model input.
+
+Complete selected record descriptions remain retained in the public dossier. For assisted prose,
+the server builds one deterministic narration packet of at most twelve provenance groups. The total
+prompt budget is one quarter of `MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS` (default 32,768), capped at
+32,768 estimated input tokens. Allocation first reserves subject identity, a subject-focused
+chronological spine, and one semantically appropriate source for every rendered section. The
+chronological spine preserves subject-named records, their complete supersession chains, and
+deterministically sampled early, middle, and latest milestones before admitting incidental features
+that merely share a broad component relationship. Curated inclusions, implementation anchors,
+current decisions, requirements, constraints, and remaining dossier evidence follow. Field values
+are atomic: the packet includes a complete value or omits it. Larger configured windows therefore
+admit more complete evidence without changing the public dossier.
+
+The default interactive path makes one synthesis request. Short source IDs keep the provider contract
+small; the daemon owns their exact mapping to evidence IRIs. JSON-schema structured output is used
+when supported, followed by independent typed and citation validation. Auto capability detection may
+retry the first explicitly unsupported schema request once with validated plain JSON, then remembers
+the provider capability for the daemon lifetime. JSON repair may repair syntax, never semantics.
+Every packet source ID must be represented exactly, and the daemon expands and revalidates the exact
+IRI union before accepting prose. A failed, invalid, mismatched, or 60-second timed-out synthesis
+leaves the complete symbolic article in place.
+
+Successful narration is memoized in a bounded process-local cache keyed by graph generation, model,
+effective budget, prompt-contract version, and packet fingerprint. Concurrent identical requests are
+single-flight. Failures are not cached, and narration is never written to the project graph or recipe.
+
+Narrative length adapts to evidence density, normally about 700–2,000 words. The workbench renders
+the symbolic Story immediately and applies assisted prose only when the returned subject and
+evidence fingerprint match the current run. A late response cannot replace another Story, reset quiz
+progress, or restore a Story after navigation.
+
+The narration outcome identifies whether the reader is seeing symbolic prose, successful single-pass
+assistance, or symbolic fallback, without using the internal term “beat.”
+
+## Chronology, evidence, gaps, and checks
+
+The timeline is a deterministic projection, not LLM output. Events sort by timestamp ascending, use
+a stable graph-derived tie-breaker, and group undated events last. Each event carries its lifecycle
+state and linked entity. Supersession events show predecessor, successor, and replacement rationale
+when present; branches are preserved rather than collapsed to a guessed canonical path.
+
+Narrative paragraphs cite evidence IRIs. The client resolves those citations through server-provided
+typed evidence details and code anchors; the model cannot create URLs or unseen citations.
+
+Missing expected relationships, proposed knowledge, unresolved recipe anchors, absent code
+substrate, and closure truncation are separate typed gaps. Gaps are never converted into invented
+connective prose.
+
+When the graph contains enough distinct authoritative evidence, the Story ends with one or two
+structured questions graded from current graph relationships. Question options are independently
+ordered for every run. Client-visible option IDs and check handles are opaque: the designated answer
+exists only in a bounded, expiring daemon grant and is revalidated, together with the subject and
+every offered option, when answered. If no nontrivial distractor exists, the missing assessment is a
+gap rather than a trivial question.
+
+## HTTP response contract
+
+Existing Story routes remain, but Story generation returns schema version 3:
+
+```ts
+interface StoryRun {
+  schema_version: 3;
+  recipe_id?: string;
+  trust_state: "generated" | "draft" | "published";
+  narration_mode: "symbolic" | "llm";
+  narration_strategy: "symbolic" | "single_pass";
+  narration_outcome: NarrationOutcome;
+  narration_failure_reason?: NarrationFailureReason;
+  narration_coverage?: StoryNarrationCoverage;
+  title: string;
+  subject: StorySubject;
+  goal: string;
+  brief: StoryParagraph;
+  narrative: StoryNarrativeSection[];
+  timeline: StoryTimelineEvent[];
+  evidence: StoryEvidenceDetail[];
+  code_anchors: StoryCodeAnchor[];
+  coverage: StoryCoverage;
+  gaps: StoryGap[];
+  checks: StoryCheck[];
+}
+
+type StorySectionKind =
+  | "orientation"
+  | "evolution"
+  | "current_state"
+  | "implementation"
+  | "implications";
+
+type NarrationOutcome =
+  | "not_requested"
+  | "succeeded"
+  | "unconfigured"
+  | "ineligible"
+  | "timeout"
+  | "provider_error"
+  | "invalid_response";
+
+type NarrationFailureReason =
+  | "packet_too_large"
+  | "invalid_json"
+  | "schema_mismatch"
+  | "citation_mismatch"
+  | "structured_output_unsupported";
+
+interface StoryNarrationCoverage {
+  eligible_entities: number;
+  included_entities: number;
+  source_groups: number;
+  truncated: boolean;
+}
+```
+
+`StoryParagraph` contains prose plus `citation_iris`. `StoryNarrativeSection` has a stable section ID,
+one of the five outline kinds, and cited paragraphs. `StoryEvidenceDetail` contains its canonical IRI,
+typed route information, full description, lifecycle status, timestamp, author, and typed
+relationships. `StoryTimelineEvent` contains an optional timestamp, lifecycle state, relation type,
+linked entity, predecessor and successor links, and replacement rationale. `StoryCoverage` reports
+dossier entity and byte counts, whether expansion was truncated, and which subject families and
+outline sections are represented.
+
+Reader progress and check results remain local session state. Checks refer readers back with
+`revisit_section_id`; the removed beat IDs are not part of the v3 response.
+
+## Curated recipes and migration
+
+Generated runs are ephemeral unless saved. Draft and published recipes are version-controlled JSON
+files outside the project knowledge graph. They contain only instructional metadata and references:
 
 ```ts
 interface StoryRecipe {
+  schema_version: 3;
   id: string;
   title: string;
-  subject_component_iri: string;
+  subject: StoryRecipeSubject;
   goal: string;
   audience: "reboarding";
-  beats: StoryBeatRecipe[];
+  focus: {
+    include_record_iris: string[];
+    exclude_record_iris: string[];
+    include_code_symbols: string[];
+    exclude_code_symbols: string[];
+    emphasis: StorySectionKind[];
+  };
+  curator_context?: string;
   status: "draft" | "published";
   curator: string;
   updated_at?: string;
 }
-
-interface StoryBeatRecipe {
-  id: string;
-  title: string;
-  intent: "purpose" | "boundary" | "core-code" | "governance" | "risk";
-  record_iris: string[];
-  code_symbols: string[];
-  curator_note?: string;
-}
 ```
 
-Recipes never copy authoritative claims, descriptions, lifecycle state, or code locations. Those are
-resolved at run time. A superseded record anchor follows its current successor and marks the recipe as
-changed since curation. A missing record or code symbol remains visible as drift; Story never chooses
-a lexical substitute silently.
+Include and exclude collections are unique, disjoint, and limited to 128 entries each. Included
+records must belong to the subject's typed closure and receive priority in evidence allocation.
+Exclusions suppress prose, but cannot remove the minimal lifecycle data needed to keep chronology
+honest. `emphasis` is a unique subset of the five section kinds; it changes prose allocation, never
+truth, chronology, or evidence eligibility. `curator_context` is limited to 2,000 characters and is
+rendered as non-authoritative maintainer guidance.
 
-Published recipes use each beat intent at most once and keep the canonical order: purpose, boundary,
-core code, governance, then risk. A recipe may select any three to five of those intents. The exact
-subject `SystemComponent` is intrinsic authoritative evidence for a boundary beat, so that beat does
-not duplicate the component IRI in `record_iris`; every other published beat requires at least one
-grounded record or code anchor.
+Published recipes require a resolvable subject and resolvable, subject-connected references.
+Historical anchors are allowed when visibly lifecycle-labelled. Proposed anchors remain gaps. At
+most one published recipe is authoritative for a normalized subject. `updated_at` is a daemon-issued
+optimistic-concurrency token; stale saves and publication attempts are rejected.
 
-`updated_at` is the daemon-issued recipe revision token. Saves and publication use it for optimistic
-concurrency: a request based on an older revision is rejected instead of overwriting newer curation.
+Readers accept schema v1 and v2 recipes without rewriting files. The next successful save migrates
+them to v3 by:
 
-## HTTP and UI contract
+1. unioning their ordered record and code anchors into the corresponding include lists;
+2. mapping route intents to section emphasis as `purpose` → `orientation`, `boundary` →
+   `current_state`, `core-code` → `implementation`, `governance` → `evolution`, and `risk` →
+   `implications`, then preserving first-occurrence order;
+3. combining curator notes in original order, prefixed by their former titles, into
+   `curator_context`; if the result exceeds 2,000 characters, rejecting the save with an actionable
+   validation error rather than truncating it; and
+4. creating empty exclusion lists.
 
-The workbench is a thin client of daemon-owned planning, validation, persistence, and grading. The
-HTTP surface supports:
+Only schema v3 is written after migration. Recipe summaries no longer expose a beat count.
 
-- listing draft and published recipes;
-- listing current Story-eligible subjects;
-- searching current Story-eligible entities;
-- generating a Story from an entity, bounded topic, or recipe;
-- reading and saving a recipe;
-- publishing a validated draft; and
-- grading a structured relationship check.
+## Honest degradation and invariants
 
-Reader progress and check results are local session state, not project knowledge.
-
-## Honest degradation
-
-- Without an LLM, the complete symbolic Story remains available with less polished prose.
-- Without a usable code substrate, the evidence narrative remains available and code navigation
-  reports reduced coverage.
-- Proposed records may be shown only as labeled gaps and never as established claims.
-- Superseded and missing evidence is called out; it is not silently hidden or replaced.
-- Story introduces no new classes or properties into the architecture or code ontologies.
+- Without an LLM, the complete symbolic article, chronology, evidence, gaps, and checks remain
+  available.
+- Without a usable code substrate, the knowledge narrative remains available and code coverage is
+  reported as reduced.
+- Missing, stale, proposed, rejected, superseded, and deprecated knowledge is represented according
+  to its lifecycle state and never silently promoted.
+- Generating, reading, narrating, saving, publishing, or completing a Story never writes the project
+  knowledge graph.
+- A discovered gap enters capture and ratification only through an explicit user action in the
+  existing workflow.
+- Story introduces no ontology classes or properties and does not modify capture behavior.
 
 ## Acceptance criteria
 
-- A current component, information record, or code entity produces a grounded Story without an LLM.
-- A topic produces a bounded Story only when current project knowledge clears the relevance floor.
-- LLM-assisted narration is evidence-bounded and safely falls back to symbolic rendering.
-- The reader clearly distinguishes assisted prose, intentional symbolic prose, and fallback.
-- Every factual beat exposes accepted, ontology-validated record evidence and code anchors.
-- Entity selection searches only current Story-eligible typed nodes and submits canonical IRIs.
-- Ambiguous subjects require explicit resolution.
-- A generated route can be saved, curated, published, reloaded, and shared through version control.
-- At most one published recipe is authoritative for a component at a time.
-- Published beat intents are unique and remain in canonical route order.
-- Curated evidence and code anchors are shown only when linked to the recipe's exact subject.
-- Generated boundary evidence survives save and reload without being misclassified as a record anchor.
-- Recipe files contain references and presentation metadata, not copied project claims.
-- Recipe reads and writes stay inside the project `stories/` directory and reject symlink escapes.
-- One or two nontrivial structured questions are graded deterministically against current graph
-  relationships when distinct options exist; otherwise the missing assessment is an explicit gap.
-- Question order does not reveal the answer, and no client-visible identifier encodes it.
-- A presentation-only narration upgrade does not issue or evict comprehension-check grants.
-- Narration upgrades preserve issued checks and in-progress or completed answers.
-- Missing, stale, proposed, and superseded evidence is represented honestly.
-- Story activity does not mutate the project knowledge graph.
+- Every eligible component, information record, or code entity produces a cohesive grounded article
+  without an LLM; a topic does so only when bounded retrieval clears the relevance floor.
+- Direct relationships, typed record clusters, code relationships, and complete bidirectional
+  supersession histories are included deterministically with cycle protection.
+- Full selected record descriptions remain inspectable and can inform assisted narration.
+- The narrative, timeline, citations, evidence appendix, gaps, and checks agree on one evidence
+  fingerprint and lifecycle classification.
+- Timeline ordering is stable; dated evolution and supersession are visible, and undated events are
+  clearly separated.
+- A bounded narration packet retains subject-focused early, middle, latest, and supersession
+  milestones before incidental recent feature records, so truncation cannot silently turn recency
+  into project history.
+- Assisted narration validates every short source ID and its expanded evidence union, uses one
+  adaptive bounded synthesis request, and falls back without losing evidence on any failure.
+- The reader presents one article surface, correct typed evidence links, a separate timeline and gaps
+  section, and a collapsible evidence appendix; it does not render one card per former beat.
+- A narration upgrade preserves issued checks and all in-progress or completed answers.
+- Recipes save, curate, publish, reload, migrate from v1/v2, and enforce grounding, uniqueness,
+  optimistic concurrency, and filesystem containment.
+- Question order and handles do not reveal answers, and grading revalidates current graph state.
+- Story activity leaves the project graph byte-for-byte unchanged and adds no ontology or capture
+  behavior.
 
 ## Deferred
 
 - PR- or diff-specific Stories.
-- Decision-archaeology Stories.
 - Adaptive tutoring and free-text answer grading.
 - Team-wide learning analytics or competency scoring.
 - Story ontology classes.

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { api } from '../api/client';
-import { StoryCheckGradeResponse, StoryRecipe, StoryRun } from '../api/types';
-import StoriesPage from './StoriesPage';
+import { StoryRecipe, StoryRun } from '../api/types';
+import StoriesPage, { applyAssistedNarration } from './StoriesPage';
 
 vi.mock('../api/client', () => ({
   api: {
@@ -19,76 +19,151 @@ vi.mock('../api/client', () => ({
 }));
 
 const componentIri = 'https://moosedev.dev/kg/SystemComponent/graph';
+const requirementIri = 'https://moosedev.dev/kg/Requirement/one';
+const oldDecisionIri = 'https://moosedev.dev/kg/ArchitecturalDecision/old';
+const suppressedIri = 'https://moosedev.dev/kg/ArchitecturalDecision/excluded';
 
 const recipe: StoryRecipe = {
   id: 'graph-store',
   title: 'The graph store',
-  schema_version: 2,
+  schema_version: 3,
   subject: { type: 'entity', iri: componentIri },
   goal: 'Understand the graph boundary.',
   audience: 'reboarding',
   status: 'draft',
   curator: 'James',
   updated_at: '2026-08-13T20:00:00Z',
-  beats: [
-    { id: 'purpose', title: 'Why it exists', intent: 'purpose', record_iris: ['record-1'], code_symbols: [] },
-    { id: 'boundary', title: 'Its boundary', intent: 'boundary', record_iris: [], code_symbols: ['symbol boundary'] },
-    { id: 'risk', title: 'What to protect', intent: 'risk', record_iris: ['record-risk'], code_symbols: [] },
-  ],
+  focus: {
+    include_record_iris: [requirementIri],
+    exclude_record_iris: [],
+    include_code_symbols: ['scip symbol graph-store'],
+    exclude_code_symbols: [],
+    emphasis: ['orientation', 'evolution', 'current_state', 'implementation', 'implications'],
+  },
+  curator_context: 'Explain the transaction boundary to new maintainers.',
 };
 
 const run: StoryRun = {
+  schema_version: 3,
   recipe_id: null,
   trust_state: 'generated',
   narration_mode: 'symbolic',
+  narration_strategy: 'symbolic',
   narration_outcome: 'not_requested',
   title: 'The graph store',
   subject: { type: 'entity', iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer' },
   goal: recipe.goal,
-  overview: 'The graph store owns authoritative project knowledge.',
-  beats: [
+  curator_context: recipe.curator_context,
+  brief: { text: 'The graph store keeps authoritative project knowledge queryable.', citation_iris: [requirementIri] },
+  narrative: [
     {
-      id: 'purpose',
+      id: 'orientation',
+      kind: 'orientation',
       title: 'Why it exists',
-      intent: 'purpose',
-      narrative: 'It keeps typed project knowledge queryable.',
-      evidence: [
-        {
-          iri: 'https://moosedev.dev/kg/Requirement/one',
-          title: 'Queryable memory',
-          kind: 'Requirement',
-          status: 'accepted',
-        },
-      ],
-      code_anchors: [
-        {
-          symbol: 'scip symbol graph-store',
-          label: 'GraphStore',
-          entity_iri: 'https://moosedev.dev/kg/CodeEntity/store',
-          path: 'src/graph/store.rs',
-          line: 0,
-        },
-      ],
+      paragraphs: [{ text: 'It externalizes typed knowledge instead of relying on model context.', citation_iris: [requirementIri] }],
     },
     {
-      id: 'boundary',
-      title: 'Its boundary',
-      intent: 'boundary',
-      narrative: 'The HTTP layer remains a thin client.',
-      evidence: [],
-      code_anchors: [],
-      gap: 'No accepted record explains transaction ownership.',
+      id: 'evolution',
+      kind: 'evolution',
+      title: 'How it evolved',
+      paragraphs: [{ text: 'An earlier decision was superseded when lifecycle history became important.', citation_iris: [oldDecisionIri] }],
     },
     {
-      id: 'risk',
-      title: 'What to protect',
-      intent: 'risk',
-      narrative: 'Do not create a second source of truth.',
-      evidence: [],
-      code_anchors: [],
+      id: 'current-state',
+      kind: 'current_state',
+      title: 'What is true now',
+      paragraphs: [{ text: 'The graph remains authoritative and Story remains read-only.', citation_iris: [requirementIri] }],
     },
   ],
-  gaps: [{ id: 'gap-1', title: 'Transaction ownership', detail: 'No accepted rationale is linked.' }],
+  timeline: [
+    {
+      id: 'event-old',
+      title: 'The earlier graph decision',
+      kind: 'ArchitecturalDecision',
+      status: 'superseded',
+      timestamp: '2025-01-02T03:04:05Z',
+      evidence_iri: oldDecisionIri,
+      relation: 'Superseded by the current approach',
+      predecessor_iris: [],
+      successor_iris: [requirementIri],
+      rationale_iris: [],
+    },
+    {
+      id: 'event-suppressed',
+      title: 'A historical transition',
+      kind: 'ArchitecturalDecision',
+      status: 'superseded',
+      timestamp: '2025-02-02T03:04:05Z',
+      evidence_iri: suppressedIri,
+      predecessor_iris: [],
+      successor_iris: [],
+      rationale_iris: [],
+    },
+  ],
+  evidence: [
+    {
+      iri: requirementIri,
+      title: 'Queryable memory',
+      kind: 'Requirement',
+      status: 'accepted',
+      description: 'Project memory must remain external and queryable.',
+      timestamp: '2026-08-13T18:00:00Z',
+      author: 'James',
+      suppressed: false,
+      properties: [{ predicate: 'hasPriority', label: 'Priority', value: 'high' }],
+      relations: [
+        {
+          predicate: 'concerns',
+          label: 'concerns',
+          direction: 'outgoing',
+          target_iri: componentIri,
+          target_label: 'graph/store layer',
+          target_kind: 'SystemComponent',
+        },
+      ],
+    },
+    {
+      iri: oldDecisionIri,
+      title: 'The earlier graph decision',
+      kind: 'ArchitecturalDecision',
+      status: 'superseded',
+      description: 'The original approach omitted lifecycle history.',
+      timestamp: '2025-01-02T03:04:05Z',
+      suppressed: false,
+      properties: [],
+      relations: [],
+    },
+    {
+      iri: suppressedIri,
+      title: 'Excluded historical detail',
+      kind: 'ArchitecturalDecision',
+      status: 'superseded',
+      suppressed: true,
+      properties: [],
+      relations: [],
+    },
+  ],
+  code_anchors: [
+    {
+      symbol: 'scip symbol graph-store',
+      label: 'GraphStore',
+      entity_iri: 'https://moosedev.dev/kg/CodeEntity/store',
+      path: 'src/graph/store.rs',
+      line: 0,
+    },
+  ],
+  coverage: {
+    entity_count: 3,
+    current_count: 1,
+    historical_count: 2,
+    proposed_count: 0,
+    code_anchor_count: 1,
+    dossier_bytes: 12_288,
+    subject_families: ['SystemComponent', 'InformationRecord'],
+    outline_sections: ['orientation', 'evolution', 'current_state'],
+    truncated: false,
+  },
+  gaps: [{ id: 'gap-1', title: 'Transaction ownership', detail: 'No accepted rationale is linked.', section_kind: 'implementation' }],
   checks: [
     {
       id: 'check-1',
@@ -104,59 +179,41 @@ const run: StoryRun = {
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
   return { promise, resolve, reject };
 }
 
-async function selectStorySubject() {
+async function chooseSubjectAndGenerate() {
   const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
-  await waitFor(() => expect(selector).not.toBeDisabled());
   fireEvent.change(selector, { target: { value: 'graph' } });
   fireEvent.click(await screen.findByRole('option', { name: /graph\/store layer/i }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Tell Story' })).not.toBeDisabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+  await screen.findByRole('heading', { name: 'The graph store', level: 3 });
 }
 
 beforeEach(() => {
   vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
   vi.mocked(api.listStories).mockResolvedValue({
-    stories: [
-      {
-        id: recipe.id,
-        title: recipe.title,
-        subject: recipe.subject,
-        subject_label: 'graph/store layer',
-        subject_kind: 'SystemComponent',
-        goal: recipe.goal,
-        audience: 'reboarding',
-        status: 'draft',
-        curator: recipe.curator,
-        beat_count: 3,
-      },
-    ],
+    stories: [{
+      id: recipe.id,
+      title: recipe.title,
+      subject: recipe.subject,
+      subject_label: 'graph/store layer',
+      subject_kind: 'SystemComponent',
+      goal: recipe.goal,
+      audience: 'reboarding',
+      status: 'draft',
+      curator: recipe.curator,
+    }],
   });
   vi.mocked(api.listStorySubjects).mockResolvedValue({
-    subjects: [
-      {
-        iri: componentIri,
-        kind: 'SystemComponent',
-        label: 'graph/store layer',
-        description: 'Owns src/graph/',
-      },
-    ],
+    subjects: [{ iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer', description: 'Owns src/graph/' }],
   });
   vi.mocked(api.getStory).mockResolvedValue({ recipe });
-  vi.mocked(api.saveStory).mockImplementation(async (value) => ({
-    recipe: { ...value, updated_at: '2026-08-13T20:01:00Z' },
-  }));
-  vi.mocked(api.publishStory).mockResolvedValue({ recipe: { ...recipe, status: 'published' } });
-  vi.mocked(api.gradeStoryCheck).mockResolvedValue({
-    correct: true,
-    feedback: 'Correct — the accepted Requirement establishes this.',
-    evidence_iris: ['https://moosedev.dev/kg/Requirement/one'],
-  });
+  vi.mocked(api.saveStory).mockImplementation(async (value) => ({ recipe: { ...value, updated_at: '2026-08-13T20:01:00Z' } }));
+  vi.mocked(api.publishStory).mockResolvedValue({ recipe: { ...recipe, status: 'published', updated_at: '2026-08-13T20:02:00Z' } });
+  vi.mocked(api.gradeStoryCheck).mockResolvedValue({ correct: true, feedback: 'Correct.', evidence_iris: [requirementIri] });
+  Element.prototype.scrollIntoView = vi.fn();
 });
 
 afterEach(() => {
@@ -164,1021 +221,215 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('StoriesPage', () => {
-  it('searches current entities and generates from the selected canonical IRI', async () => {
-    vi.mocked(api.listStorySubjects).mockResolvedValue({
-      subjects: [
-        { iri: 'component-api', kind: 'SystemComponent', label: 'API layer' },
-        { iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer' },
-      ],
-    });
-
+describe('Story v3 workbench', () => {
+  it('loads the complete categorized entity catalog and generates symbolically first', async () => {
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
 
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-
-    await waitFor(() => expect(api.generateStory).toHaveBeenNthCalledWith(1, {
-      subject_iri: componentIri,
-      assist_level: 0,
-    }));
+    expect(api.listStorySubjects).toHaveBeenCalledWith(undefined, 5_000);
+    expect(api.generateStory).toHaveBeenNthCalledWith(1, { subject_iri: componentIri, assist_level: 0 });
+    expect(api.generateStory).toHaveBeenNthCalledWith(2, { subject_iri: componentIri, assist_level: 1, include_checks: false });
   });
 
-  it('restores the complete categorized entity catalog whenever the picker opens', async () => {
-    vi.mocked(api.listStorySubjects).mockResolvedValue({
-      subjects: [
-        { iri: 'component-api', kind: 'SystemComponent', label: 'API layer' },
-        { iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer' },
-        { iri: 'requirement-story', kind: 'Requirement', label: 'Grounded Stories' },
-        { iri: 'code-story', kind: 'CodeEntity', label: 'story_subjects', description: 'src/stories/resolution.rs' },
-      ],
-    });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
-    fireEvent.mouseDown(selector);
-    expect(await screen.findByRole('option', { name: 'Grounded Stories' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /story_subjects/i })).toBeInTheDocument();
-
-    fireEvent.change(selector, { target: { value: 'graph' } });
-    fireEvent.click(await screen.findByRole('option', { name: /graph\/store layer/i }));
-    expect(selector).toHaveValue('graph/store layer');
-
-    fireEvent.mouseDown(selector);
-    expect(await screen.findByRole('option', { name: 'Grounded Stories' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /story_subjects/i })).toBeInTheDocument();
-    expect(api.listStorySubjects).toHaveBeenCalledWith();
-  });
-
-  it('generates a bounded Story from a free-form topic', async () => {
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Topic' }));
-    fireEvent.change(screen.getByLabelText('Topic'), {
-      target: { value: 'why Story generation is symbolic first' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-
-    await waitFor(() => expect(api.generateStory).toHaveBeenNthCalledWith(1, {
-      topic: 'why Story generation is symbolic first',
-      assist_level: 0,
-    }));
-  });
-
-  it('keeps narration provenance visible after an LLM rewrite', async () => {
-    const assisted = {
-      ...run,
-      narration_mode: 'llm' as const,
-      narration_outcome: 'succeeded' as const,
-      beats: run.beats.map((beat) => ({ ...beat, narrative: `Plain language: ${beat.narrative}` })),
-    };
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockResolvedValueOnce({ outcome: 'story', story: assisted });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-
-    expect(await screen.findByText(/configured LLM turned the evidence shown here into the explanations/i)).toBeInTheDocument();
-    expect(screen.getByText(/selected the Story structure, sources, gaps, and checks deterministically/i)).toBeInTheDocument();
-  });
-
-  it('immediately generates from a contextual component launch', async () => {
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
-
-    render(
-      <StoriesPage
-        onNavigateRecord={vi.fn()}
-        initialComponentIri="https://moosedev.dev/kg/SystemComponent/graph"
-      />,
-    );
-
-    await waitFor(() => {
-      expect(api.generateStory).toHaveBeenCalledWith({
-        subject_iri: 'https://moosedev.dev/kg/SystemComponent/graph',
-        assist_level: 1,
-        include_checks: false,
-      });
-    });
-    expect(await screen.findByText('Symbolic extract')).toBeInTheDocument();
-  });
-
-  it('regenerates a curated Story fresh from its subject', async () => {
-    const publishedRun = { ...run, recipe_id: 'graph-store', trust_state: 'published' as const };
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: publishedRun })
-      .mockResolvedValueOnce({ outcome: 'story', story: publishedRun })
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockResolvedValueOnce({ outcome: 'story', story: run });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByText('The graph store'));
-    expect(await screen.findByText('Published Story')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Generate fresh' }));
-
-    await waitFor(() => {
-      expect(api.generateStory).toHaveBeenLastCalledWith({
-        subject_iri: componentIri,
-        fresh: true,
-        assist_level: 1,
-        include_checks: false,
-      });
-    });
-    expect(await screen.findByText('Generated Story')).toBeInTheDocument();
-  });
-
-  it('defensively resolves an ambiguous subject response before rendering a Story', async () => {
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({
-        outcome: 'ambiguous',
-        prompt: 'graph',
-        recipe_id: 'graph-store',
-        candidates: [
-          { iri: 'component-graph', kind: 'SystemComponent', label: 'Graph store' },
-          { iri: 'component-code', kind: 'SystemComponent', label: 'Code graph' },
-        ],
-      })
-      .mockResolvedValueOnce({ outcome: 'story', story: run });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-
-    expect(await screen.findByText('Which subject did you mean?')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Graph store' }));
-
-    await waitFor(() => {
-      expect(api.generateStory).toHaveBeenLastCalledWith({
-        prompt: 'graph',
-        recipe_id: 'graph-store',
-        subject_iri: 'component-graph',
-        assist_level: 1,
-        include_checks: false,
-      });
-    });
-    expect(await screen.findByText('Symbolic extract')).toBeInTheDocument();
-  });
-
-  it('issues only one symbolic generation for synchronous duplicate submits', async () => {
-    const symbolic = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory).mockReturnValueOnce(symbolic.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    const form = screen.getByRole('button', { name: 'Tell Story' }).closest('form');
-    expect(form).not.toBeNull();
-
-    fireEvent.submit(form!);
-    fireEvent.submit(form!);
-
-    expect(api.generateStory).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      symbolic.resolve({ outcome: 'story', story: run });
-    });
-  });
-
-  it('keeps evidence, code anchors, gaps, and graph-graded checks visible', async () => {
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
+  it('renders one article with citations, chronology, code, separate gaps, and an evidence appendix', async () => {
     const navigate = vi.fn();
     render(<StoriesPage onNavigateRecord={navigate} />);
+    await chooseSubjectAndGenerate();
 
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+    const article = screen.getByRole('article');
+    expect(within(article).getByText(run.brief.text)).toBeInTheDocument();
+    expect(within(article).getByRole('heading', { name: 'Why it exists' })).toBeInTheDocument();
+    expect(within(article).getByRole('heading', { name: 'How it evolved' })).toBeInTheDocument();
+    expect(within(article).getByRole('heading', { name: 'Evolution over time' })).toBeInTheDocument();
+    expect(within(article).getByText(/Maintainer context \(non-authoritative\)/)).toBeInTheDocument();
+    expect(within(article).getByText('src/graph/store.rs:0', { exact: false })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Knowledge gaps' })).not.toBe(article);
 
-    fireEvent.click(await screen.findByText('Requirement: Queryable memory · accepted'));
-    expect(navigate).toHaveBeenCalledWith('https://moosedev.dev/kg/Requirement/one');
-    fireEvent.click(screen.getByText(/GraphStore/));
-    expect(navigate).toHaveBeenCalledWith('https://moosedev.dev/kg/CodeEntity/store');
-    expect(screen.getByText('GraphStore · src/graph/store.rs:0')).toBeInTheDocument();
-    expect(screen.getByText(/No accepted record explains transaction ownership/)).toBeInTheDocument();
-    expect(screen.getByText('This Story cannot currently answer everything')).toBeInTheDocument();
+    fireEvent.click(within(article).getAllByRole('button', { name: /Evidence 1: Queryable memory/ })[0]);
+    expect(navigate).toHaveBeenCalledWith(requirementIri);
+    fireEvent.click(within(article).getByRole('button', { name: 'The earlier graph decision' }));
+    expect(navigate).toHaveBeenCalledWith(oldDecisionIri);
+    fireEvent.click(within(article).getByRole('button', { name: 'A historical transition' }));
+    expect(navigate).toHaveBeenCalledWith(suppressedIri);
+
+    fireEvent.click(within(article).getByRole('button', { name: /Evidence appendix/ }));
+    expect(within(article).getByText('Project memory must remain external and queryable.')).toBeInTheDocument();
+    expect(within(article).getByText('Priority')).toBeInTheDocument();
+    expect(within(article).getByText('high')).toBeInTheDocument();
+    expect(within(article).getByText('12.0 KiB dossier')).toBeInTheDocument();
+    expect(within(article).getByText('InformationRecord')).toBeInTheDocument();
+    expect(within(article).getAllByText('Current state').length).toBeGreaterThan(1);
+    expect(within(article).queryByText('Excluded historical detail')).not.toBeInTheDocument();
+    expect(within(article).getAllByText(/superseded/i).length).toBeGreaterThan(0);
+  });
+
+  it('accepts assisted paragraph regrouping while rejecting deterministic projection drift', () => {
+    const assisted: StoryRun = {
+      ...run,
+      narration_mode: 'llm',
+      narration_strategy: 'single_pass',
+      narration_outcome: 'succeeded',
+      brief: { text: 'A clearer opening.', citation_iris: [oldDecisionIri, requirementIri] },
+      narrative: run.narrative.map((section, index) => ({
+        ...section,
+        paragraphs: index === 0
+          ? [
+              { text: 'A clearer first paragraph.', citation_iris: [oldDecisionIri] },
+              { text: 'A new connecting paragraph.', citation_iris: [requirementIri] },
+            ]
+          : [{ text: `Clear: ${section.paragraphs[0].text}`, citation_iris: [...section.paragraphs[0].citation_iris].reverse() }],
+      })),
+    };
+    assisted.checks = [];
+    const merged = applyAssistedNarration(run, assisted);
+    expect(merged?.brief).toEqual(assisted.brief);
+    expect(merged?.narrative).toEqual(assisted.narrative);
+    expect(merged?.narrative[0].paragraphs).toHaveLength(2);
+    expect(merged?.checks).toEqual(run.checks);
+    expect(applyAssistedNarration(run, { ...assisted, timeline: [] })).toBeNull();
+    expect(applyAssistedNarration(run, { ...assisted, evidence: [] })).toBeNull();
+    expect(applyAssistedNarration(run, { ...assisted, coverage: { ...assisted.coverage, dossier_bytes: 1 } })).toBeNull();
+  });
+
+  it('preserves graded answers while background narration replaces prose', async () => {
+    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
+    vi.mocked(api.generateStory)
+      .mockResolvedValueOnce({ outcome: 'story', story: run })
+      .mockReturnValueOnce(assisted.promise);
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
 
     fireEvent.click(screen.getByLabelText('The project knowledge graph'));
+    await waitFor(() => expect(screen.getByLabelText('The project knowledge graph')).toBeChecked());
     fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
-    expect(await screen.findByText(/Correct —/)).toBeInTheDocument();
-    expect(api.gradeStoryCheck).toHaveBeenCalledWith({
-      check_id: 'check-1',
-      selected_option_ids: ['graph'],
-    });
-  });
+    expect(await screen.findByText('Correct.')).toBeInTheDocument();
 
-  it('shows lifecycle status and styles every backend working-set status as current', async () => {
-    const lifecycleRun: StoryRun = {
-      ...run,
-      beats: [
-        {
-          ...run.beats[0],
-          evidence: [
-            { ...run.beats[0].evidence[0], status: 'implemented' },
-            {
-              iri: componentIri,
-              title: run.subject.label,
-              kind: 'SystemComponent',
-              status: 'superseded',
-            },
-          ],
+    await act(async () => assisted.resolve({
+      outcome: 'story',
+      story: {
+        ...run,
+        narration_mode: 'llm',
+        narration_strategy: 'single_pass',
+        narration_outcome: 'succeeded',
+        narration_coverage: {
+          eligible_entities: 46,
+          included_entities: 18,
+          source_groups: 9,
+          truncated: true,
         },
-        ...run.beats.slice(1),
-      ],
-    };
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: lifecycleRun });
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-
-    const current = await screen.findByText('Requirement: Queryable memory · implemented');
-    const retired = screen.getByText('SystemComponent: graph/store layer · superseded');
-    expect(current.closest('.MuiChip-root')).toHaveClass('MuiChip-colorPrimary');
-    expect(retired.closest('.MuiChip-root')).toHaveClass('MuiChip-colorWarning');
+        brief: { ...run.brief, text: 'A clearer opening.' },
+        narrative: run.narrative.map((section) => ({ ...section, paragraphs: section.paragraphs.map((paragraph) => ({ ...paragraph, text: `Clear: ${paragraph.text}` })) })),
+      },
+    }));
+    expect(await screen.findByText('A clearer opening.')).toBeInTheDocument();
+    expect(screen.getByText(/It used 18 of 46 eligible evidence entities/)).toBeInTheDocument();
+    expect(screen.getByText('Correct.')).toBeInTheDocument();
+    expect(screen.getByLabelText('The project knowledge graph')).toBeChecked();
   });
 
-  it('surfaces grading failures without leaving the check busy', async () => {
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
-    vi.mocked(api.gradeStoryCheck).mockRejectedValueOnce(new Error('Unable to grade against current graph'));
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByLabelText('The project knowledge graph'));
-    fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
-
-    expect(await screen.findByText('Unable to grade against current graph')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Check answer' })).toBeEnabled();
-  });
-
-  it('saves generated Stories as reference-only draft recipes', async () => {
-    const reloadedRun = {
-      ...run,
-      recipe_id: 'graph-store',
-      trust_state: 'draft' as const,
-      title: 'Server-resolved graph Story',
-      beats: [
-        {
-          ...run.beats[0],
-          evidence: [
-            {
-              iri: 'https://moosedev.dev/kg/Constraint/server',
-              title: 'Server-selected evidence',
-              kind: 'Constraint',
-              status: 'accepted',
-            },
-          ],
-        },
-        ...run.beats.slice(1),
-      ],
-    };
+  it('explains categorized narration validation failures without hiding the Story', async () => {
     vi.mocked(api.generateStory)
       .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockResolvedValueOnce({ outcome: 'story', story: reloadedRun });
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
-
-    await waitFor(() => expect(api.saveStory).toHaveBeenCalled());
-    const saved = vi.mocked(api.saveStory).mock.calls[0][0];
-    expect(saved.status).toBe('draft');
-    expect(saved.beats[0]).toMatchObject({
-      record_iris: ['https://moosedev.dev/kg/Requirement/one'],
-      code_symbols: ['scip symbol graph-store'],
-    });
-    expect(saved).not.toHaveProperty('overview');
-    expect(api.generateStory).toHaveBeenLastCalledWith({ recipe_id: saved.id, assist_level: 1 });
-    expect(await screen.findByText('Server-resolved graph Story')).toBeInTheDocument();
-    expect(screen.getByText('Constraint: Server-selected evidence · accepted')).toBeInTheDocument();
-    expect(screen.queryByText('Requirement: Queryable memory · accepted')).not.toBeInTheDocument();
-  });
-
-  it('supports adding, removing, reordering, annotating, saving, and publishing beats', async () => {
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    expect(await screen.findByText('Curate Story')).toBeInTheDocument();
-
-    fireEvent.change(screen.getAllByLabelText('Curator note')[0], { target: { value: 'Start with the requirement.' } });
-    fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), { target: { value: '' } });
-    expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
-    expect(screen.getByText(/Every published beat needs at least one current record or code anchor/)).toHaveTextContent('What to protect');
-    fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), {
-      target: { value: 'https://moosedev.dev/kg/Constraint/one,\n https://moosedev.dev/kg/Requirement/two' },
-    });
-    expect(screen.getByRole('button', { name: 'Publish' })).toBeEnabled();
-    fireEvent.click(screen.getByLabelText('Move Why it exists down'));
-    fireEvent.click(screen.getByRole('button', { name: 'Add beat' }));
-    fireEvent.click(screen.getByLabelText('Remove New beat'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-
-    await waitFor(() => expect(api.saveStory).toHaveBeenCalled());
-    const saved = vi.mocked(api.saveStory).mock.calls[0][0];
-    expect(saved.beats.map((beat) => beat.id)).toEqual(['boundary', 'purpose', 'risk']);
-    expect(saved.beats[1].curator_note).toBe('Start with the requirement.');
-    expect(saved.beats[2].record_iris).toEqual([
-      'https://moosedev.dev/kg/Constraint/one',
-      'https://moosedev.dev/kg/Requirement/two',
-    ]);
-
-    fireEvent.click(screen.getByLabelText('Move Its boundary down'));
-    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
-    await waitFor(() =>
-      expect(api.publishStory).toHaveBeenCalledWith(
-        'graph-store',
-        '2026-08-13T20:01:00Z',
-      ),
-    );
-  });
-
-  it('allows zero-to-five-beat drafts but blocks saving above the backend cap', async () => {
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Add beat' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add beat' }));
-    expect(screen.getByRole('button', { name: 'Save draft' })).toBeEnabled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Add beat' }));
-    expect(screen.getByText('Stories may contain at most five beats. Remove a beat before saving.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
-
-    for (let index = 0; index < 6; index += 1) {
-      fireEvent.click(screen.getAllByRole('button', { name: /^Remove / })[0]);
-    }
-    expect(screen.getByText('Drafts may contain zero to five beats; publishing requires at least three.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Save draft' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
-  });
-
-  it('preserves published status, protects dirty edits, and refreshes the reader after saving', async () => {
-    const publishedRecipe = { ...recipe, status: 'published' as const };
-    const refreshedRun = {
-      ...run,
-      recipe_id: recipe.id,
-      trust_state: 'published' as const,
-      title: 'Updated graph story',
-    };
-    vi.mocked(api.getStory).mockResolvedValueOnce({ recipe: publishedRecipe });
-    vi.mocked(api.saveStory).mockImplementationOnce(async (value) => ({ recipe: value }));
-    vi.mocked(api.generateStory).mockResolvedValueOnce({ outcome: 'story', story: refreshedRun });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'Updated graph story' } });
-
-    expect(screen.getByLabelText('Story subject')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Tell Story' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-
-    await waitFor(() => {
-      expect(api.saveStory).toHaveBeenCalledWith(expect.objectContaining({
-        title: 'Updated graph story',
-        status: 'published',
-      }));
-      expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: recipe.id, assist_level: 1 });
-    });
-    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    expect(await screen.findByText('Updated graph story')).toBeInTheDocument();
-    expect(screen.getByText('Published Story')).toBeInTheDocument();
-  });
-
-  it('rejects excessive and duplicate per-beat references before saving', async () => {
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-
-    fireEvent.change(await screen.findByLabelText('Record IRIs for Why it exists'), {
-      target: { value: 'one\ntwo\nthree\nfour\nfive\nsix\nseven' },
-    });
-    fireEvent.change(screen.getByLabelText('Code symbols for Its boundary'), {
-      target: { value: 'duplicate\nduplicate' },
-    });
-    fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), {
-      target: { value: 'record-risk\nrecord-risk' },
-    });
-    fireEvent.change(screen.getByLabelText('Code symbols for Why it exists'), {
-      target: { value: 'one\ntwo\nthree\nfour\nfive\nsix\nseven' },
-    });
-
-    expect(screen.getByText(/at most six unique records and six unique code symbols/)).toHaveTextContent(
-      'Why it exists has more than six record IRIs',
-    );
-    expect(screen.getByText(/at most six unique records and six unique code symbols/)).toHaveTextContent(
-      'Its boundary has duplicate code symbols',
-    );
-    expect(screen.getByText(/at most six unique records and six unique code symbols/)).toHaveTextContent(
-      'What to protect has duplicate record IRIs',
-    );
-    expect(screen.getByText(/at most six unique records and six unique code symbols/)).toHaveTextContent(
-      'Why it exists has more than six code symbols',
-    );
-    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
-  });
-
-  it('busy-gates ambiguity choices and reader actions', async () => {
-    const candidateRequest = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({
-        outcome: 'ambiguous',
-        prompt: 'graph',
-        candidates: [
-          { iri: 'component-graph', kind: 'SystemComponent', label: 'Graph store' },
-          { iri: 'component-code', kind: 'SystemComponent', label: 'Code graph' },
-        ],
-      })
-      .mockReturnValueOnce(candidateRequest.promise)
       .mockResolvedValueOnce({
         outcome: 'story',
-        story: { ...run, recipe_id: recipe.id, trust_state: 'published' },
+        story: {
+          ...run,
+          narration_outcome: 'invalid_response',
+          narration_failure_reason: 'citation_mismatch',
+          narration_coverage: {
+            eligible_entities: 2,
+            included_entities: 2,
+            source_groups: 2,
+            truncated: false,
+          },
+        },
       });
-
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Graph store' }));
-    expect(screen.getByRole('button', { name: 'Graph store' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Code graph' })).toBeDisabled();
+    await chooseSubjectAndGenerate();
+    expect(await screen.findByText(/did not preserve the required evidence citations/)).toBeInTheDocument();
+    expect(screen.getByText(run.brief.text)).toBeInTheDocument();
+  });
 
-    candidateRequest.resolve({
-      outcome: 'story',
-      story: { ...run, recipe_id: recipe.id, trust_state: 'published' },
+  it('scrolls an incorrect answer back to the server-selected narrative section', async () => {
+    vi.mocked(api.gradeStoryCheck).mockResolvedValue({
+      correct: false,
+      feedback: 'Revisit the current state.',
+      revisit_section_id: 'current-state',
+      evidence_iris: [requirementIri],
     });
-    expect(await screen.findByRole('button', { name: 'Generate fresh' })).toBeEnabled();
-
-    const freshRequest = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory).mockReturnValueOnce(freshRequest.promise);
-    fireEvent.click(screen.getByRole('button', { name: 'Generate fresh' }));
-    expect(screen.getByRole('button', { name: 'All Stories' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Generate fresh' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Curate' })).toBeDisabled();
-    freshRequest.resolve({ outcome: 'story', story: run });
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
+    fireEvent.click(screen.getByLabelText('The Story recipe'));
+    fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
+    await screen.findByText('Revisit the current state.');
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
   });
 
-  it('does not publish when the save response omits its CAS token', async () => {
-    vi.mocked(api.saveStory).mockImplementationOnce(async (value) => ({
-      recipe: { ...value, updated_at: null },
-    }));
+  it('saves a generated Story as a v3 focus recipe and guards double clicks', async () => {
+    const save = deferred<{ recipe: StoryRecipe }>();
+    const expandedRun: StoryRun = {
+      ...run,
+      evidence: [
+        ...run.evidence,
+        { iri: componentIri, title: 'graph/store layer', kind: 'SystemComponent', status: 'accepted', suppressed: false, properties: [], relations: [] },
+        { iri: 'https://moosedev.dev/kg/Rationale/one', title: 'Why the graph changed', kind: 'Rationale', status: 'accepted', suppressed: false, properties: [], relations: [] },
+      ],
+      coverage: { ...run.coverage, entity_count: 4, current_count: 3 },
+    };
+    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: expandedRun });
+    vi.mocked(api.saveStory).mockReturnValueOnce(save.promise);
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
 
+    const button = screen.getByRole('button', { name: 'Save as draft' });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(api.saveStory).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(api.saveStory).mock.calls[0][0];
+    expect(saved.schema_version).toBe(3);
+    expect(saved.focus.include_record_iris).toEqual([]);
+    expect(saved.focus.exclude_record_iris).toEqual([]);
+    expect(saved.focus.include_code_symbols).toEqual([]);
+    expect(saved.focus.exclude_code_symbols).toEqual([]);
+    expect(saved.focus.emphasis).toEqual(['orientation', 'evolution', 'current_state']);
+
+    await act(async () => save.resolve({ recipe: { ...saved, updated_at: 'token' } }));
+    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: saved.id, assist_level: 0 }));
+    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: saved.id, assist_level: 1, include_checks: false }));
+  });
+
+  it('curates focus, emphasis, and context instead of editing narrative blocks', async () => {
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Publish' }));
+    await screen.findByRole('heading', { name: 'Curate Story' });
 
-    expect(await screen.findByText('Story changes were saved, but the server did not return the updated_at token required to publish')).toBeInTheDocument();
-    expect(api.publishStory).not.toHaveBeenCalled();
-  });
-
-  it('advances the editor CAS baseline when publish fails after a successful save', async () => {
-    vi.mocked(api.saveStory).mockImplementationOnce(async (value) => ({
-      recipe: { ...value, updated_at: '2026-08-13T21:00:00Z' },
-    }));
-    vi.mocked(api.publishStory).mockRejectedValueOnce(new Error('Story changed concurrently'));
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'Saved before publish' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
-
-    expect(await screen.findByText(/Story changes were saved, but publication failed: Story changed concurrently/)).toBeInTheDocument();
-    expect(api.publishStory).toHaveBeenCalledWith('graph-store', '2026-08-13T21:00:00Z');
-    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
-    expect(screen.queryByText('Save changes before closing or starting another Story.')).not.toBeInTheDocument();
-  });
-
-  it('keeps a successful server reload visible when library refresh fails', async () => {
-    const serverRun = { ...run, recipe_id: recipe.id, trust_state: 'draft' as const, title: 'Reload succeeded' };
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockResolvedValueOnce({ outcome: 'story', story: serverRun });
-    vi.mocked(api.listStories)
-      .mockResolvedValueOnce({ stories: [] })
-      .mockRejectedValueOnce(new Error('Library unavailable'));
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
-
-    expect(await screen.findByText('Reload succeeded')).toBeInTheDocument();
-    expect(screen.getByText(/Story was saved as draft, but the library could not be refreshed: Library unavailable/)).toBeInTheDocument();
-  });
-
-  it('mints collision-free beat IDs when UUID generation is unavailable and timestamps collide', async () => {
-    const originalCrypto = globalThis.crypto;
-    vi.stubGlobal('crypto', {});
-    vi.spyOn(Date, 'now').mockReturnValue(12345);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Add beat' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add beat' }));
+    fireEvent.change(screen.getByLabelText('Exclude records'), { target: { value: oldDecisionIri } });
+    fireEvent.change(screen.getByLabelText('Curator context'), { target: { value: 'Lead with why the history changed.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Move Evolution up' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
 
     await waitFor(() => expect(api.saveStory).toHaveBeenCalled());
     const saved = vi.mocked(api.saveStory).mock.calls[0][0];
-    const ids = saved.beats.map((beat) => beat.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(ids.filter((id) => id.startsWith('beat-')).length).toBe(2);
-    vi.stubGlobal('crypto', originalCrypto);
+    expect(saved.focus.exclude_record_iris).toEqual([oldDecisionIri]);
+    expect(saved.focus.emphasis.slice(0, 2)).toEqual(['evolution', 'orientation']);
+    expect(saved.curator_context).toBe('Lead with why the history changed.');
+    expect(screen.queryByText(/beat/i)).not.toBeInTheDocument();
   });
 
-  it('renders symbolically first and ignores assisted narration after navigation', async () => {
-    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockReturnValueOnce(assisted.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-
-    expect(await screen.findByText('Symbolic extract')).toBeInTheDocument();
-    expect(screen.getByText('Improving narration…')).toBeInTheDocument();
-    expect(api.generateStory).toHaveBeenNthCalledWith(1, {
-      subject_iri: componentIri,
-      assist_level: 0,
-    });
-    expect(api.generateStory).toHaveBeenNthCalledWith(2, {
-      subject_iri: componentIri,
-      assist_level: 1,
-      include_checks: false,
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'All Stories' }));
-    assisted.resolve({
-      outcome: 'story',
-      story: { ...run, narration_mode: 'llm', title: 'Late assisted Story' },
-    });
-
-    await waitFor(() => expect(screen.queryByText('Late assisted Story')).not.toBeInTheDocument());
-    expect(screen.getByText('Saved Stories')).toBeInTheDocument();
-  });
-
-  it('ignores a stale assisted error after navigation', async () => {
-    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockReturnValueOnce(assisted.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'All Stories' }));
-    assisted.reject(new Error('Late LLM failure'));
-
-    await waitFor(() => expect(screen.queryByText(/Late LLM failure/)).not.toBeInTheDocument());
-    expect(screen.getByText('Saved Stories')).toBeInTheDocument();
-  });
-
-  it('does not let pending assistance overwrite a generated Story save', async () => {
-    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
-    const savedRun = {
-      ...run,
-      recipe_id: recipe.id,
-      trust_state: 'draft' as const,
-      title: 'Saved server Story',
-    };
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockReturnValueOnce(assisted.promise)
-      .mockResolvedValueOnce({ outcome: 'story', story: savedRun });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
-    expect(await screen.findByText('Saved server Story')).toBeInTheDocument();
-
-    assisted.resolve({
-      outcome: 'story',
-      story: { ...run, narration_mode: 'llm', title: 'Stale assisted Story' },
-    });
-    await waitFor(() => expect(screen.queryByText('Stale assisted Story')).not.toBeInTheDocument());
-    expect(screen.getByText('Saved server Story')).toBeInTheDocument();
-  });
-
-  it('preserves quiz answers across a symbolic-to-assisted presentation upgrade', async () => {
-    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockReturnValueOnce(assisted.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    const answer = await screen.findByLabelText('The project knowledge graph');
-    fireEvent.click(answer);
-    expect(answer).toBeChecked();
-
-    assisted.resolve({
-      outcome: 'story',
-      story: {
-        ...run,
-        narration_mode: 'llm',
-        beats: run.beats.map((beat) => ({
-          ...beat,
-          narrative: `Assisted: ${beat.narrative}`,
-        })),
-        checks: [
-          {
-            id: 'random-assisted-check-id',
-            question: 'This presentation-only quiz must be ignored',
-            options: [{ id: 'ignored', label: 'Ignored option' }],
-          },
-        ],
-      },
-    });
-
-    expect(await screen.findByText('LLM-assisted narration')).toBeInTheDocument();
-    expect(screen.getByText('Assisted: It keeps typed project knowledge queryable.')).toBeInTheDocument();
-    expect(screen.getByLabelText('The project knowledge graph')).toBeChecked();
-    expect(screen.queryByText('This presentation-only quiz must be ignored')).not.toBeInTheDocument();
-  });
-
-  it('rejects an assisted snapshot whose title or evidence differs from the symbolic structure', async () => {
-    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockReturnValueOnce(assisted.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({
-      subject_iri: componentIri,
-      assist_level: 0,
-    }));
-    expect(await screen.findByText('The graph store')).toBeInTheDocument();
-
-    assisted.resolve({
-      outcome: 'story',
-      story: {
-        ...run,
-        narration_mode: 'llm',
-        title: 'Structurally different Story',
-        beats: [
-          {
-            ...run.beats[0],
-            narrative: 'Assisted replacement must not land.',
-            evidence: [
-              {
-                iri: 'https://moosedev.dev/kg/Constraint/different',
-                title: 'Different evidence',
-                kind: 'Constraint',
-                status: 'accepted',
-              },
-            ],
-          },
-          ...run.beats.slice(1),
-        ],
-      },
-    });
-
-    expect(await screen.findByText('Assisted narration did not match the symbolic Story structure; showing the symbolic Story.')).toBeInTheDocument();
-    expect(screen.getByText('The graph store')).toBeInTheDocument();
-    expect(screen.getByText('It keeps typed project knowledge queryable.')).toBeInTheDocument();
-    expect(screen.queryByText('Structurally different Story')).not.toBeInTheDocument();
-    expect(screen.queryByText('Assisted replacement must not land.')).not.toBeInTheDocument();
-  });
-
-  it('rejects assisted narration when visible evidence metadata changes', async () => {
-    const assisted = deferred<{ outcome: 'story'; story: StoryRun }>();
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: run })
-      .mockReturnValueOnce(assisted.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({
-      subject_iri: componentIri,
-      assist_level: 0,
-    }));
-    expect(await screen.findByText('The graph store')).toBeInTheDocument();
-
-    assisted.resolve({
-      outcome: 'story',
-      story: {
-        ...run,
-        narration_mode: 'llm',
-        beats: [
-          {
-            ...run.beats[0],
-            narrative: 'Metadata drift must prevent this narration from landing.',
-            evidence: [{ ...run.beats[0].evidence[0], title: 'Changed visible evidence title' }],
-          },
-          ...run.beats.slice(1),
-        ],
-      },
-    });
-
-    expect(await screen.findByText('Assisted narration did not match the symbolic Story structure; showing the symbolic Story.')).toBeInTheDocument();
-    expect(screen.getByText('Requirement: Queryable memory · accepted')).toBeInTheDocument();
-    expect(screen.queryByText('Changed visible evidence title')).not.toBeInTheDocument();
-    expect(screen.queryByText('Metadata drift must prevent this narration from landing.')).not.toBeInTheDocument();
-  });
-
-  it('grades different checks concurrently with independent request identity', async () => {
-    const firstGrade = deferred<StoryCheckGradeResponse>();
-    const secondGrade = deferred<StoryCheckGradeResponse>();
-    const twoCheckRun: StoryRun = {
-      ...run,
-      checks: [
-        ...run.checks,
-        {
-          id: 'check-2',
-          question: 'Which layer presents the Story?',
-          options: [
-            { id: 'ui', label: 'The web UI' },
-            { id: 'store', label: 'The graph store' },
-          ],
-        },
-      ],
-    };
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: twoCheckRun });
-    vi.mocked(api.gradeStoryCheck)
-      .mockReturnValueOnce(firstGrade.promise)
-      .mockReturnValueOnce(secondGrade.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByLabelText('The project knowledge graph'));
-    fireEvent.click(screen.getByLabelText('The web UI'));
-    const buttons = screen.getAllByRole('button', { name: 'Check answer' });
-    fireEvent.click(buttons[0]);
-    fireEvent.click(buttons[1]);
-
-    expect(api.gradeStoryCheck).toHaveBeenCalledTimes(2);
-    expect(buttons[0]).toBeDisabled();
-    expect(buttons[1]).toBeDisabled();
-    secondGrade.resolve({ correct: true, feedback: 'Second complete', evidence_iris: [] });
-    expect(await screen.findByText('Second complete')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Check answer' })[0]).toBeDisabled();
-    expect(screen.getAllByRole('button', { name: 'Check answer' })[1]).toBeEnabled();
-    firstGrade.resolve({ correct: true, feedback: 'First complete', evidence_iris: [] });
-    expect(await screen.findByText('First complete')).toBeInTheDocument();
-  });
-
-  it('guards Save as draft synchronously and mints its recipe ID with UUID entropy', async () => {
-    const save = deferred<{ recipe: StoryRecipe }>();
-    vi.stubGlobal('crypto', { randomUUID: () => '123e4567-e89b-12d3-a456-426614174000' });
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
-    vi.mocked(api.saveStory).mockReturnValue(save.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    const saveButton = await screen.findByRole('button', { name: 'Save as draft' });
-    act(() => {
-      saveButton.click();
-      saveButton.click();
-    });
-
-    expect(api.saveStory).toHaveBeenCalledTimes(1);
-    const savedRecipe = vi.mocked(api.saveStory).mock.calls[0][0];
-    expect(savedRecipe.id).toBe('the-graph-store-123e4567-e89b-12d3-a456-426614174000');
-    save.resolve({ recipe: savedRecipe });
-    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: savedRecipe.id, assist_level: 1 }));
-  });
-
-  it('freezes editor mutations and synchronously guards save operations', async () => {
-    const save = deferred<{ recipe: StoryRecipe }>();
-    vi.mocked(api.saveStory).mockReturnValue(save.promise);
-
+  it('blocks invalid overlapping focus and preserves a published status on save', async () => {
+    vi.mocked(api.getStory).mockResolvedValue({ recipe: { ...recipe, status: 'published' } });
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    const saveButton = await screen.findByRole('button', { name: 'Save draft' });
-    act(() => {
-      saveButton.click();
-      saveButton.click();
-    });
+    await screen.findByRole('heading', { name: 'Curate Story' });
 
-    expect(api.saveStory).toHaveBeenCalledTimes(1);
-    expect(screen.getByLabelText('Title')).toBeDisabled();
-    expect(screen.getByLabelText('Learning goal')).toBeDisabled();
-    expect(screen.getByLabelText('Beat 1')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Add beat' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Remove Why it exists' })).toBeDisabled();
-
-    save.resolve({ recipe: { ...recipe, updated_at: '2026-08-14T01:00:00Z' } });
-    await waitFor(() => expect(screen.getByLabelText('Title')).toBeEnabled());
-  });
-
-  it('invalidates grading when an answer changes and clears feedback tied to the old selection', async () => {
-    const firstGrade = deferred<StoryCheckGradeResponse>();
-    vi.mocked(api.gradeStoryCheck)
-      .mockReturnValueOnce(firstGrade.promise)
-      .mockResolvedValueOnce({ correct: false, feedback: 'Second answer feedback', evidence_iris: [] });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByLabelText('The project knowledge graph'));
-    fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
-    fireEvent.click(screen.getByLabelText('The Story recipe'));
-
-    expect(screen.getByRole('button', { name: 'Check answer' })).toBeEnabled();
-    firstGrade.resolve({ correct: true, feedback: 'Feedback for the old answer', evidence_iris: [] });
-    await waitFor(() => expect(screen.queryByText('Feedback for the old answer')).not.toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
-    expect(await screen.findByText('Second answer feedback')).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('The project knowledge graph'));
-    expect(screen.queryByText('Second answer feedback')).not.toBeInTheDocument();
-  });
-
-  it('adopts a successfully saved draft before reload so a reload failure cannot create a duplicate', async () => {
-    const generatedWithComponentBoundary: StoryRun = {
-      ...run,
-      beats: run.beats.map((beat) =>
-        beat.intent === 'boundary'
-          ? {
-              ...beat,
-              evidence: [{ iri: componentIri, title: run.subject.label, kind: 'SystemComponent', status: 'accepted' }],
-              code_anchors: [],
-            }
-          : beat,
-      ),
-    };
-    vi.mocked(api.generateStory)
-      .mockResolvedValueOnce({ outcome: 'story', story: generatedWithComponentBoundary })
-      .mockResolvedValueOnce({ outcome: 'story', story: generatedWithComponentBoundary })
-      .mockRejectedValueOnce(new Error('Reader reload unavailable'));
-    vi.mocked(api.saveStory).mockImplementationOnce(async (value) => ({
-      recipe: { ...value, id: 'saved-once', updated_at: '2026-08-14T01:00:00Z' },
-    }));
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
-
-    expect(await screen.findByText(/Story was saved as draft, but its reader could not be reloaded: Reader reload unavailable/)).toBeInTheDocument();
-    expect(screen.getByText('Draft Story')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Save as draft' })).not.toBeInTheDocument();
-    expect(api.saveStory).toHaveBeenCalledTimes(1);
-    const saved = vi.mocked(api.saveStory).mock.calls[0][0];
-    expect(saved.beats.find((beat) => beat.intent === 'boundary')?.record_iris).toEqual([]);
-  });
-
-  it('keeps successful curated persistence honest when reader reload fails', async () => {
-    const updatedTitle = 'Persisted without a reader reload';
-    vi.mocked(api.saveStory).mockImplementationOnce(async (value) => ({
-      recipe: { ...value, updated_at: '2026-08-14T01:00:00Z' },
-    }));
-    vi.mocked(api.generateStory).mockRejectedValueOnce(new Error('Reader unavailable'));
-    vi.mocked(api.listStories)
-      .mockResolvedValueOnce({
-        stories: [
-          {
-            id: recipe.id,
-            title: recipe.title,
-            subject: recipe.subject,
-            subject_label: 'graph/store layer',
-            subject_kind: 'SystemComponent',
-            goal: recipe.goal,
-            audience: 'reboarding',
-            status: 'draft',
-            curator: recipe.curator,
-            beat_count: 3,
-          },
-        ],
-      })
-      .mockResolvedValueOnce({
-        stories: [
-          {
-            id: recipe.id,
-            title: updatedTitle,
-            subject: recipe.subject,
-            subject_label: 'graph/store layer',
-            subject_kind: 'SystemComponent',
-            goal: recipe.goal,
-            audience: 'reboarding',
-            status: 'draft',
-            curator: recipe.curator,
-            beat_count: 3,
-          },
-        ],
-      });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.change(await screen.findByLabelText('Title'), { target: { value: updatedTitle } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-
-    expect(await screen.findByText(/Story was saved, but its reader could not be reloaded: Reader unavailable/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    expect(await screen.findByText(updatedTitle)).toBeInTheDocument();
-    expect(screen.queryByText('Symbolic extract')).not.toBeInTheDocument();
-  });
-
-  it('keeps successful publication honest when reader reload fails', async () => {
-    const published = {
-      ...recipe,
-      status: 'published' as const,
-      updated_at: '2026-08-14T02:00:00Z',
-    };
-    vi.mocked(api.publishStory).mockResolvedValueOnce({ recipe: published });
-    vi.mocked(api.generateStory).mockRejectedValueOnce(new Error('Published reader unavailable'));
-    vi.mocked(api.listStories)
-      .mockResolvedValueOnce({
-        stories: [
-          {
-            id: recipe.id,
-            title: recipe.title,
-            subject: recipe.subject,
-            subject_label: 'graph/store layer',
-            subject_kind: 'SystemComponent',
-            goal: recipe.goal,
-            audience: 'reboarding',
-            status: 'draft',
-            curator: recipe.curator,
-            beat_count: 3,
-          },
-        ],
-      })
-      .mockResolvedValueOnce({
-        stories: [
-          {
-            id: recipe.id,
-            title: recipe.title,
-            subject: recipe.subject,
-            subject_label: 'graph/store layer',
-            subject_kind: 'SystemComponent',
-            goal: recipe.goal,
-            audience: 'reboarding',
-            status: 'published',
-            curator: recipe.curator,
-            beat_count: 3,
-          },
-        ],
-      });
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Publish' }));
-
-    expect(await screen.findByText(/Story was published, but its reader could not be reloaded: Published reader unavailable/)).toBeInTheDocument();
-    expect(api.publishStory).toHaveBeenCalledWith(recipe.id, '2026-08-13T20:01:00Z');
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    expect(screen.getByText('Saved Stories')).toBeInTheDocument();
-    expect(screen.getByText('Published Story')).toBeInTheDocument();
-    expect(screen.queryByText('Symbolic extract')).not.toBeInTheDocument();
-  });
-
-  it('busy-gates library curation synchronously', async () => {
-    const load = deferred<{ recipe: StoryRecipe }>();
-    vi.mocked(api.getStory).mockReturnValue(load.promise);
-
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    const curate = await screen.findByRole('button', { name: 'Curate' });
-    act(() => {
-      curate.click();
-      curate.click();
-    });
-
-    expect(api.getStory).toHaveBeenCalledTimes(1);
-    expect(curate).toBeDisabled();
-    load.resolve({ recipe });
-    expect(await screen.findByText('Curate Story')).toBeInTheDocument();
-  });
-
-  it('reports dirty editor state to the App navigation boundary', async () => {
-    const onDirtyChange = vi.fn();
-    render(<StoriesPage onNavigateRecord={vi.fn()} onDirtyChange={onDirtyChange} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-    fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'Unsaved Story title' } });
-    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
-  });
-
-  it('applies published anchor and canonical-intent validation to Save changes', async () => {
-    vi.mocked(api.getStory).mockResolvedValueOnce({ recipe: { ...recipe, status: 'published' } });
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
-
-    fireEvent.change(await screen.findByLabelText('Code symbols for Its boundary'), { target: { value: '' } });
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
-    fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Exclude records'), { target: { value: requirementIri } });
+    expect(screen.getByText(/both included and excluded/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
-    fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), { target: { value: 'record-risk' } });
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
-    fireEvent.click(screen.getByLabelText('Move Why it exists down'));
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
-    expect(screen.getByText(/Published Story beats must use unique intents in this order/)).toBeInTheDocument();
-  });
 
-  it('renders curator notes separately from authoritative narration', async () => {
-    const notedRun: StoryRun = {
-      ...run,
-      beats: run.beats.map((beat, index) =>
-        index === 0 ? { ...beat, curator_note: 'Start here during incident response.' } : beat,
-      ),
-    };
-    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: notedRun });
-    render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    await selectStorySubject();
-    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
-    expect(await screen.findByText(/Maintainer note \(non-authoritative\):/)).toBeInTheDocument();
-    expect(screen.getByText('Start here during incident response.')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Exclude records'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Learning goal'), { target: { value: 'Updated goal' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(api.saveStory).toHaveBeenCalled());
+    expect(vi.mocked(api.saveStory).mock.calls[0][0].status).toBe('published');
   });
 });

@@ -3,36 +3,6 @@
 //! Recipes are version-controlled presentation metadata under `stories/`. Story
 //! runs are read-only projections: this module never writes the project graph.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
-
-use anyhow::Context;
-use moose::traits::LlmClient;
-use moose::types::{LlmAssistLevel, LlmParams};
-use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNode, Term};
-use serde::{Deserialize, Serialize};
-
-use crate::graph::{
-    asserted_project_types, first_literal, in_working_set, load_components, local_name,
-    relevant_context_snapshot, resolve_component_query, AppState, CodeTerms, ComponentEntry,
-    PROJECT_KG_GRAPH_IRI,
-};
-
-const MIN_PUBLISHED_BEATS: usize = 3;
-const MAX_BEATS: usize = 5;
-const MAX_ANCHORS_PER_BEAT: usize = 6;
-const MAX_CHECK_GRANTS: usize = 1_024;
-const MAX_RETIRED_CHECK_HANDLES: usize = 1_024;
-const MAX_CHECK_OPTIONS: usize = 3;
-const MAX_LLM_FIELD_BYTES: usize = 512;
-const MAX_LLM_PROMPT_BYTES: usize = 32 * 1024;
-const STORY_SCHEMA_VERSION: u8 = 2;
-const MAX_TOPIC_CHARS: usize = 200;
-const CHECK_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
 mod checks;
 mod grounding;
 mod model;
@@ -41,15 +11,43 @@ mod planner;
 mod repository;
 mod resolution;
 
-pub use checks::*;
-pub use model::*;
-pub use narration::*;
-pub use planner::*;
-pub use repository::*;
-pub use resolution::*;
+pub use checks::grade_check;
+pub use model::{
+    GradeResult, NarrationFailureReason, NarrationMode, NarrationOutcome, NarrationStrategy,
+    ResolveOutcome, StoryBeatRecipe, StoryCandidate, StoryCheck, StoryCheckError, StoryCheckOption,
+    StoryCodeAnchor, StoryCoverage, StoryEvidenceDetail, StoryEvidenceRelation, StoryFocus,
+    StoryGap, StoryIntent, StoryLiteralProperty, StoryNarrationCoverage, StoryNarrativeSection,
+    StoryParagraph, StoryRecipe, StoryRecipeSubject, StoryRelationDirection, StoryRun,
+    StorySectionKind, StoryStatus, StorySubject, StorySummary, StoryTimelineEvent, StoryTrustState,
+};
+pub use narration::{narrate_with_llm, narration_prompt_token_budget};
+pub use planner::generate_consistent_story;
+pub use repository::{
+    validate_story_id, StoryConflict, StoryCorrupt, StoryInternal, StoryNotFound, StoryRepository,
+    StorySubjectInvalid,
+};
+pub use resolution::{enrich_summary, recipe_has_drift, story_subjects, StoryResolutionIndex};
+
+pub(crate) use model::StoryCheckRegistry;
+pub(crate) use narration::StoryNarrationCache;
 
 #[cfg(test)]
+use checks::*;
+#[cfg(test)]
 use grounding::*;
+#[cfg(test)]
+use model::{CheckGrant, CheckKind, StoryEvidence};
+#[cfg(test)]
+use narration::{
+    apply_packet_response_for_test, build_narration_packet_for_test, narration_evidence_is_eligible,
+};
+#[cfg(test)]
+use planner::*;
+#[cfg(test)]
+use repository::{
+    next_revision, revision_value, validate_recipe, validate_refs, MAX_FOCUS_REFS,
+    STORY_SCHEMA_VERSION,
+};
 
 #[cfg(test)]
 mod tests;

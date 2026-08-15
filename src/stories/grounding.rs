@@ -1,10 +1,29 @@
 //! Graph-facing evidence, code-anchor, lifecycle, and relationship helpers.
 
-use super::model::*;
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNode, Term};
+
+use crate::graph::{
+    asserted_project_types, first_literal, in_working_set, local_name, relevant_context_snapshot,
+    AppState, CodeTerms, PROJECT_KG_GRAPH_IRI,
+};
+
+use super::model::{
+    StoryBeat, StoryCandidate, StoryCodeAnchor, StoryCoverage, StoryEvidence, StoryEvidenceDetail,
+    StoryEvidenceRelation, StoryGap, StoryLiteralProperty, StoryNarrativeSection, StoryParagraph,
+    StoryRecipe, StoryRecipeSubject, StoryRelationDirection, StorySectionKind, StorySubject,
+    StoryTimelineEvent,
+};
+
+pub(super) const MAX_STORY_ENTITIES: usize = 512;
+// Discover beyond the output cap so deep curator-selected evidence can reserve
+// a slot without turning an unrelated include into a new traversal root.
+const MAX_STORY_DISCOVERY_ENTITIES: usize = MAX_STORY_ENTITIES * 8;
+const MAX_STORY_DOSSIER_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) fn topic_records(state: &AppState, query: &str) -> anyhow::Result<Vec<RecordData>> {
-    let mut records = relevant_context_snapshot(state, Some(query), 18, false)?
+    let mut records = relevant_context_snapshot(state, Some(query), 64, false)?
         .into_iter()
         .filter_map(|item| record_data(state, &item.iri).transpose())
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -38,13 +57,13 @@ pub(super) fn entity_records(
 
 pub(super) fn canonicalize_records(records: &mut Vec<RecordData>) {
     sort_dedupe_records(records);
-    records.truncate(18);
+    records.truncate(MAX_STORY_ENTITIES);
 }
 
 pub(super) fn sort_dedupe_records(records: &mut Vec<RecordData>) {
     records.sort_by(|left, right| {
-        record_kind_rank(&left.evidence.kind)
-            .cmp(&record_kind_rank(&right.evidence.kind))
+        entity_kind_rank(&left.evidence.kind)
+            .cmp(&entity_kind_rank(&right.evidence.kind))
             .then_with(|| left.evidence.title.cmp(&right.evidence.title))
             .then_with(|| left.evidence.iri.cmp(&right.evidence.iri))
     });
@@ -79,6 +98,601 @@ fn project_neighbors(state: &AppState, iri: &str) -> anyhow::Result<BTreeSet<Str
     Ok(neighbors)
 }
 
+pub(super) struct StoryDocument {
+    pub brief: StoryParagraph,
+    pub narrative: Vec<StoryNarrativeSection>,
+    pub timeline: Vec<StoryTimelineEvent>,
+    pub evidence: Vec<StoryEvidenceDetail>,
+    pub code_anchors: Vec<StoryCodeAnchor>,
+    pub coverage: StoryCoverage,
+}
+
+pub(super) fn build_story_document(
+    state: &AppState,
+    subject: &StorySubject,
+    beats: &[StoryBeat],
+    recipe: Option<&StoryRecipe>,
+) -> anyhow::Result<StoryDocument> {
+    let excluded: BTreeSet<String> = recipe
+        .map(|recipe| recipe.focus.exclude_record_iris.iter().cloned().collect())
+        .unwrap_or_default();
+    let excluded_code = code_entity_iris_for_symbols(
+        state,
+        recipe
+            .map(|recipe| recipe.focus.exclude_code_symbols.as_slice())
+            .unwrap_or_default(),
+    )?;
+    let mut priority: BTreeSet<String> = recipe
+        .map(|recipe| recipe.focus.include_record_iris.iter().cloned().collect())
+        .unwrap_or_default();
+    priority.extend(code_entity_iris_for_symbols(
+        state,
+        recipe
+            .map(|recipe| recipe.focus.include_code_symbols.as_slice())
+            .unwrap_or_default(),
+    )?);
+    let (mut evidence, truncated, dossier_bytes) =
+        collect_story_closure(state, subject, &priority)?;
+    for item in &mut evidence {
+        item.suppressed = excluded.contains(&item.iri) || excluded_code.contains(&item.iri);
+    }
+    let allowed = evidence
+        .iter()
+        .map(|item| item.iri.clone())
+        .collect::<BTreeSet<_>>();
+    for item in &mut evidence {
+        item.relations
+            .retain(|relation| allowed.contains(&relation.target_iri));
+    }
+    let label = match subject {
+        StorySubject::Entity { label, .. } | StorySubject::Topic { label, .. } => label,
+    };
+    let subject_iri = match subject {
+        StorySubject::Entity { iri, .. } => Some(iri.as_str()),
+        StorySubject::Topic { .. } => None,
+    };
+    let narrative = symbolic_sections_from_dossier(
+        label,
+        subject_iri,
+        &evidence,
+        recipe.map(|recipe| recipe.focus.emphasis.as_slice()),
+    );
+    let cited = narrative
+        .iter()
+        .flat_map(|section| &section.paragraphs)
+        .flat_map(|paragraph| &paragraph.citation_iris)
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    let brief = StoryParagraph {
+        text: format!(
+            "This account brings together the recorded decisions, constraints, lessons, code, and lifecycle history connected to {label}."
+        ),
+        citation_iris: cited,
+    };
+    let timeline = build_timeline(&evidence);
+    let mut code_anchors = beats
+        .iter()
+        .flat_map(|beat| beat.code_anchors.iter().cloned())
+        .collect::<Vec<_>>();
+    code_anchors = dedupe_code_anchors(code_anchors);
+    let current_count = evidence
+        .iter()
+        .filter(|item| in_working_set(&item.status))
+        .count();
+    let proposed_count = evidence
+        .iter()
+        .filter(|item| item.status.eq_ignore_ascii_case("proposed"))
+        .count();
+    let coverage = StoryCoverage {
+        entity_count: evidence.len(),
+        dossier_bytes,
+        current_count,
+        historical_count: evidence
+            .len()
+            .saturating_sub(current_count)
+            .saturating_sub(proposed_count),
+        proposed_count,
+        code_anchor_count: code_anchors.len(),
+        subject_families: evidence
+            .iter()
+            .map(|item| item.kind.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        outline_sections: narrative
+            .iter()
+            .map(|section| section.kind.clone())
+            .collect(),
+        truncated,
+    };
+    Ok(StoryDocument {
+        brief,
+        narrative,
+        timeline,
+        evidence,
+        code_anchors,
+        coverage,
+    })
+}
+
+pub(super) fn story_subject_closure_iris_with_priority(
+    state: &AppState,
+    subject: &StoryRecipeSubject,
+    priority: &BTreeSet<String>,
+) -> anyhow::Result<BTreeSet<String>> {
+    let subject = match subject {
+        StoryRecipeSubject::Entity { iri } => StorySubject::Entity {
+            iri: iri.clone(),
+            kind: "Entity".to_string(),
+            label: iri.clone(),
+        },
+        StoryRecipeSubject::Topic { query } => StorySubject::Topic {
+            query: query.clone(),
+            label: query.clone(),
+        },
+    };
+    Ok(collect_story_closure(state, &subject, priority)?
+        .0
+        .into_iter()
+        .map(|item| item.iri)
+        .collect())
+}
+
+pub(super) fn story_recipe_priority_iris(
+    state: &AppState,
+    recipe: &StoryRecipe,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mut priority = recipe
+        .focus
+        .include_record_iris
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    priority.extend(code_entity_iris_for_symbols(
+        state,
+        &recipe.focus.include_code_symbols,
+    )?);
+    Ok(priority)
+}
+
+fn collect_story_closure(
+    state: &AppState,
+    subject: &StorySubject,
+    priority: &BTreeSet<String>,
+) -> anyhow::Result<(Vec<StoryEvidenceDetail>, bool, usize)> {
+    let roots = match subject {
+        StorySubject::Entity { iri, .. } => BTreeSet::from([iri.clone()]),
+        StorySubject::Topic { query, .. } => topic_records(state, query)?
+            .into_iter()
+            .map(|record| record.evidence.iri)
+            .collect(),
+    };
+    let mut queued = roots.clone();
+    let mut frontier = BTreeMap::<usize, BTreeSet<String>>::new();
+    frontier.insert(0, roots.clone());
+    let mut root_candidates = Vec::new();
+    let mut priority_candidates = Vec::new();
+    let mut normal_candidates = Vec::new();
+    let mut cached_normal_bytes = 0usize;
+    let mut truncated = false;
+    while let Some(depth) = frontier.keys().next().copied() {
+        let iri = {
+            let bucket = frontier.get_mut(&depth).expect("frontier depth exists");
+            bucket.pop_first()
+        };
+        if frontier.get(&depth).is_some_and(BTreeSet::is_empty) {
+            frontier.remove(&depth);
+        }
+        let Some(iri) = iri else { continue };
+        let Some(mut detail) = story_entity_detail(state, &iri)? else {
+            continue;
+        };
+        detail.relations.sort_by(|left, right| {
+            left.label
+                .cmp(&right.label)
+                .then(left.target_label.cmp(&right.target_label))
+                .then(left.target_iri.cmp(&right.target_iri))
+        });
+        detail.relations.dedup();
+        let prospective = serde_json::to_vec(&detail)?.len();
+        let mut next = detail
+            .relations
+            .iter()
+            .filter(|relation| expands_story_closure(&detail.kind, depth, relation))
+            .map(|relation| relation.target_iri.clone())
+            .collect::<Vec<_>>();
+        next.sort_by(|left, right| {
+            priority
+                .contains(right)
+                .cmp(&priority.contains(left))
+                .then(left.cmp(right))
+        });
+        next.dedup();
+        for target in next {
+            if queued.contains(&target) {
+                continue;
+            }
+            if queued.len() == MAX_STORY_DISCOVERY_ENTITIES {
+                truncated = true;
+                continue;
+            }
+            queued.insert(target.clone());
+            frontier
+                .entry(depth.saturating_add(1))
+                .or_default()
+                .insert(target);
+        }
+
+        if prospective > MAX_STORY_DOSSIER_BYTES {
+            truncated = true;
+            continue;
+        }
+        if roots.contains(&iri) {
+            root_candidates.push((detail, prospective));
+        } else if priority.contains(&iri) {
+            priority_candidates.push((detail, prospective));
+        } else if normal_candidates.len() < MAX_STORY_ENTITIES
+            && cached_normal_bytes.saturating_add(prospective) <= MAX_STORY_DOSSIER_BYTES
+        {
+            cached_normal_bytes = cached_normal_bytes.saturating_add(prospective);
+            normal_candidates.push((detail, prospective));
+        } else {
+            truncated = true;
+        }
+    }
+
+    // Subject roots establish context. Naturally reached explicit includes
+    // then reserve capacity before ordinary breadth-first evidence, so a deep
+    // curated item cannot be starved by a broad first hop.
+    let mut evidence = Vec::new();
+    let mut serialized_bytes = 0usize;
+    for (detail, bytes) in root_candidates
+        .into_iter()
+        .chain(priority_candidates)
+        .chain(normal_candidates)
+    {
+        if evidence.len() == MAX_STORY_ENTITIES
+            || serialized_bytes.saturating_add(bytes) > MAX_STORY_DOSSIER_BYTES
+        {
+            truncated = true;
+            continue;
+        }
+        serialized_bytes = serialized_bytes.saturating_add(bytes);
+        evidence.push(detail);
+    }
+    evidence.sort_by(|left, right| {
+        entity_kind_rank(&left.kind)
+            .cmp(&entity_kind_rank(&right.kind))
+            .then(left.title.cmp(&right.title))
+            .then(left.iri.cmp(&right.iri))
+    });
+    let allowed = evidence
+        .iter()
+        .map(|item| item.iri.clone())
+        .collect::<BTreeSet<_>>();
+    for item in &mut evidence {
+        item.relations
+            .retain(|relation| allowed.contains(&relation.target_iri));
+    }
+    Ok((evidence, truncated, serialized_bytes))
+}
+
+fn expands_story_closure(
+    source_kind: &str,
+    depth: usize,
+    relation: &StoryEvidenceRelation,
+) -> bool {
+    let lifecycle = matches!(
+        relation.label.as_str(),
+        "supersedes" | "isSupersededBy" | "hasRationale" | "isRationaleFor"
+    ) || relation.target_kind == "Rationale";
+    if lifecycle {
+        return true;
+    }
+    if depth == 0 {
+        return true;
+    }
+    // Three typed hops cover the local knowledge cluster; stopping component
+    // hubs after the root prevents a connected project graph from going global.
+    if depth >= 3 || (depth > 0 && source_kind == "SystemComponent") {
+        return false;
+    }
+    matches!(
+        relation.label.as_str(),
+        "concerns"
+            | "isConcernedBy"
+            | "isMotivatedBy"
+            | "motivates"
+            | "weighs"
+            | "isWeighedBy"
+            | "resultsIn"
+            | "resultsFrom"
+            | "constrains"
+            | "isConstrainedBy"
+            | "violates"
+            | "isViolatedBy"
+            | "learnedFrom"
+            | "yieldsLesson"
+            | "realizes"
+            | "isRealizedBy"
+            | "satisfies"
+            | "isSatisfiedBy"
+            | "embodies"
+            | "isEmbodiedBy"
+            | "supersedes"
+            | "isSupersededBy"
+            | "hasRationale"
+            | "isRationaleFor"
+    )
+}
+
+fn symbolic_sections_from_dossier(
+    subject_label: &str,
+    subject_iri: Option<&str>,
+    evidence: &[StoryEvidenceDetail],
+    emphasis: Option<&[StorySectionKind]>,
+) -> Vec<StoryNarrativeSection> {
+    let defaults = [
+        StorySectionKind::Orientation,
+        StorySectionKind::Evolution,
+        StorySectionKind::CurrentState,
+        StorySectionKind::Implementation,
+        StorySectionKind::Implications,
+    ];
+    let mut order = emphasis.unwrap_or_default().to_vec();
+    for kind in defaults {
+        if !order.contains(&kind) {
+            order.push(kind);
+        }
+    }
+    let mut sections = Vec::new();
+    for kind in order {
+        let matching = evidence
+            .iter()
+            .filter(|item| !item.suppressed && !item.status.eq_ignore_ascii_case("proposed"))
+            .filter(|item| story_section_kind(item, subject_iri) == kind)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        let statements = matching
+            .iter()
+            .map(|item| {
+                let body = item
+                    .description
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(&item.title);
+                if in_working_set(&item.status) {
+                    body.trim().to_string()
+                } else {
+                    format!(
+                        "Historically, {} was recorded as {}: {}",
+                        item.title,
+                        item.status,
+                        body.trim()
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let paragraphs = vec![StoryParagraph {
+            text: format!("For {subject_label}, {}", statements.join(" ")),
+            citation_iris: matching.iter().map(|item| item.iri.clone()).collect(),
+        }];
+        let title = match kind {
+            StorySectionKind::Orientation => "Orientation",
+            StorySectionKind::Evolution => "Evolution",
+            StorySectionKind::CurrentState => "Current state",
+            StorySectionKind::Implementation => "Implementation",
+            StorySectionKind::Implications => "Implications",
+        };
+        sections.push(StoryNarrativeSection {
+            id: kind.id().to_string(),
+            kind,
+            title: title.to_string(),
+            paragraphs,
+        });
+    }
+    sections
+}
+
+pub(super) fn story_section_kind(
+    item: &StoryEvidenceDetail,
+    subject_iri: Option<&str>,
+) -> StorySectionKind {
+    if subject_iri == Some(item.iri.as_str()) {
+        return StorySectionKind::Orientation;
+    }
+    if !in_working_set(&item.status) {
+        return StorySectionKind::Evolution;
+    }
+    if item
+        .relations
+        .iter()
+        .any(|relation| matches!(relation.label.as_str(), "supersedes" | "isSupersededBy"))
+    {
+        return StorySectionKind::Evolution;
+    }
+    match item.kind.as_str() {
+        "Requirement" | "Rationale" | "Alternative" => StorySectionKind::Orientation,
+        "ArchitecturalDecision" | "Constraint" | "Pattern" => StorySectionKind::CurrentState,
+        "CodeEntity" | "SystemComponent" => StorySectionKind::Implementation,
+        "Lesson" | "AntiPattern" | "Consequence" => StorySectionKind::Implications,
+        _ => StorySectionKind::Orientation,
+    }
+}
+
+fn story_entity_detail(state: &AppState, iri: &str) -> anyhow::Result<Option<StoryEvidenceDetail>> {
+    let Some((title, kind)) = story_entity_identity(state, iri)? else {
+        return Ok(None);
+    };
+    let status = first_literal(&state.store, iri, &state.capture.status)
+        .unwrap_or_else(|| "unknown".to_string());
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let subject = NamedNodeRef::new(iri)?;
+    let mut relations = Vec::new();
+    let mut properties = Vec::new();
+    for quad in state.store.quads_for_pattern(
+        Some(subject.into()),
+        None,
+        None,
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        let quad = quad?;
+        match quad.object {
+            Term::NamedNode(target) => {
+                if let Some((target_label, target_kind)) =
+                    story_entity_identity(state, target.as_str())?
+                {
+                    relations.push(StoryEvidenceRelation {
+                        predicate: quad.predicate.as_str().to_string(),
+                        label: local_name(quad.predicate.as_str()).to_string(),
+                        direction: StoryRelationDirection::Outgoing,
+                        target_iri: target.as_str().to_string(),
+                        target_label,
+                        target_kind,
+                    });
+                }
+            }
+            Term::Literal(literal) => properties.push(StoryLiteralProperty {
+                predicate: quad.predicate.as_str().to_string(),
+                label: local_name(quad.predicate.as_str()).to_string(),
+                value: literal.value().to_string(),
+            }),
+            _ => {}
+        }
+    }
+    for quad in state.store.quads_for_pattern(
+        None,
+        None,
+        Some(subject.into()),
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        let quad = quad?;
+        if let NamedOrBlankNode::NamedNode(target) = quad.subject {
+            if let Some((target_label, target_kind)) =
+                story_entity_identity(state, target.as_str())?
+            {
+                relations.push(StoryEvidenceRelation {
+                    predicate: quad.predicate.as_str().to_string(),
+                    label: local_name(quad.predicate.as_str()).to_string(),
+                    direction: StoryRelationDirection::Incoming,
+                    target_iri: target.as_str().to_string(),
+                    target_label,
+                    target_kind,
+                });
+            }
+        }
+    }
+    properties.sort();
+    properties.dedup();
+    Ok(Some(StoryEvidenceDetail {
+        iri: iri.to_string(),
+        title,
+        kind,
+        status,
+        suppressed: false,
+        description: first_literal(&state.store, iri, &state.capture.description),
+        timestamp: first_literal(&state.store, iri, &state.capture.timestamp),
+        author: first_literal(&state.store, iri, &state.capture.author),
+        properties,
+        relations,
+    }))
+}
+
+fn story_entity_identity(state: &AppState, iri: &str) -> anyhow::Result<Option<(String, String)>> {
+    let node = match NamedNode::new(iri) {
+        Ok(node) => node,
+        Err(_) => return Ok(None),
+    };
+    let mut kinds = asserted_project_types(state, &node)
+        .into_iter()
+        .map(|kind| local_name(&kind).to_string())
+        .filter(|kind| kind != "NamedIndividual")
+        .collect::<Vec<_>>();
+    kinds.sort_by(|left, right| {
+        entity_kind_rank(left)
+            .cmp(&entity_kind_rank(right))
+            .then(left.cmp(right))
+    });
+    kinds.dedup();
+    let kind = kinds.into_iter().next();
+    Ok(kind.map(|kind| {
+        let label = first_literal(&state.store, iri, moose::RDFS_LABEL)
+            .or_else(|| first_literal(&state.store, iri, &state.capture.title))
+            .unwrap_or_else(|| local_name(iri).to_string());
+        (label, kind)
+    }))
+}
+
+pub(super) fn build_timeline(evidence: &[StoryEvidenceDetail]) -> Vec<StoryTimelineEvent> {
+    let mut events = evidence
+        .iter()
+        .filter(|item| item.timestamp.is_some() || item.status != "unknown")
+        .map(|item| {
+            let mut predecessor_iris = Vec::new();
+            let mut successor_iris = Vec::new();
+            let mut rationale_iris = Vec::new();
+            for relation in &item.relations {
+                match (relation.direction.clone(), relation.label.as_str()) {
+                    (StoryRelationDirection::Outgoing, "supersedes")
+                    | (StoryRelationDirection::Incoming, "isSupersededBy") => {
+                        predecessor_iris.push(relation.target_iri.clone())
+                    }
+                    (StoryRelationDirection::Outgoing, "isSupersededBy")
+                    | (StoryRelationDirection::Incoming, "supersedes") => {
+                        successor_iris.push(relation.target_iri.clone())
+                    }
+                    _ if relation.target_kind == "Rationale" => {
+                        rationale_iris.push(relation.target_iri.clone())
+                    }
+                    _ => {}
+                }
+            }
+            predecessor_iris.sort();
+            predecessor_iris.dedup();
+            successor_iris.sort();
+            successor_iris.dedup();
+            rationale_iris.sort();
+            rationale_iris.dedup();
+            StoryTimelineEvent {
+                id: format!("event-{}", item.iri),
+                title: item.title.clone(),
+                kind: item.kind.clone(),
+                status: item.status.clone(),
+                timestamp: item.timestamp.clone(),
+                evidence_iri: item.iri.clone(),
+                relation: if !successor_iris.is_empty() {
+                    Some("is_superseded_by".to_string())
+                } else if !predecessor_iris.is_empty() {
+                    Some("supersedes".to_string())
+                } else {
+                    None
+                },
+                predecessor_iris,
+                successor_iris,
+                rationale_iris,
+            }
+        })
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        timeline_instant(left)
+            .is_none()
+            .cmp(&timeline_instant(right).is_none())
+            .then(timeline_instant(left).cmp(&timeline_instant(right)))
+            .then(left.title.cmp(&right.title))
+            .then(left.evidence_iri.cmp(&right.evidence_iri))
+    });
+    events
+}
+
+fn timeline_instant(event: &StoryTimelineEvent) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(event.timestamp.as_deref()?)
+        .ok()?
+        .timestamp_nanos_opt()
+}
+
 pub(super) fn entity_code(
     state: &AppState,
     code_entities: &[StoryCodeAnchor],
@@ -101,6 +715,37 @@ pub(super) fn entity_code(
         }
     }
     Ok(dedupe_code_anchors(anchors))
+}
+
+fn code_entity_iris_for_symbols(
+    state: &AppState,
+    symbols: &[String],
+) -> anyhow::Result<BTreeSet<String>> {
+    if symbols.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let wanted = symbols.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let terms = CodeTerms::resolve(state)?;
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let predicate = NamedNodeRef::new(&terms.has_substrate_symbol)?;
+    let mut iris = BTreeSet::new();
+    for quad in state.store.quads_for_pattern(
+        None,
+        Some(predicate),
+        None,
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        let quad = quad?;
+        let (NamedOrBlankNode::NamedNode(subject), Term::Literal(symbol)) =
+            (quad.subject, quad.object)
+        else {
+            continue;
+        };
+        if wanted.contains(symbol.value()) {
+            iris.insert(subject.as_str().to_string());
+        }
+    }
+    Ok(iris)
 }
 
 pub(super) fn code_for_records(
@@ -142,215 +787,15 @@ pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
-pub(super) fn recipe_beats(
-    state: &AppState,
-    recipe: &StoryRecipe,
-    component: &StoryCandidate,
-    code_by_symbol: &BTreeMap<String, StoryCodeAnchor>,
-) -> anyhow::Result<(Vec<StoryBeat>, Vec<StoryGap>)> {
-    let subject_iri = component.iri.as_str();
-    let mut beats = Vec::new();
-    let mut gaps = Vec::new();
-    for spec in &recipe.beats {
-        let mut evidence = Vec::new();
-        for iri in &spec.record_iris {
-            match resolve_recipe_record(state, iri)? {
-                AnchorResolution::Current(item) => {
-                    if record_concerns_component(state, &item.iri, subject_iri)? {
-                        evidence.push(item);
-                    } else {
-                        gaps.push(StoryGap {
-                            id: format!("subject-record-{}-{}", spec.id, gaps.len()),
-                            title: "Story record does not concern this subject".to_string(),
-                            detail: format!(
-                                "Record {iri} is not linked to effective Story subject {subject_iri}."
-                            ),
-                            beat_intent: Some(spec.intent.clone()),
-                        });
-                    }
-                }
-                AnchorResolution::Superseded { replacements } => {
-                    let detail = match replacements.as_slice() {
-                        [successor] => format!(
-                            "{iri} is retired; current successor {} is shown.",
-                            successor.iri
-                        ),
-                        [] => {
-                            format!("{iri} is retired and no current successor can be resolved.")
-                        }
-                        successors => format!(
-                            "{iri} is retired and has multiple current successors ({}); curator selection is required.",
-                            successors
-                                .iter()
-                                .map(|successor| successor.iri.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    };
-                    gaps.push(StoryGap {
-                        id: format!("drift-{}-{}", spec.id, gaps.len()),
-                        title: "Story anchor was superseded".to_string(),
-                        detail,
-                        beat_intent: Some(spec.intent.clone()),
-                    });
-                    if let [item] = replacements.as_slice() {
-                        if record_concerns_component(state, &item.iri, subject_iri)? {
-                            evidence.push(item.clone());
-                        } else {
-                            gaps.push(StoryGap {
-                                id: format!("subject-record-{}-{}", spec.id, gaps.len()),
-                                title: "Story successor does not concern this subject".to_string(),
-                                detail: format!(
-                                    "Successor {} is not linked to effective Story subject {subject_iri}.",
-                                    item.iri
-                                ),
-                                beat_intent: Some(spec.intent.clone()),
-                            });
-                        }
-                    }
-                }
-                AnchorResolution::Missing => gaps.push(StoryGap {
-                    id: format!("missing-{}-{}", spec.id, gaps.len()),
-                    title: "Story anchor is missing".to_string(),
-                    detail: format!("Record {iri} cannot be resolved."),
-                    beat_intent: Some(spec.intent.clone()),
-                }),
-                AnchorResolution::Ineligible(status) => gaps.push(StoryGap {
-                    id: format!("inactive-{}-{}", spec.id, gaps.len()),
-                    title: "Story anchor is not current".to_string(),
-                    detail: format!("Record {iri} has lifecycle status {status}."),
-                    beat_intent: Some(spec.intent.clone()),
-                }),
-            }
-        }
-        let mut anchors = Vec::new();
-        for symbol in &spec.code_symbols {
-            if let Some(anchor) = code_by_symbol.get(symbol) {
-                let grounded = match anchor.entity_iri.as_deref() {
-                    Some(entity) => code_realizes_component(state, entity, subject_iri)?,
-                    None => false,
-                };
-                if grounded {
-                    anchors.push(anchor.clone());
-                } else {
-                    gaps.push(StoryGap {
-                        id: format!("subject-code-{}-{}", spec.id, gaps.len()),
-                        title: "Story code does not realize this subject".to_string(),
-                        detail: format!(
-                            "Symbol {symbol} is not linked to effective Story subject {subject_iri}."
-                        ),
-                        beat_intent: Some(spec.intent.clone()),
-                    });
-                }
-            } else {
-                gaps.push(StoryGap {
-                    id: format!("code-{}-{}", spec.id, gaps.len()),
-                    title: "Code anchor is unresolved".to_string(),
-                    detail: format!("Symbol {symbol} is not present in the current code graph."),
-                    beat_intent: Some(spec.intent.clone()),
-                });
-            }
-        }
-        if spec.intent == StoryIntent::Boundary && is_system_component(state, subject_iri)? {
-            evidence.insert(
-                0,
-                StoryEvidence {
-                    iri: subject_iri.to_string(),
-                    title: component.label.clone(),
-                    kind: "SystemComponent".to_string(),
-                    status: first_literal(&state.store, subject_iri, &state.capture.status)
-                        .unwrap_or_else(|| "unknown".to_string()),
-                },
-            );
-        }
-        let beat = make_beat(
-            &spec.id,
-            &spec.title,
-            spec.intent.clone(),
-            evidence,
-            anchors,
-            (spec.intent == StoryIntent::Boundary)
-                .then(|| component.description.clone())
-                .flatten(),
-            spec.curator_note.clone(),
-        );
-        beats.push(beat);
-    }
-    Ok((beats, gaps))
-}
-
-#[derive(Debug)]
-pub(super) enum AnchorResolution {
-    Current(StoryEvidence),
-    Superseded { replacements: Vec<StoryEvidence> },
-    Missing,
-    Ineligible(String),
-}
-
-pub(super) fn resolve_recipe_record(
-    state: &AppState,
-    iri: &str,
-) -> anyhow::Result<AnchorResolution> {
-    let Ok(node) = NamedNode::new(iri) else {
-        return Ok(AnchorResolution::Missing);
-    };
-    if crate::graph::capture::require_information_record(state, &node).is_err() {
-        return Ok(AnchorResolution::Missing);
-    }
-    let Some(record) = record_data(state, iri)? else {
-        return Ok(AnchorResolution::Missing);
-    };
-    if in_working_set(&record.evidence.status) {
-        return Ok(AnchorResolution::Current(record.evidence));
-    }
-    if record.evidence.status.eq_ignore_ascii_case("superseded") {
-        let successors = accepted_successors(state, iri)?;
-        return Ok(AnchorResolution::Superseded {
-            replacements: successors,
-        });
-    }
-    Ok(AnchorResolution::Ineligible(record.evidence.status))
-}
-
 pub(super) fn component_records(
     state: &AppState,
     component_iri: &str,
 ) -> anyhow::Result<Vec<RecordData>> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let object = NamedNodeRef::new(component_iri)?;
-    let concerns = state.resolve_object_property("concerns")?;
-    let predicate = NamedNodeRef::new(&concerns)?;
     let mut out = Vec::new();
-    for quad in state.store.quads_for_pattern(
-        None,
-        Some(predicate),
-        Some(object.into()),
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        let quad = quad?;
-        let NamedOrBlankNode::NamedNode(subject) = quad.subject else {
-            continue;
-        };
-        if let Some(record) = record_data(state, subject.as_str())? {
+    for record_iri in component_record_iris(state, component_iri)? {
+        if let Some(record) = record_data(state, &record_iri)? {
             if in_working_set(&record.evidence.status) {
                 out.push(record);
-            }
-        }
-    }
-    let inverse_iri = state.resolve_object_property("isConcernedBy")?;
-    let inverse = NamedNodeRef::new(&inverse_iri)?;
-    let component = NamedNodeRef::new(component_iri)?;
-    for quad in state.store.quads_for_pattern(
-        Some(component.into()),
-        Some(inverse),
-        None,
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        if let Term::NamedNode(record_node) = quad?.object {
-            if let Some(record) = record_data(state, record_node.as_str())? {
-                if in_working_set(&record.evidence.status) {
-                    out.push(record);
-                }
             }
         }
     }
@@ -361,24 +806,23 @@ pub(super) fn component_records(
             .then(a.evidence.title.cmp(&b.evidence.title))
             .then(a.evidence.iri.cmp(&b.evidence.iri))
     });
-    out.dedup_by(|a, b| a.evidence.iri == b.evidence.iri);
     Ok(out)
 }
 
-pub(super) fn pending_component_record_count(
+/// Return records linked to a component through either ontology direction.
+/// Keeping the pair together prevents Story surfaces from drifting on inverse edges.
+fn component_record_iris(
     state: &AppState,
     component_iri: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<BTreeSet<String>> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
     let component = NamedNodeRef::new(component_iri)?;
-    let concerns_iri = state.resolve_object_property("concerns")?;
-    let concerns = NamedNodeRef::new(&concerns_iri)?;
-    let inverse_iri = state.resolve_object_property("isConcernedBy")?;
-    let inverse = NamedNodeRef::new(&inverse_iri)?;
+    let concerns = state.resolve_object_property("concerns")?;
+    let predicate = NamedNodeRef::new(&concerns)?;
     let mut records = BTreeSet::new();
     for quad in state.store.quads_for_pattern(
         None,
-        Some(concerns),
+        Some(predicate),
         Some(component.into()),
         Some(GraphNameRef::NamedNode(graph)),
     ) {
@@ -386,6 +830,8 @@ pub(super) fn pending_component_record_count(
             records.insert(record.as_str().to_string());
         }
     }
+    let inverse_iri = state.resolve_object_property("isConcernedBy")?;
+    let inverse = NamedNodeRef::new(&inverse_iri)?;
     for quad in state.store.quads_for_pattern(
         Some(component.into()),
         Some(inverse),
@@ -396,7 +842,14 @@ pub(super) fn pending_component_record_count(
             records.insert(record.as_str().to_string());
         }
     }
-    Ok(records
+    Ok(records)
+}
+
+pub(super) fn pending_component_record_count(
+    state: &AppState,
+    component_iri: &str,
+) -> anyhow::Result<usize> {
+    Ok(component_record_iris(state, component_iri)?
         .into_iter()
         .filter(|iri| {
             let Ok(node) = NamedNode::new(iri) else {
@@ -452,81 +905,31 @@ pub(super) fn record_data(state: &AppState, iri: &str) -> anyhow::Result<Option<
 
 pub(super) fn choose_record_kind(mut kinds: Vec<String>) -> Option<String> {
     kinds.sort_by(|left, right| {
-        record_kind_rank(left)
-            .cmp(&record_kind_rank(right))
+        entity_kind_rank(left)
+            .cmp(&entity_kind_rank(right))
             .then(left.cmp(right))
     });
     kinds.dedup();
     kinds.into_iter().next()
 }
 
-pub(super) fn record_kind_rank(kind: &str) -> usize {
-    [
-        "Requirement",
-        "ArchitecturalDecision",
-        "Constraint",
-        "Pattern",
-        "AntiPattern",
-        "Lesson",
-        "Consequence",
-        "Rationale",
-    ]
-    .iter()
-    .position(|candidate| *candidate == kind)
-    .unwrap_or(match kind {
-        "InformationRecord" => usize::MAX - 1,
-        "ProjectEntity" => usize::MAX,
-        _ => usize::MAX - 2,
-    })
-}
-
-fn successor_iris(state: &AppState, iri: &str) -> anyhow::Result<Vec<String>> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let subject = NamedNodeRef::new(iri)?;
-    let predicate_iri = state.resolve_object_property("isSupersededBy")?;
-    let predicate = NamedNodeRef::new(&predicate_iri)?;
-    let mut out = Vec::new();
-    for quad in state.store.quads_for_pattern(
-        Some(subject.into()),
-        Some(predicate),
-        None,
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        if let Term::NamedNode(node) = quad?.object {
-            out.push(node.as_str().to_string());
-        }
+pub(super) fn entity_kind_rank(kind: &str) -> usize {
+    match kind {
+        "Requirement" => 0,
+        "ArchitecturalDecision" => 1,
+        "Constraint" => 2,
+        "Pattern" => 3,
+        "AntiPattern" => 4,
+        "Lesson" => 5,
+        "Consequence" => 6,
+        "Rationale" => 7,
+        "Alternative" => 8,
+        "SystemComponent" => 9,
+        "CodeEntity" => 10,
+        "InformationRecord" => 98,
+        "ProjectEntity" => 99,
+        _ => 50,
     }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-fn accepted_successors(state: &AppState, retired_iri: &str) -> anyhow::Result<Vec<StoryEvidence>> {
-    let mut visited = BTreeSet::from([retired_iri.to_string()]);
-    let mut frontier = VecDeque::new();
-    for successor in successor_iris(state, retired_iri)? {
-        if visited.insert(successor.clone()) {
-            frontier.push_back(successor);
-        }
-    }
-    let mut accepted = BTreeMap::new();
-    for _ in 0..256 {
-        let Some(next) = frontier.pop_front() else {
-            break;
-        };
-        if let Some(record) = record_data(state, &next)? {
-            if in_working_set(&record.evidence.status) {
-                accepted.insert(record.evidence.iri.clone(), record.evidence);
-                continue;
-            }
-        }
-        for successor in successor_iris(state, &next)? {
-            if visited.insert(successor.clone()) {
-                frontier.push_back(successor);
-            }
-        }
-    }
-    Ok(accepted.into_values().collect())
 }
 
 pub(super) fn component_code(
@@ -690,10 +1093,7 @@ pub(super) fn record_concerns_component(
     if !in_working_set(&record.evidence.status) {
         return Ok(false);
     }
-    Ok(
-        edge_exists(state, &record.evidence.iri, "concerns", component)?
-            || edge_exists(state, component, "isConcernedBy", &record.evidence.iri)?,
-    )
+    Ok(component_record_iris(state, component)?.contains(&record.evidence.iri))
 }
 
 pub(super) fn code_realizes_component(

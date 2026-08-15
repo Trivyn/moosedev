@@ -1,8 +1,14 @@
 //! Cross-module Story domain regression tests.
 
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+
 use chrono::Utc;
 use oxigraph::model::{GraphName, NamedNode, Quad};
+
+use crate::graph::{AppState, CodeTerms, PROJECT_KG_GRAPH_IRI};
 
 struct StoryTestState {
     state: AppState,
@@ -56,10 +62,6 @@ fn record_with_status(state: &AppState, title: &str, status: &str) -> String {
     .unwrap()
 }
 
-fn link_successor(state: &AppState, old: &str, new: &str) {
-    link_edge(state, old, "isSupersededBy", new);
-}
-
 fn link_edge(state: &AppState, subject: &str, predicate: &str, object: &str) {
     let quad = Quad::new(
         NamedNode::new(subject).unwrap(),
@@ -86,6 +88,28 @@ fn type_component(state: &AppState, iri: &str) {
     type_entity(state, iri, &state.resolve_class("SystemComponent").unwrap());
 }
 
+fn add_literal(state: &AppState, iri: &str, predicate: &str, value: &str) {
+    state
+        .store
+        .insert(&Quad::new(
+            NamedNode::new(iri).unwrap(),
+            NamedNode::new(predicate).unwrap(),
+            oxigraph::model::Literal::new_simple_literal(value),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+}
+
+fn type_raw_record(state: &AppState, iri: &str, title: &str) {
+    type_entity(
+        state,
+        iri,
+        &state.resolve_class("ArchitecturalDecision").unwrap(),
+    );
+    add_literal(state, iri, moose::RDFS_LABEL, title);
+    add_literal(state, iri, &state.capture.status, "accepted");
+}
+
 fn type_code_entity(state: &AppState, iri: &str, symbol: &str, label: &str) {
     let terms = CodeTerms::resolve(state).unwrap();
     type_entity(state, iri, &terms.code_entity_class);
@@ -109,13 +133,15 @@ fn recipe(id: &str, status: StoryStatus, beats: usize) -> StoryRecipe {
     StoryRecipe {
         id: id.to_string(),
         title: "Graph store overview".to_string(),
-        schema_version: STORY_SCHEMA_VERSION,
+        schema_version: if beats == 0 { STORY_SCHEMA_VERSION } else { 2 },
         subject: Some(StoryRecipeSubject::Entity {
             iri: "https://example.test/components/graph".to_string(),
         }),
         subject_component_iri: None,
         goal: "Understand the graph store".to_string(),
         audience: "reboarding".to_string(),
+        focus: StoryFocus::default(),
+        curator_context: None,
         beats: (0..beats)
             .map(|index| StoryBeatRecipe {
                 id: format!("beat-{index}"),
@@ -154,7 +180,11 @@ fn repository_round_trips_and_lists_recipe() {
     assert_eq!(repository.get("graph-store").unwrap(), Some(saved));
     let recipes = repository.list_recipes().unwrap();
     assert_eq!(recipes.len(), 1);
-    assert_eq!(recipes[0].beats.len(), 1);
+    assert!(recipes[0].beats.is_empty());
+    assert_eq!(
+        recipes[0].focus.emphasis,
+        vec![StorySectionKind::Orientation]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -178,6 +208,34 @@ fn repository_quarantines_invalid_files_and_filename_id_mismatches() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, "valid");
     assert!(repository.get("filename-id").is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repository_rejects_future_schema_versions_without_downgrading() {
+    let root = std::env::temp_dir().join(format!(
+        "moosedev-story-future-schema-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let repository = StoryRepository::new(&root);
+    let mut future = recipe("future", StoryStatus::Draft, 0);
+    future.schema_version = STORY_SCHEMA_VERSION + 1;
+    assert!(repository
+        .save("future", future.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported Story schema version"));
+
+    std::fs::create_dir_all(root.join("stories")).unwrap();
+    std::fs::write(
+        root.join("stories/future.json"),
+        serde_json::to_vec_pretty(&future).unwrap(),
+    )
+    .unwrap();
+    let error = repository.get("future").unwrap_err();
+    assert!(error.downcast_ref::<StoryCorrupt>().is_some());
+    assert!(repository.list_recipes().unwrap().is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -440,111 +498,6 @@ fn stale_save_conflicts_before_graph_dependent_validation() {
 }
 
 #[test]
-fn superseded_recipe_anchor_follows_chain_to_current_successor() {
-    let state = story_state("supersession-chain");
-    let old = record_with_status(&state, "Old", "superseded");
-    let middle = record_with_status(&state, "Middle", "superseded");
-    let current = record_with_status(&state, "Current", "accepted");
-    link_successor(&state, &old, &middle);
-    link_successor(&state, &old, "https://example.test/000-dead-branch");
-    link_successor(&state, &middle, &current);
-
-    match resolve_recipe_record(&state, &old).unwrap() {
-        AnchorResolution::Superseded { replacements } => {
-            assert_eq!(replacements[0].iri, current)
-        }
-        other => panic!("unexpected resolution: {other:?}"),
-    }
-    let competing = record_with_status(&state, "Competing current", "accepted");
-    link_successor(&state, &old, &competing);
-    match resolve_recipe_record(&state, &old).unwrap() {
-        AnchorResolution::Superseded { replacements } => {
-            assert_eq!(replacements.len(), 2);
-            assert_eq!(
-                replacements
-                    .iter()
-                    .map(|replacement| replacement.iri.as_str())
-                    .collect::<BTreeSet<_>>(),
-                BTreeSet::from([current.as_str(), competing.as_str()])
-            );
-        }
-        other => panic!("unexpected resolution: {other:?}"),
-    }
-
-    let legacy_old = record_with_status(&state, "Legacy old", "superseded");
-    let legacy_current = record_with_status(&state, "Legacy current", "accepted");
-    let status = NamedNode::new(&state.capture.status).unwrap();
-    let legacy_node = NamedNode::new(&legacy_current).unwrap();
-    let graph = NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap();
-    let status_quads = state
-        .store
-        .quads_for_pattern(
-            Some(legacy_node.as_ref().into()),
-            Some(status.as_ref()),
-            None,
-            Some(GraphNameRef::NamedNode(graph.as_ref())),
-        )
-        .flatten()
-        .collect::<Vec<_>>();
-    for quad in &status_quads {
-        state.store.remove(quad).unwrap();
-    }
-    link_successor(&state, &legacy_old, &legacy_current);
-    match resolve_recipe_record(&state, &legacy_old).unwrap() {
-        AnchorResolution::Superseded { replacements } => {
-            let replacement = &replacements[0];
-            assert_eq!(replacement.iri, legacy_current);
-            assert_eq!(replacement.status, "unknown");
-        }
-        other => panic!("unexpected legacy resolution: {other:?}"),
-    }
-
-    let orphan = record_with_status(&state, "Orphan", "superseded");
-    assert!(matches!(
-        resolve_recipe_record(&state, &orphan).unwrap(),
-        AnchorResolution::Superseded { replacements } if replacements.is_empty()
-    ));
-    let recipe = StoryRecipe {
-        id: "orphan".to_string(),
-        title: "Orphan".to_string(),
-        schema_version: STORY_SCHEMA_VERSION,
-        subject: Some(StoryRecipeSubject::Entity {
-            iri: "https://example.test/component".to_string(),
-        }),
-        subject_component_iri: None,
-        goal: "See the gap".to_string(),
-        audience: "reboarding".to_string(),
-        beats: vec![StoryBeatRecipe {
-            id: "governance".to_string(),
-            title: "Governance".to_string(),
-            intent: StoryIntent::Governance,
-            record_iris: vec![orphan],
-            code_symbols: vec![],
-            curator_note: None,
-        }],
-        status: StoryStatus::Draft,
-        curator: "tester".to_string(),
-        updated_at: None,
-    };
-    let code = all_code_by_symbol(&state).unwrap();
-    let (_, gaps) = recipe_beats(
-        &state,
-        &recipe,
-        &StoryCandidate {
-            iri: "https://example.test/component".to_string(),
-            kind: "SystemComponent".to_string(),
-            label: "Component".to_string(),
-            description: None,
-        },
-        &code,
-    )
-    .unwrap();
-    assert!(gaps[0]
-        .detail
-        .contains("no current successor can be resolved"));
-}
-
-#[test]
 fn inverse_concerns_is_evidence_while_proposed_knowledge_is_only_a_gap_signal() {
     let state = story_state("inverse-concerns");
     let component = "https://example.test/component";
@@ -611,20 +564,18 @@ fn generated_boundary_round_trips_as_intrinsic_subject_evidence() {
         description: Some("Owns src/boundary/".to_string()),
     };
     let (generated, _) = generated_beats(&component, "unknown", &[], &[]);
-    let generated_boundary = generated
-        .iter()
-        .find(|beat| beat.intent == StoryIntent::Boundary)
-        .unwrap();
     let draft = StoryRecipe {
         id: "boundary-round-trip".to_string(),
         title: "Boundary round trip".to_string(),
-        schema_version: STORY_SCHEMA_VERSION,
+        schema_version: 2,
         subject: Some(StoryRecipeSubject::Entity {
             iri: component_iri.to_string(),
         }),
         subject_component_iri: None,
         goal: "Preserve the boundary".to_string(),
         audience: "reboarding".to_string(),
+        focus: StoryFocus::default(),
+        curator_context: None,
         beats: generated
             .iter()
             .map(|beat| StoryBeatRecipe {
@@ -650,24 +601,21 @@ fn generated_boundary_round_trips_as_intrinsic_subject_evidence() {
     };
     let repository = StoryRepository::new(&state.dir);
     let saved = repository.save("boundary-round-trip", draft).unwrap();
-    let saved_boundary = saved
-        .beats
+    assert!(saved.beats.is_empty());
+    assert!(!saved
+        .focus
+        .include_record_iris
+        .contains(&component_iri.to_string()));
+    let index = StoryResolutionIndex::build(&state).unwrap();
+    let reloaded = generate_component_story(&state, &index, &component, Some(&saved)).unwrap();
+    assert!(reloaded
+        .evidence
         .iter()
-        .find(|beat| beat.intent == StoryIntent::Boundary)
-        .unwrap();
-    assert!(saved_boundary.record_iris.is_empty());
-
-    let code = all_code_by_symbol(&state).unwrap();
-    let (reloaded, gaps) = recipe_beats(&state, &saved, &component, &code).unwrap();
-    let reloaded_boundary = reloaded
+        .any(|item| item.iri == component_iri));
+    assert!(!reloaded
+        .gaps
         .iter()
-        .find(|beat| beat.intent == StoryIntent::Boundary)
-        .unwrap();
-    assert_eq!(reloaded_boundary.evidence, generated_boundary.evidence);
-    assert_eq!(reloaded_boundary.narrative, generated_boundary.narrative);
-    assert!(!gaps
-        .iter()
-        .any(|gap| gap.beat_intent == Some(StoryIntent::Boundary)));
+        .any(|gap| gap.section_kind == Some(StorySectionKind::CurrentState)));
 }
 
 #[test]
@@ -693,7 +641,6 @@ fn record_and_topic_subjects_generate_from_current_project_knowledge() {
             iri: record_iri.clone(),
         },
         None,
-        false,
     )
     .unwrap();
     assert!(matches!(
@@ -714,7 +661,6 @@ fn record_and_topic_subjects_generate_from_current_project_knowledge() {
             query: "plain language narration".to_string(),
         },
         None,
-        false,
     )
     .unwrap();
     assert!(matches!(topic.subject, StorySubject::Topic { .. }));
@@ -725,6 +671,7 @@ fn record_and_topic_subjects_generate_from_current_project_knowledge() {
         .any(|evidence| evidence.iri == record_iri));
 
     let curated_iri = record_with_status(&state, "Explicitly curated anchor", "accepted");
+    link_edge(&state, &record_iri, "hasRationale", &curated_iri);
     let curated = StoryRecipe {
         id: "curated-topic".to_string(),
         title: "Curated topic".to_string(),
@@ -735,6 +682,11 @@ fn record_and_topic_subjects_generate_from_current_project_knowledge() {
         subject_component_iri: None,
         goal: "Keep the selected route".to_string(),
         audience: "reboarding".to_string(),
+        focus: StoryFocus {
+            include_record_iris: vec![curated_iri.clone()],
+            ..StoryFocus::default()
+        },
+        curator_context: None,
         beats: vec![StoryBeatRecipe {
             id: "governance".to_string(),
             title: "Chosen decision".to_string(),
@@ -752,10 +704,9 @@ fn record_and_topic_subjects_generate_from_current_project_knowledge() {
         &index,
         curated.resolved_subject().unwrap(),
         Some(&curated),
-        false,
     )
     .unwrap();
-    assert!(curated_run.beats[0]
+    assert!(curated_run
         .evidence
         .iter()
         .any(|evidence| evidence.iri == curated_iri));
@@ -810,6 +761,142 @@ fn generated_evidence_requires_canonical_record_and_code_types() {
 }
 
 #[test]
+fn canonical_section_policy_uses_subject_lifecycle_supersession_and_kind() {
+    let detail = |iri: &str, kind: &str, status: &str| StoryEvidenceDetail {
+        iri: iri.to_string(),
+        title: iri.to_string(),
+        kind: kind.to_string(),
+        status: status.to_string(),
+        suppressed: false,
+        description: None,
+        timestamp: None,
+        author: None,
+        properties: vec![],
+        relations: vec![],
+    };
+    let subject = "https://example.test/component/subject";
+    assert_eq!(
+        story_section_kind(
+            &detail(subject, "SystemComponent", "deprecated"),
+            Some(subject)
+        ),
+        StorySectionKind::Orientation
+    );
+    assert_eq!(
+        story_section_kind(
+            &detail(
+                "https://example.test/component/dependency",
+                "SystemComponent",
+                "accepted"
+            ),
+            Some(subject)
+        ),
+        StorySectionKind::Implementation
+    );
+    assert_eq!(
+        story_section_kind(
+            &detail(
+                "https://example.test/decision/historical",
+                "ArchitecturalDecision",
+                "superseded"
+            ),
+            Some(subject)
+        ),
+        StorySectionKind::Evolution
+    );
+    let mut successor = detail(
+        "https://example.test/decision/successor",
+        "ArchitecturalDecision",
+        "accepted",
+    );
+    successor.relations.push(StoryEvidenceRelation {
+        predicate: "https://example.test/supersedes".to_string(),
+        label: "supersedes".to_string(),
+        direction: StoryRelationDirection::Outgoing,
+        target_iri: "https://example.test/decision/predecessor".to_string(),
+        target_label: "Predecessor".to_string(),
+        target_kind: "ArchitecturalDecision".to_string(),
+    });
+    assert_eq!(
+        story_section_kind(&successor, Some(subject)),
+        StorySectionKind::Evolution
+    );
+    assert_eq!(
+        story_section_kind(
+            &detail("https://example.test/pattern/current", "Pattern", "unknown"),
+            Some(subject)
+        ),
+        StorySectionKind::CurrentState
+    );
+}
+
+#[test]
+fn rendered_citation_drives_narration_group_and_wrong_answer_revisit() {
+    let state = story_state("rendered-check-section");
+    let subject = "https://example.test/component/target";
+    let other = "https://example.test/component/other";
+    for (iri, label) in [(subject, "Target"), (other, "Other")] {
+        type_component(&state, iri);
+        add_literal(&state, iri, moose::RDFS_LABEL, label);
+    }
+    let correct = record_with_status(&state, "Current target decision", "accepted");
+    let distractor = record_with_status(&state, "Other component decision", "accepted");
+    link_edge(&state, &correct, "concerns", subject);
+    link_edge(&state, &distractor, "concerns", other);
+
+    let run = generate_consistent_story(
+        &state,
+        &StoryRecipeSubject::Entity {
+            iri: subject.to_string(),
+        },
+        None,
+        true,
+    )
+    .unwrap();
+    let rendered_section = run
+        .narrative
+        .iter()
+        .find(|section| {
+            section
+                .paragraphs
+                .iter()
+                .any(|paragraph| paragraph.citation_iris.contains(&correct))
+        })
+        .unwrap();
+    assert_eq!(rendered_section.kind, StorySectionKind::CurrentState);
+
+    let packet = build_narration_packet_for_test(&state, &run, 32_768).unwrap();
+    let source = packet
+        .citations_by_source
+        .iter()
+        .find_map(|(source, iris)| iris.contains(&correct).then_some(source))
+        .unwrap();
+    assert_eq!(
+        packet.sections_by_source.get(source),
+        Some(&rendered_section.id)
+    );
+
+    let check = run
+        .checks
+        .iter()
+        .find(|check| {
+            check
+                .options
+                .iter()
+                .any(|option| option.label == "Current target decision")
+        })
+        .unwrap();
+    let wrong = check
+        .options
+        .iter()
+        .find(|option| option.label == "Other component decision")
+        .unwrap();
+    let result = grade_check(&state, &check.id, std::slice::from_ref(&wrong.id)).unwrap();
+    assert!(!result.correct);
+    assert_eq!(result.revisit_section_id, Some(rendered_section.id.clone()));
+}
+
+#[test]
 fn presentation_only_generation_preserves_structure_without_issuing_grants() {
     let state = story_state("presentation-only-checks");
     let target = "https://example.test/component/target";
@@ -820,19 +907,14 @@ fn presentation_only_generation_preserves_structure_without_issuing_grants() {
     let distractor = record_with_status(&state, "Other evidence", "accepted");
     link_edge(&state, &correct, "concerns", target);
     link_edge(&state, &distractor, "concerns", other);
-    let component = StoryCandidate {
+    let subject = StoryRecipeSubject::Entity {
         iri: target.to_string(),
-        kind: "SystemComponent".to_string(),
-        label: "Target".to_string(),
-        description: None,
     };
-    let index = StoryResolutionIndex::build(&state).unwrap();
-    let symbolic = generate_symbolic_with_index(&state, &index, &component, None, true).unwrap();
+    let symbolic = generate_consistent_story(&state, &subject, None, true).unwrap();
     assert_eq!(symbolic.checks.len(), 1);
     let grants_after_symbolic = state.story_checks.lock().unwrap().grants.len();
 
-    let presentation =
-        generate_symbolic_with_index(&state, &index, &component, None, false).unwrap();
+    let presentation = generate_consistent_story(&state, &subject, None, false).unwrap();
     assert!(presentation.checks.is_empty());
     assert_eq!(presentation.gaps, symbolic.gaps);
     assert_eq!(
@@ -847,7 +929,7 @@ fn presentation_only_generation_preserves_structure_without_issuing_grants() {
         description: None,
     };
     let empty_index = StoryResolutionIndex::build(&state).unwrap();
-    let sparse = generate_symbolic_with_index(
+    let sparse = generate_component_story(
         &state,
         &empty_index,
         &empty_component,
@@ -861,6 +943,8 @@ fn presentation_only_generation_preserves_structure_without_issuing_grants() {
             subject_component_iri: None,
             goal: "Show gaps".to_string(),
             audience: "reboarding".to_string(),
+            focus: StoryFocus::default(),
+            curator_context: None,
             beats: vec![StoryBeatRecipe {
                 id: "boundary".to_string(),
                 title: "Boundary".to_string(),
@@ -873,11 +957,9 @@ fn presentation_only_generation_preserves_structure_without_issuing_grants() {
             curator: "tester".to_string(),
             updated_at: None,
         }),
-        true,
     )
     .unwrap();
     assert!(sparse.checks.is_empty());
-    assert!(sparse.gaps.iter().any(|gap| gap.id == "checks-unavailable"));
 }
 
 #[test]
@@ -902,7 +984,7 @@ fn drifted_subjects_remain_readable_but_never_issue_checks() {
     link_edge(&state, &distractor, "concerns", other);
 
     let index = StoryResolutionIndex::build(&state).unwrap();
-    let run = generate_symbolic_with_index(
+    let run = generate_component_story(
         &state,
         &index,
         &StoryCandidate {
@@ -912,7 +994,6 @@ fn drifted_subjects_remain_readable_but_never_issue_checks() {
             description: None,
         },
         None,
-        true,
     )
     .unwrap();
 
@@ -923,7 +1004,7 @@ fn drifted_subjects_remain_readable_but_never_issue_checks() {
 }
 
 #[test]
-fn curated_code_is_subject_grounded_and_check_uses_displayed_anchor() {
+fn comprehension_check_uses_displayed_code_anchor() {
     let state = story_state("curated-code-grounding");
     let component_a = "https://example.test/component/a";
     let component_b = "https://example.test/component/b";
@@ -935,97 +1016,59 @@ fn curated_code_is_subject_grounded_and_check_uses_displayed_anchor() {
     type_code_entity(&state, code_b, "symbol-b", "Code B");
     link_edge(&state, code_a, "realizes", component_a);
     link_edge(&state, code_b, "realizes", component_b);
-    let anchor = |symbol: &str, label: &str, iri: &str| StoryCodeAnchor {
-        symbol: symbol.to_string(),
-        label: label.to_string(),
-        entity_iri: Some(iri.to_string()),
-        path: None,
-        line: None,
-    };
-    let anchor_a = anchor("symbol-a", "Code A", code_a);
-    let anchor_b = anchor("symbol-b", "Code B", code_b);
-    let code_by_symbol = BTreeMap::from([
-        (anchor_a.symbol.clone(), anchor_a.clone()),
-        (anchor_b.symbol.clone(), anchor_b.clone()),
-    ]);
-    let curated = StoryRecipe {
-        id: "curated-code".to_string(),
-        title: "Curated code".to_string(),
-        schema_version: STORY_SCHEMA_VERSION,
-        subject: Some(StoryRecipeSubject::Entity {
-            iri: component_a.to_string(),
-        }),
-        subject_component_iri: None,
-        goal: "Ground code".to_string(),
-        audience: "reboarding".to_string(),
-        beats: vec![StoryBeatRecipe {
-            id: "core-code".to_string(),
-            title: "Core code".to_string(),
-            intent: StoryIntent::CoreCode,
-            record_iris: vec![],
-            code_symbols: vec![anchor_b.symbol.clone()],
-            curator_note: None,
-        }],
-        status: StoryStatus::Draft,
-        curator: "tester".to_string(),
-        updated_at: None,
-    };
-    let (beats, gaps) = recipe_beats(
+    let run = generate_consistent_story(
         &state,
-        &curated,
-        &StoryCandidate {
-            iri: component_a.to_string(),
-            kind: "SystemComponent".to_string(),
-            label: "Component A".to_string(),
-            description: None,
-        },
-        &code_by_symbol,
-    )
-    .unwrap();
-    assert!(beats[0].code_anchors.is_empty());
-    assert!(gaps
-        .iter()
-        .any(|gap| gap.title == "Story code does not realize this subject"));
-
-    let displayed = vec![make_beat(
-        "core-code",
-        "Core code",
-        StoryIntent::CoreCode,
-        vec![],
-        vec![anchor_b],
-        None,
-        None,
-    )];
-    let index = StoryResolutionIndex {
-        components: vec![],
-        components_by_iri: BTreeMap::new(),
-        known_components_by_iri: BTreeMap::new(),
-        code_entities: code_by_symbol.values().cloned().collect(),
-        code_by_symbol,
-    };
-    let (checks, viable) = build_checks(
-        &state,
-        &StoryCandidate {
+        &StoryRecipeSubject::Entity {
             iri: component_b.to_string(),
-            kind: "SystemComponent".to_string(),
-            label: "Component B".to_string(),
-            description: None,
         },
-        &displayed,
-        &index,
-        &[],
-        &[anchor("symbol-b", "Code B", code_b)],
+        None,
         true,
     )
     .unwrap();
-    assert_eq!(viable, 1);
-    assert_eq!(checks.len(), 1);
-    let labels = checks[0]
+    assert_eq!(run.checks.len(), 1);
+    let labels = run.checks[0]
         .options
         .iter()
         .map(|option| option.label.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(labels, BTreeSet::from(["Code A", "Code B"]));
+}
+
+#[test]
+fn stable_checks_never_treat_undisplayed_component_evidence_as_a_distractor() {
+    let state = story_state("stable-check-complete-target-set");
+    let component_iri = "https://example.test/component/target";
+    let other_component_iri = "https://example.test/component/other";
+    for (iri, label) in [
+        (component_iri, "Target component"),
+        (other_component_iri, "Other component"),
+    ] {
+        type_component(&state, iri);
+        add_literal(&state, iri, moose::RDFS_LABEL, label);
+    }
+    let displayed = record_with_status(&state, "A displayed decision", "accepted");
+    let undisplayed = record_with_status(&state, "B undisplayed valid decision", "accepted");
+    let distractor = record_with_status(&state, "C actual distractor", "accepted");
+    link_edge(&state, &displayed, "concerns", component_iri);
+    link_edge(&state, &undisplayed, "concerns", component_iri);
+    link_edge(&state, &distractor, "concerns", other_component_iri);
+
+    let subject = StoryRecipeSubject::Entity {
+        iri: component_iri.to_string(),
+    };
+    let index = StoryResolutionIndex::build(&state).unwrap();
+    let mut run = generate_story_with_index(&state, &index, &subject, None).unwrap();
+    for beat in &mut run.beats {
+        beat.evidence.retain(|item| item.iri != undisplayed);
+    }
+
+    let prepared = prepare_checks_for_stable_story(&state, &index, &run).unwrap();
+    let checks = issue_prepared_checks(&state, prepared);
+    assert!(!checks.is_empty());
+    assert!(checks
+        .iter()
+        .flat_map(|check| &check.options)
+        .all(|option| option.label != "B undisplayed valid decision"));
 }
 
 #[test]
@@ -1038,6 +1081,49 @@ fn multiply_typed_kind_and_duplicate_symbol_selection_are_deterministic() {
         ]),
         Some("ArchitecturalDecision".to_string())
     );
+    assert_eq!(
+        choose_record_kind(vec![
+            "InformationRecord".to_string(),
+            "Alternative".to_string(),
+        ]),
+        Some("Alternative".to_string())
+    );
+
+    let state = story_state("multiply-typed-story-kind");
+    let record_iri = "https://example.test/record/multiply-typed";
+    type_entity(
+        &state,
+        record_iri,
+        &state.resolve_class("Alternative").unwrap(),
+    );
+    type_entity(
+        &state,
+        record_iri,
+        &state.resolve_class("Consequence").unwrap(),
+    );
+    add_literal(&state, record_iri, moose::RDFS_LABEL, "Multiple types");
+    add_literal(&state, record_iri, &state.capture.status, "accepted");
+    assert_eq!(
+        record_data(&state, record_iri)
+            .unwrap()
+            .unwrap()
+            .evidence
+            .kind,
+        "Consequence"
+    );
+    let document = build_story_document(
+        &state,
+        &StorySubject::Entity {
+            iri: record_iri.to_string(),
+            kind: "Consequence".to_string(),
+            label: "Multiple types".to_string(),
+        },
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(document.evidence[0].kind, "Consequence");
+
     let anchor = |iri: &str, label: &str| StoryCodeAnchor {
         symbol: "same-symbol".to_string(),
         label: label.to_string(),
@@ -1065,47 +1151,39 @@ fn multiply_typed_kind_and_duplicate_symbol_selection_are_deterministic() {
 }
 
 #[test]
-fn published_recipes_require_three_to_five_beats() {
-    let error = validate_recipe(&recipe("short", StoryStatus::Published, 2), true)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("3 to 5"));
-    let mut valid = recipe("valid", StoryStatus::Published, 5);
-    for beat in &mut valid.beats {
-        beat.record_iris
-            .push("https://example.test/record".to_string());
-    }
+fn v3_recipe_focus_is_disjoint_and_curator_context_is_bounded() {
+    let mut valid = recipe("valid", StoryStatus::Published, 0);
+    valid.focus.include_record_iris = vec!["https://example.test/record".to_string()];
     assert!(validate_recipe(&valid, true).is_ok());
 
-    let mut duplicated = valid.clone();
-    duplicated.beats[1].intent = StoryIntent::Purpose;
-    assert!(validate_recipe(&duplicated, true)
+    let mut overlapping = valid.clone();
+    overlapping.focus.exclude_record_iris = overlapping.focus.include_record_iris.clone();
+    assert!(validate_recipe(&overlapping, true)
         .unwrap_err()
         .to_string()
-        .contains("intent only once"));
+        .contains("both included and excluded"));
 
-    let mut out_of_order = valid;
-    out_of_order.beats.swap(0, 1);
-    assert!(validate_recipe(&out_of_order, true)
+    valid.curator_context = Some("x".repeat(2_001));
+    assert!(validate_recipe(&valid, true)
         .unwrap_err()
         .to_string()
-        .contains("must follow"));
+        .contains("at most 2000"));
 }
 
 #[test]
-fn beat_reference_limit_accepts_six_and_rejects_seven_or_duplicates() {
-    let six = (0..6)
+fn focus_reference_limit_accepts_128_and_rejects_129_or_duplicates() {
+    let allowed = (0..MAX_FOCUS_REFS)
         .map(|index| format!("ref-{index}"))
         .collect::<Vec<_>>();
-    assert!(validate_refs("record IRI", &six).is_ok());
+    assert!(validate_refs("record IRI", &allowed).is_ok());
 
-    let seven = (0..7)
+    let too_many = (0..=MAX_FOCUS_REFS)
         .map(|index| format!("ref-{index}"))
         .collect::<Vec<_>>();
-    assert!(validate_refs("record IRI", &seven)
+    assert!(validate_refs("record IRI", &too_many)
         .unwrap_err()
         .to_string()
-        .contains("at most 6"));
+        .contains("at most 128"));
 
     assert!(
         validate_refs("record IRI", &["same".to_string(), "same".to_string()])
@@ -1316,7 +1394,7 @@ fn check_grants_are_project_scoped_and_distinguish_error_states() {
         CheckGrant {
             kind: CheckKind::Concerns,
             component_iri: "https://example.test/component".to_string(),
-            beat_id: "purpose".to_string(),
+            section_id: "orientation".to_string(),
             correct_option_token: allowed.clone(),
             option_entities: BTreeMap::from([(
                 allowed.clone(),
@@ -1352,7 +1430,7 @@ fn check_grants_are_project_scoped_and_distinguish_error_states() {
         CheckGrant {
             kind: CheckKind::Concerns,
             component_iri: "https://example.test/component".to_string(),
-            beat_id: "purpose".to_string(),
+            section_id: "orientation".to_string(),
             correct_option_token: "token".to_string(),
             option_entities: BTreeMap::from([(
                 "token".to_string(),
@@ -1384,7 +1462,7 @@ fn grading_rejects_retired_subjects_and_newly_valid_distractors() {
     let grant = || CheckGrant {
         kind: CheckKind::Concerns,
         component_iri: component.to_string(),
-        beat_id: "purpose".to_string(),
+        section_id: "orientation".to_string(),
         correct_option_token: "correct-token".to_string(),
         option_entities: BTreeMap::from([
             ("correct-token".to_string(), correct.clone()),
@@ -1418,7 +1496,7 @@ fn grading_rejects_retired_subjects_and_newly_valid_distractors() {
         CheckGrant {
             kind: CheckKind::Concerns,
             component_iri: other_component.to_string(),
-            beat_id: "purpose".to_string(),
+            section_id: "orientation".to_string(),
             correct_option_token: "only-token".to_string(),
             option_entities: BTreeMap::from([("only-token".to_string(), other_record.clone())]),
             correct_entity_iri: other_record,
@@ -1450,7 +1528,7 @@ fn capacity_evicted_check_reports_unavailable() {
     let grant = || CheckGrant {
         kind: CheckKind::Concerns,
         component_iri: "https://example.test/component".to_string(),
-        beat_id: "purpose".to_string(),
+        section_id: "orientation".to_string(),
         correct_option_token: "token".to_string(),
         option_entities: BTreeMap::from([(
             "token".to_string(),
@@ -1473,183 +1551,808 @@ fn capacity_evicted_check_reports_unavailable() {
     );
 }
 
+#[test]
+fn typed_closure_is_depth_bounded_deterministic_and_honors_natural_exclusions() {
+    let state = story_state("typed-story-closure");
+    let subject = "https://example.test/component/root";
+    let other_component = "https://example.test/component/other";
+    type_component(&state, subject);
+    type_component(&state, other_component);
+    let direct = record_with_status(&state, "Direct decision", "accepted");
+    let rationale = record_with_status(&state, "Decision rationale", "accepted");
+    let unrelated = record_with_status(&state, "Other component decision", "accepted");
+    link_edge(&state, &direct, "concerns", subject);
+    link_edge(&state, &direct, "hasRationale", &rationale);
+    link_edge(&state, &direct, "concerns", other_component);
+    link_edge(&state, &unrelated, "concerns", other_component);
+
+    let subject_selector = StoryRecipeSubject::Entity {
+        iri: subject.to_string(),
+    };
+    let first =
+        story_subject_closure_iris_with_priority(&state, &subject_selector, &BTreeSet::new())
+            .unwrap();
+    let second =
+        story_subject_closure_iris_with_priority(&state, &subject_selector, &BTreeSet::new())
+            .unwrap();
+    assert_eq!(first, second);
+    assert!(first.contains(subject));
+    assert!(first.contains(&direct));
+    assert!(first.contains(&rationale));
+    assert!(!first.contains(&unrelated));
+
+    let mut focused = recipe("closure", StoryStatus::Draft, 0);
+    focused.subject = Some(subject_selector);
+    focused.focus.exclude_record_iris = vec![rationale.clone()];
+    focused.focus.emphasis = vec![StorySectionKind::CurrentState];
+    let index = StoryResolutionIndex::build(&state).unwrap();
+    let run = generate_story_with_index(
+        &state,
+        &index,
+        focused.resolved_subject().unwrap(),
+        Some(&focused),
+    )
+    .unwrap();
+    assert!(run
+        .evidence
+        .iter()
+        .any(|item| item.iri == rationale && item.suppressed));
+    assert!(run
+        .evidence
+        .iter()
+        .find(|item| item.iri == direct)
+        .unwrap()
+        .properties
+        .iter()
+        .any(|property| property.label == "hasLifecycleStatus"));
+    assert!(run
+        .narrative
+        .iter()
+        .flat_map(|section| &section.paragraphs)
+        .all(|paragraph| !paragraph.citation_iris.contains(&rationale)));
+    assert_eq!(run.narrative[0].kind, StorySectionKind::CurrentState);
+
+    focused.focus.exclude_record_iris = vec![unrelated];
+    assert!(recipe_has_drift(&state, &focused).unwrap());
+}
+
+#[test]
+fn exact_subject_closure_includes_typed_direct_neighbors_for_other_predicates() {
+    let state = story_state("typed-direct-neighbor");
+    let subject = "https://example.test/component/root";
+    let dependency = "https://example.test/role/dependency";
+    type_component(&state, subject);
+    type_entity(
+        &state,
+        dependency,
+        "https://trivyn.io/ontologies/software/code#CodeRole",
+    );
+    link_edge(&state, subject, "playsRole", dependency);
+
+    let closure = story_subject_closure_iris_with_priority(
+        &state,
+        &StoryRecipeSubject::Entity {
+            iri: subject.to_string(),
+        },
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(closure.contains(subject));
+    assert!(closure.contains(dependency));
+}
+
+#[test]
+fn curated_deep_include_reserves_capacity_without_becoming_a_root() {
+    let state = story_state("closure-priority-pressure");
+    let subject = "https://example.test/component/root";
+    type_component(&state, subject);
+    let priority = "https://example.test/record/priority";
+    type_raw_record(&state, priority, "Curated deep rationale");
+
+    for index in 0..(MAX_STORY_ENTITIES + 1) {
+        let iri = format!("https://example.test/record/direct-{index:04}");
+        type_raw_record(&state, &iri, &format!("Direct {index:04}"));
+        link_edge(&state, &iri, "concerns", subject);
+        if index == MAX_STORY_ENTITIES {
+            link_edge(&state, &iri, "hasRationale", priority);
+        }
+    }
+
+    let selected = story_subject_closure_iris_with_priority(
+        &state,
+        &StoryRecipeSubject::Entity {
+            iri: subject.to_string(),
+        },
+        &BTreeSet::from([priority.to_string()]),
+    )
+    .unwrap();
+    assert_eq!(selected.len(), MAX_STORY_ENTITIES);
+    assert!(selected.contains(subject));
+    assert!(selected.contains(priority));
+}
+
+#[test]
+fn code_symbol_exclusion_only_suppresses_matching_code_entities() {
+    let state = story_state("exact-code-exclusion");
+    let subject = "https://example.test/component/root";
+    type_component(&state, subject);
+    let record = record_with_status(&state, "Decision with coincidental text", "accepted");
+    add_literal(&state, &record, &state.capture.description, "shared-symbol");
+    link_edge(&state, &record, "concerns", subject);
+    let code = "https://example.test/code/shared";
+    type_code_entity(&state, code, "shared-symbol", "Shared code");
+    link_edge(&state, code, "realizes", subject);
+
+    let mut focused = recipe("exact-code-exclusion", StoryStatus::Draft, 0);
+    focused.subject = Some(StoryRecipeSubject::Entity {
+        iri: subject.to_string(),
+    });
+    focused.focus.exclude_code_symbols = vec!["shared-symbol".to_string()];
+    let index = StoryResolutionIndex::build(&state).unwrap();
+    let run = generate_story_with_index(
+        &state,
+        &index,
+        focused.resolved_subject().unwrap(),
+        Some(&focused),
+    )
+    .unwrap();
+    assert!(
+        !run.evidence
+            .iter()
+            .find(|item| item.iri == record)
+            .unwrap()
+            .suppressed
+    );
+    assert!(
+        run.evidence
+            .iter()
+            .find(|item| item.iri == code)
+            .unwrap()
+            .suppressed
+    );
+    assert!(run.coverage.dossier_bytes > 0);
+    assert!(run
+        .coverage
+        .subject_families
+        .contains(&"ArchitecturalDecision".to_string()));
+    assert_eq!(
+        run.coverage.outline_sections,
+        run.narrative
+            .iter()
+            .map(|section| section.kind.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn timeline_orders_rfc3339_instants_and_puts_invalid_dates_last() {
+    let detail = |iri: &str, timestamp: Option<&str>| StoryEvidenceDetail {
+        iri: iri.to_string(),
+        title: iri.to_string(),
+        kind: "ArchitecturalDecision".to_string(),
+        status: "accepted".to_string(),
+        suppressed: false,
+        description: None,
+        timestamp: timestamp.map(str::to_string),
+        author: None,
+        properties: vec![],
+        relations: vec![],
+    };
+    let timeline = build_timeline(&[
+        detail("later-offset", Some("2026-08-01T02:00:00+02:00")),
+        detail("earlier", Some("2026-07-31T23:30:00Z")),
+        detail("invalid", Some("yesterday")),
+        detail("undated", None),
+    ]);
+    assert_eq!(
+        timeline
+            .iter()
+            .map(|event| event.evidence_iri.as_str())
+            .collect::<Vec<_>>(),
+        vec!["earlier", "later-offset", "invalid", "undated"]
+    );
+}
+
+#[test]
+fn legacy_recipe_reads_losslessly_and_writes_v3() {
+    let root = std::env::temp_dir().join(format!(
+        "moosedev-story-v3-migration-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(root.join("stories")).unwrap();
+    let raw = serde_json::json!({
+        "id": "legacy",
+        "title": "Legacy story",
+        "schema_version": 2,
+        "subject": {"type":"entity", "iri":"https://example.test/component"},
+        "goal": "Preserve curation",
+        "audience": "reboarding",
+        "beats": [{
+            "id":"governance", "title":"Governance", "intent":"governance",
+            "record_iris":["https://example.test/decision"], "code_symbols":[],
+            "curator_note":"Explain the trade-off"
+        }],
+        "status":"draft", "curator":"maintainer", "updated_at": null
+    });
+    std::fs::write(
+        root.join("stories/legacy.json"),
+        serde_json::to_vec_pretty(&raw).unwrap(),
+    )
+    .unwrap();
+    let repository = StoryRepository::new(&root);
+    let migrated = repository.get("legacy").unwrap().unwrap();
+    assert_eq!(migrated.schema_version, 3);
+    assert_eq!(
+        migrated.focus.include_record_iris,
+        vec!["https://example.test/decision"]
+    );
+    assert_eq!(
+        migrated.curator_context.as_deref(),
+        Some("Governance: Explain the trade-off")
+    );
+    let saved = repository.save("legacy", migrated).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("stories/legacy.json")).unwrap()).unwrap();
+    assert_eq!(written["schema_version"], 3);
+    assert!(written.get("beats").is_none());
+    assert_eq!(
+        saved.curator_context.as_deref(),
+        Some("Governance: Explain the trade-off")
+    );
+    let mut long_raw = raw.clone();
+    long_raw["id"] = serde_json::json!("legacy-long");
+    long_raw["beats"][0]["curator_note"] = serde_json::json!("x".repeat(2_001));
+    std::fs::write(
+        root.join("stories/legacy-long.json"),
+        serde_json::to_vec_pretty(&long_raw).unwrap(),
+    )
+    .unwrap();
+    let long = repository.get("legacy-long").unwrap().unwrap();
+    assert!(long.curator_context.as_ref().unwrap().chars().count() > 2_000);
+    assert!(repository
+        .save("legacy-long", long)
+        .unwrap_err()
+        .to_string()
+        .contains("at most 2000"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn symbolic_run_for_narration() -> StoryRun {
+    let evidence = vec![
+        StoryEvidenceDetail {
+            iri: "https://example.test/requirement".to_string(),
+            title: "Readable stories".to_string(),
+            kind: "Requirement".to_string(),
+            status: "accepted".to_string(),
+            suppressed: false,
+            description: Some("Stories explain the project in plain language.".to_string()),
+            timestamp: Some("2026-08-01T00:00:00Z".to_string()),
+            author: Some("maintainer".to_string()),
+            properties: vec![],
+            relations: vec![],
+        },
+        StoryEvidenceDetail {
+            iri: "https://example.test/decision".to_string(),
+            title: "Ground narration".to_string(),
+            kind: "ArchitecturalDecision".to_string(),
+            status: "accepted".to_string(),
+            suppressed: false,
+            description: Some("Narration cites deterministic evidence.".to_string()),
+            timestamp: Some("2026-08-02T00:00:00Z".to_string()),
+            author: Some("maintainer".to_string()),
+            properties: vec![],
+            relations: vec![],
+        },
+    ];
+    let narrative = vec![
+        StoryNarrativeSection {
+            id: "orientation".to_string(),
+            kind: StorySectionKind::Orientation,
+            title: "Orientation".to_string(),
+            paragraphs: vec![StoryParagraph {
+                text: "Symbolic orientation.".to_string(),
+                citation_iris: vec![evidence[0].iri.clone()],
+            }],
+        },
+        StoryNarrativeSection {
+            id: "evolution".to_string(),
+            kind: StorySectionKind::Evolution,
+            title: "Evolution".to_string(),
+            paragraphs: vec![StoryParagraph {
+                text: "Symbolic evolution.".to_string(),
+                citation_iris: vec![evidence[1].iri.clone()],
+            }],
+        },
+    ];
     StoryRun {
+        schema_version: STORY_SCHEMA_VERSION,
         recipe_id: None,
         trust_state: StoryTrustState::Generated,
         narration_mode: NarrationMode::Symbolic,
+        narration_strategy: NarrationStrategy::Symbolic,
         narration_outcome: NarrationOutcome::NotRequested,
+        narration_failure_reason: None,
+        narration_coverage: None,
         title: "A Story".to_string(),
         subject: StorySubject::Entity {
-            iri: "component".to_string(),
+            iri: "https://example.test/component".to_string(),
             kind: "SystemComponent".to_string(),
             label: "Component".to_string(),
         },
         goal: "Understand it".to_string(),
-        overview: "Overview".to_string(),
-        beats: vec![
-            StoryBeat {
-                id: "purpose".to_string(),
-                title: "Purpose".to_string(),
-                intent: StoryIntent::Purpose,
-                narrative: "Symbolic purpose".to_string(),
-                evidence: vec![StoryEvidence {
-                    iri: "record".to_string(),
-                    title: "Requirement".to_string(),
-                    kind: "Requirement".to_string(),
-                    status: "accepted".to_string(),
-                }],
-                code_anchors: vec![],
-                curator_note: Some("Keep this note".to_string()),
-                gap: None,
-            },
-            StoryBeat {
-                id: "code".to_string(),
-                title: "Code".to_string(),
-                intent: StoryIntent::CoreCode,
-                narrative: "Symbolic code".to_string(),
-                evidence: vec![],
-                code_anchors: vec![StoryCodeAnchor {
-                    symbol: "symbol".to_string(),
-                    label: "function".to_string(),
-                    entity_iri: Some("entity".to_string()),
-                    path: Some("src/lib.rs".to_string()),
-                    line: None,
-                }],
-                curator_note: None,
-                gap: None,
-            },
-        ],
+        curator_context: Some("Human guidance stays separate.".to_string()),
+        brief: StoryParagraph {
+            text: "Brief.".to_string(),
+            citation_iris: vec![evidence[0].iri.clone()],
+        },
+        narrative,
+        timeline: vec![],
+        evidence,
+        code_anchors: vec![],
+        coverage: StoryCoverage {
+            entity_count: 2,
+            current_count: 2,
+            ..StoryCoverage::default()
+        },
         gaps: vec![],
         checks: vec![],
+        beats: vec![],
     }
 }
 
 #[test]
-fn valid_narration_changes_only_grounded_prose_and_mode() {
-    let symbolic = symbolic_run_for_narration();
-    let raw = r#"{"beats":[{"beat_id":"purpose","text":"Narrated purpose","citation_ids":["e0"]},{"beat_id":"code","text":"Narrated code","citation_ids":["c0"]}]}"#;
-    let narrated = apply_narration_response(symbolic.clone(), raw).unwrap();
-    let mut expected = symbolic;
-    expected.narration_mode = NarrationMode::Llm;
-    expected.narration_outcome = NarrationOutcome::Succeeded;
-    expected.beats[0].narrative = "Narrated purpose".to_string();
-    expected.beats[1].narrative = "Narrated code".to_string();
-    assert_eq!(narrated, expected);
+fn valid_narration_replaces_only_article_paragraphs() {
+    let state = story_state("valid-packet-narration");
+    let run = symbolic_run_for_narration();
+    let citations = build_narration_packet_for_test(&state, &run, 32_768)
+        .unwrap()
+        .citations_by_source;
+    let raw = r#"{"paragraphs":[{"section_id":"orientation","text":"The project requires readable explanations.","source_ids":["s1"]},{"section_id":"evolution","text":"It later grounded narration in typed evidence.","source_ids":["s2"]}]}"#;
+    let narrative = apply_packet_response_for_test(&run, raw, &citations).unwrap();
+    assert_eq!(
+        narrative[0].paragraphs[0].text,
+        "The project requires readable explanations."
+    );
+    assert_eq!(
+        narrative[1].paragraphs[0].text,
+        "It later grounded narration in typed evidence."
+    );
+    assert_eq!(narrative[0].kind, StorySectionKind::Orientation);
 }
 
 #[test]
-fn narration_repairs_common_local_model_json_syntax_before_strict_validation() {
-    let symbolic = symbolic_run_for_narration();
-    let raw = r#"```json
-{"beats":[{"beat_id":"purpose","text":"Narrated purpose","citation_ids":["e0"]},{"beat_id":"code","text":"Narrated code","citation_ids":["c0"]}]}
+fn narration_accepts_provider_section_arrays_without_weakening_citations() {
+    let run = symbolic_run_for_narration();
+    let citations = BTreeMap::from([
+        (
+            "s1".to_string(),
+            vec!["https://example.test/requirement".to_string()],
+        ),
+        (
+            "s2".to_string(),
+            vec!["https://example.test/decision".to_string()],
+        ),
+    ]);
+    let raw = r#"[{"section_id":"orientation","title":"Orientation","paragraph":"The project requires readable explanations.","source_ids":["s1"]},{"section_id":"evolution","title":"Evolution","paragraph":"It later grounded narration in typed evidence.","source_ids":["s2"]}]"#;
+    let narrative = apply_packet_response_for_test(&run, raw, &citations).unwrap();
+    assert_eq!(narrative[0].paragraphs[0].citation_iris, citations["s1"]);
+    assert_eq!(narrative[1].paragraphs[0].citation_iris, citations["s2"]);
+
+    let plural = r#"[{"section_id":"orientation","title":"Orientation","paragraphs":["The project requires readable explanations."],"source_ids":["s1"]},{"section_id":"evolution","title":"Evolution","paragraphs":["It later grounded narration.","The evidence remained deterministic."],"source_ids":["s2"]}]"#;
+    let plural_narrative = apply_packet_response_for_test(&run, plural, &citations).unwrap();
+    assert_eq!(plural_narrative[1].paragraphs.len(), 2);
+
+    let cross_section = r#"[{"section_id":"orientation","title":"Orientation","paragraph":"Wrong evidence.","source_ids":["s2"]},{"section_id":"evolution","title":"Evolution","paragraph":"Also wrong.","source_ids":["s1"]}]"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, cross_section, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
+    let ambiguous = r#"[{"section_id":"orientation","title":"Orientation","paragraph":"One.","paragraphs":["Two."],"source_ids":["s1"]},{"section_id":"evolution","title":"Evolution","paragraph":"Evolution.","source_ids":["s2"]}]"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, ambiguous, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
+}
+
+#[test]
+fn packet_source_ids_expand_to_complete_public_evidence_citations() {
+    let run = symbolic_run_for_narration();
+    let citations = BTreeMap::from([
+        (
+            "source-1".to_string(),
+            vec!["https://example.test/requirement".to_string()],
+        ),
+        (
+            "source-2".to_string(),
+            vec!["https://example.test/decision".to_string()],
+        ),
+    ]);
+    let raw = r#"{"paragraphs":[{"section_id":"orientation","text":"Readable explanations.","source_ids":["source-1"]},{"section_id":"evolution","text":"Grounded narration.","source_ids":["source-2"]}]}"#;
+    let narrative = apply_packet_response_for_test(&run, raw, &citations).unwrap();
+    assert_eq!(
+        narrative[0].paragraphs[0].citation_iris,
+        vec!["https://example.test/requirement"]
+    );
+    assert_eq!(
+        narrative[1].paragraphs[0].citation_iris,
+        vec!["https://example.test/decision"]
+    );
+
+    let missing_source = r#"{"paragraphs":[{"section_id":"orientation","text":"Readable explanations.","source_ids":["source-1"]},{"section_id":"evolution","text":"Grounded narration.","source_ids":["source-1"]}]}"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, missing_source, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
+}
+
+#[test]
+fn narration_repairs_json_but_rejects_unknown_or_incomplete_citations() {
+    let run = symbolic_run_for_narration();
+    let citations = BTreeMap::from([
+        (
+            "s1".to_string(),
+            vec!["https://example.test/requirement".to_string()],
+        ),
+        (
+            "s2".to_string(),
+            vec!["https://example.test/decision".to_string()],
+        ),
+    ]);
+    let repaired = r#"{'paragraphs':[{'section_id':'orientation','text':'Readable explanations.','source_ids':['s1'],},{'section_id':'evolution','text':'Grounded narration.','source_ids':['s2']}],}"#;
+    assert!(apply_packet_response_for_test(&run, repaired, &citations).is_ok());
+    let fenced_with_trailing_quote = r#"```json
+{"paragraphs":[{"section_id":"orientation","text":"Readable explanations.","source_ids":["s1"]},{"section_id":"evolution","text":"Grounded narration.","source_ids":["s2"]}]}
+"
 ```"#;
-    let narrated = apply_narration_response(symbolic.clone(), raw).unwrap();
-    assert_eq!(narrated.narration_mode, NarrationMode::Llm);
-    assert_eq!(narrated.beats[0].narrative, "Narrated purpose");
-    assert_eq!(narrated.beats[1].narrative, "Narrated code");
-
-    let prefixed = format!("Here you go:\n{raw}");
-    assert!(apply_narration_response(symbolic.clone(), &prefixed).is_some());
-    let json_like = r#"{'beats':[{'beat_id':'purpose','text':'Narrated purpose','citation_ids':['e0'],},{'beat_id':'code','text':'Narrated code','citation_ids':['c0'],}],}"#;
-    assert!(apply_narration_response(symbolic.clone(), json_like).is_some());
-
-    let unknown_field = r#"{'beats':[{'beat_id':'purpose','text':'Narrated purpose','citation_ids':['e0'],'claim':'invented'},{'beat_id':'code','text':'Narrated code','citation_ids':['c0']}] }"#;
-    assert!(apply_narration_response(symbolic.clone(), unknown_field).is_none());
-    let cross_beat_citation = r#"{'beats':[{'beat_id':'purpose','text':'Narrated purpose','citation_ids':['c0']},{'beat_id':'code','text':'Narrated code','citation_ids':['c0']}] }"#;
-    assert!(apply_narration_response(symbolic.clone(), cross_beat_citation).is_none());
-    let multiple = format!("{raw}\n{raw}");
-    assert!(apply_narration_response(symbolic, &multiple).is_none());
+    let fenced = apply_packet_response_for_test(&run, fenced_with_trailing_quote, &citations);
+    assert!(fenced.is_ok(), "{fenced:?}");
+    let missing = r#"{"paragraphs":[{"section_id":"orientation","text":"Only one.","source_ids":["s1"]},{"section_id":"evolution","text":"Still one.","source_ids":["s1"]}]}"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, missing, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
+    let invented = r#"{"paragraphs":[{"section_id":"orientation","text":"Invented.","source_ids":["invented"]},{"section_id":"evolution","text":"Grounded.","source_ids":["s2"]}]}"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, invented, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
+    let wrong_section = r#"{"paragraphs":[{"section_id":"orientation","text":"Wrong source section.","source_ids":["s2"]},{"section_id":"evolution","text":"Grounded.","source_ids":["s1"]}]}"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, wrong_section, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
+    let leaked_marker = r#"{"paragraphs":[{"section_id":"orientation","text":"Readable explanations [s1].","source_ids":["s1"]},{"section_id":"evolution","text":"Grounded narration.","source_ids":["s2"]}]}"#;
+    assert_eq!(
+        apply_packet_response_for_test(&run, leaked_marker, &citations),
+        Err(NarrationFailureReason::SchemaMismatch)
+    );
 }
 
 #[test]
-fn narration_prompt_bounds_individual_fields_and_total_input() {
-    let state = story_state("narration-prompt-bounds");
+fn narration_packet_reserves_a_chronological_spine_under_budget_pressure() {
+    let state = story_state("narration-chronology-spine");
     let mut run = symbolic_run_for_narration();
-    run.beats[0].evidence[0].title = "x".repeat(MAX_LLM_FIELD_BYTES * 4);
-    run.beats[0].narrative = "Owns src/boundary/ through coversPath".to_string();
-    run.beats[0].curator_note = Some("private curator guidance".to_string());
-    let prompt = build_narration_prompt(&state, &run, &[&run.beats[0]]).unwrap();
-    assert!(prompt.len() <= MAX_LLM_PROMPT_BYTES);
-    assert!(!prompt.contains(&"x".repeat(MAX_LLM_FIELD_BYTES + 1)));
-    assert!(prompt.contains("Owns src/boundary/ through coversPath"));
-    assert!(prompt.contains("two to four short, connected sentences"));
-    assert!(prompt.contains(r#""title":"A Story""#));
-    assert!(prompt.contains(r#""subject_label":"Component""#));
-    assert!(prompt.contains(r#""goal":"Understand it""#));
-    assert!(prompt.contains(r#""status":"accepted""#));
-    assert!(!prompt.contains("private curator guidance"));
-
-    let huge = "y".repeat(MAX_LLM_FIELD_BYTES * 4);
-    let template = StoryBeat {
-        id: "beat".to_string(),
-        title: "Beat".to_string(),
-        intent: StoryIntent::Governance,
-        narrative: "Symbolic".to_string(),
-        evidence: (0..MAX_ANCHORS_PER_BEAT)
-            .map(|index| StoryEvidence {
-                iri: format!("https://example.test/record/{index}"),
-                title: huge.clone(),
-                kind: huge.clone(),
-                status: "accepted".to_string(),
-            })
-            .collect(),
-        code_anchors: (0..MAX_ANCHORS_PER_BEAT)
-            .map(|index| StoryCodeAnchor {
-                symbol: format!("symbol-{index}"),
-                label: huge.clone(),
-                entity_iri: Some(format!("https://example.test/code/{index}")),
-                path: Some(huge.clone()),
-                line: None,
-            })
-            .collect(),
-        curator_note: Some("not sent to the sensor".to_string()),
-        gap: None,
+    let subject_iri = match &run.subject {
+        StorySubject::Entity { iri, .. } => iri.clone(),
+        StorySubject::Topic { .. } => unreachable!(),
     };
-    let beats = (0..MAX_BEATS)
-        .map(|index| {
-            let mut beat = template.clone();
-            beat.id = format!("beat-{index}");
-            beat
-        })
-        .collect::<Vec<_>>();
-    let mut oversized = symbolic_run_for_narration();
-    oversized.beats = beats;
-    let eligible = oversized.beats.iter().collect::<Vec<_>>();
-    assert!(build_narration_prompt(&state, &oversized, &eligible).is_none());
+    for index in 0..20 {
+        let iri = format!("https://example.test/milestone/{index:02}");
+        run.evidence.push(StoryEvidenceDetail {
+            iri: iri.clone(),
+            title: format!("Milestone {index:02}"),
+            kind: "ArchitecturalDecision".to_string(),
+            status: "accepted".to_string(),
+            suppressed: false,
+            description: Some(format!("{} {index:02}", "chronology".repeat(250))),
+            timestamp: Some(format!("2026-07-{:02}T00:00:00Z", index + 1)),
+            author: None,
+            properties: vec![],
+            relations: vec![StoryEvidenceRelation {
+                predicate: "https://example.test/concerns".to_string(),
+                label: "concerns".to_string(),
+                direction: StoryRelationDirection::Outgoing,
+                target_iri: subject_iri.clone(),
+                target_label: "Component".to_string(),
+                target_kind: "SystemComponent".to_string(),
+            }],
+        });
+        run.timeline.push(StoryTimelineEvent {
+            id: format!("event-{index:02}"),
+            title: format!("Milestone {index:02}"),
+            kind: "ArchitecturalDecision".to_string(),
+            status: "accepted".to_string(),
+            timestamp: Some(format!("2026-07-{:02}T00:00:00Z", index + 1)),
+            evidence_iri: iri,
+            relation: None,
+            predecessor_iris: vec![],
+            successor_iris: vec![],
+            rationale_iris: vec![],
+        });
+    }
+
+    let packet = build_narration_packet_for_test(&state, &run, 32_768).unwrap();
+    assert!(packet.coverage.truncated);
+    assert!(packet.prompt.contains("Milestone 00"));
+    assert!(packet.prompt.contains("Milestone 19"));
+    assert!(packet.prompt.contains("Milestone 07"));
 }
 
 #[test]
-fn narration_rejects_drifted_or_noncurrent_evidence() {
+fn narration_chronology_prefers_subject_history_over_incidental_component_features() {
+    let state = story_state("narration-subject-history");
     let mut run = symbolic_run_for_narration();
-    assert!(narration_evidence_is_current(&run));
+    let (subject_iri, subject_label) = match &mut run.subject {
+        StorySubject::Entity { iri, label, .. } => {
+            *label = "HTTP API".to_string();
+            (iri.clone(), label.clone())
+        }
+        StorySubject::Topic { .. } => unreachable!(),
+    };
+    for index in 0..20 {
+        let iri = format!("https://example.test/incidental/{index:02}");
+        run.evidence.push(StoryEvidenceDetail {
+            iri: iri.clone(),
+            title: format!("Incidental feature {index:02}"),
+            kind: "ArchitecturalDecision".to_string(),
+            status: "accepted".to_string(),
+            suppressed: false,
+            description: Some("feature detail ".repeat(150)),
+            timestamp: Some(format!("2026-07-{:02}T00:00:00Z", index + 1)),
+            author: None,
+            properties: vec![],
+            relations: vec![StoryEvidenceRelation {
+                predicate: "https://example.test/concerns".to_string(),
+                label: "concerns".to_string(),
+                direction: StoryRelationDirection::Outgoing,
+                target_iri: subject_iri.clone(),
+                target_label: subject_label.clone(),
+                target_kind: "SystemComponent".to_string(),
+            }],
+        });
+        run.timeline.push(StoryTimelineEvent {
+            id: format!("incidental-{index:02}"),
+            title: format!("Incidental feature {index:02}"),
+            kind: "ArchitecturalDecision".to_string(),
+            status: "accepted".to_string(),
+            timestamp: Some(format!("2026-07-{:02}T00:00:00Z", index + 1)),
+            evidence_iri: iri,
+            relation: None,
+            predecessor_iris: vec![],
+            successor_iris: vec![],
+            rationale_iris: vec![],
+        });
+    }
+    let history_iris = (0..4)
+        .map(|index| format!("https://example.test/http-history/{index}"))
+        .collect::<Vec<_>>();
+    for (index, iri) in history_iris.iter().enumerate() {
+        let title = format!("HTTP API discovery generation {index}");
+        run.evidence.push(StoryEvidenceDetail {
+            iri: iri.clone(),
+            title: title.clone(),
+            kind: "ArchitecturalDecision".to_string(),
+            status: if index == 3 { "accepted" } else { "superseded" }.to_string(),
+            suppressed: false,
+            description: Some(format!("{title}. {}", "identity verification ".repeat(40))),
+            timestamp: Some(format!("2026-06-{:02}T00:00:00Z", index + 1)),
+            author: None,
+            properties: vec![],
+            relations: vec![StoryEvidenceRelation {
+                predicate: "https://example.test/concerns".to_string(),
+                label: "concerns".to_string(),
+                direction: StoryRelationDirection::Outgoing,
+                target_iri: subject_iri.clone(),
+                target_label: subject_label.clone(),
+                target_kind: "SystemComponent".to_string(),
+            }],
+        });
+        run.timeline.push(StoryTimelineEvent {
+            id: format!("history-{index}"),
+            title,
+            kind: "ArchitecturalDecision".to_string(),
+            status: if index == 3 { "accepted" } else { "superseded" }.to_string(),
+            timestamp: Some(format!("2026-06-{:02}T00:00:00Z", index + 1)),
+            evidence_iri: iri.clone(),
+            relation: Some("isSupersededBy".to_string()),
+            predecessor_iris: index
+                .checked_sub(1)
+                .map(|previous| vec![history_iris[previous].clone()])
+                .unwrap_or_default(),
+            successor_iris: history_iris.get(index + 1).cloned().into_iter().collect(),
+            rationale_iris: vec![],
+        });
+    }
+    run.timeline
+        .sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
 
-    run.beats[0].evidence[0].status = "superseded".to_string();
-    assert!(!narration_evidence_is_current(&run));
+    let packet = build_narration_packet_for_test(&state, &run, 32_768).unwrap();
+    assert!(packet.coverage.truncated);
+    for index in 0..4 {
+        assert!(
+            packet
+                .prompt
+                .contains(&format!("HTTP API discovery generation {index}")),
+            "missing lifecycle generation {index}"
+        );
+    }
+}
 
-    run.beats[0].evidence[0].status = "accepted".to_string();
+#[test]
+fn narration_prompt_uses_complete_evidence_and_excludes_curator_context() {
+    let state = story_state("narration-prompt-completeness");
+    let mut run = symbolic_run_for_narration();
+    let full = "x".repeat(4_000);
+    run.evidence[0].description = Some(full.clone());
+    run.evidence[0].properties = vec![
+        StoryLiteralProperty {
+            predicate: state.capture.description.clone(),
+            label: "hasDescription".to_string(),
+            value: full.clone(),
+        },
+        StoryLiteralProperty {
+            predicate: state.capture.description.clone(),
+            label: "hasDescription".to_string(),
+            value: "A second canonical description remains evidence.".to_string(),
+        },
+        StoryLiteralProperty {
+            predicate: "https://foreign.example/hasDescription".to_string(),
+            label: "hasDescription".to_string(),
+            value: full.clone(),
+        },
+        StoryLiteralProperty {
+            predicate: "https://example.test/tradeoff".to_string(),
+            label: "tradeoff".to_string(),
+            value: "Keep the explicit tradeoff.".to_string(),
+        },
+    ];
+    run.evidence[0].relations = vec![
+        StoryEvidenceRelation {
+            predicate: "https://example.test/motivates".to_string(),
+            label: "motivates".to_string(),
+            direction: StoryRelationDirection::Outgoing,
+            target_iri: run.evidence[1].iri.clone(),
+            target_label: run.evidence[1].title.clone(),
+            target_kind: run.evidence[1].kind.clone(),
+        },
+        StoryEvidenceRelation {
+            predicate: "https://example.test/motivates".to_string(),
+            label: "motivates".to_string(),
+            direction: StoryRelationDirection::Incoming,
+            target_iri: run.evidence[1].iri.clone(),
+            target_label: run.evidence[1].title.clone(),
+            target_kind: run.evidence[1].kind.clone(),
+        },
+    ];
+    let packet = build_narration_packet_for_test(&state, &run, 131_072).unwrap();
+    let prompt = packet.prompt;
+    let coverage = packet.coverage;
+    assert_eq!(coverage.included_entities, 2);
+    assert_eq!(coverage.source_groups, 2);
+    assert_eq!(prompt.matches(&full).count(), 2);
+    assert_eq!(prompt.matches(&state.capture.description).count(), 1);
+    assert!(prompt.contains("A second canonical description remains evidence."));
+    assert!(prompt.contains("https://foreign.example/hasDescription"));
+    assert!(prompt.contains("Keep the explicit tradeoff."));
+    assert_eq!(prompt.matches("https://example.test/motivates").count(), 1);
+    assert!(!prompt.contains("Human guidance stays separate."));
+    assert!(prompt.contains("Use every source ID"));
+}
+
+#[test]
+fn narration_prompt_removes_relations_to_non_narratable_evidence() {
+    let state = story_state("narration-prompt-suppression");
+    let mut run = symbolic_run_for_narration();
+    let suppressed_iri = run.evidence[1].iri.clone();
+    run.evidence[1].suppressed = true;
+    run.evidence[0].relations.push(StoryEvidenceRelation {
+        predicate: "https://example.test/concerns".to_string(),
+        label: "concerns".to_string(),
+        direction: StoryRelationDirection::Outgoing,
+        target_iri: suppressed_iri.clone(),
+        target_label: "Suppressed target".to_string(),
+        target_kind: "ArchitecturalDecision".to_string(),
+    });
+    let prompt = build_narration_packet_for_test(&state, &run, 32_768)
+        .unwrap()
+        .prompt;
+    assert!(!prompt.contains(&suppressed_iri));
+    assert!(!prompt.contains("Suppressed target"));
+}
+
+#[test]
+fn larger_context_windows_admit_more_complete_evidence() {
+    let state = story_state("narration-prompt-chunks");
+    let mut run = symbolic_run_for_narration();
+    run.evidence = (0..20)
+        .map(|index| StoryEvidenceDetail {
+            iri: format!("https://example.test/evidence/{index}"),
+            title: format!("Evidence {index}"),
+            kind: "Requirement".to_string(),
+            status: "accepted".to_string(),
+            suppressed: false,
+            description: Some("y".repeat(3_000)),
+            timestamp: None,
+            author: None,
+            properties: vec![],
+            relations: vec![],
+        })
+        .collect();
+    let small = build_narration_packet_for_test(&state, &run, 32_768)
+        .unwrap()
+        .coverage;
+    let large = build_narration_packet_for_test(&state, &run, 131_072)
+        .unwrap()
+        .coverage;
+    assert!(small.truncated);
+    assert!(large.included_entities > small.included_entities);
+    assert!(large.source_groups <= 12);
+}
+
+#[test]
+fn narration_includes_current_grounded_code_anchors_only() {
+    let state = story_state("narration-truncated-code-anchor");
+    let mut run = symbolic_run_for_narration();
+    run.code_anchors = vec![
+        StoryCodeAnchor {
+            symbol: "current::symbol".to_string(),
+            label: "Current symbol".to_string(),
+            entity_iri: Some(run.evidence[0].iri.clone()),
+            path: Some("src/current.rs".to_string()),
+            line: Some(7),
+        },
+        StoryCodeAnchor {
+            symbol: "proposed::symbol".to_string(),
+            label: "Proposed symbol".to_string(),
+            entity_iri: Some(run.evidence[1].iri.clone()),
+            path: Some("src/proposed.rs".to_string()),
+            line: Some(9),
+        },
+        StoryCodeAnchor {
+            symbol: "truncated::symbol".to_string(),
+            label: "Current anchor outside the bounded dossier".to_string(),
+            entity_iri: Some("https://example.test/truncated-code".to_string()),
+            path: Some("src/truncated.rs".to_string()),
+            line: Some(11),
+        },
+    ];
+    run.evidence[1].status = "proposed".to_string();
+
+    let prompt = build_narration_packet_for_test(&state, &run, 32_768)
+        .unwrap()
+        .prompt;
+    assert!(prompt.contains("current::symbol"));
+    assert!(prompt.contains("src/current.rs"));
+    assert!(!prompt.contains("proposed::symbol"));
+    assert!(!prompt.contains("src/proposed.rs"));
+    assert!(prompt.contains("truncated::symbol"));
+    assert!(prompt.contains("src/truncated.rs"));
+}
+
+#[test]
+fn narration_prompt_budget_scales_but_never_exceeds_32k_tokens() {
+    assert_eq!(narration_prompt_token_budget(32_768), 8_192);
+    assert_eq!(narration_prompt_token_budget(131_072), 32_768);
+    assert_eq!(narration_prompt_token_budget(1_000_000), 32_768);
+}
+
+#[test]
+fn narration_excludes_proposed_but_allows_labeled_history() {
+    let mut run = symbolic_run_for_narration();
+    assert!(narration_evidence_is_eligible(&run));
+    run.evidence[0].status = "proposed".to_string();
+    assert!(narration_evidence_is_eligible(&run));
+    run.evidence[1].status = "rejected".to_string();
+    assert!(narration_evidence_is_eligible(&run));
+    run.evidence[1].status = "proposed".to_string();
+    assert!(!narration_evidence_is_eligible(&run));
+    run.evidence[0].status = "accepted".to_string();
     run.gaps.push(StoryGap {
         id: "subject-drift".to_string(),
         title: "Story subject is unresolved".to_string(),
         detail: "The subject is no longer current.".to_string(),
-        beat_intent: None,
+        section_kind: None,
     });
-    assert!(!narration_evidence_is_current(&run));
-}
-
-#[test]
-fn invalid_narration_preserves_the_identical_symbolic_run() {
-    let symbolic = symbolic_run_for_narration();
-    let invalid = [
-        "not json",
-        r#"{"unknown":true,"beats":[]}"#,
-        r#"{"beats":[{"beat_id":"purpose","text":"x","citation_ids":["e0","e0"]},{"beat_id":"code","text":"y","citation_ids":["c0"]}]}"#,
-        r#"{"beats":[{"beat_id":"purpose","text":"x","citation_ids":["c0"]},{"beat_id":"code","text":"y","citation_ids":["c0"]}]}"#,
-        r#"{"beats":[{"beat_id":"code","text":"y","citation_ids":["c0"]},{"beat_id":"purpose","text":"x","citation_ids":["e0"]}]}"#,
-    ];
-    for raw in invalid {
-        let actual =
-            apply_narration_response(symbolic.clone(), raw).unwrap_or_else(|| symbolic.clone());
-        assert_eq!(actual, symbolic, "response should fall back: {raw}");
-    }
+    assert!(!narration_evidence_is_eligible(&run));
 }

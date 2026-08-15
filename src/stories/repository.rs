@@ -1,7 +1,18 @@
 //! Versioned, file-backed Story recipe persistence and validation.
 
-use super::model::*;
-use super::*;
+use std::collections::BTreeSet;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use anyhow::Context;
+use oxigraph::model::NamedNode;
+
+use super::model::{validate_topic, StoryFocus, StoryRecipe, StoryRecipeSubject, StoryStatus};
+
+pub(super) const MAX_FOCUS_REFS: usize = 128;
+pub(super) const STORY_SCHEMA_VERSION: u8 = 3;
 
 /// File-backed recipe repository. Claims stay in the KG; recipes contain only
 /// presentation metadata and stable references.
@@ -11,6 +22,8 @@ pub struct StoryRepository {
     root: PathBuf,
 }
 
+// Repository values are cheap and recreated by handlers. A process-wide lock
+// keeps CAS writes and the list-based single-published-subject check atomic.
 static STORY_WRITER: OnceLock<Mutex<()>> = OnceLock::new();
 static LAST_STORY_REVISION: AtomicU64 = AtomicU64::new(0);
 
@@ -29,14 +42,6 @@ pub struct StoryInternal(pub String);
 #[derive(Debug)]
 pub struct StorySubjectInvalid(pub String);
 
-impl std::fmt::Display for StoryConflict {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for StoryConflict {}
-
 macro_rules! impl_story_error {
     ($kind:ident) => {
         impl std::fmt::Display for $kind {
@@ -49,6 +54,7 @@ macro_rules! impl_story_error {
     };
 }
 
+impl_story_error!(StoryConflict);
 impl_story_error!(StoryNotFound);
 impl_story_error!(StoryCorrupt);
 impl_story_error!(StoryInternal);
@@ -99,7 +105,7 @@ impl StoryRepository {
     }
 
     pub fn get(&self, id: &str) -> anyhow::Result<Option<StoryRecipe>> {
-        validate_id(id)?;
+        validate_story_id(id)?;
         let path = self.path(id);
         if !self.safe_root_exists()? || !self.safe_recipe_exists(&path)? {
             return Ok(None);
@@ -125,7 +131,22 @@ impl StoryRepository {
     where
         F: FnOnce(&StoryRecipe) -> anyhow::Result<()>,
     {
-        validate_id(route_id)?;
+        validate_story_id(route_id)?;
+        if recipe.schema_version == 0 || recipe.schema_version > STORY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported Story schema version {}; this server supports v1 through v{STORY_SCHEMA_VERSION}",
+                recipe.schema_version
+            );
+        }
+        if recipe.schema_version == STORY_SCHEMA_VERSION && !recipe.beats.is_empty() {
+            anyhow::bail!("Story v3 recipes use focus metadata and must not contain legacy beats");
+        }
+        if recipe.schema_version == STORY_SCHEMA_VERSION
+            && recipe.subject_component_iri.is_none()
+            && recipe.beats.is_empty()
+        {
+            validate_recipe(&recipe, recipe.status == StoryStatus::Published)?;
+        }
         let recipe = normalize_recipe(recipe);
         if recipe.id != route_id {
             anyhow::bail!("recipe id must match route id");
@@ -200,7 +221,7 @@ impl StoryRepository {
     where
         F: FnOnce(&StoryRecipe) -> anyhow::Result<()>,
     {
-        validate_id(id)?;
+        validate_story_id(id)?;
         let _writer = STORY_WRITER
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -348,6 +369,30 @@ impl StoryRepository {
                 path.display()
             )))
         })?;
+        if recipe.schema_version == 0 || recipe.schema_version > STORY_SCHEMA_VERSION {
+            return Err(anyhow::Error::new(StoryCorrupt(format!(
+                "invalid stored Story recipe {}: unsupported schema version {}",
+                path.display(),
+                recipe.schema_version
+            ))));
+        }
+        if recipe.schema_version == STORY_SCHEMA_VERSION && !recipe.beats.is_empty() {
+            return Err(anyhow::Error::new(StoryCorrupt(format!(
+                "invalid stored Story recipe {}: Story v3 must not contain legacy beats",
+                path.display()
+            ))));
+        }
+        let legacy = recipe.schema_version < STORY_SCHEMA_VERSION
+            || recipe.subject_component_iri.is_some()
+            || !recipe.beats.is_empty();
+        if !legacy {
+            validate_recipe(&recipe, recipe.status == StoryStatus::Published).map_err(|error| {
+                anyhow::Error::new(StoryCorrupt(format!(
+                    "invalid stored Story recipe {}: {error}",
+                    path.display()
+                )))
+            })?;
+        }
         let recipe = normalize_recipe(recipe);
         if expected_id.is_some_and(|expected| recipe.id != expected) {
             return Err(anyhow::Error::new(StoryCorrupt(format!(
@@ -356,7 +401,22 @@ impl StoryRepository {
                 recipe.id
             ))));
         }
-        validate_recipe(&recipe, recipe.status == StoryStatus::Published).map_err(|error| {
+        let mut validation_view = recipe.clone();
+        if legacy
+            && validation_view
+                .curator_context
+                .as_ref()
+                .is_some_and(|context| context.chars().count() > 2_000)
+        {
+            // Legacy files remain readable without truncation. A subsequent
+            // save still fails the v3 limit with an actionable message.
+            validation_view.curator_context = None;
+        }
+        validate_recipe(
+            &validation_view,
+            validation_view.status == StoryStatus::Published,
+        )
+        .map_err(|error| {
             anyhow::Error::new(StoryCorrupt(format!(
                 "invalid stored Story recipe {}: {error}",
                 path.display()
@@ -372,17 +432,61 @@ fn normalize_recipe(mut recipe: StoryRecipe) -> StoryRecipe {
             recipe.subject = Some(StoryRecipeSubject::Entity { iri });
         }
     }
-    if let Some(StoryRecipeSubject::Entity { iri }) = &recipe.subject {
-        for beat in &mut recipe.beats {
-            if beat.intent == StoryIntent::Boundary {
-                beat.record_iris.retain(|record_iri| record_iri != iri);
+    if !recipe.beats.is_empty() {
+        let subject_iri = match &recipe.subject {
+            Some(StoryRecipeSubject::Entity { iri }) => Some(iri.as_str()),
+            _ => None,
+        };
+        let mut curator_notes = Vec::new();
+        for beat in &recipe.beats {
+            recipe.focus.emphasis.push((&beat.intent).into());
+            recipe.focus.include_record_iris.extend(
+                beat.record_iris
+                    .iter()
+                    .filter(|iri| Some(iri.as_str()) != subject_iri)
+                    .cloned(),
+            );
+            recipe
+                .focus
+                .include_code_symbols
+                .extend(beat.code_symbols.iter().cloned());
+            if let Some(note) = beat
+                .curator_note
+                .as_deref()
+                .map(str::trim)
+                .filter(|note| !note.is_empty())
+            {
+                curator_notes.push(format!("{}: {note}", beat.title));
             }
         }
+        if recipe.curator_context.is_none() && !curator_notes.is_empty() {
+            recipe.curator_context = Some(curator_notes.join("\n\n"));
+        }
     }
+    canonicalize_focus(&mut recipe.focus);
+    recipe.schema_version = STORY_SCHEMA_VERSION;
+    recipe.beats.clear();
     recipe
 }
 
+fn canonicalize_focus(focus: &mut StoryFocus) {
+    dedupe_stable(&mut focus.include_record_iris);
+    dedupe_stable(&mut focus.exclude_record_iris);
+    dedupe_stable(&mut focus.include_code_symbols);
+    dedupe_stable(&mut focus.exclude_code_symbols);
+    let mut emphasis = BTreeSet::new();
+    focus.emphasis.retain(|kind| emphasis.insert(kind.clone()));
+}
+
+fn dedupe_stable(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
 pub(super) fn next_revision(previous: Option<&str>) -> String {
+    // The clock supplies ordering across restarts, while the prior token and
+    // process counter preserve monotonicity across clock stalls/regressions.
+    // The UUID keeps independently running writers from minting the same token.
     let now = chrono::Utc::now()
         .timestamp_nanos_opt()
         .unwrap_or_default()
@@ -444,10 +548,6 @@ pub fn validate_story_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_id(id: &str) -> anyhow::Result<()> {
-    validate_story_id(id)
-}
-
 fn require_text(field: &str, value: &str) -> anyhow::Result<()> {
     if value.trim().is_empty() {
         anyhow::bail!("{field} must not be empty");
@@ -456,8 +556,8 @@ fn require_text(field: &str, value: &str) -> anyhow::Result<()> {
 }
 
 pub(super) fn validate_refs(kind: &str, refs: &[String]) -> anyhow::Result<()> {
-    if refs.len() > MAX_ANCHORS_PER_BEAT {
-        anyhow::bail!("a Story beat may contain at most {MAX_ANCHORS_PER_BEAT} {kind}s");
+    if refs.len() > MAX_FOCUS_REFS {
+        anyhow::bail!("Story focus may contain at most {MAX_FOCUS_REFS} {kind}s");
     }
     let mut seen = BTreeSet::new();
     for value in refs {
@@ -469,8 +569,8 @@ pub(super) fn validate_refs(kind: &str, refs: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn validate_recipe(recipe: &StoryRecipe, publishing: bool) -> anyhow::Result<()> {
-    validate_id(&recipe.id)?;
+pub(super) fn validate_recipe(recipe: &StoryRecipe, publishing: bool) -> anyhow::Result<()> {
+    validate_story_id(&recipe.id)?;
     require_text("title", &recipe.title)?;
     if recipe.schema_version != STORY_SCHEMA_VERSION {
         anyhow::bail!("unsupported Story schema version {}", recipe.schema_version);
@@ -488,58 +588,60 @@ pub fn validate_recipe(recipe: &StoryRecipe, publishing: bool) -> anyhow::Result
     if recipe.audience != "reboarding" {
         anyhow::bail!("story audience must be \"reboarding\"");
     }
-    if recipe.beats.len() > MAX_BEATS {
-        anyhow::bail!("a Story may contain at most {MAX_BEATS} beats");
+    if recipe
+        .curator_context
+        .as_ref()
+        .is_some_and(|context| context.chars().count() > 2_000)
+    {
+        anyhow::bail!("curator_context may contain at most 2000 characters; shorten the migrated curator notes before saving");
     }
-    if publishing && !(MIN_PUBLISHED_BEATS..=MAX_BEATS).contains(&recipe.beats.len()) {
-        anyhow::bail!("a published Story must contain 3 to 5 beats");
+    validate_refs("included record IRI", &recipe.focus.include_record_iris)?;
+    validate_refs("excluded record IRI", &recipe.focus.exclude_record_iris)?;
+    validate_refs("included code symbol", &recipe.focus.include_code_symbols)?;
+    validate_refs("excluded code symbol", &recipe.focus.exclude_code_symbols)?;
+    for iri in recipe
+        .focus
+        .include_record_iris
+        .iter()
+        .chain(&recipe.focus.exclude_record_iris)
+    {
+        NamedNode::new(iri)
+            .map_err(|error| anyhow::anyhow!("Story focus record must be an IRI: {error}"))?;
     }
-    let mut ids = BTreeSet::new();
-    let mut intents = BTreeSet::new();
-    let mut previous_intent = None;
-    for beat in &recipe.beats {
-        validate_id(&beat.id)?;
-        require_text("beat title", &beat.title)?;
-        if !ids.insert(&beat.id) {
-            anyhow::bail!("duplicate Story beat id {:?}", beat.id);
-        }
-        if publishing && !intents.insert(beat.intent.id()) {
-            anyhow::bail!("a published Story may contain each beat intent only once");
-        }
-        let rank = story_intent_rank(&beat.intent);
-        if publishing && previous_intent.is_some_and(|previous| previous >= rank) {
-            anyhow::bail!(
-                "published Story beats must follow purpose, boundary, core-code, governance, risk order"
-            );
-        }
-        previous_intent = Some(rank);
-        let has_implicit_entity_boundary = beat.intent == StoryIntent::Boundary
-            && matches!(
-                recipe.resolved_subject()?,
-                StoryRecipeSubject::Entity { .. }
-            );
-        if publishing
-            && !has_implicit_entity_boundary
-            && beat.record_iris.is_empty()
-            && beat.code_symbols.is_empty()
-        {
-            anyhow::bail!(
-                "published Story beat {:?} must reference current authoritative evidence or code",
-                beat.id
-            );
-        }
-        validate_refs("record IRI", &beat.record_iris)?;
-        validate_refs("code symbol", &beat.code_symbols)?;
+    let included_records = recipe
+        .focus
+        .include_record_iris
+        .iter()
+        .collect::<BTreeSet<_>>();
+    if let Some(iri) = recipe
+        .focus
+        .exclude_record_iris
+        .iter()
+        .find(|iri| included_records.contains(iri))
+    {
+        anyhow::bail!("record IRI {iri:?} cannot be both included and excluded");
+    }
+    let included_code = recipe
+        .focus
+        .include_code_symbols
+        .iter()
+        .collect::<BTreeSet<_>>();
+    if let Some(symbol) = recipe
+        .focus
+        .exclude_code_symbols
+        .iter()
+        .find(|symbol| included_code.contains(symbol))
+    {
+        anyhow::bail!("code symbol {symbol:?} cannot be both included and excluded");
+    }
+    if publishing
+        && recipe.focus.include_record_iris.is_empty()
+        && recipe.focus.include_code_symbols.is_empty()
+        && matches!(recipe.resolved_subject()?, StoryRecipeSubject::Topic { .. })
+    {
+        anyhow::bail!(
+            "a published topic Story must include at least one grounded record or code anchor"
+        );
     }
     Ok(())
-}
-
-fn story_intent_rank(intent: &StoryIntent) -> usize {
-    match intent {
-        StoryIntent::Purpose => 0,
-        StoryIntent::Boundary => 1,
-        StoryIntent::CoreCode => 2,
-        StoryIntent::Governance => 3,
-        StoryIntent::Risk => 4,
-    }
 }

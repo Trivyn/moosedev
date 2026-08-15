@@ -128,6 +128,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   const [storyDirty, setStoryDirty] = useState(false);
   const storyDirtyRef = useRef(storyDirty);
   const acceptedHashRef = useRef(window.location.hash);
+  // The once-installed hash listener reads the current dirty state through this ref.
   storyDirtyRef.current = storyDirty;
 
   useEffect(() => {
@@ -262,6 +263,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
         </Box>
       ) : page === 'stories' ? (
         <Box sx={{ height: '100%' }}>
+          {/* Keep Story mounted behind linked records so returning preserves reader/editor state. */}
           <Box sx={{ display: recordRoute?.kind === 'record' ? 'none' : 'block', height: '100%' }}>
             <StoriesPage
               onNavigateRecord={navigateRecord}

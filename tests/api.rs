@@ -54,6 +54,8 @@ fn unconfigured_llm() -> LlmConfig {
         api_key: "test".to_string(),
         model: "fake-model".to_string(),
         configured: false,
+        context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
+        structured_output: moosedev::llm::StructuredOutputMode::Auto,
     }
 }
 
@@ -406,11 +408,10 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     topic_story.assert_status_ok();
     let topic_body = topic_story.json::<Value>();
     assert_eq!(topic_body["story"]["subject"]["type"], "topic");
-    assert!(topic_body["story"]["beats"]
+    assert!(topic_body["story"]["evidence"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|beat| beat["evidence"].as_array().unwrap())
         .any(|evidence| evidence["iri"] == requirement));
     assert_eq!(project_quads(&state), before_generate);
 
@@ -451,10 +452,11 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     let generated_body = generated.json::<Value>();
     assert_eq!(generated_body["outcome"], "story");
     assert_eq!(generated_body["story"]["narration_mode"], "symbolic");
-    assert_eq!(
-        generated_body["story"]["beats"].as_array().unwrap().len(),
-        5
-    );
+    assert_eq!(generated_body["story"]["schema_version"], 3);
+    assert!(!generated_body["story"]["narrative"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(project_quads(&state), before_generate);
 
     let presentation_only = server
@@ -514,7 +516,7 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     wrong_grade.assert_status_ok();
     let wrong_grade_body = wrong_grade.json::<Value>();
     assert_eq!(wrong_grade_body["correct"], false);
-    assert_eq!(wrong_grade_body["revisit_beat_id"], "purpose");
+    assert_eq!(wrong_grade_body["revisit_section_id"], "orientation");
     assert_eq!(wrong_grade_body["evidence_iris"], json!([requirement]));
 
     server
@@ -542,13 +544,15 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     let draft = json!({
         "id":"graph-store",
         "title":"The Graph Store",
-        "subject_component_iri":graph_component,
+        "schema_version":3,
+        "subject":{"type":"entity", "iri":graph_component},
         "goal":"Understand durable storage",
         "audience":"reboarding",
-        "beats":[{
-            "id":"purpose", "title":"Purpose", "intent":"purpose",
-            "record_iris":[], "code_symbols":[]
-        }],
+        "focus":{
+            "include_record_iris":["https://example.test/missing-record"],
+            "exclude_record_iris":[], "include_code_symbols":[],
+            "exclude_code_symbols":[], "emphasis":["orientation"]
+        },
         "status":"draft",
         "curator":"maintainer"
     });
@@ -556,7 +560,7 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     put.assert_status_ok();
     let put_body = put.json::<Value>();
     assert_eq!(put_body["recipe"]["id"], "graph-store");
-    assert_eq!(put_body["recipe"]["schema_version"], 2);
+    assert_eq!(put_body["recipe"]["schema_version"], 3);
     assert_eq!(put_body["recipe"]["subject"]["type"], "entity");
     assert!(put_body["recipe"].get("subject_component_iri").is_none());
 
@@ -591,7 +595,7 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     list.assert_status_ok();
     let list_body = list.json::<Value>();
     assert_eq!(list_body["stories"][0]["subject_label"], "Graph Store");
-    assert_eq!(list_body["stories"][0]["drifted"], false);
+    assert_eq!(list_body["stories"][0]["drifted"], true);
 
     let invalid_publish = server
         .post("/api/v1/stories/graph-store/publish")
@@ -601,11 +605,8 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
 
     let mut publishable = draft;
     publishable["updated_at"] = put_body["recipe"]["updated_at"].clone();
-    publishable["beats"] = json!([
-        {"id":"purpose", "title":"Purpose", "intent":"purpose", "record_iris":[requirement], "code_symbols":[]},
-        {"id":"governance", "title":"Governance", "intent":"governance", "record_iris":[requirement], "code_symbols":[]},
-        {"id":"risk", "title":"Risk", "intent":"risk", "record_iris":[requirement], "code_symbols":[]}
-    ]);
+    publishable["focus"]["include_record_iris"] = json!([requirement]);
+    publishable["focus"]["emphasis"] = json!(["orientation", "current_state"]);
     let updated = server
         .put("/api/v1/stories/graph-store")
         .json(&publishable)
@@ -668,13 +669,13 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     let drifted = json!({
         "id":"drifted",
         "title":"Drifted Story",
-        "subject_component_iri":"https://example.test/missing-component",
+        "schema_version":3,
+        "subject":{"type":"entity", "iri":"https://example.test/missing-component"},
         "goal":"Repair a stale route",
         "audience":"reboarding",
-        "beats":[{
-            "id":"purpose", "title":"Purpose", "intent":"purpose",
-            "record_iris":["https://example.test/missing-record"], "code_symbols":[]
-        }],
+        "focus":{"include_record_iris":["https://example.test/missing-record"],
+            "exclude_record_iris":[], "include_code_symbols":[], "exclude_code_symbols":[],
+            "emphasis":[]},
         "status":"draft",
         "curator":"maintainer"
     });
@@ -706,13 +707,12 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     let ungrounded = json!({
         "id":"ungrounded",
         "title":"Ungrounded draft",
-        "subject_component_iri":graph_component,
+        "schema_version":3,
+        "subject":{"type":"entity", "iri":graph_component},
         "goal":"Surface curator drift",
         "audience":"reboarding",
-        "beats":[{
-            "id":"purpose", "title":"Purpose", "intent":"purpose",
-            "record_iris":[safe_distractor], "code_symbols":[]
-        }],
+        "focus":{"include_record_iris":[safe_distractor], "exclude_record_iris":[],
+            "include_code_symbols":[], "exclude_code_symbols":[], "emphasis":[]},
         "status":"draft",
         "curator":"maintainer"
     });
@@ -725,11 +725,6 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     ungrounded_published["updated_at"] =
         ungrounded_put.json::<Value>()["recipe"]["updated_at"].clone();
     ungrounded_published["status"] = json!("published");
-    ungrounded_published["beats"] = json!([
-        {"id":"purpose", "title":"Purpose", "intent":"purpose", "record_iris":[safe_distractor], "code_symbols":[]},
-        {"id":"governance", "title":"Governance", "intent":"governance", "record_iris":[safe_distractor], "code_symbols":[]},
-        {"id":"risk", "title":"Risk", "intent":"risk", "record_iris":[safe_distractor], "code_symbols":[]}
-    ]);
     server
         .put("/api/v1/stories/ungrounded")
         .json(&ungrounded_published)
@@ -741,15 +736,19 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
         .await;
     ungrounded_run.assert_status_ok();
     let ungrounded_body = ungrounded_run.json::<Value>();
-    assert!(ungrounded_body["story"]["beats"][0]["evidence"]
+    assert!(ungrounded_body["story"]["evidence"]
         .as_array()
         .unwrap()
-        .is_empty());
+        .iter()
+        .all(|item| item["iri"] != safe_distractor));
     assert!(ungrounded_body["story"]["gaps"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|gap| gap["title"] == "Story record does not concern this subject"));
+        .any(|gap| gap["id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("outside-focus-record-")));
     assert_eq!(
         project_quads(&state),
         before_generate,

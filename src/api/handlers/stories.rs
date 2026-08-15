@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::error::ApiError;
 use crate::graph::AppState;
 use crate::stories::{
-    enrich_summary, generate_story_with_index, grade_check, narrate_with_llm, recipe_has_drift,
+    enrich_summary, generate_consistent_story, grade_check, narrate_with_llm, recipe_has_drift,
     story_subjects, validate_story_id, GradeResult, ResolveOutcome, StoryCandidate,
     StoryCheckError, StoryConflict, StoryCorrupt, StoryInternal, StoryNotFound, StoryRecipe,
     StoryRecipeSubject, StoryRepository, StoryResolutionIndex, StoryRun, StorySubjectInvalid,
@@ -69,7 +69,7 @@ fn default_include_checks() -> bool {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum GenerateStoryResponse {
     Story {
-        story: StoryRun,
+        story: Box<StoryRun>,
     },
     Ambiguous {
         prompt: String,
@@ -247,22 +247,19 @@ pub async fn generate_story(
     if recipe.is_none() && !request.fresh {
         recipe = repository.published_for_subject(&subject)?;
     }
-    let story = generate_story_with_index(
-        &state,
-        &index,
-        &subject,
-        recipe.as_ref(),
-        request.include_checks,
-    )
-    .map_err(|error| {
-        if error.downcast_ref::<StorySubjectInvalid>().is_some() {
-            ApiError::bad_request(error.to_string())
-        } else {
-            ApiError::internal(error.to_string())
-        }
-    })?;
+    let story =
+        generate_consistent_story(&state, &subject, recipe.as_ref(), request.include_checks)
+            .map_err(|error| {
+                if error.downcast_ref::<StorySubjectInvalid>().is_some() {
+                    ApiError::bad_request(error.to_string())
+                } else {
+                    ApiError::internal(error.to_string())
+                }
+            })?;
     let story = narrate_with_llm(&state, story, request.assist_level).await;
-    Ok(Json(GenerateStoryResponse::Story { story }))
+    Ok(Json(GenerateStoryResponse::Story {
+        story: Box::new(story),
+    }))
 }
 
 pub async fn grade_story_check(

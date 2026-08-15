@@ -12,7 +12,12 @@ export interface HealthResponse {
 export type StoryStatus = 'draft' | 'published';
 export type StoryTrustState = 'generated' | StoryStatus;
 export type StoryAssistLevel = 0 | 1;
-export type StoryBeatIntent = 'purpose' | 'boundary' | 'core-code' | 'governance' | 'risk';
+export type StorySectionKind =
+  | 'orientation'
+  | 'evolution'
+  | 'current_state'
+  | 'implementation'
+  | 'implications';
 
 export interface StoryGenerateRequest {
   prompt?: string;
@@ -29,23 +34,23 @@ export type StoryRecipeSubject =
   | { type: 'entity'; iri: string }
   | { type: 'topic'; query: string };
 
-export interface StoryBeatRecipe {
-  id: string;
-  title: string;
-  intent: StoryBeatIntent;
-  record_iris: string[];
-  code_symbols: string[];
-  curator_note?: string;
+export interface StoryRecipeFocus {
+  include_record_iris: string[];
+  exclude_record_iris: string[];
+  include_code_symbols: string[];
+  exclude_code_symbols: string[];
+  emphasis: StorySectionKind[];
 }
 
 export interface StoryRecipe {
   id: string;
   title: string;
-  schema_version: 2;
+  schema_version: 3;
   subject: StoryRecipeSubject;
   goal: string;
   audience: 'reboarding';
-  beats: StoryBeatRecipe[];
+  focus: StoryRecipeFocus;
+  curator_context?: string;
   status: StoryStatus;
   curator: string;
   updated_at?: string | null;
@@ -61,7 +66,6 @@ export interface StorySummary {
   audience: 'reboarding';
   status: StoryStatus;
   curator: string;
-  beat_count: number;
   updated_at?: string | null;
   drifted?: boolean;
 }
@@ -85,11 +89,32 @@ export interface StorySubjectListResponse {
   subjects: StorySubjectCandidate[];
 }
 
-export interface StoryEvidence {
+export interface StoryEvidenceRelation {
+  predicate: string;
+  label: string;
+  direction: 'outgoing' | 'incoming';
+  target_iri: string;
+  target_label: string;
+  target_kind: string;
+}
+
+export interface StoryLiteralProperty {
+  predicate: string;
+  label: string;
+  value: string;
+}
+
+export interface StoryEvidenceDetail {
   iri: string;
   title: string;
   kind: string;
   status: string;
+  description?: string | null;
+  timestamp?: string | null;
+  author?: string | null;
+  suppressed: boolean;
+  properties: StoryLiteralProperty[];
+  relations: StoryEvidenceRelation[];
 }
 
 export interface StoryCodeAnchor {
@@ -100,22 +125,48 @@ export interface StoryCodeAnchor {
   line?: number | null;
 }
 
-export interface StoryBeat {
+export interface StoryParagraph {
+  text: string;
+  citation_iris: string[];
+}
+
+export interface StoryNarrativeSection {
   id: string;
   title: string;
-  intent: StoryBeatIntent;
-  narrative: string;
-  evidence: StoryEvidence[];
-  code_anchors: StoryCodeAnchor[];
-  gap?: string | null;
-  curator_note?: string | null;
+  kind: StorySectionKind;
+  paragraphs: StoryParagraph[];
+}
+
+export interface StoryTimelineEvent {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  timestamp?: string | null;
+  evidence_iri: string;
+  relation?: string | null;
+  predecessor_iris: string[];
+  successor_iris: string[];
+  rationale_iris: string[];
+}
+
+export interface StoryCoverage {
+  entity_count: number;
+  current_count: number;
+  historical_count: number;
+  proposed_count: number;
+  code_anchor_count: number;
+  dossier_bytes: number;
+  subject_families: string[];
+  outline_sections: StorySectionKind[];
+  truncated: boolean;
 }
 
 export interface StoryGap {
   id: string;
   title: string;
   detail: string;
-  beat_intent?: StoryBeatIntent | null;
+  section_kind?: StorySectionKind | null;
 }
 
 export interface StoryCheckOption {
@@ -130,9 +181,11 @@ export interface StoryCheck {
 }
 
 export interface StoryRun {
+  schema_version: 3;
   recipe_id?: string | null;
   trust_state: StoryTrustState;
   narration_mode: 'symbolic' | 'llm';
+  narration_strategy: 'symbolic' | 'single_pass';
   narration_outcome:
     | 'not_requested'
     | 'succeeded'
@@ -141,13 +194,31 @@ export interface StoryRun {
     | 'timeout'
     | 'provider_error'
     | 'invalid_response';
+  narration_failure_reason?:
+    | 'packet_too_large'
+    | 'invalid_json'
+    | 'schema_mismatch'
+    | 'citation_mismatch'
+    | 'structured_output_unsupported'
+    | null;
+  narration_coverage?: {
+    eligible_entities: number;
+    included_entities: number;
+    source_groups: number;
+    truncated: boolean;
+  } | null;
   title: string;
   subject:
     | { type: 'entity'; iri: string; kind: string; label: string }
     | { type: 'topic'; query: string; label: string };
   goal: string;
-  overview: string;
-  beats: StoryBeat[];
+  curator_context?: string | null;
+  brief: StoryParagraph;
+  narrative: StoryNarrativeSection[];
+  timeline: StoryTimelineEvent[];
+  evidence: StoryEvidenceDetail[];
+  code_anchors: StoryCodeAnchor[];
+  coverage: StoryCoverage;
   gaps: StoryGap[];
   checks: StoryCheck[];
 }
@@ -164,7 +235,7 @@ export type StoryGenerateResponse =
 export interface StoryCheckGradeResponse {
   correct: boolean;
   feedback: string;
-  revisit_beat_id?: string | null;
+  revisit_section_id?: string | null;
   evidence_iris: string[];
 }
 

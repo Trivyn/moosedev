@@ -1,20 +1,35 @@
 //! Opaque comprehension-check issuance and graph-current grading.
 
-use super::grounding::*;
-use super::model::*;
-use super::resolution::*;
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
-pub(super) fn build_record_kind_checks(
+use crate::graph::{in_working_set, relevant_context_snapshot, AppState, ComponentEntry};
+
+use super::grounding::{
+    code_entity_is_current, code_realizes_component, component_iri_is_current, component_records,
+    record_concerns_component, record_data, story_entity_is_current, RecordData,
+};
+use super::model::{
+    friendly_record_kind, CheckGrant, CheckKind, GradeResult, RetiredCheckKind, StoryBeat,
+    StoryCandidate, StoryCheck, StoryCheckError, StoryCheckOption, StoryCheckRegistry,
+    StoryCodeAnchor, StoryNarrativeSection, StorySubject,
+};
+use super::resolution::StoryResolutionIndex;
+
+pub(super) const MAX_CHECK_GRANTS: usize = 1_024;
+const MAX_RETIRED_CHECK_HANDLES: usize = 1_024;
+pub(super) const MAX_CHECK_OPTIONS: usize = 3;
+pub(super) const CHECK_TTL: Duration = Duration::from_secs(30 * 60);
+
+pub(super) fn prepare_record_kind_checks(
     state: &AppState,
     subject: &StorySubject,
     beats: &[StoryBeat],
-    include_checks: bool,
-) -> anyhow::Result<(Vec<StoryCheck>, usize)> {
+) -> anyhow::Result<Vec<PreparedStoryCheck>> {
     let displayed = beats
         .iter()
-        .flat_map(|beat| beat.evidence.iter().map(move |evidence| (beat, evidence)))
-        .filter(|(_, evidence)| {
+        .flat_map(|beat| &beat.evidence)
+        .filter(|evidence| {
             evidence.kind != "SystemComponent"
                 && evidence.kind != "CodeEntity"
                 && evidence.kind != "Entity"
@@ -26,8 +41,7 @@ pub(super) fn build_record_kind_checks(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut checks = Vec::new();
     let mut used_kinds = BTreeSet::new();
-    let mut viable = 0;
-    for (beat, correct) in displayed {
+    for correct in displayed {
         if !used_kinds.insert(correct.kind.clone()) {
             continue;
         }
@@ -41,13 +55,11 @@ pub(super) fn build_record_kind_checks(
         else {
             continue;
         };
-        if push_check(
-            state,
+        prepare_check(
             &mut checks,
             CheckSpec {
                 kind: CheckKind::RecordKind,
                 component_iri: "",
-                beat_id: &beat.id,
                 correct_option_id: &correct_id,
                 correct_kind: Some(&correct.kind),
                 subject_entity: match subject {
@@ -60,28 +72,23 @@ pub(super) fn build_record_kind_checks(
                 ),
                 options,
             },
-            include_checks,
-        ) {
-            viable += 1;
-        }
-        if viable == 2 {
+        );
+        if checks.len() == 2 {
             break;
         }
     }
-    Ok((checks, viable))
+    Ok(checks)
 }
 
-pub(super) fn build_checks(
+pub(super) fn prepare_checks(
     state: &AppState,
     component: &StoryCandidate,
     beats: &[StoryBeat],
     index: &StoryResolutionIndex,
     component_records: &[RecordData],
     component_code: &[StoryCodeAnchor],
-    include_checks: bool,
-) -> anyhow::Result<(Vec<StoryCheck>, usize)> {
+) -> anyhow::Result<Vec<PreparedStoryCheck>> {
     let mut checks = Vec::new();
-    let mut viable_check_count = 0;
     let target_record_ids = component_records
         .iter()
         .map(|record| record.evidence.iri.clone())
@@ -105,34 +112,20 @@ pub(super) fn build_checks(
     if let Some((correct_id, options)) =
         unambiguous_check_options(&displayed_record_ids, record_facts)
     {
-        let beat_id = beats
-            .iter()
-            .find(|beat| {
-                beat.evidence
-                    .iter()
-                    .any(|evidence| evidence.iri == correct_id)
-            })
-            .map(|beat| beat.id.as_str())
-            .unwrap_or_default();
-        if push_check(
-            state,
+        prepare_check(
             &mut checks,
             CheckSpec {
                 kind: CheckKind::Concerns,
                 component_iri: &component.iri,
-                beat_id,
                 correct_option_id: &correct_id,
                 correct_kind: None,
                 subject_entity: None,
                 question: format!("Which accepted record is linked to {}?", component.label),
                 options,
             },
-            include_checks,
-        ) {
-            viable_check_count += 1;
-        }
+        );
     }
-    if viable_check_count < 2 {
+    if checks.len() < 2 {
         let target_code_ids = component_code
             .iter()
             .filter_map(|anchor| anchor.entity_iri.clone())
@@ -158,35 +151,23 @@ pub(super) fn build_checks(
         if let Some((correct_id, options)) =
             unambiguous_check_options(&displayed_code_ids, code_facts)
         {
-            if let Some(beat_id) = beats.iter().find_map(|beat| {
-                beat.code_anchors
-                    .iter()
-                    .any(|anchor| anchor.entity_iri.as_deref() == Some(correct_id.as_str()))
-                    .then_some(beat.id.as_str())
-            }) {
-                if push_check(
-                    state,
-                    &mut checks,
-                    CheckSpec {
-                        kind: CheckKind::Realizes,
-                        component_iri: &component.iri,
-                        beat_id,
-                        correct_option_id: &correct_id,
-                        correct_kind: None,
-                        subject_entity: None,
-                        question: format!("Which code entity realizes {}?", component.label),
-                        options,
-                    },
-                    include_checks,
-                ) {
-                    viable_check_count += 1;
-                }
-            }
+            prepare_check(
+                &mut checks,
+                CheckSpec {
+                    kind: CheckKind::Realizes,
+                    component_iri: &component.iri,
+                    correct_option_id: &correct_id,
+                    correct_kind: None,
+                    subject_entity: None,
+                    question: format!("Which code entity realizes {}?", component.label),
+                    options,
+                },
+            );
         }
     }
     // Keep the API bounded even if future generators add more check kinds.
     checks.truncate(2);
-    Ok((checks, viable_check_count.min(2)))
+    Ok(checks)
 }
 
 #[derive(Debug, Clone)]
@@ -251,7 +232,6 @@ pub(super) fn unambiguous_check_options(
 struct CheckSpec<'a> {
     kind: CheckKind,
     component_iri: &'a str,
-    beat_id: &'a str,
     correct_option_id: &'a str,
     correct_kind: Option<&'a str>,
     subject_entity: Option<(&'a str, &'a str)>,
@@ -259,41 +239,55 @@ struct CheckSpec<'a> {
     options: Vec<StoryCheckOption>,
 }
 
-fn push_check(
-    state: &AppState,
-    checks: &mut Vec<StoryCheck>,
-    mut spec: CheckSpec<'_>,
-    include_check: bool,
-) -> bool {
+pub(super) struct PreparedStoryCheck {
+    question: String,
+    options: Vec<StoryCheckOption>,
+    grant: CheckGrant,
+}
+
+fn prepare_check(checks: &mut Vec<PreparedStoryCheck>, mut spec: CheckSpec<'_>) -> bool {
     if !nontrivial_options(&mut spec.options) {
         return false;
     }
-    if include_check {
-        let (correct_option_token, options, option_entities) =
-            opaque_options(spec.options, spec.correct_option_id, uuid::Uuid::new_v4);
-        let handle = register_check(
-            state,
-            CheckGrant {
-                kind: spec.kind,
-                component_iri: spec.component_iri.to_string(),
-                beat_id: spec.beat_id.to_string(),
-                correct_option_token,
-                option_entities,
-                correct_entity_iri: spec.correct_option_id.to_string(),
-                correct_kind: spec.correct_kind.map(str::to_string),
-                subject_entity: spec
-                    .subject_entity
-                    .map(|(iri, kind)| (iri.to_string(), kind.to_string())),
-                expires_at: std::time::Instant::now() + CHECK_TTL,
-            },
-        );
-        checks.push(StoryCheck {
-            id: handle,
-            question: spec.question,
-            options,
-        });
-    }
+    let (correct_option_token, options, option_entities) =
+        opaque_options(spec.options, spec.correct_option_id, uuid::Uuid::new_v4);
+    checks.push(PreparedStoryCheck {
+        question: spec.question,
+        options,
+        grant: CheckGrant {
+            kind: spec.kind,
+            component_iri: spec.component_iri.to_string(),
+            section_id: String::new(),
+            correct_option_token,
+            option_entities,
+            correct_entity_iri: spec.correct_option_id.to_string(),
+            correct_kind: spec.correct_kind.map(str::to_string),
+            subject_entity: spec
+                .subject_entity
+                .map(|(iri, kind)| (iri.to_string(), kind.to_string())),
+            expires_at: std::time::Instant::now() + CHECK_TTL,
+        },
+    });
     true
+}
+
+pub(super) fn bind_prepared_check_sections(
+    checks: &mut Vec<PreparedStoryCheck>,
+    narrative: &[StoryNarrativeSection],
+) {
+    checks.retain_mut(|check| {
+        let Some(section) = narrative.iter().find(|section| {
+            section.paragraphs.iter().any(|paragraph| {
+                paragraph
+                    .citation_iris
+                    .contains(&check.grant.correct_entity_iri)
+            })
+        }) else {
+            return false;
+        };
+        check.grant.section_id = section.id.clone();
+        true
+    });
 }
 
 pub(super) fn opaque_options(
@@ -301,6 +295,8 @@ pub(super) fn opaque_options(
     correct_option_id: &str,
     mut random_uuid: impl FnMut() -> uuid::Uuid,
 ) -> (String, Vec<StoryCheckOption>, BTreeMap<String, String>) {
+    // Entity IDs become opaque tokens; independent UUID sort keys ensure the
+    // correct answer's position reveals nothing about which token it received.
     let mut correct_option_token = String::new();
     let mut option_entities = BTreeMap::new();
     let mut randomized = options
@@ -328,13 +324,36 @@ pub(super) fn opaque_options(
     )
 }
 
+#[cfg(test)]
 pub(super) fn register_check(state: &AppState, grant: CheckGrant) -> String {
-    let handle = uuid::Uuid::new_v4().to_string();
-    let now = std::time::Instant::now();
     let mut registry = state
         .story_checks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    register_check_in_registry(&mut registry, grant)
+}
+
+pub(super) fn issue_prepared_checks(
+    state: &AppState,
+    prepared: Vec<PreparedStoryCheck>,
+) -> Vec<StoryCheck> {
+    let mut registry = state
+        .story_checks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prepared
+        .into_iter()
+        .map(|prepared| StoryCheck {
+            id: register_check_in_registry(&mut registry, prepared.grant),
+            question: prepared.question,
+            options: prepared.options,
+        })
+        .collect()
+}
+
+fn register_check_in_registry(registry: &mut StoryCheckRegistry, grant: CheckGrant) -> String {
+    let handle = uuid::Uuid::new_v4().to_string();
+    let now = std::time::Instant::now();
     let expired = registry
         .grants
         .iter()
@@ -343,7 +362,9 @@ pub(super) fn register_check(state: &AppState, grant: CheckGrant) -> String {
         .collect::<Vec<_>>();
     for handle in expired {
         registry.grants.remove(&handle);
-        remember_retired(&mut registry, handle, RetiredCheckKind::Expired);
+        // Retain the bounded tombstone so grading can distinguish expiry or
+        // eviction from a handle that never belonged to this process.
+        remember_retired(registry, handle, RetiredCheckKind::Expired);
     }
     if registry.grants.len() >= MAX_CHECK_GRANTS {
         if let Some(oldest) = registry
@@ -353,7 +374,7 @@ pub(super) fn register_check(state: &AppState, grant: CheckGrant) -> String {
             .map(|(handle, _)| handle.clone())
         {
             registry.grants.remove(&oldest);
-            remember_retired(&mut registry, oldest, RetiredCheckKind::Evicted);
+            remember_retired(registry, oldest, RetiredCheckKind::Evicted);
         }
     }
     registry.grants.insert(handle.clone(), grant);
@@ -464,11 +485,9 @@ pub fn grade_check(
     }
     let endpoint_is_current = |entity: &str| -> anyhow::Result<bool> {
         match grant.kind {
-            CheckKind::Concerns => Ok(record_data(state, entity)?
+            CheckKind::Concerns | CheckKind::RecordKind => Ok(record_data(state, entity)?
                 .is_some_and(|record| in_working_set(&record.evidence.status))),
             CheckKind::Realizes => code_entity_is_current(state, entity),
-            CheckKind::RecordKind => Ok(record_data(state, entity)?
-                .is_some_and(|record| in_working_set(&record.evidence.status))),
         }
     };
     for entity in grant.option_entities.values() {
@@ -494,20 +513,15 @@ pub fn grade_check(
         return Err(StoryCheckError::Stale.into());
     }
     let correct = selected == [grant.correct_option_token.as_str()];
-    let evidence_iris = if correct {
-        vec![grant.correct_entity_iri.clone()]
-    } else {
-        vec![grant.correct_entity_iri]
-    };
     Ok(GradeResult {
         correct,
         feedback: if correct {
             "Correct. The selected relationship is present in current authoritative project knowledge."
                 .to_string()
         } else {
-            "Not quite. Revisit the evidence linked to this Story beat.".to_string()
+            "Not quite. Revisit the cited evidence in that Story section.".to_string()
         },
-        revisit_beat_id: (!correct).then_some(grant.beat_id),
-        evidence_iris,
+        revisit_section_id: (!correct).then_some(grant.section_id),
+        evidence_iris: vec![grant.correct_entity_iri],
     })
 }

@@ -1,8 +1,23 @@
 //! Read-only Story subject discovery, resolution, summaries, and drift checks.
 
-use super::grounding::*;
-use super::model::*;
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode};
+
+use crate::graph::{
+    first_literal, in_working_set, load_components, resolve_component_query, AppState,
+    ComponentEntry, PROJECT_KG_GRAPH_IRI,
+};
+
+use super::grounding::{
+    all_code, record_data, story_recipe_priority_iris, story_subject_closure_iris_with_priority,
+    topic_records, truncate_utf8, RecordData,
+};
+use super::model::{
+    validate_topic, ResolveOutcome, StoryCandidate, StoryCodeAnchor, StoryRecipe,
+    StoryRecipeSubject, StorySummary,
+};
+use super::repository::StorySubjectInvalid;
 
 /// One request-local snapshot reused across a Story library render. This avoids
 /// rescanning every code entity and component for every recipe.
@@ -244,70 +259,53 @@ fn recipe_has_drift_with_index(
     recipe: &StoryRecipe,
 ) -> anyhow::Result<bool> {
     let subject = recipe.resolved_subject()?;
-    let mut allowed_record_iris = None;
-    let mut allowed_code_symbols = None;
-    let component_iri = match subject {
-        StoryRecipeSubject::Entity { iri } if index.components_by_iri.contains_key(iri) => {
-            Some(iri.as_str())
-        }
+    match subject {
+        StoryRecipeSubject::Entity { iri } if index.components_by_iri.contains_key(iri) => {}
         StoryRecipeSubject::Entity { iri } => {
-            let Ok(entity) = index.resolve_entity(state, iri) else {
+            if index.resolve_entity(state, iri).is_err() {
                 return Ok(true);
-            };
-            allowed_record_iris = Some(
-                entity_records(state, &entity)?
-                    .into_iter()
-                    .map(|record| record.evidence.iri)
-                    .collect::<BTreeSet<_>>(),
-            );
-            allowed_code_symbols = Some(
-                entity_code(state, &index.code_entities, &entity.iri)?
-                    .into_iter()
-                    .map(|anchor| anchor.symbol)
-                    .collect::<BTreeSet<_>>(),
-            );
-            None
+            }
         }
         StoryRecipeSubject::Topic { query } => {
-            if validate_topic(query).is_err() {
-                return Ok(true);
-            }
-            None
-        }
-    };
-    for beat in &recipe.beats {
-        for symbol in &beat.code_symbols {
-            let Some(anchor) = index.code_by_symbol.get(symbol) else {
-                return Ok(true);
-            };
-            let Some(entity) = anchor.entity_iri.as_deref() else {
-                return Ok(true);
-            };
-            if let Some(component) = component_iri {
-                if !code_realizes_component(state, entity, component)? {
-                    return Ok(true);
-                }
-            } else if allowed_code_symbols
-                .as_ref()
-                .is_some_and(|allowed| !allowed.contains(symbol))
-            {
+            if validate_topic(query).is_err() || topic_records(state, query)?.is_empty() {
                 return Ok(true);
             }
         }
-        for iri in &beat.record_iris {
-            let AnchorResolution::Current(record) = resolve_recipe_record(state, iri)? else {
-                return Ok(true);
-            };
-            if let Some(component) = component_iri {
-                if !record_concerns_component(state, &record.iri, component)? {
-                    return Ok(true);
-                }
-            } else if allowed_record_iris
-                .as_ref()
-                .is_some_and(|allowed| !allowed.contains(iri))
-            {
-                return Ok(true);
-            }
+    }
+    let priority = story_recipe_priority_iris(state, recipe)?;
+    let closure = story_subject_closure_iris_with_priority(state, subject, &priority)?;
+    for iri in recipe
+        .focus
+        .include_record_iris
+        .iter()
+        .chain(&recipe.focus.exclude_record_iris)
+    {
+        if !closure.contains(iri) || record_data(state, iri)?.is_none() {
+            return Ok(true);
+        }
+    }
+    for iri in &recipe.focus.include_record_iris {
+        if record_data(state, iri)?
+            .is_some_and(|record| record.evidence.status.eq_ignore_ascii_case("proposed"))
+        {
+            return Ok(true);
+        }
+    }
+    for symbol in recipe
+        .focus
+        .include_code_symbols
+        .iter()
+        .chain(&recipe.focus.exclude_code_symbols)
+    {
+        let Some(entity) = index
+            .code_by_symbol
+            .get(symbol)
+            .and_then(|anchor| anchor.entity_iri.as_ref())
+        else {
+            return Ok(true);
+        };
+        if !closure.contains(entity) {
+            return Ok(true);
         }
     }
     Ok(false)
