@@ -9,6 +9,7 @@ import StoriesPage from './StoriesPage';
 vi.mock('../api/client', () => ({
   api: {
     listStories: vi.fn(),
+    listStorySubjects: vi.fn(),
     getStory: vi.fn(),
     generateStory: vi.fn(),
     saveStory: vi.fn(),
@@ -17,10 +18,13 @@ vi.mock('../api/client', () => ({
   },
 }));
 
+const componentIri = 'https://moosedev.dev/kg/SystemComponent/graph';
+
 const recipe: StoryRecipe = {
   id: 'graph-store',
   title: 'The graph store',
-  subject_component_iri: 'https://moosedev.dev/kg/SystemComponent/graph',
+  schema_version: 2,
+  subject: { type: 'entity', iri: componentIri },
   goal: 'Understand the graph boundary.',
   audience: 'reboarding',
   status: 'draft',
@@ -37,8 +41,9 @@ const run: StoryRun = {
   recipe_id: null,
   trust_state: 'generated',
   narration_mode: 'symbolic',
+  narration_outcome: 'not_requested',
   title: 'The graph store',
-  subject: { iri: recipe.subject_component_iri, label: 'graph/store layer' },
+  subject: { type: 'entity', iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer' },
   goal: recipe.goal,
   overview: 'The graph store owns authoritative project knowledge.',
   beats: [
@@ -106,6 +111,14 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function selectStorySubject() {
+  const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
+  await waitFor(() => expect(selector).not.toBeDisabled());
+  fireEvent.change(selector, { target: { value: 'graph' } });
+  fireEvent.click(await screen.findByRole('option', { name: /graph\/store layer/i }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Tell Story' })).not.toBeDisabled());
+}
+
 beforeEach(() => {
   vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
   vi.mocked(api.listStories).mockResolvedValue({
@@ -113,13 +126,24 @@ beforeEach(() => {
       {
         id: recipe.id,
         title: recipe.title,
-        subject_component_iri: recipe.subject_component_iri,
+        subject: recipe.subject,
         subject_label: 'graph/store layer',
+        subject_kind: 'SystemComponent',
         goal: recipe.goal,
         audience: 'reboarding',
         status: 'draft',
         curator: recipe.curator,
         beat_count: 3,
+      },
+    ],
+  });
+  vi.mocked(api.listStorySubjects).mockResolvedValue({
+    subjects: [
+      {
+        iri: componentIri,
+        kind: 'SystemComponent',
+        label: 'graph/store layer',
+        description: 'Owns src/graph/',
       },
     ],
   });
@@ -141,6 +165,85 @@ afterEach(() => {
 });
 
 describe('StoriesPage', () => {
+  it('searches current entities and generates from the selected canonical IRI', async () => {
+    vi.mocked(api.listStorySubjects).mockResolvedValue({
+      subjects: [
+        { iri: 'component-api', kind: 'SystemComponent', label: 'API layer' },
+        { iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer' },
+      ],
+    });
+
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+
+    await selectStorySubject();
+    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+
+    await waitFor(() => expect(api.generateStory).toHaveBeenNthCalledWith(1, {
+      subject_iri: componentIri,
+      assist_level: 0,
+    }));
+  });
+
+  it('restores the complete categorized entity catalog whenever the picker opens', async () => {
+    vi.mocked(api.listStorySubjects).mockResolvedValue({
+      subjects: [
+        { iri: 'component-api', kind: 'SystemComponent', label: 'API layer' },
+        { iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer' },
+        { iri: 'requirement-story', kind: 'Requirement', label: 'Grounded Stories' },
+        { iri: 'code-story', kind: 'CodeEntity', label: 'story_subjects', description: 'src/stories/resolution.rs' },
+      ],
+    });
+
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
+    fireEvent.mouseDown(selector);
+    expect(await screen.findByRole('option', { name: 'Grounded Stories' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /story_subjects/i })).toBeInTheDocument();
+
+    fireEvent.change(selector, { target: { value: 'graph' } });
+    fireEvent.click(await screen.findByRole('option', { name: /graph\/store layer/i }));
+    expect(selector).toHaveValue('graph/store layer');
+
+    fireEvent.mouseDown(selector);
+    expect(await screen.findByRole('option', { name: 'Grounded Stories' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /story_subjects/i })).toBeInTheDocument();
+    expect(api.listStorySubjects).toHaveBeenCalledWith();
+  });
+
+  it('generates a bounded Story from a free-form topic', async () => {
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Topic' }));
+    fireEvent.change(screen.getByLabelText('Topic'), {
+      target: { value: 'why Story generation is symbolic first' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+
+    await waitFor(() => expect(api.generateStory).toHaveBeenNthCalledWith(1, {
+      topic: 'why Story generation is symbolic first',
+      assist_level: 0,
+    }));
+  });
+
+  it('keeps narration provenance visible after an LLM rewrite', async () => {
+    const assisted = {
+      ...run,
+      narration_mode: 'llm' as const,
+      narration_outcome: 'succeeded' as const,
+      beats: run.beats.map((beat) => ({ ...beat, narrative: `Plain language: ${beat.narrative}` })),
+    };
+    vi.mocked(api.generateStory)
+      .mockResolvedValueOnce({ outcome: 'story', story: run })
+      .mockResolvedValueOnce({ outcome: 'story', story: assisted });
+
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await selectStorySubject();
+    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+
+    expect(await screen.findByText(/configured LLM turned the evidence shown here into the explanations/i)).toBeInTheDocument();
+    expect(screen.getByText(/selected the Story structure, sources, gaps, and checks deterministically/i)).toBeInTheDocument();
+  });
+
   it('immediately generates from a contextual component launch', async () => {
     vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
 
@@ -153,7 +256,7 @@ describe('StoriesPage', () => {
 
     await waitFor(() => {
       expect(api.generateStory).toHaveBeenCalledWith({
-        component_iri: 'https://moosedev.dev/kg/SystemComponent/graph',
+        subject_iri: 'https://moosedev.dev/kg/SystemComponent/graph',
         assist_level: 1,
         include_checks: false,
       });
@@ -176,7 +279,7 @@ describe('StoriesPage', () => {
 
     await waitFor(() => {
       expect(api.generateStory).toHaveBeenLastCalledWith({
-        component_iri: recipe.subject_component_iri,
+        subject_iri: componentIri,
         fresh: true,
         assist_level: 1,
         include_checks: false,
@@ -185,21 +288,21 @@ describe('StoriesPage', () => {
     expect(await screen.findByText('Generated Story')).toBeInTheDocument();
   });
 
-  it('resolves an ambiguous prompt before rendering a Story', async () => {
+  it('defensively resolves an ambiguous subject response before rendering a Story', async () => {
     vi.mocked(api.generateStory)
       .mockResolvedValueOnce({
         outcome: 'ambiguous',
         prompt: 'graph',
         recipe_id: 'graph-store',
         candidates: [
-          { iri: 'component-graph', label: 'Graph store' },
-          { iri: 'component-code', label: 'Code graph' },
+          { iri: 'component-graph', kind: 'SystemComponent', label: 'Graph store' },
+          { iri: 'component-code', kind: 'SystemComponent', label: 'Code graph' },
         ],
       })
       .mockResolvedValueOnce({ outcome: 'story', story: run });
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
 
     expect(await screen.findByText('Which subject did you mean?')).toBeInTheDocument();
@@ -209,7 +312,7 @@ describe('StoriesPage', () => {
       expect(api.generateStory).toHaveBeenLastCalledWith({
         prompt: 'graph',
         recipe_id: 'graph-store',
-        component_iri: 'component-graph',
+        subject_iri: 'component-graph',
         assist_level: 1,
         include_checks: false,
       });
@@ -222,9 +325,7 @@ describe('StoriesPage', () => {
     vi.mocked(api.generateStory).mockReturnValueOnce(symbolic.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), {
-      target: { value: 'graph store' },
-    });
+    await selectStorySubject();
     const form = screen.getByRole('button', { name: 'Tell Story' }).closest('form');
     expect(form).not.toBeNull();
 
@@ -242,7 +343,7 @@ describe('StoriesPage', () => {
     const navigate = vi.fn();
     render(<StoriesPage onNavigateRecord={navigate} />);
 
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
 
     fireEvent.click(await screen.findByText('Requirement: Queryable memory · accepted'));
@@ -271,7 +372,7 @@ describe('StoriesPage', () => {
           evidence: [
             { ...run.beats[0].evidence[0], status: 'implemented' },
             {
-              iri: run.subject.iri,
+              iri: componentIri,
               title: run.subject.label,
               kind: 'SystemComponent',
               status: 'superseded',
@@ -283,7 +384,7 @@ describe('StoriesPage', () => {
     };
     vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: lifecycleRun });
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
 
     const current = await screen.findByText('Requirement: Queryable memory · implemented');
@@ -296,7 +397,7 @@ describe('StoriesPage', () => {
     vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: run });
     vi.mocked(api.gradeStoryCheck).mockRejectedValueOnce(new Error('Unable to grade against current graph'));
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByLabelText('The project knowledge graph'));
     fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
@@ -331,7 +432,7 @@ describe('StoriesPage', () => {
       .mockResolvedValueOnce({ outcome: 'story', story: run })
       .mockResolvedValueOnce({ outcome: 'story', story: reloadedRun });
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
 
@@ -357,7 +458,7 @@ describe('StoriesPage', () => {
     fireEvent.change(screen.getAllByLabelText('Curator note')[0], { target: { value: 'Start with the requirement.' } });
     fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), { target: { value: '' } });
     expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
-    expect(screen.getByText(/Every published beat except Boundary needs at least one record IRI/)).toHaveTextContent('What to protect');
+    expect(screen.getByText(/Every published beat needs at least one current record or code anchor/)).toHaveTextContent('What to protect');
     fireEvent.change(screen.getByLabelText('Record IRIs for What to protect'), {
       target: { value: 'https://moosedev.dev/kg/Constraint/one,\n https://moosedev.dev/kg/Requirement/two' },
     });
@@ -422,7 +523,7 @@ describe('StoriesPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
     fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'Updated graph story' } });
 
-    expect(screen.getByLabelText('Tell me the story of…')).toBeDisabled();
+    expect(screen.getByLabelText('Story subject')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Tell Story' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -480,8 +581,8 @@ describe('StoriesPage', () => {
         outcome: 'ambiguous',
         prompt: 'graph',
         candidates: [
-          { iri: 'component-graph', label: 'Graph store' },
-          { iri: 'component-code', label: 'Code graph' },
+          { iri: 'component-graph', kind: 'SystemComponent', label: 'Graph store' },
+          { iri: 'component-code', kind: 'SystemComponent', label: 'Code graph' },
         ],
       })
       .mockReturnValueOnce(candidateRequest.promise)
@@ -491,7 +592,7 @@ describe('StoriesPage', () => {
       });
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Graph store' }));
     expect(screen.getByRole('button', { name: 'Graph store' })).toBeDisabled();
@@ -553,7 +654,7 @@ describe('StoriesPage', () => {
       .mockRejectedValueOnce(new Error('Library unavailable'));
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
 
@@ -587,13 +688,20 @@ describe('StoriesPage', () => {
       .mockReturnValueOnce(assisted.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
 
     expect(await screen.findByText('Symbolic extract')).toBeInTheDocument();
     expect(screen.getByText('Improving narration…')).toBeInTheDocument();
-    expect(api.generateStory).toHaveBeenNthCalledWith(1, { prompt: 'graph store', assist_level: 0 });
-    expect(api.generateStory).toHaveBeenNthCalledWith(2, { prompt: 'graph store', assist_level: 1, include_checks: false });
+    expect(api.generateStory).toHaveBeenNthCalledWith(1, {
+      subject_iri: componentIri,
+      assist_level: 0,
+    });
+    expect(api.generateStory).toHaveBeenNthCalledWith(2, {
+      subject_iri: componentIri,
+      assist_level: 1,
+      include_checks: false,
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'All Stories' }));
     assisted.resolve({
@@ -612,7 +720,7 @@ describe('StoriesPage', () => {
       .mockReturnValueOnce(assisted.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByRole('button', { name: 'All Stories' }));
     assisted.reject(new Error('Late LLM failure'));
@@ -635,7 +743,7 @@ describe('StoriesPage', () => {
       .mockResolvedValueOnce({ outcome: 'story', story: savedRun });
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
     expect(await screen.findByText('Saved server Story')).toBeInTheDocument();
@@ -655,7 +763,7 @@ describe('StoriesPage', () => {
       .mockReturnValueOnce(assisted.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     const answer = await screen.findByLabelText('The project knowledge graph');
     fireEvent.click(answer);
@@ -693,8 +801,12 @@ describe('StoriesPage', () => {
       .mockReturnValueOnce(assisted.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({
+      subject_iri: componentIri,
+      assist_level: 0,
+    }));
     expect(await screen.findByText('The graph store')).toBeInTheDocument();
 
     assisted.resolve({
@@ -735,8 +847,12 @@ describe('StoriesPage', () => {
       .mockReturnValueOnce(assisted.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+    await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({
+      subject_iri: componentIri,
+      assist_level: 0,
+    }));
     expect(await screen.findByText('The graph store')).toBeInTheDocument();
 
     assisted.resolve({
@@ -784,7 +900,7 @@ describe('StoriesPage', () => {
       .mockReturnValueOnce(secondGrade.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByLabelText('The project knowledge graph'));
     fireEvent.click(screen.getByLabelText('The web UI'));
@@ -810,7 +926,7 @@ describe('StoriesPage', () => {
     vi.mocked(api.saveStory).mockReturnValue(save.promise);
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     const saveButton = await screen.findByRole('button', { name: 'Save as draft' });
     act(() => {
@@ -855,7 +971,7 @@ describe('StoriesPage', () => {
       .mockResolvedValueOnce({ correct: false, feedback: 'Second answer feedback', evidence_iris: [] });
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByLabelText('The project knowledge graph'));
     fireEvent.click(screen.getByRole('button', { name: 'Check answer' }));
@@ -878,7 +994,7 @@ describe('StoriesPage', () => {
         beat.intent === 'boundary'
           ? {
               ...beat,
-              evidence: [{ iri: run.subject.iri, title: run.subject.label, kind: 'SystemComponent', status: 'accepted' }],
+              evidence: [{ iri: componentIri, title: run.subject.label, kind: 'SystemComponent', status: 'accepted' }],
               code_anchors: [],
             }
           : beat,
@@ -893,7 +1009,7 @@ describe('StoriesPage', () => {
     }));
 
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Save as draft' }));
 
@@ -917,8 +1033,9 @@ describe('StoriesPage', () => {
           {
             id: recipe.id,
             title: recipe.title,
-            subject_component_iri: recipe.subject_component_iri,
+            subject: recipe.subject,
             subject_label: 'graph/store layer',
+            subject_kind: 'SystemComponent',
             goal: recipe.goal,
             audience: 'reboarding',
             status: 'draft',
@@ -932,8 +1049,9 @@ describe('StoriesPage', () => {
           {
             id: recipe.id,
             title: updatedTitle,
-            subject_component_iri: recipe.subject_component_iri,
+            subject: recipe.subject,
             subject_label: 'graph/store layer',
+            subject_kind: 'SystemComponent',
             goal: recipe.goal,
             audience: 'reboarding',
             status: 'draft',
@@ -968,8 +1086,9 @@ describe('StoriesPage', () => {
           {
             id: recipe.id,
             title: recipe.title,
-            subject_component_iri: recipe.subject_component_iri,
+            subject: recipe.subject,
             subject_label: 'graph/store layer',
+            subject_kind: 'SystemComponent',
             goal: recipe.goal,
             audience: 'reboarding',
             status: 'draft',
@@ -983,8 +1102,9 @@ describe('StoriesPage', () => {
           {
             id: recipe.id,
             title: recipe.title,
-            subject_component_iri: recipe.subject_component_iri,
+            subject: recipe.subject,
             subject_label: 'graph/store layer',
+            subject_kind: 'SystemComponent',
             goal: recipe.goal,
             audience: 'reboarding',
             status: 'published',
@@ -1056,7 +1176,7 @@ describe('StoriesPage', () => {
     };
     vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: notedRun });
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Tell me the story of…'), { target: { value: 'graph store' } });
+    await selectStorySubject();
     fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
     expect(await screen.findByText(/Maintainer note \(non-authoritative\):/)).toBeInTheDocument();
     expect(screen.getByText('Start here during incident response.')).toBeInTheDocument();

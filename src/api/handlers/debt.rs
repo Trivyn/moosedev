@@ -26,6 +26,7 @@ pub async fn why_coverage(
                     .iri
                     .clone()
                     .filter(|_| status.as_deref().is_none_or(in_working_set)),
+                status,
                 iri: c.iri,
                 name: c.name,
                 numerator: c.numerator,

@@ -17,11 +17,17 @@ export type StoryBeatIntent = 'purpose' | 'boundary' | 'core-code' | 'governance
 export interface StoryGenerateRequest {
   prompt?: string;
   component_iri?: string;
+  subject_iri?: string;
+  topic?: string;
   recipe_id?: string;
   fresh?: boolean;
   include_checks?: boolean;
   assist_level: StoryAssistLevel;
 }
+
+export type StoryRecipeSubject =
+  | { type: 'entity'; iri: string }
+  | { type: 'topic'; query: string };
 
 export interface StoryBeatRecipe {
   id: string;
@@ -35,7 +41,8 @@ export interface StoryBeatRecipe {
 export interface StoryRecipe {
   id: string;
   title: string;
-  subject_component_iri: string;
+  schema_version: 2;
+  subject: StoryRecipeSubject;
   goal: string;
   audience: 'reboarding';
   beats: StoryBeatRecipe[];
@@ -47,8 +54,9 @@ export interface StoryRecipe {
 export interface StorySummary {
   id: string;
   title: string;
-  subject_component_iri: string;
+  subject: StoryRecipeSubject;
   subject_label: string;
+  subject_kind: string;
   goal: string;
   audience: 'reboarding';
   status: StoryStatus;
@@ -68,8 +76,13 @@ export interface StoryRecipeResponse {
 
 export interface StorySubjectCandidate {
   iri: string;
+  kind: string;
   label: string;
   description?: string | null;
+}
+
+export interface StorySubjectListResponse {
+  subjects: StorySubjectCandidate[];
 }
 
 export interface StoryEvidence {
@@ -120,8 +133,18 @@ export interface StoryRun {
   recipe_id?: string | null;
   trust_state: StoryTrustState;
   narration_mode: 'symbolic' | 'llm';
+  narration_outcome:
+    | 'not_requested'
+    | 'succeeded'
+    | 'unconfigured'
+    | 'ineligible'
+    | 'timeout'
+    | 'provider_error'
+    | 'invalid_response';
   title: string;
-  subject: { iri: string; label: string };
+  subject:
+    | { type: 'entity'; iri: string; kind: string; label: string }
+    | { type: 'topic'; query: string; label: string };
   goal: string;
   overview: string;
   beats: StoryBeat[];

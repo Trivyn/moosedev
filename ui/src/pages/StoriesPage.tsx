@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Card,
@@ -19,6 +20,8 @@ import {
   RadioGroup,
   Select,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   Tooltip,
   Typography,
@@ -42,8 +45,10 @@ import {
   StoryGenerateResponse,
   StoryListResponse,
   StoryRecipe,
+  StoryRecipeSubject,
   StoryRun,
   StoryStatus,
+  StorySubjectCandidate,
   StorySummary,
   StoryTrustState,
 } from '../api/types';
@@ -114,10 +119,14 @@ function storyId(title: string) {
 }
 
 function recipeFromRun(run: StoryRun): StoryRecipe {
+  const subject: StoryRecipeSubject = run.subject.type === 'entity'
+    ? { type: 'entity', iri: run.subject.iri }
+    : { type: 'topic', query: run.subject.query };
   return {
     id: run.recipe_id || storyId(run.title),
     title: run.title,
-    subject_component_iri: run.subject.iri,
+    schema_version: 2,
+    subject,
     goal: run.goal,
     audience: 'reboarding',
     beats: run.beats.map((beat) => ({
@@ -125,9 +134,10 @@ function recipeFromRun(run: StoryRun): StoryRecipe {
       title: beat.title,
       intent: beat.intent,
       record_iris: beat.evidence
-        .filter((item) => item.kind !== 'SystemComponent')
+        .filter((item) => run.subject.type !== 'entity' || item.iri !== run.subject.iri)
         .map((item) => item.iri),
       code_symbols: beat.code_anchors.map((item) => item.symbol),
+      curator_note: beat.curator_note ?? undefined,
     })),
     status: 'draft',
     curator: 'maintainer',
@@ -160,10 +170,65 @@ function applyAssistedNarration(symbolic: StoryRun, assisted: StoryRun): StoryRu
   return {
     ...symbolic,
     narration_mode: assisted.narration_mode,
+    narration_outcome: assisted.narration_outcome,
     beats: symbolic.beats.map((beat, index) => ({
       ...beat,
       narrative: assisted.beats[index].narrative,
     })),
+  };
+}
+
+function storySubjectIdentity(subject: StoryRun['subject']): string {
+  return subject.type === 'entity' ? subject.iri : `topic:${subject.query}`;
+}
+
+function storySelection(subject: StoryRun['subject']): StorySelectionRequest {
+  return subject.type === 'entity'
+    ? { subject_iri: subject.iri }
+    : { topic: subject.query };
+}
+
+function filterStorySubjects(options: StorySubjectCandidate[], query: string) {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return options;
+  return options.filter((option) =>
+    option.label.toLocaleLowerCase().includes(normalized) ||
+    option.kind.toLocaleLowerCase().includes(normalized) ||
+    option.description?.toLocaleLowerCase().includes(normalized),
+  );
+}
+
+function narrationNotice(story: StoryRun, assisting: boolean) {
+  if (assisting) {
+    return {
+      severity: 'info' as const,
+      text: 'This grounded Story is ready now. MOOSEDev is asking the configured LLM to make the explanations easier to read; the evidence and structure will not change.',
+    };
+  }
+  if (story.narration_mode === 'llm' && story.narration_outcome === 'succeeded') {
+    return {
+      severity: 'info' as const,
+      text: 'The configured LLM turned the evidence shown here into the explanations you are reading. MOOSEDev still selected the Story structure, sources, gaps, and checks deterministically from the project graph.',
+    };
+  }
+  if (story.narration_outcome === 'not_requested') {
+    return {
+      severity: 'success' as const,
+      text: 'This prose is a deterministic summary assembled from current project knowledge; no LLM narration was used.',
+    };
+  }
+  const reason: Record<StoryRun['narration_outcome'], string> = {
+    not_requested: '',
+    succeeded: '',
+    unconfigured: 'no narration provider is configured',
+    ineligible: 'the evidence could not be safely packaged for narration',
+    timeout: 'the narration request timed out',
+    provider_error: 'the narration provider returned an error',
+    invalid_response: 'the narration response failed grounding validation',
+  };
+  return {
+    severity: 'warning' as const,
+    text: `LLM narration was not used because ${reason[story.narration_outcome]}. The deterministic symbolic Story is shown instead.`,
   };
 }
 
@@ -177,7 +242,7 @@ function parseAnchors(value: string): string[] {
 function storyEditorValidation(recipe: StoryRecipe) {
   const unanchoredBeats = recipe.beats.filter(
     (beat) =>
-      beat.intent !== 'boundary' &&
+      !(beat.intent === 'boundary' && recipe.subject.type === 'entity') &&
       beat.record_iris.length === 0 &&
       beat.code_symbols.length === 0,
   );
@@ -256,7 +321,7 @@ function StoryLibrary({
                         <TrustBadge state={story.status} />
                       </Stack>
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
-                        {story.subject_label} · {story.beat_count} beats
+                        {story.subject_kind}: {story.subject_label} · {story.beat_count} beats
                       </Typography>
                       {story.drifted && (
                         <Chip size="small" color="warning" variant="outlined" label="Changed since curation" sx={{ mt: 1 }} />
@@ -347,6 +412,12 @@ function StoryEditor({
         </Stack>
         <TextField disabled={busy} label="Title" value={recipe.title} onChange={(event) => onChange({ ...recipe, title: event.target.value })} />
         <TextField
+          disabled
+          label="Story subject"
+          value={recipe.subject.type === 'entity' ? recipe.subject.iri : recipe.subject.query}
+          helperText={recipe.subject.type === 'entity' ? 'Exact project entity' : 'Saved topic query'}
+        />
+        <TextField
           disabled={busy}
           label="Learning goal"
           value={recipe.goal}
@@ -423,7 +494,7 @@ function StoryEditor({
         ) : null}
         {unanchoredBeats.length > 0 ? (
           <Alert severity="warning">
-            Every published beat except Boundary needs at least one record IRI or stable code symbol. Missing: {unanchoredBeats.map((beat) => beat.title).join(', ')}.
+            Every published beat needs at least one current record or code anchor. An entity Story's Boundary beat may use the subject itself. Missing: {unanchoredBeats.map((beat) => beat.title).join(', ')}.
           </Alert>
         ) : null}
         {hasDuplicateIntents || hasNonCanonicalIntentOrder ? (
@@ -489,7 +560,7 @@ function StoryReader({
   const [gradeErrors, setGradeErrors] = useState<Record<string, string>>({});
   const [grading, setGrading] = useState<Record<string, boolean>>({});
   const gradeRequestRef = useRef<Record<string, number>>({});
-  const checkIdentity = `${story.recipe_id ?? story.subject.iri}\u0001${story.checks
+  const checkIdentity = `${story.recipe_id ?? storySubjectIdentity(story.subject)}\u0001${story.checks
     .map((check) => check.id)
     .join('\u0000')}`;
 
@@ -555,6 +626,8 @@ function StoryReader({
     });
   };
 
+  const provenance = narrationNotice(story, assisting);
+
   return (
     <Stack spacing={3}>
       <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 } }}>
@@ -586,6 +659,9 @@ function StoryReader({
         </Stack>
         <Typography variant="body1" sx={{ mt: 2, maxWidth: 900 }}>{story.overview}</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}><strong>Goal:</strong> {story.goal}</Typography>
+        <Alert severity={provenance.severity} variant="outlined" sx={{ mt: 2, maxWidth: 900 }}>
+          {provenance.text}
+        </Alert>
       </Paper>
 
       <Stack spacing={2}>
@@ -667,7 +743,12 @@ function StoryReader({
 
 export default function StoriesPage({ onNavigateRecord, initialComponentIri, onDirtyChange }: StoriesPageProps) {
   const [library, setLibrary] = useState<StoryListResponse | null>(null);
-  const [prompt, setPrompt] = useState('');
+  const [subjectMode, setSubjectMode] = useState<'entity' | 'topic'>('entity');
+  const [subjects, setSubjects] = useState<StorySubjectCandidate[]>([]);
+  const [subjectsLoading, setSubjectsLoading] = useState(false);
+  const [subjectQuery, setSubjectQuery] = useState('');
+  const [selectedSubject, setSelectedSubject] = useState<StorySubjectCandidate | null>(null);
+  const [topic, setTopic] = useState('');
   const [assistLevel, setAssistLevel] = useState<StoryAssistLevel>(1);
   const [generated, setGenerated] = useState<StoryGenerateResponse | null>(null);
   const [editor, setEditor] = useState<StoryRecipe | null>(null);
@@ -682,6 +763,7 @@ export default function StoriesPage({ onNavigateRecord, initialComponentIri, onD
   const editorOperationRef = useRef(false);
   const libraryActionRef = useRef(false);
   const libraryRequestRef = useRef(0);
+  const subjectCatalogRequestRef = useRef(0);
   const editorDirty = Boolean(editor && editorBaseline && JSON.stringify(editor) !== JSON.stringify(editorBaseline));
 
   useEffect(() => {
@@ -715,6 +797,23 @@ export default function StoriesPage({ onNavigateRecord, initialComponentIri, onD
   useEffect(() => {
     refresh().catch((err) => setError(errorMessage(err)));
   }, []);
+
+  const loadSubjectCatalog = useCallback(async () => {
+    const request = ++subjectCatalogRequestRef.current;
+    setSubjectsLoading(true);
+    try {
+      const response = await api.listStorySubjects();
+      if (subjectCatalogRequestRef.current === request) setSubjects(response.subjects);
+    } catch (err) {
+      if (subjectCatalogRequestRef.current === request) setError(errorMessage(err));
+    } finally {
+      if (subjectCatalogRequestRef.current === request) setSubjectsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (subjectMode === 'entity') void loadSubjectCatalog();
+  }, [loadSubjectCatalog, subjectMode]);
 
   const improveNarration = async (
     request: StorySelectionRequest,
@@ -795,13 +894,23 @@ export default function StoriesPage({ onNavigateRecord, initialComponentIri, onD
 
   useEffect(() => {
     if (initialComponentIri) {
-      generate({ component_iri: initialComponentIri });
+      setSubjectMode('entity');
+      setSelectedSubject({
+        iri: initialComponentIri,
+        kind: 'SystemComponent',
+        label: initialComponentIri,
+      });
+      generate({ subject_iri: initialComponentIri });
     }
   }, [initialComponentIri]);
 
-  const submitPrompt = (event: FormEvent) => {
+  const submitSubject = (event: FormEvent) => {
     event.preventDefault();
-    if (prompt.trim()) generate({ prompt: prompt.trim() });
+    if (subjectMode === 'entity' && selectedSubject) {
+      generate({ subject_iri: selectedSubject.iri });
+    } else if (subjectMode === 'topic' && topic.trim().length >= 2) {
+      generate({ topic: topic.trim() });
+    }
   };
 
   const beginLibraryAction = () => {
@@ -934,30 +1043,102 @@ export default function StoriesPage({ onNavigateRecord, initialComponentIri, onD
         <Box>
           <Stack direction="row" spacing={1} alignItems="center"><AutoStoriesIcon color="primary" /><Typography variant="h4">Stories</Typography></Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-            Build a short, evidence-backed path through a subsystem: why it exists, where its boundaries are, and what matters when changing it.
+            Build a short, evidence-backed path through a project entity or topic: why it matters, how it connects, and what to understand before making changes.
           </Typography>
         </Box>
 
-        <Paper component="form" onSubmit={submitPrompt} variant="outlined" sx={{ p: 2 }}>
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
-            <TextField
-              fullWidth
-              label="Tell me the story of…"
-              placeholder="the graph store, code indexing, policy evaluation…"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              disabled={Boolean(editor)}
-            />
-            <FormControl disabled={Boolean(editor)} sx={{ minWidth: 180 }}>
-              <InputLabel>Narration</InputLabel>
-              <Select label="Narration" value={assistLevel} onChange={(event) => setAssistLevel(Number(event.target.value) as StoryAssistLevel)}>
-                <MenuItem value={0}>Symbolic only</MenuItem>
-                <MenuItem value={1}>LLM sensor (symbolic fallback)</MenuItem>
-              </Select>
-            </FormControl>
-            <Button type="submit" variant="contained" disabled={busy || Boolean(editor) || !prompt.trim()} sx={{ minWidth: 120 }}>
-              {busy ? <CircularProgress size={20} /> : 'Tell Story'}
-            </Button>
+        <Paper component="form" onSubmit={submitSubject} variant="outlined" sx={{ p: 2 }}>
+          <Stack spacing={1.5}>
+            <Tabs
+              value={subjectMode}
+              onChange={(_event, value: 'entity' | 'topic') => setSubjectMode(value)}
+              aria-label="Story subject mode"
+            >
+              <Tab value="entity" label="Entity" disabled={Boolean(editor)} />
+              <Tab value="topic" label="Topic" disabled={Boolean(editor)} />
+            </Tabs>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'flex-start' }}>
+              {subjectMode === 'entity' ? (
+                <Autocomplete
+                  fullWidth
+                  disabled={Boolean(editor)}
+                  loading={subjectsLoading}
+                  options={subjects}
+                  value={selectedSubject}
+                  inputValue={subjectQuery}
+                  filterOptions={(options, state) => filterStorySubjects(options, state.inputValue)}
+                  groupBy={(option) => option.kind}
+                  getOptionLabel={(option) => option.label}
+                  isOptionEqualToValue={(option, value) => option.iri === value.iri}
+                  onOpen={() => {
+                    setSubjectQuery('');
+                    void loadSubjectCatalog();
+                  }}
+                  onClose={() => {
+                    if (selectedSubject) setSubjectQuery(selectedSubject.label);
+                  }}
+                  onInputChange={(_event, value, reason) => {
+                    if (reason === 'input' || reason === 'clear') {
+                      setSubjectQuery(value);
+                      setSelectedSubject(null);
+                    }
+                  }}
+                  onChange={(_event, value) => {
+                    setSelectedSubject(value);
+                    setSubjectQuery(value?.label ?? '');
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Find an entity"
+                      placeholder="Component, decision, requirement, lesson, or code symbol"
+                      helperText="Browse the complete current catalog by category, or type to filter entities, records, and code."
+                    />
+                  )}
+                  renderOption={(props, option) => (
+                    <li {...props} key={option.iri}>
+                      <Box>
+                        <Typography variant="body2">{option.label}</Typography>
+                        {option.description ? (
+                          <Typography variant="caption" color="text.secondary">
+                            {option.description}
+                          </Typography>
+                        ) : null}
+                      </Box>
+                    </li>
+                  )}
+                />
+              ) : (
+                <TextField
+                  fullWidth
+                  disabled={Boolean(editor)}
+                  label="Topic"
+                  placeholder="For example: why Story generation is symbolic-first"
+                  value={topic}
+                  onChange={(event) => setTopic(event.target.value)}
+                  helperText="MOOSEDev retrieves a bounded set of current project records; it does not create a Topic node in the graph."
+                />
+              )}
+              <FormControl disabled={Boolean(editor)} sx={{ minWidth: 220 }}>
+                <InputLabel>Narration</InputLabel>
+                <Select label="Narration" value={assistLevel} onChange={(event) => setAssistLevel(Number(event.target.value) as StoryAssistLevel)}>
+                  <MenuItem value={0}>Symbolic summary</MenuItem>
+                  <MenuItem value={1}>Plain-language LLM assist</MenuItem>
+                </Select>
+              </FormControl>
+              <Button
+                type="submit"
+                variant="contained"
+                disabled={
+                  busy ||
+                  Boolean(editor) ||
+                  (subjectMode === 'entity' ? !selectedSubject : topic.trim().length < 2)
+                }
+                sx={{ minWidth: 120, minHeight: 56 }}
+              >
+                {busy ? <CircularProgress size={20} /> : 'Tell Story'}
+              </Button>
+            </Stack>
           </Stack>
         </Paper>
 
@@ -978,7 +1159,7 @@ export default function StoriesPage({ onNavigateRecord, initialComponentIri, onD
                     generate({
                       prompt: generated.prompt,
                       ...(generated.recipe_id ? { recipe_id: generated.recipe_id } : {}),
-                      component_iri: candidate.iri,
+                      subject_iri: candidate.iri,
                     })
                   }
                 >
@@ -1013,16 +1194,16 @@ export default function StoriesPage({ onNavigateRecord, initialComponentIri, onD
               invalidateGeneration();
               setGenerated(null);
             }}
-            onGenerateFresh={() => generate({ component_iri: currentStory.subject.iri, fresh: true })}
+            onGenerateFresh={() => generate({ ...storySelection(currentStory.subject), fresh: true })}
             busy={busy}
             assisting={assisting}
           />
         ) : (
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1fr) 340px' }, gap: 3 }}>
             <Paper variant="outlined" sx={{ p: 3 }}>
-              <Typography variant="h6">Start with a question, not a document</Typography>
+              <Typography variant="h6">Start with a project entity or a focused topic</Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1, maxWidth: 650 }}>
-                MOOSEDev selects three to five beats from accepted project knowledge. Missing rationale stays visible as a gap, and generated narration never becomes authoritative knowledge.
+                Choose a current component, knowledge record, or code entity—or ask about a focused topic. MOOSEDev selects three to five beats from current project knowledge; missing rationale stays visible as a gap, and narration never becomes authoritative knowledge.
               </Typography>
             </Paper>
             <Box>

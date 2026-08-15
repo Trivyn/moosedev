@@ -5,7 +5,6 @@ import {
   confirmStoryNavigation,
   pageNavigationIsNoop,
   recordRouteForIri,
-  recordRouteForPage,
   recordRouteFromHash,
   recordUuidFromHash,
 } from './App';
@@ -68,17 +67,6 @@ describe('recordRouteForIri', () => {
 
   it('does not navigate external graph nodes', () => {
     expect(recordRouteForIri('https://example.com/entity/one')).toBeNull();
-  });
-});
-
-describe('recordRouteForPage', () => {
-  it('keeps typed evidence on the generic record route inside Stories', () => {
-    const iri = 'https://moosedev.dev/kg/Requirement/req-1';
-    expect(recordRouteForPage(iri, 'stories')).toEqual({ kind: 'record', uuid: 'req-1' });
-    expect(recordRouteForPage(iri, 'requirements')).toEqual({
-      kind: 'requirements',
-      uuid: 'req-1',
-    });
   });
 });
 

@@ -24,6 +24,7 @@ import {
   StoryListResponse,
   StoryRecipe,
   StoryRecipeResponse,
+  StorySubjectListResponse,
   WhyCoverageResponse,
 } from './types';
 
@@ -119,6 +120,11 @@ export const api = {
     }),
   debt: () => request<WhyCoverageResponse>('/debt'),
   listStories: () => request<StoryListResponse>('/stories'),
+  listStorySubjects: (query?: string, limit = 20) => {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (query?.trim()) search.set('q', query.trim());
+    return request<StorySubjectListResponse>(`/stories/actions/subjects?${search}`);
+  },
   getStory: (id: string) =>
     request<StoryRecipeResponse>(`/stories/${encodeURIComponent(id)}`),
   generateStory: (payload: StoryGenerateRequest) =>

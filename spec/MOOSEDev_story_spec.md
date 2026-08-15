@@ -19,17 +19,25 @@ Story is a projection over existing knowledge, not a new knowledge type or a sec
 
 ## Reader experience
 
-The workbench has a **Stories** page with a “Tell me the story of…” prompt and a list of draft and
-published recipes. A reader may name a topic or choose a component; an ambiguous topic requires an
-explicit component choice.
+The workbench has a **Stories** page with separate **Entity** and **Topic** entry modes plus a list
+of draft and published recipes. Entity mode searches current `SystemComponent`, `InformationRecord`,
+and `CodeEntity` nodes and submits their canonical IRIs. Topic mode uses the existing bounded
+project-context retriever to assemble an evidence cluster without minting a Topic ontology node.
+Both modes may be saved, curated, and published.
 
-A Story contains three to five ordered beats:
+A Story contains three to five ordered beats chosen by its deterministic subject-family planner.
+Component Stories retain the original route:
 
 1. purpose,
 2. boundary,
 3. core code,
 4. governing decisions or constraints, and
 5. risks or extension points.
+
+Record Stories explain the claim, context, relationships, impact, and history or risk. Code Stories
+explain role, ownership, governing knowledge, connections, and change risk. Topic Stories explain
+orientation, drivers, decisions, implementation, and risks. Unsupported beats are omitted or shown
+as explicit gaps; they are never filled with invented prose.
 
 Only beats supported by current accepted evidence are shown. Missing evidence is an explicit
 knowledge gap, never invented connective tissue. Each beat exposes its source records, lifecycle
@@ -55,10 +63,13 @@ One deterministic backend planner serves every surface. It resolves the componen
 bounded route, orders accepted evidence, resolves code anchors, and derives comprehension checks
 before any prose generation occurs.
 
-Story remains usable in pure symbolic mode through templates and extractive record text. A configured
-LLM is **strongly recommended** for concise human-readable narration. The LLM receives only the
-planner-selected evidence and acts as a presentation sensor: its prose is never accepted project
-knowledge. Missing, invalid, or failed narration falls back to the symbolic rendering.
+Story remains usable in pure symbolic mode through plain-language deterministic summaries. A
+configured LLM is **strongly recommended** for guided reboarding narration: two to four sentences per
+evidence-bearing beat, necessary terminology explained on first use, and an explicit connection to
+why the evidence matters when changing the subject. The LLM receives only planner-selected evidence
+and acts as a presentation sensor: its prose is never accepted project knowledge. Missing, invalid,
+timed-out, or failed narration falls back to symbolic rendering, and the reader persistently shows
+whether narration was assisted, intentionally symbolic, or a fallback.
 
 The workbench renders the symbolic Story first, then may apply assisted prose only when the second
 response has the same structural and evidence fingerprint. The presentation-only request does not
@@ -120,7 +131,9 @@ The workbench is a thin client of daemon-owned planning, validation, persistence
 HTTP surface supports:
 
 - listing draft and published recipes;
-- generating a Story from a prompt, component, or recipe;
+- listing current Story-eligible subjects;
+- searching current Story-eligible entities;
+- generating a Story from an entity, bounded topic, or recipe;
 - reading and saving a recipe;
 - publishing a validated draft; and
 - grading a structured relationship check.
@@ -138,9 +151,12 @@ Reader progress and check results are local session state, not project knowledge
 
 ## Acceptance criteria
 
-- A component produces a three-to-five-beat Story without an LLM.
+- A current component, information record, or code entity produces a grounded Story without an LLM.
+- A topic produces a bounded Story only when current project knowledge clears the relevance floor.
 - LLM-assisted narration is evidence-bounded and safely falls back to symbolic rendering.
+- The reader clearly distinguishes assisted prose, intentional symbolic prose, and fallback.
 - Every factual beat exposes accepted, ontology-validated record evidence and code anchors.
+- Entity selection searches only current Story-eligible typed nodes and submits canonical IRIs.
 - Ambiguous subjects require explicit resolution.
 - A generated route can be saved, curated, published, reloaded, and shared through version control.
 - At most one published recipe is authoritative for a component at a time.

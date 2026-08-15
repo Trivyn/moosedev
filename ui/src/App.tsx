@@ -108,17 +108,6 @@ export function recordRouteForIri(iri: string): RecordRoute | null {
   return iri.startsWith('https://moosedev.dev/kg/') ? { kind: 'record', uuid } : null;
 }
 
-export function recordRouteForPage(iri: string, page: PageKey): RecordRoute | null {
-  const route = recordRouteForIri(iri);
-  if (!route || page !== 'stories') {
-    return route;
-  }
-  // Evidence inspection is a transient view inside the Story workspace. Keep
-  // even typed artifacts on the generic record route so StoriesPage stays
-  // mounted with its quiz and curation state intact.
-  return { kind: 'record', uuid: route.uuid };
-}
-
 function routeForArtifact(target: ArtifactTarget): ArtifactRoute | null {
   const uuid = uuidFromIri(target.iri);
   return uuid ? { kind: target.kind, uuid } : null;
@@ -209,7 +198,7 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   };
 
   const navigateRecord = (iri: string) => {
-    const route = recordRouteForPage(iri, page);
+    const route = recordRouteForIri(iri);
     if (route) {
       window.location.hash = hashForRoute(route);
     }

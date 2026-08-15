@@ -1,21 +1,27 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::api::error::ApiError;
 use crate::graph::AppState;
 use crate::stories::{
-    enrich_summary, generate_symbolic_with_index, grade_check, narrate_with_llm, recipe_has_drift,
-    validate_story_id, GradeResult, ResolveOutcome, StoryCandidate, StoryCheckError, StoryConflict,
-    StoryCorrupt, StoryInternal, StoryNotFound, StoryRecipe, StoryRepository, StoryResolutionIndex,
-    StoryRun, StorySummary,
+    enrich_summary, generate_story_with_index, grade_check, narrate_with_llm, recipe_has_drift,
+    story_subjects, validate_story_id, GradeResult, ResolveOutcome, StoryCandidate,
+    StoryCheckError, StoryConflict, StoryCorrupt, StoryInternal, StoryNotFound, StoryRecipe,
+    StoryRecipeSubject, StoryRepository, StoryResolutionIndex, StoryRun, StorySubjectInvalid,
+    StorySummary,
 };
 
 #[derive(Debug, Serialize)]
 pub struct StoryListResponse {
     pub stories: Vec<StorySummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StorySubjectListResponse {
+    pub subjects: Vec<StoryCandidate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,6 +36,10 @@ pub struct GenerateStoryRequest {
     #[serde(default)]
     pub component_iri: Option<String>,
     #[serde(default)]
+    pub subject_iri: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
     pub recipe_id: Option<String>,
     #[serde(default)]
     pub fresh: bool,
@@ -37,6 +47,18 @@ pub struct GenerateStoryRequest {
     pub assist_level: u8,
     #[serde(default = "default_include_checks")]
     pub include_checks: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct StorySubjectQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default = "default_subject_limit")]
+    pub limit: usize,
+}
+
+fn default_subject_limit() -> usize {
+    20
 }
 
 fn default_include_checks() -> bool {
@@ -77,6 +99,14 @@ pub async fn list_stories(
         stories.push(summary);
     }
     Ok(Json(StoryListResponse { stories }))
+}
+
+pub async fn list_story_subjects(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<StorySubjectQuery>,
+) -> Result<Json<StorySubjectListResponse>, ApiError> {
+    let subjects = story_subjects(&state, query.q.as_deref(), query.limit)?;
+    Ok(Json(StorySubjectListResponse { subjects }))
 }
 
 pub async fn get_story(
@@ -156,58 +186,81 @@ pub async fn generate_story(
         }
         None => None,
     };
-    if let (Some(recipe), Some(explicit_component)) =
-        (recipe.as_ref(), request.component_iri.as_deref())
+    if request
+        .subject_iri
+        .as_deref()
+        .zip(request.component_iri.as_deref())
+        .is_some_and(|(subject, legacy)| subject != legacy)
     {
-        if explicit_component != recipe.subject_component_iri {
+        return Err(ApiError::bad_request(
+            "subject_iri and legacy component_iri must identify the same entity",
+        ));
+    }
+    let explicit_entity = request
+        .subject_iri
+        .as_deref()
+        .or(request.component_iri.as_deref());
+    let explicit_subject = match (explicit_entity, request.topic.as_deref()) {
+        (Some(_), Some(_)) => {
             return Err(ApiError::bad_request(
-                "component_iri cannot override a curated Story recipe subject",
+                "choose either subject_iri or topic, not both",
+            ));
+        }
+        (Some(iri), None) => Some(StoryRecipeSubject::Entity {
+            iri: iri.to_string(),
+        }),
+        (None, Some(topic)) => Some(StoryRecipeSubject::Topic {
+            query: topic.to_string(),
+        }),
+        (None, None) => None,
+    };
+    if let (Some(recipe), Some(explicit)) = (recipe.as_ref(), explicit_subject.as_ref()) {
+        if recipe.resolved_subject()? != explicit {
+            return Err(ApiError::bad_request(
+                "an explicit subject cannot override a curated Story recipe subject",
             ));
         }
     }
-    // An explicit component selects a generated Story. A curated recipe keeps
-    // its exact saved subject; mismatch was rejected immediately above.
-    let selector = request
-        .component_iri
-        .as_deref()
-        .or_else(|| {
-            recipe
-                .as_ref()
-                .map(|recipe| recipe.subject_component_iri.as_str())
-        })
-        .or(request.prompt.as_deref())
-        .ok_or_else(|| ApiError::bad_request("prompt, component_iri, or recipe_id is required"))?;
-    let prompt = request
-        .prompt
-        .clone()
-        .unwrap_or_else(|| selector.to_string());
-    let component = match index.resolve_component(selector) {
-        Ok(ResolveOutcome::Resolved(component)) => component,
-        Ok(ResolveOutcome::Ambiguous(candidates)) => {
-            return Ok(Json(GenerateStoryResponse::Ambiguous {
-                prompt,
-                recipe_id: request.recipe_id.clone(),
-                candidates,
-            }));
+    let subject = if let Some(recipe) = recipe.as_ref() {
+        recipe.resolved_subject()?.clone()
+    } else if let Some(subject) = explicit_subject {
+        subject
+    } else if let Some(prompt) = request.prompt.as_deref() {
+        match index.resolve_component(prompt) {
+            Ok(ResolveOutcome::Resolved(component)) => {
+                StoryRecipeSubject::Entity { iri: component.iri }
+            }
+            Ok(ResolveOutcome::Ambiguous(candidates)) => {
+                return Ok(Json(GenerateStoryResponse::Ambiguous {
+                    prompt: prompt.to_string(),
+                    recipe_id: request.recipe_id.clone(),
+                    candidates,
+                }));
+            }
+            Err(error) => return Err(ApiError::bad_request(error.to_string())),
         }
-        // Curated recipes retain their exact historical subject so drift can
-        // be rendered honestly. Any explicit subject mismatch was rejected
-        // before resolution above.
-        Err(error) => match recipe.as_ref() {
-            Some(recipe) => index.recipe_subject(&recipe.subject_component_iri),
-            None => return Err(ApiError::bad_request(error.to_string())),
-        },
+    } else {
+        return Err(ApiError::bad_request(
+            "subject_iri, topic, or recipe_id is required",
+        ));
     };
     if recipe.is_none() && !request.fresh {
-        recipe = repository.published_for_subject(&component.iri)?;
+        recipe = repository.published_for_subject(&subject)?;
     }
-    let story = generate_symbolic_with_index(
+    let story = generate_story_with_index(
         &state,
         &index,
-        &component,
+        &subject,
         recipe.as_ref(),
         request.include_checks,
-    )?;
+    )
+    .map_err(|error| {
+        if error.downcast_ref::<StorySubjectInvalid>().is_some() {
+            ApiError::bad_request(error.to_string())
+        } else {
+            ApiError::internal(error.to_string())
+        }
+    })?;
     let story = narrate_with_llm(&state, story, request.assist_level).await;
     Ok(Json(GenerateStoryResponse::Story { story }))
 }

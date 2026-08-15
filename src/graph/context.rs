@@ -82,13 +82,25 @@ pub fn relevant_context(
     limit: usize,
     include_history: bool,
 ) -> anyhow::Result<Vec<ContextItem>> {
+    // General query callers want fresh inferred inverse/subproperty links.
+    // Read-only projections that must not materialize graph state can use
+    // `relevant_context_snapshot` against the already-loaded snapshot.
+    state.ensure_enriched();
+    relevant_context_snapshot(state, topic, limit, include_history)
+}
+
+/// The same bounded symbolic retrieval as [`relevant_context`], evaluated
+/// against the currently loaded store without materializing inferred edges.
+/// This is appropriate for read-only projections such as Story generation.
+pub fn relevant_context_snapshot(
+    state: &AppState,
+    topic: Option<&str>,
+    limit: usize,
+    include_history: bool,
+) -> anyhow::Result<Vec<ContextItem>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-
-    // Materialize inferred edges if a write invalidated them, so the typed expansion
-    // traverses fresh inverse/subproperty links (bidirectional walk).
-    state.ensure_enriched();
     let class_iris: Vec<String> = state
         .arch_vocab
         .classes

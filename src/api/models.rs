@@ -100,6 +100,8 @@ pub struct ComponentCoverageDto {
     pub iri: Option<String>,
     /// Present when the component is eligible for Story generation.
     pub story_component_iri: Option<String>,
+    /// Lifecycle status used by clients to mirror the backend working-set rule.
+    pub status: Option<String>,
     pub name: String,
     pub numerator: usize,
     pub denominator: usize,

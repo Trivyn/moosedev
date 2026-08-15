@@ -359,6 +359,61 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     let before_generate = project_quads(&state);
     let server = TestServer::new(build_routes(state.clone())).expect("build Story test server");
 
+    let subjects = server.get("/api/v1/stories/actions/subjects").await;
+    subjects.assert_status_ok();
+    let subject_body = subjects.json::<Value>();
+    let subject_rows = subject_body["subjects"].as_array().unwrap();
+    assert!(subject_rows.len() >= 5);
+    assert_eq!(subject_rows[0]["label"], "Graph API");
+    assert_eq!(subject_rows[1]["label"], "Graph Store");
+    assert!(subject_rows
+        .iter()
+        .any(|subject| subject["iri"] == graph_component));
+    assert!(subject_rows
+        .iter()
+        .any(|subject| subject["iri"] == api_component));
+    assert!(subject_rows
+        .iter()
+        .any(|subject| subject["iri"] == requirement));
+
+    let limited_subjects = server
+        .get("/api/v1/stories/actions/subjects?q=Graph&limit=1")
+        .await;
+    limited_subjects.assert_status_ok();
+    assert_eq!(
+        limited_subjects.json::<Value>()["subjects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let searched_subjects = server
+        .get("/api/v1/stories/actions/subjects?q=durable%20project&limit=12")
+        .await;
+    searched_subjects.assert_status_ok();
+    assert!(searched_subjects.json::<Value>()["subjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|subject| subject["iri"] == requirement && subject["kind"] == "Requirement"));
+    assert_eq!(project_quads(&state), before_generate);
+
+    let topic_story = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"topic":"durable project knowledge", "assist_level":0}))
+        .await;
+    topic_story.assert_status_ok();
+    let topic_body = topic_story.json::<Value>();
+    assert_eq!(topic_body["story"]["subject"]["type"], "topic");
+    assert!(topic_body["story"]["beats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|beat| beat["evidence"].as_array().unwrap())
+        .any(|evidence| evidence["iri"] == requirement));
+    assert_eq!(project_quads(&state), before_generate);
+
     server
         .get("/api/v1/stories/bad!id")
         .await
@@ -501,6 +556,9 @@ async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     put.assert_status_ok();
     let put_body = put.json::<Value>();
     assert_eq!(put_body["recipe"]["id"], "graph-store");
+    assert_eq!(put_body["recipe"]["schema_version"], 2);
+    assert_eq!(put_body["recipe"]["subject"]["type"], "entity");
+    assert!(put_body["recipe"].get("subject_component_iri").is_none());
 
     // Action routes live below an extra segment, so ordinary recipe IDs such
     // as `generate` remain addressable by every resource method.

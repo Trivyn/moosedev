@@ -43,6 +43,10 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .route("/lessons/{num}", get(handlers::get_lesson))
         .route("/debt", get(handlers::why_coverage))
         .route("/stories", get(handlers::list_stories))
+        .route(
+            "/stories/actions/subjects",
+            get(handlers::list_story_subjects),
+        )
         .route("/stories/actions/generate", post(handlers::generate_story))
         .route("/stories/checks/grade", post(handlers::grade_story_check))
         .route(

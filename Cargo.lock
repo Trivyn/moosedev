@@ -2348,6 +2348,7 @@ dependencies = [
  "dotenvy",
  "growl",
  "include_dir",
+ "jsonrepair",
  "lsp-server",
  "lsp-types",
  "mime_guess",
