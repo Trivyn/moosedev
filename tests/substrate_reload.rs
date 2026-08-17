@@ -299,7 +299,14 @@ fn app_state_recovers_from_absent_substrate_without_restart() {
 
     let recovered = state.substrate().expect("cold substrate recovery");
     assert_eq!(recovered.stats().definitions, 2);
-    assert_eq!(recovered.repo_root(), Some(repo_root.as_path()));
+    // `load_substrate` canonicalizes the project root (AD e43baa99), so compare
+    // canonical paths: on macOS the temp dir resolves through /private, and a
+    // raw-vs-resolved comparison fails there for reasons unrelated to recovery.
+    let canonical = |path: &Path| path.canonicalize().expect("canonicalize repo root");
+    assert_eq!(
+        recovered.repo_root().map(canonical),
+        Some(canonical(&repo_root)),
+    );
 }
 
 #[test]

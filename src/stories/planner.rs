@@ -8,7 +8,7 @@ use super::grounding::{
     build_story_document, code_for_records, component_code, component_records, dedupe_code_anchors,
     dedupe_gaps, entity_code, entity_records, pending_component_record_count, record_data,
     sort_dedupe_records, story_recipe_priority_iris, story_subject_closure_iris_with_priority,
-    topic_records, truncate_utf8, RecordData, MAX_STORY_ENTITIES,
+    topic_records, truncate_utf8, ComponentExpansion, RecordData, MAX_STORY_ENTITIES,
 };
 use super::model::{
     friendly_record_kind, validate_topic, NarrationMode, NarrationOutcome, NarrationStrategy,
@@ -111,7 +111,16 @@ fn generate_entity_story(
     recipe: Option<&StoryRecipe>,
 ) -> anyhow::Result<StoryRun> {
     let mut records = entity_records(state, entity)?;
-    let mut code = entity_code(state, &index.code_entities, &entity.iri)?;
+    let mut code = entity_code(
+        state,
+        &index.code_entities,
+        &entity.iri,
+        if entity.kind == "CodeEntity" {
+            ComponentExpansion::SubjectOnly
+        } else {
+            ComponentExpansion::Full
+        },
+    )?;
     let mut focus_gaps = Vec::new();
     if let Some(recipe) = recipe {
         apply_recipe_focus(

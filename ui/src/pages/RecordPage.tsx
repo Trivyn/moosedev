@@ -13,6 +13,7 @@ import AutoStoriesIcon from '@mui/icons-material/AutoStories';
 import { api } from '../api/client';
 import { RecordDetailResponse } from '../api/types';
 import LinkedMarkdown, { artifactTargetForIri, ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
+import CodeEntityPanel from '../components/code/CodeEntityPanel';
 import RecordNeighborhoodGraph from '../components/graph/RecordNeighborhoodGraph';
 
 interface RecordPageProps {
@@ -20,8 +21,22 @@ interface RecordPageProps {
   onNavigateArtifact?: (target: ArtifactTarget) => void;
   onNavigateRecord?: (iri: string) => void;
   onResolveArtifact?: (target: ArtifactTarget) => void;
-  onTellStory?: (componentIri: string) => void;
+  onTellStory?: (subjectIri: string) => void;
   resolveArtifacts?: boolean;
+}
+
+/**
+ * The subject whose Story this record can launch.
+ *
+ * A CodeEntity is its own Story subject — redirecting to its containing
+ * component would answer a different question than the one the reader asked.
+ * Every other record still defers to the daemon's chosen component.
+ */
+export function storySubjectForRecord(record: RecordDetailResponse): string | null {
+  if (record.code) {
+    return record.iri;
+  }
+  return record.story_component_iri ?? null;
 }
 
 export default function RecordPage({
@@ -84,7 +99,7 @@ export default function RecordPage({
   const metadata = [record.status, record.timestamp, record.author].filter(
     (value): value is string => Boolean(value),
   );
-  const storyComponentIri = record.story_component_iri ?? null;
+  const storySubjectIri = storySubjectForRecord(record);
   return (
     <Box sx={{ height: '100%', overflow: 'auto', p: { xs: 2, md: 3 }, bgcolor: 'background.default' }}>
       <Stack spacing={2.5} sx={{ maxWidth: 1100 }}>
@@ -92,8 +107,8 @@ export default function RecordPage({
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
             <Chip size="small" label={record.kind} />
             <Typography variant="h5">{record.title}</Typography>
-            {storyComponentIri && onTellStory && (
-              <Button size="small" startIcon={<AutoStoriesIcon />} onClick={() => onTellStory(storyComponentIri)}>
+            {storySubjectIri && onTellStory && (
+              <Button size="small" startIcon={<AutoStoriesIcon />} onClick={() => onTellStory(storySubjectIri)}>
                 Tell this Story
               </Button>
             )}
@@ -104,6 +119,8 @@ export default function RecordPage({
             </Typography>
           )}
         </Box>
+
+        {record.code && <CodeEntityPanel uuid={uuid} code={record.code} />}
 
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 650, mb: 1 }}>

@@ -1,5 +1,6 @@
 pub mod adrs;
 pub mod chat;
+pub mod code;
 pub mod constraints;
 pub mod debt;
 pub mod export;
@@ -15,6 +16,7 @@ pub mod stories;
 
 pub use adrs::*;
 pub use chat::*;
+pub use code::*;
 pub use constraints::*;
 pub use debt::*;
 pub use export::*;

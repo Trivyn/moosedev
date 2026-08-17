@@ -48,7 +48,12 @@ export { applyAssistedNarration } from './stories/storyModel';
 
 interface StoriesPageProps {
   onNavigateRecord: (iri: string) => void;
-  initialComponentIri?: string | null;
+  /** Any current Story subject IRI — a component, a record, or a CodeEntity. */
+  initialSubjectIri?: string | null;
+  /** True while a deep link's subject is still being resolved by the daemon. */
+  subjectResolving?: boolean;
+  /** The subject now on screen, so the URL can stop naming a stale one. */
+  onSubjectChange?: (subjectIri: string | null) => void;
   onDirtyChange?: (dirty: boolean) => void;
 }
 
@@ -119,6 +124,16 @@ function StoryLibrary({ data, onOpen, onEdit, busy }: StoryLibraryProps) {
   );
 }
 
+/**
+ * The entity IRI a generated response puts on screen, or null when it is a
+ * topic (which has no canonical route) or not a Story at all.
+ */
+function displayedSubjectIri(response: StoryGenerateResponse): string | null {
+  if (response.outcome !== 'story') return null;
+  const subject = response.story.subject;
+  return subject.type === 'entity' ? subject.iri : null;
+}
+
 function ChipWarning() {
   return (
     <Chip
@@ -133,7 +148,9 @@ function ChipWarning() {
 
 export default function StoriesPage({
   onNavigateRecord,
-  initialComponentIri,
+  initialSubjectIri,
+  subjectResolving = false,
+  onSubjectChange,
   onDirtyChange,
 }: StoriesPageProps) {
   const [library, setLibrary] = useState<StoryListResponse | null>(null);
@@ -155,6 +172,8 @@ export default function StoriesPage({
   // Tokens reject stale LLM results; boolean refs synchronously guard clicks before `busy` renders.
   const generationRef = useRef(0);
   const generationOperationRef = useRef<number | null>(null);
+  // Which generation currently owns the assisted-narration indicator.
+  const assistingGenerationRef = useRef<number | null>(null);
   const saveGeneratedRef = useRef(false);
   const editorOperationRef = useRef(false);
   const libraryActionRef = useRef(false);
@@ -203,6 +222,7 @@ export default function StoriesPage({
     symbolicStory: StoryRun,
     generation: number,
   ) => {
+    assistingGenerationRef.current = generation;
     setAssisting(true);
     try {
       const assisted = await api.generateStory({
@@ -228,29 +248,55 @@ export default function StoriesPage({
         );
       }
     } finally {
-      if (generationRef.current === generation) setAssisting(false);
+      // Clear only if THIS assist still owns the indicator. Guarding on the
+      // generation token alone left the chip up forever once the token moved;
+      // clearing unconditionally let a late straggler hide a newer assist's
+      // progress. Ownership answers both.
+      if (assistingGenerationRef.current === generation) {
+        assistingGenerationRef.current = null;
+        setAssisting(false);
+      }
     }
   };
 
-  const reloadStoryReader = async (recipeId: string, completedAction: string) => {
+  const reloadStoryReader = async (
+    recipeId: string,
+    completedAction: string,
+    generation: number,
+  ) => {
     try {
       const symbolic = await api.generateStory({ recipe_id: recipeId, assist_level: 0 });
+      if (!stillOwns(generation)) return;
       setGenerated(symbolic);
+      // Curating straight from the library starts with no Story hash, so
+      // without this the URL keeps naming nothing while a Story is on screen —
+      // and refreshing lands back on the default page. Deep links are meant to
+      // be refreshable, so whatever is displayed must name itself.
+      onSubjectChange?.(displayedSubjectIri(symbolic));
       if (assistLevel === 1 && symbolic.outcome === 'story') {
-        void improveNarration({ recipe_id: recipeId }, symbolic.story, generationRef.current);
+        void improveNarration({ recipe_id: recipeId }, symbolic.story, generation);
       }
     } catch (err) {
-      appendWarning(
-        `${completedAction}, but its reader could not be reloaded: ${errorMessage(err)}`,
-      );
+      if (stillOwns(generation)) {
+        appendWarning(
+          `${completedAction}, but its reader could not be reloaded: ${errorMessage(err)}`,
+        );
+      }
     }
   };
 
-  const generate = async (request: StorySelectionRequest) => {
-    if (editor || generationOperationRef.current !== null) return;
+  const generate = async (request: StorySelectionRequest, replacesCurrent = false) => {
+    // A deep link has already been confirmed by the navigation guard, so it
+    // SUPERSEDES whatever is open OR still in flight — bumping the generation
+    // token below is what makes the older response discard itself. Deferring
+    // here instead would strand the older Story on screen under the new URL.
+    // Every other caller still defers, rather than yanking the page out from
+    // under a curator or stacking duplicate work.
+    if (!replacesCurrent && (editor || generationOperationRef.current !== null)) return;
     const generation = ++generationRef.current;
     generationOperationRef.current = generation;
     setBusy(true);
+    assistingGenerationRef.current = null;
     setAssisting(false);
     setError(null);
     setWarning(null);
@@ -259,6 +305,7 @@ export default function StoriesPage({
       if (generationOperationRef.current === generation) generationOperationRef.current = null;
       if (generationRef.current !== generation) return;
       setGenerated(symbolic);
+      onSubjectChange?.(displayedSubjectIri(symbolic));
       setBusy(false);
       if (assistLevel === 1 && symbolic.outcome === 'story') {
         await improveNarration(request, symbolic.story, generation);
@@ -271,28 +318,75 @@ export default function StoriesPage({
     }
   };
 
+  // Returns the generation the caller now owns. Every async Story operation
+  // must carry it and re-check before touching state: a deep link arriving
+  // mid-flight bumps the token, and an operation that ignored it would land its
+  // `setEditor`/`setGenerated` on top of the Story the URL now names.
   const invalidateGeneration = () => {
     generationRef.current += 1;
     generationOperationRef.current = null;
+    assistingGenerationRef.current = null;
     setAssisting(false);
+    // The disowned operation can no longer clear this itself — its `finally`
+    // now checks ownership. If nothing replaces it (a deep link whose subject
+    // lookup fails), the form and library would stay disabled forever.
+    // Callers that go on to start work set it straight back.
+    setBusy(false);
+    return generationRef.current;
   };
   const beginBlockingAction = () => {
-    invalidateGeneration();
+    const generation = invalidateGeneration();
     setBusy(true);
     setError(null);
     setWarning(null);
+    return generation;
   };
+  const stillOwns = (generation: number) => generationRef.current === generation;
+
+  // A deep link whose subject is still resolving must not leave the PREVIOUS
+  // Story on screen: the URL already names the new subject, and if the lookup
+  // fails that mismatch would otherwise persist indefinitely.
+  useEffect(() => {
+    if (!subjectResolving) return;
+    invalidateGeneration();
+    setEditor(null);
+    setEditorBaseline(null);
+    setGenerated(null);
+    // The selector must not keep naming the OUTGOING subject. The catalog is
+    // bounded, so an arriving subject may never appear in it to overwrite
+    // these — leaving the form ready to regenerate the wrong Story.
+    setSelectedSubject(null);
+    setSubjectQuery('');
+  }, [subjectResolving]);
 
   useEffect(() => {
-    if (!initialComponentIri) return;
+    if (!initialSubjectIri) return;
+    // The workbench echoes the displayed subject back when it syncs the URL, so
+    // this effect re-enters naming the Story already on screen. Regenerating
+    // then would throw away that Story along with the reader's progress and
+    // graded answers, so only a subject that is NOT displayed is acted on.
+    if (generated && displayedSubjectIri(generated) === initialSubjectIri) return;
     setSubjectMode('entity');
-    setSelectedSubject({
-      iri: initialComponentIri,
-      kind: 'SystemComponent',
-      label: initialComponentIri,
-    });
-    void generate({ subject_iri: initialComponentIri });
-  }, [initialComponentIri]);
+    // The navigation to this subject was already accepted (App confirmed any
+    // unsaved curation), so the editor and the outgoing Story must not survive
+    // it — otherwise the URL names one subject while another stays on screen.
+    setEditor(null);
+    setEditorBaseline(null);
+    setGenerated(null);
+    void generate({ subject_iri: initialSubjectIri }, true);
+  }, [initialSubjectIri]);
+
+  // Name the deep-linked subject in the selector once the catalog can. Until
+  // then the selector stays empty rather than showing a guessed kind or an
+  // IRI as if it were a label.
+  useEffect(() => {
+    if (!initialSubjectIri) return;
+    const match = subjects.find((subject) => subject.iri === initialSubjectIri);
+    if (match) {
+      setSelectedSubject(match);
+      setSubjectQuery(match.label);
+    }
+  }, [initialSubjectIri, subjects]);
 
   const submitSubject = (event: FormEvent) => {
     event.preventDefault();
@@ -318,15 +412,16 @@ export default function StoriesPage({
   };
   const editStory = async (storyId: string) => {
     if (!beginLibraryAction()) return;
-    beginBlockingAction();
+    const generation = beginBlockingAction();
     try {
       const response = await api.getStory(storyId);
+      if (!stillOwns(generation)) return;
       setEditor(response.recipe);
       setEditorBaseline(response.recipe);
     } catch (err) {
-      setError(errorMessage(err));
+      if (stillOwns(generation)) setError(errorMessage(err));
     } finally {
-      setBusy(false);
+      if (stillOwns(generation)) setBusy(false);
       libraryActionRef.current = false;
     }
   };
@@ -334,28 +429,30 @@ export default function StoriesPage({
   const saveRecipe = async () => {
     if (!editor || editorOperationRef.current) return;
     editorOperationRef.current = true;
-    beginBlockingAction();
+    const generation = beginBlockingAction();
     try {
       const response = await api.saveStory(editor);
+      if (!stillOwns(generation)) return;
       setEditor(response.recipe);
       setEditorBaseline(response.recipe);
       setGenerated(null);
-      await reloadStoryReader(response.recipe.id, 'Story was saved');
+      await reloadStoryReader(response.recipe.id, 'Story was saved', generation);
       await refreshBestEffort('Story was saved');
     } catch (err) {
-      setError(errorMessage(err));
+      if (stillOwns(generation)) setError(errorMessage(err));
     } finally {
       editorOperationRef.current = false;
-      setBusy(false);
+      if (stillOwns(generation)) setBusy(false);
     }
   };
 
   const publishRecipe = async () => {
     if (!editor || editorOperationRef.current) return;
     editorOperationRef.current = true;
-    beginBlockingAction();
+    const generation = beginBlockingAction();
     try {
       const saved = await api.saveStory(editor);
+      if (!stillOwns(generation)) return;
       setEditor(saved.recipe);
       setEditorBaseline(saved.recipe);
       setGenerated(null);
@@ -368,19 +465,21 @@ export default function StoriesPage({
       }
       try {
         const response = await api.publishStory(saved.recipe.id, saved.recipe.updated_at);
+        if (!stillOwns(generation)) return;
         setEditor(response.recipe);
         setEditorBaseline(response.recipe);
-        await reloadStoryReader(response.recipe.id, 'Story was published');
+        await reloadStoryReader(response.recipe.id, 'Story was published', generation);
         await refreshBestEffort('Story was published');
       } catch (err) {
+        if (!stillOwns(generation)) return;
         setError(`Story changes were saved, but publication failed: ${errorMessage(err)}`);
         await refreshBestEffort('Story changes were saved');
       }
     } catch (err) {
-      setError(errorMessage(err));
+      if (stillOwns(generation)) setError(errorMessage(err));
     } finally {
       editorOperationRef.current = false;
-      setBusy(false);
+      if (stillOwns(generation)) setBusy(false);
     }
   };
 
@@ -388,9 +487,10 @@ export default function StoriesPage({
   const saveGenerated = async () => {
     if (!currentStory || saveGeneratedRef.current) return;
     saveGeneratedRef.current = true;
-    beginBlockingAction();
+    const generation = beginBlockingAction();
     try {
       const response = await api.saveStory(recipeFromRun(currentStory));
+      if (!stillOwns(generation)) return;
       setGenerated({
         outcome: 'story',
         story: {
@@ -399,13 +499,13 @@ export default function StoriesPage({
           trust_state: response.recipe.status,
         },
       });
-      await reloadStoryReader(response.recipe.id, 'Story was saved as draft');
+      await reloadStoryReader(response.recipe.id, 'Story was saved as draft', generation);
       await refreshBestEffort('Story was saved as draft');
     } catch (err) {
-      setError(errorMessage(err));
+      if (stillOwns(generation)) setError(errorMessage(err));
     } finally {
       saveGeneratedRef.current = false;
-      setBusy(false);
+      if (stillOwns(generation)) setBusy(false);
     }
   };
 
@@ -579,6 +679,7 @@ export default function StoriesPage({
             onClose={() => {
               invalidateGeneration();
               setGenerated(null);
+              onSubjectChange?.(null);
             }}
             onGenerateFresh={() => generate({
               ...storySelection(currentStory.subject),

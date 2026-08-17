@@ -1003,6 +1003,132 @@ fn drifted_subjects_remain_readable_but_never_issue_checks() {
     assert!(state.story_checks.lock().unwrap().grants.is_empty());
 }
 
+const ANCHORED_SYMBOL: &str = "rust-analyzer cargo testpkg 0.1.0 anchored/code_a().";
+const UNANCHORED_SYMBOL: &str = "rust-analyzer cargo testpkg 0.1.0 anchored/missing().";
+
+/// A substrate that defines [`ANCHORED_SYMBOL`] at 0-based line 30 and knows
+/// nothing about any other symbol.
+///
+/// It is ROOTED at a real directory holding a real `src/anchored.rs`, because
+/// a line number is only published when the defining file is provably the one
+/// this generation indexed. `trusted` chooses whether that proof exists.
+fn anchor_substrate(repo_root: &Path, trusted: bool) -> crate::code::substrate::Substrate {
+    use protobuf::EnumOrUnknown;
+    use scip::types::{
+        symbol_information, Document, Index, Occurrence, PositionEncoding, SymbolInformation,
+    };
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(
+        repo_root.join("src/anchored.rs"),
+        (0..40)
+            .map(|line| format!("// line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+
+    let mut document = Document::new();
+    document.relative_path = "src/anchored.rs".to_string();
+    document.position_encoding =
+        EnumOrUnknown::new(PositionEncoding::UTF8CodeUnitOffsetFromLineStart);
+    let mut info = SymbolInformation::new();
+    info.symbol = ANCHORED_SYMBOL.to_string();
+    info.display_name = "Code A".to_string();
+    info.kind = EnumOrUnknown::new(symbol_information::Kind::Function);
+    document.symbols.push(info);
+    let mut occurrence = Occurrence::new();
+    occurrence.symbol = ANCHORED_SYMBOL.to_string();
+    occurrence.range = vec![30, 7, 13];
+    occurrence.symbol_roles = 1;
+    occurrence.enclosing_range = vec![30, 0, 32, 1];
+    document.occurrences.push(occurrence);
+    let mut index = Index::new();
+    index.documents.push(document);
+
+    let mut meta =
+        crate::code::substrate::SubstrateMeta::single("rust-analyzer", "c0", Utc::now(), 1, 1);
+    let skew = chrono::Duration::seconds(30);
+    meta.indexed_started_at = Some(if trusted {
+        Utc::now() + skew
+    } else {
+        Utc::now() - skew
+    });
+    crate::code::substrate::Substrate::from_index_rooted(index, meta, false, repo_root).unwrap()
+}
+
+#[test]
+fn story_code_anchors_carry_the_current_definition_line() {
+    let state = story_state("code-anchor-lines");
+    let component = "https://example.test/component/anchored";
+    let known = "https://example.test/code/known";
+    let unknown = "https://example.test/code/unknown";
+    type_component(&state, component);
+    type_code_entity(&state, known, ANCHORED_SYMBOL, "Code A");
+    type_code_entity(&state, unknown, UNANCHORED_SYMBOL, "Code Missing");
+    link_edge(&state, known, "realizes", component);
+    link_edge(&state, unknown, "realizes", component);
+
+    let tell = || {
+        generate_consistent_story(
+            &state,
+            &StoryRecipeSubject::Entity {
+                iri: component.to_string(),
+            },
+            None,
+            false,
+        )
+        .unwrap()
+    };
+    let line_for = |run: &StoryRun, symbol: &str| {
+        run.code_anchors
+            .iter()
+            .find(|anchor| anchor.symbol == symbol)
+            .unwrap_or_else(|| panic!("anchor {symbol}"))
+            .line
+    };
+
+    // With no substrate loaded there is nothing to prove a line from.
+    let without = tell();
+    assert!(!without.code_anchors.is_empty());
+    assert!(without
+        .code_anchors
+        .iter()
+        .all(|anchor| anchor.line.is_none()));
+
+    let repo_root = state.dir.join("anchor-repo");
+    state.set_substrate(std::sync::Arc::new(anchor_substrate(&repo_root, true)));
+    let with = tell();
+    // 0-based line 30 in the substrate is line 31 to a reader.
+    assert_eq!(line_for(&with, ANCHORED_SYMBOL), Some(31));
+    // A symbol the substrate cannot locate keeps no line rather than a guess.
+    assert_eq!(line_for(&with, UNANCHORED_SYMBOL), None);
+
+    // Same index, same definition — but the file can no longer be proven to be
+    // the one it was indexed from, so its line may have drifted and is not
+    // published. A Story must not send a reader to a stale location.
+    state.set_substrate(std::sync::Arc::new(anchor_substrate(&repo_root, false)));
+    let untrusted = tell();
+    assert_eq!(line_for(&untrusted, ANCHORED_SYMBOL), None);
+
+    // The path travels WITH the line. The graph still records the old
+    // defined_in_path until the next mint, so pairing it with a fresh line
+    // would read as `old/path.rs:<line in new/path.rs>`.
+    let path_for = |run: &StoryRun, symbol: &str| {
+        run.code_anchors
+            .iter()
+            .find(|anchor| anchor.symbol == symbol)
+            .unwrap_or_else(|| panic!("anchor {symbol}"))
+            .path
+            .clone()
+    };
+    assert_eq!(
+        path_for(&with, ANCHORED_SYMBOL).as_deref(),
+        Some("src/anchored.rs"),
+        "a published line must be paired with the file it was resolved in"
+    );
+}
+
 #[test]
 fn comprehension_check_uses_displayed_code_anchor() {
     let state = story_state("curated-code-grounding");
@@ -1983,6 +2109,53 @@ fn packet_source_ids_expand_to_complete_public_evidence_citations() {
     assert_eq!(
         apply_packet_response_for_test(&run, missing_source, &citations),
         Err(NarrationFailureReason::SchemaMismatch)
+    );
+}
+
+/// compact_narration_evidence mints private packet sources from code anchors the
+/// bounded dossier omitted. They ground the prose, but they are absent from
+/// `run.evidence`, so citing them ships a reference the reader cannot resolve —
+/// it rendered as a dead "[?]" marker in the workbench.
+#[test]
+fn private_packet_sources_never_become_public_citations() {
+    let run = symbolic_run_for_narration();
+    let private_anchor = "https://example.test/code-entity-not-in-dossier".to_string();
+    assert!(
+        !run.evidence.iter().any(|item| item.iri == private_anchor),
+        "fixture must keep the anchor out of the public dossier"
+    );
+    let citations = BTreeMap::from([
+        (
+            "source-1".to_string(),
+            vec!["https://example.test/requirement".to_string()],
+        ),
+        (
+            "source-2".to_string(),
+            vec!["https://example.test/decision".to_string(), private_anchor],
+        ),
+    ]);
+    let raw = r#"{"paragraphs":[{"section_id":"orientation","text":"Readable explanations.","source_ids":["source-1"]},{"section_id":"evolution","text":"Grounded narration.","source_ids":["source-2"]}]}"#;
+    let narrative = apply_packet_response_for_test(&run, raw, &citations).unwrap();
+
+    let public = run
+        .evidence
+        .iter()
+        .map(|item| item.iri.clone())
+        .collect::<BTreeSet<_>>();
+    for section in &narrative {
+        for paragraph in &section.paragraphs {
+            for iri in &paragraph.citation_iris {
+                assert!(
+                    public.contains(iri),
+                    "citation {iri} does not resolve to listed evidence"
+                );
+            }
+        }
+    }
+    // The public half of the group still cites; only the private IRI is dropped.
+    assert_eq!(
+        narrative[1].paragraphs[0].citation_iris,
+        vec!["https://example.test/decision"]
     );
 }
 

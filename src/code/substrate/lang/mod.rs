@@ -30,6 +30,11 @@ pub(crate) struct LanguageSpec {
     /// `clients/zed/extension.toml` from drifting.
     #[cfg_attr(not(test), allow(dead_code))] // read by the extension.toml sync test
     pub zed_languages: &'static [&'static str],
+    /// Whether a repo-relative path is THIS language's test code, for idioms a
+    /// shared rule cannot express: pytest's `test_*.py`, Jest's `*.spec.ts`,
+    /// Rust's `tests.rs`. `None` when the language adds nothing to the shared
+    /// directory conventions.
+    pub is_test_path: Option<fn(&str) -> bool>,
 }
 
 pub(crate) struct ProducerHooks {
@@ -93,6 +98,62 @@ pub(crate) fn canonical_symbol(raw: &str) -> Option<String> {
     producer_hooks(scheme)?
         .canonical_symbol
         .and_then(|hook| hook(raw))
+}
+
+/// Whether a repo-relative path is test code.
+///
+/// DIRECTORY conventions are broadly shared, so they are answered here. NAMING
+/// idioms are not — `test_*.py`, `*.spec.ts`, `*_test.go` all mean the same
+/// thing in different languages and nothing in another — so each language
+/// answers for its own. A path whose extension the registry does not recognize
+/// gets the shared rules only, which is the honest answer for a language whose
+/// idioms this build does not know.
+///
+/// KNOWN LIMIT: Rust's dominant convention is an inline `#[cfg(test)] mod
+/// tests`, which is not a path at all. No path predicate can see it — it is
+/// visible only in a symbol's module descriptor, so a symbol-level check would
+/// be needed to exclude it.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    if shared_test_path(path) {
+        return true;
+    }
+    language_for_path(path)
+        .and_then(|language| language.is_test_path)
+        .is_some_and(|hook| hook(path))
+}
+
+/// Final path segment. The languages' test-naming hooks all key on it.
+pub(crate) fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Directory conventions that mean test code in essentially every language.
+///
+/// Deliberately NOT included: a `spec`/`specs` segment. It is a test directory
+/// in Ruby but an interface-description directory elsewhere — this repository's
+/// own `spec/` holds specifications, not tests — so it is left to the languages
+/// that actually mean tests by it.
+fn shared_test_path(path: &str) -> bool {
+    path.starts_with("tests/")
+        || path
+            .split('/')
+            .any(|segment| matches!(segment, "test" | "tests" | "__tests__"))
+}
+
+/// The registered language owning a path, by extension. Checks both halves so a
+/// producer-only or fallback-only language still resolves.
+fn language_for_path(path: &str) -> Option<&'static LanguageSpec> {
+    let extension = Path::new(path).extension()?.to_str()?;
+    LANGUAGES.iter().copied().find(|language| {
+        language
+            .fallback
+            .as_ref()
+            .is_some_and(|fallback| fallback.extensions.contains(&extension))
+            || language
+                .producer
+                .as_ref()
+                .is_some_and(|producer| producer.spec.extensions.contains(&extension))
+    })
 }
 
 pub(crate) fn fallback_for_path(path: &Path) -> Option<&'static FallbackSpec> {
@@ -176,5 +237,76 @@ mod tests {
                  claims — remove it or register the language here"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_path_tests {
+    use super::is_test_path;
+
+    #[test]
+    fn shared_directory_conventions_hold_for_every_language() {
+        for path in [
+            "tests/api.rs",
+            "src/deep/tests/helper.rs",
+            "app/test/thing.py",
+            "src/components/__tests__/Button.tsx",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn python_naming_idioms_are_recognized() {
+        // pytest discovers by FILE NAME, so none of these sit in a test
+        // directory — the shared rules alone miss Python's primary convention.
+        for path in [
+            "pkg/test_client.py",
+            "pkg/client_test.py",
+            "pkg/conftest.py",
+            "pkg/test_client.pyi",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+        assert!(!is_test_path("pkg/latest_client.py"));
+        assert!(!is_test_path("pkg/contest.py"));
+    }
+
+    #[test]
+    fn javascript_naming_idioms_are_recognized() {
+        assert!(is_test_path("src/api/client.test.ts"));
+        assert!(is_test_path("src/api/client.spec.tsx"));
+        assert!(!is_test_path("src/api/client.ts"));
+    }
+
+    #[test]
+    fn rust_recognizes_a_broken_out_test_module() {
+        assert!(is_test_path("src/graph/tests.rs"));
+        assert!(!is_test_path("src/graph/store.rs"));
+    }
+
+    #[test]
+    fn naming_idioms_do_not_leak_across_languages() {
+        // `.spec.` is a JS convention and means nothing in Rust or Python; a
+        // shared filename rule would classify these as tests in every language.
+        assert!(!is_test_path("src/openapi.spec.rs"));
+        assert!(!is_test_path("pkg/openapi.spec.py"));
+        // Python's `test_` prefix is likewise not a Rust convention.
+        assert!(!is_test_path("src/test_harness.rs"));
+    }
+
+    #[test]
+    fn an_unregistered_language_gets_the_shared_rules_only() {
+        assert!(is_test_path("tests/smoke.go"));
+        // `*_test.go` is Go's idiom, which this build has no language for. It
+        // reports false rather than guessing — the honest answer.
+        assert!(!is_test_path("pkg/client_test.go"));
+    }
+
+    #[test]
+    fn a_spec_directory_is_not_assumed_to_be_tests() {
+        // This repository's own `spec/` holds specifications. Treating the
+        // segment as a test directory would silently drop real source.
+        assert!(!is_test_path("spec/protocol.py"));
     }
 }

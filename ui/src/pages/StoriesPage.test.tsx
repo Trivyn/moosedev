@@ -398,6 +398,48 @@ describe('Story v3 workbench', () => {
     await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: saved.id, assist_level: 1, include_checks: false }));
   });
 
+  it('does not regenerate when told about the subject already on screen', async () => {
+    // The workbench syncs the URL to whatever is displayed, which feeds the
+    // same subject straight back in. Acting on it would discard the Story just
+    // generated — and with it the reader's progress and graded answers.
+    const { rerender } = render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
+    const callsAfterGenerate = vi.mocked(api.generateStory).mock.calls.length;
+
+    rerender(<StoriesPage onNavigateRecord={vi.fn()} initialSubjectIri={componentIri} />);
+
+    await waitFor(() => expect(screen.getByRole('article')).toBeInTheDocument());
+    expect(api.generateStory).toHaveBeenCalledTimes(callsAfterGenerate);
+  });
+
+  it('discards a save that lands after a deep link replaced the Story', async () => {
+    const linkedIri = 'https://moosedev.dev/kg/CodeEntity/build-routes';
+    const save = deferred<{ recipe: StoryRecipe }>();
+    vi.mocked(api.saveStory).mockReturnValueOnce(save.promise);
+    const { rerender } = render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save as draft' }));
+    await waitFor(() => expect(api.saveStory).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(api.saveStory).mock.calls[0][0];
+
+    // The deep link arrives while the save is still in flight. It supersedes
+    // what is on screen AND what is in flight.
+    rerender(<StoriesPage onNavigateRecord={vi.fn()} initialSubjectIri={linkedIri} />);
+    await waitFor(() =>
+      expect(api.generateStory).toHaveBeenCalledWith({ subject_iri: linkedIri, assist_level: 0 }),
+    );
+
+    await act(async () => save.resolve({ recipe: { ...saved, updated_at: 'token' } }));
+
+    // Reloading the reader here would put the SAVED Story back on screen under
+    // the deep-linked URL, so the stale save must abandon its result entirely.
+    expect(api.generateStory).not.toHaveBeenCalledWith({
+      recipe_id: saved.id,
+      assist_level: 0,
+    });
+  });
+
   it('curates focus, emphasis, and context instead of editing narrative blocks', async () => {
     render(<StoriesPage onNavigateRecord={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
@@ -414,6 +456,20 @@ describe('Story v3 workbench', () => {
     expect(saved.focus.emphasis.slice(0, 2)).toEqual(['evolution', 'orientation']);
     expect(saved.curator_context).toBe('Lead with why the history changed.');
     expect(screen.queryByText(/beat/i)).not.toBeInTheDocument();
+  });
+
+  it('names the reloaded Story in the URL after curating straight from the library', async () => {
+    // This flow never goes through a Story hash, so without syncing the subject
+    // the URL keeps naming nothing while a Story is on screen — and a refresh
+    // lands back on the default page instead of the Story being read.
+    const onSubjectChange = vi.fn();
+    render(<StoriesPage onNavigateRecord={vi.fn()} onSubjectChange={onSubjectChange} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Curate' }));
+    await screen.findByRole('heading', { name: 'Curate Story' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+
+    await waitFor(() => expect(onSubjectChange).toHaveBeenCalledWith(componentIri));
   });
 
   it('blocks invalid overlapping focus and preserves a published status on save', async () => {

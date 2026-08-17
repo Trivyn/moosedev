@@ -5,7 +5,8 @@
 //! no enclosing-range fallback, because downstream surfaces must not present a
 //! lexical guess as a semantic entity.
 
-use std::path::Path;
+use std::io::{BufRead, Read};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -14,6 +15,34 @@ use super::scip::{self, IngestedIndex, OccurrenceEntry, SymbolData};
 use super::symbols;
 use super::treesitter::{parse_identity, TreeSitterFallback};
 use super::{meta_path, producer_index_path_in, CHURN_FILE_NAME};
+
+/// One retained slice of a proven file: lines `[first_line, first_line +
+/// max_lines)`, stopping early once `max_bytes` of content is held. Requesting
+/// windows rather than a file is what keeps a preview's cost proportional to
+/// what it shows.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceWindowRequest {
+    pub first_line: usize,
+    pub max_lines: usize,
+    pub max_bytes: usize,
+}
+
+impl SourceWindowRequest {
+    /// Whether this window still wants the line at 0-based `index`, given the
+    /// bytes it already holds.
+    ///
+    /// The byte check happens BEFORE the line is added, so a window always
+    /// keeps at least one line and overshoots its cap by at most the last line
+    /// admitted — which is what lets a single oversized line be clipped rather
+    /// than vanish. Callers that read from a file and callers that already hold
+    /// the text share this so the two cannot come to disagree.
+    pub fn wants(&self, index: usize, held: usize) -> bool {
+        index
+            .checked_sub(self.first_line)
+            .is_some_and(|offset| offset < self.max_lines)
+            && held <= self.max_bytes
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
@@ -105,6 +134,13 @@ pub struct Substrate {
     churn: Option<super::ChurnIndex>,
     /// Lazy workspace-wide fan-in: normalized symbol → reference count.
     reference_counts: std::sync::OnceLock<std::collections::HashMap<String, u32>>,
+    /// Lazy normalized symbol → definition, so a caller resolving many symbols
+    /// pays one normalization pass over the index instead of one per lookup.
+    definitions_by_symbol: std::sync::OnceLock<std::collections::HashMap<String, FileDefinition>>,
+    /// Canonical repository root, resolved once. Containment checks compare
+    /// against it on every source read, and the root cannot move underneath a
+    /// loaded substrate.
+    canonical_root: std::sync::OnceLock<Option<PathBuf>>,
 }
 
 impl Substrate {
@@ -162,6 +198,8 @@ impl Substrate {
             syntactic: TreeSitterFallback::new(),
             churn,
             reference_counts: std::sync::OnceLock::new(),
+            definitions_by_symbol: std::sync::OnceLock::new(),
+            canonical_root: std::sync::OnceLock::new(),
         })
     }
 
@@ -231,33 +269,141 @@ impl Substrate {
         &self.meta
     }
 
+    /// Consume a file whose bytes are provably the ones this generation
+    /// indexed, however the caller wants to consume them.
+    ///
+    /// This is the ONE place source bytes enter the process, so the proof is
+    /// stated once rather than restated per reader. `consume` is handed a
+    /// reader already capped one byte past the proven length — a file being
+    /// rewritten between the stat and the read would otherwise be slurped at
+    /// whatever size it has NOW, and the extra byte is what makes growth
+    /// detectable rather than silently truncated. It reports how many bytes it
+    /// read so that length can be checked against the baseline.
+    ///
+    /// The proof COMPLETES AFTER `consume` returns: a file that changed while
+    /// it was being read is rejected along with whatever was produced from it.
+    fn read_proven<T>(
+        &self,
+        relative_path: &str,
+        consume: impl FnOnce(std::io::Take<std::fs::File>) -> Option<(T, u64)>,
+    ) -> Option<T> {
+        let build_started_at = self.meta.indexed_started_at?;
+        let (path, before) = self.trusted_baseline(relative_path)?;
+        let before_modified = before.modified().ok()?;
+        let file = std::fs::File::open(&path).ok()?;
+        let (value, read_bytes) = consume(file.take(before.len().checked_add(1)?))?;
+        let after = std::fs::metadata(&path).ok()?;
+        let after_modified = after.modified().ok()?;
+        if before_modified != after_modified
+            || before.len() != after.len()
+            || read_bytes != before.len()
+        {
+            return None;
+        }
+        (chrono::DateTime::<chrono::Utc>::from(after_modified) < build_started_at).then_some(value)
+    }
+
     /// Read a source baseline only when filesystem evidence proves it did not
-    /// change during or after this generation's producer run. The two metadata
-    /// samples reject concurrent writes while the file is being read.
+    /// change during or after this generation's producer run.
     pub fn read_indexed_source(&self, relative_path: &str) -> Option<String> {
+        self.read_proven(relative_path, |mut reader| {
+            let mut text = String::new();
+            reader.read_to_string(&mut text).ok()?;
+            let read_bytes = text.len() as u64;
+            Some((text, read_bytes))
+        })
+    }
+
+    /// Read only the requested WINDOWS of a provably-indexed file, plus its
+    /// total line count.
+    ///
+    /// Same evidence as [`Self::read_indexed_source`] — the file must still be
+    /// the bytes this generation indexed — but the file is streamed and only
+    /// the windows are retained, so peak allocation follows the caps a caller
+    /// will actually serve rather than the size of the file it came from. A
+    /// multi-megabyte file previewed 12 lines at a time costs 12 lines.
+    ///
+    /// Line splitting matches `str::lines`, so line indices agree with every
+    /// other coordinate in this module.
+    pub fn read_indexed_source_windows(
+        &self,
+        relative_path: &str,
+        requests: &[SourceWindowRequest],
+    ) -> Option<(Vec<Vec<String>>, usize)> {
+        self.read_proven(relative_path, |reader| {
+            let mut reader = std::io::BufReader::new(reader);
+            let mut windows: Vec<Vec<String>> = vec![Vec::new(); requests.len()];
+            let mut held: Vec<usize> = vec![0; requests.len()];
+            let mut total_lines = 0usize;
+            let mut read_bytes = 0u64;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let count = reader.read_line(&mut line).ok()?;
+                if count == 0 {
+                    break;
+                }
+                read_bytes += count as u64;
+                // `read_line` keeps the terminator; `str::lines` does not, and
+                // the published coordinates are relative to the latter.
+                let content = line.strip_suffix('\n').unwrap_or(&line);
+                let content = content.strip_suffix('\r').unwrap_or(content);
+                for (index, request) in requests.iter().enumerate() {
+                    if !request.wants(total_lines, held[index]) {
+                        continue;
+                    }
+                    held[index] += content.len();
+                    windows[index].push(content.to_string());
+                }
+                total_lines += 1;
+            }
+            Some(((windows, total_lines), read_bytes))
+        })
+    }
+
+    /// Byte length of a file whose on-disk bytes are provably the ones this
+    /// generation indexed, or `None` when that cannot be proven.
+    ///
+    /// The same evidence [`Self::read_indexed_source`] demands, without paying
+    /// for the contents — so a caller that only needs to know whether source
+    /// can be trusted (and how large it is) never reads the file.
+    pub fn indexed_source_len(&self, relative_path: &str) -> Option<u64> {
+        self.trusted_baseline(relative_path)
+            .map(|(_, metadata)| metadata.len())
+    }
+
+    /// Resolve a repo-relative indexed path to a real file this substrate may
+    /// serve, with its pre-read metadata.
+    ///
+    /// Containment is checked AFTER canonicalization, not by rejecting `..`
+    /// alone: an indexed path can itself be a symlink — or sit under one — that
+    /// points outside the repository, and reads follow symlinks. Only paths
+    /// that still resolve inside the repository root are servable.
+    fn trusted_baseline(&self, relative_path: &str) -> Option<(PathBuf, std::fs::Metadata)> {
         if !self.index.files.contains_key(relative_path) {
             return None;
         }
-        if !std::path::Path::new(relative_path)
+        if !Path::new(relative_path)
             .components()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
         {
             return None;
         }
         let build_started_at = self.meta.indexed_started_at?;
-        let path = self.repo_root()?.join(relative_path);
-        let before = std::fs::metadata(&path).ok()?;
-        let before_modified = before.modified().ok()?;
-        if chrono::DateTime::<chrono::Utc>::from(before_modified) >= build_started_at {
+        // The root is resolved once; the FILE is still canonicalized per call,
+        // because that resolution is the containment check itself.
+        let repo_root = self.canonical_root()?;
+        let path = repo_root.join(relative_path).canonicalize().ok()?;
+        if !path.starts_with(repo_root) {
             return None;
         }
-        let text = std::fs::read_to_string(&path).ok()?;
-        let after = std::fs::metadata(path).ok()?;
-        let after_modified = after.modified().ok()?;
-        if before_modified != after_modified || before.len() != after.len() {
+        let metadata = std::fs::metadata(&path).ok()?;
+        if !metadata.is_file() {
             return None;
         }
-        (chrono::DateTime::<chrono::Utc>::from(after_modified) < build_started_at).then_some(text)
+        let modified = metadata.modified().ok()?;
+        (chrono::DateTime::<chrono::Utc>::from(modified) < build_started_at)
+            .then_some((path, metadata))
     }
 
     pub fn is_stale(&self) -> bool {
@@ -421,6 +567,121 @@ impl Substrate {
         })
     }
 
+    /// Resolve a symbol to its defining file AND the source range of that
+    /// definition, through the same SCIP/tree-sitter ladder
+    /// [`Self::definition_for_symbol`] uses.
+    ///
+    /// This is the ONE place a surface may learn where a definition lives.
+    /// Locating a definition by searching the file for its name would present
+    /// a lexical guess as a semantic location, which the trusted-source
+    /// Constraint forbids. A miss stays a miss.
+    /// Callers resolve MANY symbols in a loop (Story code anchors), so this
+    /// goes through a memoized normalized-symbol map rather than
+    /// [`Self::definition_for_symbol`], whose miss path normalizes every symbol
+    /// in the index. Symbols read back out of the project graph are stored
+    /// version-normalized (Constraint `00b3986e`) while the index holds raw
+    /// ones, so that miss path is the COMMON case here, not the rare one.
+    pub fn definition_location(&self, symbol: &str) -> Option<FileDefinition> {
+        // Syntactic identities are self-describing and verified against the
+        // file on disk, so they never enter the index-derived map.
+        if symbol.starts_with("ts:") {
+            let entry = self.definition_for_symbol(symbol)?;
+            let range = self.syntactic.identity_range(self.repo_root()?, symbol)?;
+            return Some(FileDefinition { entry, range });
+        }
+        if let Some(found) = symbols::normalize_symbol(symbol)
+            .and_then(|normalized| self.definitions_by_symbol().get(&normalized))
+        {
+            return Some(found.clone());
+        }
+        // Locals have no normalized identity but keep exact-lookup
+        // compatibility, matching `definition_for_symbol`.
+        let entry = self.definition_for_symbol(symbol)?;
+        let range = self.definition_range_of(&entry)?;
+        Some(FileDefinition { entry, range })
+    }
+
+    /// Normalized symbol → definition, built once per loaded substrate.
+    ///
+    /// Building it normalizes each indexed symbol a single time, turning a
+    /// per-lookup O(index) scan into an O(1) probe.
+    fn definitions_by_symbol(&self) -> &std::collections::HashMap<String, FileDefinition> {
+        self.definitions_by_symbol.get_or_init(|| {
+            let mut map = std::collections::HashMap::new();
+            for (path, file) in self.index.files.iter() {
+                for occurrence in &file.occurrences {
+                    if !scip::is_definition_role(occurrence.symbol_roles) {
+                        continue;
+                    }
+                    let Some(symbol) = self.index.symbols.get(occurrence.symbol_id) else {
+                        continue;
+                    };
+                    if symbol.is_local || is_synthetic_whole_file_marker(symbol, occurrence.range) {
+                        continue;
+                    }
+                    let Some(entry) = definition_entry(symbol) else {
+                        continue;
+                    };
+                    // Pair a range ONLY with the entry's own defining document,
+                    // exactly as `definition_range_of` does: another file's
+                    // occurrence of the same symbol must never stand in for it.
+                    if entry.file != *path {
+                        continue;
+                    }
+                    // Two definitions can share a normalized symbol. Minting
+                    // filters to scope and THEN takes the lowest (file, symbol)
+                    // — `graph::code_entities::{mint_candidates,
+                    // dedupe_collisions}` — so this map must reach the same
+                    // answer via `collision_rank`, or a minted entity resolves
+                    // to the definition minting dropped. `index.files` is a
+                    // HashMap, so first-visited-wins is not even stable across
+                    // runs. Equal keys leave the incumbent, which is the
+                    // earliest occurrence because ingest position-sorts them.
+                    match map.entry(entry.normalized_symbol.clone()) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(FileDefinition {
+                                range: occurrence.range,
+                                entry,
+                            });
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot) => {
+                            if collision_rank(&entry) < collision_rank(&slot.get().entry) {
+                                slot.insert(FileDefinition {
+                                    range: occurrence.range,
+                                    entry,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            map
+        })
+    }
+
+    /// The definition occurrence range for an already-resolved SCIP entry.
+    /// Scoped to the defining document, so an unrelated file's occurrence of
+    /// the same symbol can never stand in for it.
+    fn definition_range_of(&self, entry: &DefinitionEntry) -> Option<SourceRange> {
+        let file = self.index.files.get(entry.file.as_str())?;
+        file.occurrences
+            .iter()
+            .filter(|occurrence| scip::is_definition_role(occurrence.symbol_roles))
+            .find(|occurrence| {
+                let symbol = &self.index.symbols[occurrence.symbol_id];
+                symbol.symbol == entry.symbol
+                    && !is_synthetic_whole_file_marker(symbol, occurrence.range)
+            })
+            .map(|occurrence| occurrence.range)
+    }
+
+    /// Canonical repository root, resolved once per loaded substrate.
+    fn canonical_root(&self) -> Option<&Path> {
+        self.canonical_root
+            .get_or_init(|| self.repo_root()?.canonicalize().ok())
+            .as_deref()
+    }
+
     /// Check a self-describing syntactic identity against the current file.
     /// `None` means this substrate cannot verify it.
     pub fn identity_alive(&self, identity: &str) -> Option<bool> {
@@ -451,6 +712,8 @@ impl Substrate {
             syntactic: TreeSitterFallback::new(),
             churn: None,
             reference_counts: std::sync::OnceLock::new(),
+            definitions_by_symbol: std::sync::OnceLock::new(),
+            canonical_root: std::sync::OnceLock::new(),
         })
     }
 
@@ -539,6 +802,15 @@ impl Staleness {
             cache: std::sync::Mutex::new(Some((std::time::Instant::now(), constructed_stale))),
         }
     }
+}
+
+/// Ordering key reproducing minting's collision choice: in-scope definitions
+/// outrank out-of-scope ones, then lowest (file, symbol) wins. Minting filters
+/// to scope BEFORE deduping, so ordering alone would pick a definition that
+/// minting had already discarded.
+fn collision_rank(entry: &DefinitionEntry) -> (bool, &str, &str) {
+    let in_mint_scope = !super::is_test_path(&entry.file) && (entry.is_module || entry.is_public);
+    (!in_mint_scope, &entry.file, &entry.symbol)
 }
 
 fn definition_entry(symbol: &SymbolData) -> Option<DefinitionEntry> {
@@ -730,6 +1002,239 @@ mod tests {
         assert_eq!(resolution.mode, ResolutionMode::Scip);
         assert_eq!(resolution.symbol, symbol);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn definition_location_returns_the_defining_file_and_range() {
+        let symbol = "rust-analyzer cargo moosedev 0.6.3 build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            symbol,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        // A definition occurrence, plus a reference to the SAME symbol in a
+        // later line that must never be mistaken for the definition.
+        document.occurrences.push(occ(symbol, vec![2, 7, 19], 1));
+        document.occurrences.push(occ(symbol, vec![9, 4, 16], 0));
+        index.documents.push(document);
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        let located = substrate.definition_location(symbol).expect("located");
+        assert_eq!(located.entry.file, "src/runtime.rs");
+        assert_eq!(
+            located.entry.signature.as_deref(),
+            Some("pub fn build_server()")
+        );
+        assert_eq!(
+            located.range,
+            SourceRange {
+                start: Position { line: 2, col: 7 },
+                end: Position { line: 2, col: 19 },
+            }
+        );
+    }
+
+    #[test]
+    fn definition_location_resolves_raw_and_normalized_forms_alike() {
+        // The project graph stores version-NORMALIZED symbols while the index
+        // holds RAW ones (Constraint 00b3986e), so every caller reading symbols
+        // back out of the graph presents the normalized form. Both must land on
+        // the same definition.
+        let raw = "rust-analyzer cargo moosedev 0.9.0 runtime/build_server().";
+        let normalized = "rust-analyzer cargo moosedev . runtime/build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            raw,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        document.occurrences.push(occ(raw, vec![4, 7, 19], 1));
+        index.documents.push(document);
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        let from_raw = substrate.definition_location(raw).expect("raw");
+        let from_normalized = substrate
+            .definition_location(normalized)
+            .expect("normalized");
+        assert_eq!(from_raw.range, from_normalized.range);
+        assert_eq!(from_raw.entry.file, from_normalized.entry.file);
+        assert_eq!(from_raw.range.start.line, 4);
+    }
+
+    #[test]
+    fn definition_location_pairs_a_range_only_with_its_defining_file() {
+        // Another document's definition-role occurrence of the same symbol must
+        // never supply the range for the defining file's entry.
+        let symbol = "rust-analyzer cargo moosedev 0.9.0 runtime/build_server().";
+        let mut index = Index::new();
+        let mut defining = doc("src/runtime.rs");
+        defining.symbols.push(info(
+            symbol,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        defining.occurrences.push(occ(symbol, vec![9, 7, 19], 1));
+        let mut other = doc("src/other.rs");
+        other.occurrences.push(occ(symbol, vec![1, 0, 12], 1));
+        index.documents.push(other);
+        index.documents.push(defining);
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        let located = substrate.definition_location(symbol).expect("located");
+        // Ingest picks which document is the defining one; the invariant under
+        // test is that the RANGE belongs to whichever file that is, never to
+        // the other document's occurrence of the same symbol.
+        assert_eq!(
+            located.entry.file,
+            substrate.definition_for_symbol(symbol).expect("entry").file
+        );
+        assert!(
+            substrate
+                .definitions_in_file(&located.entry.file)
+                .iter()
+                .any(|candidate| candidate.entry.normalized_symbol
+                    == located.entry.normalized_symbol
+                    && candidate.range == located.range),
+            "range {:?} is not an occurrence in {}",
+            located.range,
+            located.entry.file
+        );
+    }
+
+    #[test]
+    fn colliding_normalized_symbols_resolve_to_the_definition_mint_keeps() {
+        // A real collision is two DIFFERENT raw symbols that normalize alike
+        // (here, crate-version drift), each with its own defining file. The
+        // same raw symbol twice would merge at ingest into one entry, which is
+        // no collision at all.
+        let build = |files: &[(&str, &str)]| {
+            let mut index = Index::new();
+            for (path, raw) in files {
+                let mut document = doc(path);
+                document.symbols.push(info(
+                    raw,
+                    "item",
+                    symbol_information::Kind::Function,
+                    "pub fn item()",
+                ));
+                document.occurrences.push(occ(raw, vec![3, 7, 11], 1));
+                index.documents.push(document);
+            }
+            Substrate::from_index(index, meta(), false).unwrap()
+        };
+        let normalized = "rust-analyzer cargo moosedev . shared/item().";
+
+        // Both in mint scope: minting takes the lowest file, so must this.
+        let tie = build(&[
+            (
+                "src/zebra.rs",
+                "rust-analyzer cargo moosedev 0.9.0 shared/item().",
+            ),
+            (
+                "src/alpha.rs",
+                "rust-analyzer cargo moosedev 0.8.0 shared/item().",
+            ),
+        ]);
+        // HashMap iteration order varies per process, so a first-visited-wins
+        // map fails this only sometimes.
+        for _ in 0..8 {
+            let located = tie.definition_location(normalized).expect("located");
+            assert_eq!(located.entry.file, "src/alpha.rs");
+        }
+
+        // Scope outranks ordering: minting filters test paths out BEFORE
+        // deduping, so the later in-scope file wins even though the test file
+        // sorts first. Ordering alone would resolve a minted entity to the
+        // definition minting discarded.
+        let scoped = build(&[
+            (
+                // A real Rust test path. `src/aaa.test.rs` would NOT do: the
+                // `.test.` infix is a JavaScript idiom, and the registry no
+                // longer applies one language's naming to another.
+                "src/aaa/tests.rs",
+                "rust-analyzer cargo moosedev 0.9.0 shared/item().",
+            ),
+            (
+                "src/zzz.rs",
+                "rust-analyzer cargo moosedev 0.8.0 shared/item().",
+            ),
+        ]);
+        for _ in 0..8 {
+            let located = scoped.definition_location(normalized).expect("located");
+            assert_eq!(located.entry.file, "src/zzz.rs");
+        }
+    }
+
+    #[test]
+    fn resolving_many_symbols_does_not_rescan_the_index() {
+        // CANARY for the quadratic regression this replaced: the pre-memo path
+        // normalized every indexed symbol on every lookup, so a graph-shaped
+        // (normalized) query over a few thousand symbols took minutes. The
+        // bound is deliberately loose — it exists to catch a return to
+        // per-lookup scanning, not to measure throughput.
+        let mut index = Index::new();
+        let mut document = doc("src/wide.rs");
+        for n in 0..2_000 {
+            let raw = format!("rust-analyzer cargo moosedev 0.9.0 wide/item{n}().");
+            document.symbols.push(info(
+                &raw,
+                &format!("item{n}"),
+                symbol_information::Kind::Function,
+                "pub fn item()",
+            ));
+            document.occurrences.push(occ(&raw, vec![n, 0, 8], 1));
+        }
+        index.documents.push(document);
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        let started = std::time::Instant::now();
+        for n in 0..2_000 {
+            let normalized = format!("rust-analyzer cargo moosedev . wide/item{n}().");
+            assert!(substrate.definition_location(&normalized).is_some());
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "2000 normalized lookups took {elapsed:?}; the per-lookup index scan is back"
+        );
+    }
+
+    #[test]
+    fn definition_location_misses_stay_misses() {
+        let substrate = substrate_with_occurrences(vec![occ("known", vec![0, 0, 5], 1)]);
+        // No fuzzy matching and no text search: an unknown symbol has no location.
+        assert!(substrate.definition_location("unknown").is_none());
+        // A local symbol has no stable identity, so it has no definition entry.
+        assert!(substrate.definition_location("local 0").is_none());
+    }
+
+    #[test]
+    fn definition_location_resolves_a_syntactic_identity_on_disk() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let substrate = Substrate::from_index_rooted(Index::new(), meta(), false, &root).unwrap();
+        let identity = "ts:rust:tests/fixtures/ts_fallback.rs:struct:Widget";
+
+        let located = substrate.definition_location(identity).expect("located");
+        assert_eq!(located.entry.file, "tests/fixtures/ts_fallback.rs");
+        assert_eq!(located.entry.producer, "tree-sitter");
+        // The fixture declares `pub struct Widget` on line 10 (0-based 9).
+        assert_eq!(located.range.start.line, 9);
+        assert!(located.range.end.line > located.range.start.line);
+
+        // A declaration that is not in the file has no location, and neither
+        // does a well-formed identity for a file the fallback cannot read.
+        assert!(substrate
+            .definition_location("ts:rust:tests/fixtures/ts_fallback.rs:struct:Absent")
+            .is_none());
+        assert!(substrate
+            .definition_location("ts:rust:tests/fixtures/missing.rs:struct:Widget")
+            .is_none());
     }
 
     #[test]
@@ -1518,6 +2023,142 @@ mod tests {
     }
 
     #[test]
+    fn indexed_source_refuses_a_document_path_that_escapes_the_repo() {
+        let base = unique_temp_dir("escape-source");
+        let repo_root = base.join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        // A file OUTSIDE the repository that a traversal path would reach.
+        let outside = base.join("outside-secret.rs");
+        std::fs::write(&outside, "const SECRET: &str = \"do not serve\";\n").unwrap();
+
+        // A hostile or broken producer could emit a traversal relative_path;
+        // covering the document must not make its bytes servable.
+        let mut index = Index::new();
+        let mut document = doc("../outside-secret.rs");
+        document.occurrences.push(occ("s", vec![0, 0, 5], 1));
+        index.documents.push(document);
+
+        let mut meta = meta();
+        meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(30));
+        let substrate = Substrate::from_index_rooted(index, meta, false, &repo_root).unwrap();
+
+        assert!(substrate.covers_file("../outside-secret.rs"));
+        assert_eq!(substrate.read_indexed_source("../outside-secret.rs"), None);
+        assert_eq!(substrate.indexed_source_len("../outside-secret.rs"), None);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn indexed_source_refuses_a_symlink_that_leaves_the_repo() {
+        let base = unique_temp_dir("symlink-source");
+        let repo_root = base.join("repo");
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+        let outside = base.join("outside-secret.rs");
+        std::fs::write(&outside, "const SECRET: &str = \"do not serve\";\n").unwrap();
+        // An ordinary-looking repo-relative path whose target is elsewhere on
+        // the machine. Rejecting `..` components does nothing here: reads
+        // follow symlinks, so containment must be checked after resolution.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, repo_root.join("src/linked.rs")).unwrap();
+
+        // A sibling real file proves the fixture would otherwise be servable.
+        const REAL_SOURCE: &str = "pub fn real() {}\n";
+        std::fs::write(repo_root.join("src/real.rs"), REAL_SOURCE).unwrap();
+
+        let mut index = Index::new();
+        for path in ["src/linked.rs", "src/real.rs"] {
+            let mut document = doc(path);
+            document.occurrences.push(occ("s", vec![0, 0, 5], 1));
+            index.documents.push(document);
+        }
+
+        let mut meta = meta();
+        meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(30));
+        let substrate = Substrate::from_index_rooted(index, meta, false, &repo_root).unwrap();
+
+        assert!(substrate.covers_file("src/linked.rs"));
+        assert_eq!(substrate.read_indexed_source("src/linked.rs"), None);
+        assert_eq!(substrate.indexed_source_len("src/linked.rs"), None);
+        // The in-repo file is unaffected, so containment is not just refusing
+        // everything.
+        assert_eq!(
+            substrate.read_indexed_source("src/real.rs").as_deref(),
+            Some(REAL_SOURCE)
+        );
+        assert_eq!(
+            substrate.indexed_source_len("src/real.rs"),
+            Some(REAL_SOURCE.len() as u64)
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn indexed_source_refuses_a_file_under_a_symlinked_directory() {
+        let base = unique_temp_dir("symlink-dir-source");
+        let repo_root = base.join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let outside = base.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.rs"), "const SECRET: u8 = 1;\n").unwrap();
+        // The INTERMEDIATE component is the symlink this time.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, repo_root.join("src")).unwrap();
+
+        let mut index = Index::new();
+        let mut document = doc("src/secret.rs");
+        document.occurrences.push(occ("s", vec![0, 0, 5], 1));
+        index.documents.push(document);
+
+        let mut meta = meta();
+        meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(30));
+        let substrate = Substrate::from_index_rooted(index, meta, false, &repo_root).unwrap();
+
+        assert_eq!(substrate.read_indexed_source("src/secret.rs"), None);
+        assert_eq!(substrate.indexed_source_len("src/secret.rs"), None);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn indexed_source_len_agrees_with_the_read_it_replaces() {
+        let data_dir = unique_temp_dir("indexed-source-len");
+        // A fixture this test writes itself, so nothing in the repository can
+        // drift it — and the expected length is derived from it rather than
+        // spelled out, so editing the fixture cannot leave a stale literal.
+        const ITEM_SOURCE: &str = "pub fn item() {}\n";
+        let source_path = data_dir.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, ITEM_SOURCE).unwrap();
+        write_index(
+            &data_dir,
+            "rust-analyzer",
+            index_with_definition("src/lib.rs", "rust-analyzer cargo test 1.0.0 item()."),
+        );
+
+        let mut trusted_meta = multi_meta(vec![producer_run("rust-analyzer", None)]);
+        trusted_meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(2));
+        trusted_meta.save(&data_dir).unwrap();
+        let trusted = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(
+            trusted.indexed_source_len("src/lib.rs"),
+            Some(ITEM_SOURCE.len() as u64)
+        );
+        assert_eq!(trusted.indexed_source_len("src/missing.rs"), None);
+
+        // The cheap probe must go quiet in exactly the cases the read does.
+        let mut untrusted_meta = trusted_meta;
+        untrusted_meta.indexed_started_at = Some(Utc::now() - chrono::Duration::seconds(2));
+        untrusted_meta.save(&data_dir).unwrap();
+        let untrusted = Substrate::load(&data_dir, &data_dir).unwrap();
+        assert_eq!(untrusted.read_indexed_source("src/lib.rs"), None);
+        assert_eq!(untrusted.indexed_source_len("src/lib.rs"), None);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
     fn load_with_uses_the_sampled_manifest_exactly() {
         let data_dir = unique_temp_dir("sampled-load");
         write_index(
@@ -1565,6 +2206,72 @@ mod tests {
         untrusted_meta.save(&data_dir).unwrap();
         let untrusted = Substrate::load(&data_dir, &data_dir).unwrap();
         assert_eq!(untrusted.read_indexed_source("src/lib.rs"), None);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn source_windows_retain_only_what_was_asked_for() {
+        use super::SourceWindowRequest;
+        let data_dir = unique_temp_dir("source-windows");
+        let source_path = data_dir.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        let lines: Vec<String> = (0..200).map(|n| format!("line {n}")).collect();
+        std::fs::write(&source_path, format!("{}\n", lines.join("\n"))).unwrap();
+        write_index(
+            &data_dir,
+            "rust-analyzer",
+            index_with_definition("src/lib.rs", "rust-analyzer cargo test 1.0.0 item()."),
+        );
+        let mut meta = multi_meta(vec![producer_run("rust-analyzer", None)]);
+        meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(2));
+        meta.save(&data_dir).unwrap();
+        let substrate = Substrate::load(&data_dir, &data_dir).unwrap();
+
+        let requests = [
+            SourceWindowRequest {
+                first_line: 100,
+                max_lines: 3,
+                max_bytes: 1024,
+            },
+            // One line, the shape the API uses to validate a span's end column.
+            SourceWindowRequest {
+                first_line: 0,
+                max_lines: 1,
+                max_bytes: 0,
+            },
+        ];
+        let (windows, total_lines) = substrate
+            .read_indexed_source_windows("src/lib.rs", &requests)
+            .expect("windows");
+
+        // The whole file is counted even though almost none of it is held.
+        assert_eq!(total_lines, 200);
+        assert_eq!(windows[0], ["line 100", "line 101", "line 102"]);
+        assert_eq!(windows[1], ["line 0"]);
+
+        // A window past EOF is empty rather than an error: the file is still
+        // proven, there is simply nothing at those lines.
+        let past_eof = [SourceWindowRequest {
+            first_line: 500,
+            max_lines: 10,
+            max_bytes: 1024,
+        }];
+        let (windows, total_lines) = substrate
+            .read_indexed_source_windows("src/lib.rs", &past_eof)
+            .expect("windows");
+        assert_eq!(total_lines, 200);
+        assert!(windows[0].is_empty());
+
+        // The same trust evidence the whole-file read demands still gates this.
+        assert_eq!(
+            substrate.read_indexed_source_windows("src/missing.rs", &requests),
+            None
+        );
+        assert_eq!(
+            substrate.read_indexed_source_windows("../outside.rs", &requests),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

@@ -58,29 +58,41 @@ function CitationLinks({
   citationNumber,
   onNavigateRecord,
 }: CitationLinksProps) {
-  const visibleCitations = paragraph.citation_iris.filter(
-    (iri) => !evidenceByIri.get(iri)?.suppressed,
-  );
+  // A citation must resolve to a numbered, listed evidence item. Anything else
+  // (a private narration packet source, a suppressed item) would render as a
+  // dead "[?]" marker — a reference that points nowhere is worse than no marker.
+  const visibleCitations = paragraph.citation_iris.flatMap((iri) => {
+    const evidence = evidenceByIri.get(iri);
+    const number = citationNumber.get(iri);
+    return evidence && !evidence.suppressed && number !== undefined
+      ? [{ iri, evidence, number }]
+      : [];
+  });
   if (!visibleCitations.length) return null;
   return (
     <Box
       component="span"
-      sx={{ display: 'inline-flex', gap: 0.25, ml: 0.5, verticalAlign: 'baseline' }}
+      sx={{
+        display: 'inline-flex',
+        flexWrap: 'wrap',
+        gap: 0.25,
+        ml: 0.5,
+        verticalAlign: 'baseline',
+        maxWidth: '100%',
+      }}
     >
-      {visibleCitations.map((iri) => {
-        const evidence = evidenceByIri.get(iri);
-        const number = citationNumber.get(iri);
+      {visibleCitations.map(({ iri, evidence, number }) => {
         return (
           <Button
             key={iri}
             size="small"
             variant="text"
-            aria-label={`Evidence ${number}: ${evidence?.title ?? iri}`}
-            title={`${evidence?.kind ?? 'Evidence'}: ${evidence?.title ?? iri}`}
+            aria-label={`Evidence ${number}: ${evidence.title}`}
+            title={`${evidence.kind}: ${evidence.title}`}
             onClick={() => onNavigateRecord(iri)}
             sx={{ minWidth: 0, p: 0.25, lineHeight: 1, verticalAlign: 'super' }}
           >
-            [{number ?? '?'}]
+            [{number}]
           </Button>
         );
       })}

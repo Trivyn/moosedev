@@ -23,6 +23,10 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .route("/adrs/archive.zip", get(handlers::download_adr_archive))
         .route("/adrs/{num}", get(handlers::get_adr))
         .route("/records/{uuid}", get(handlers::get_record))
+        .route(
+            "/records/{uuid}/source",
+            get(handlers::code::get_record_source),
+        )
         .route("/constraints", get(handlers::list_constraints))
         .route(
             "/constraints/archive.zip",

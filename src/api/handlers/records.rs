@@ -34,6 +34,7 @@ pub async fn get_record(
         story_component_for_record(&state, &iri, &kind, status.as_deref(), &outgoing, &incoming);
 
     Ok(Json(RecordDetailResponse {
+        code: super::code::code_detail(&state, &iri),
         iri: iri.clone(),
         kind,
         title,

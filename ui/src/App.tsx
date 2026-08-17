@@ -24,97 +24,26 @@ import SparqlPage from './pages/SparqlPage';
 import StoriesPage from './pages/StoriesPage';
 import { api } from './api/client';
 import { HealthResponse } from './api/types';
+import { ArtifactTarget } from './components/artifacts/LinkedMarkdown';
 import {
-  artifactTargetForIri,
-  ArtifactKind,
-  ArtifactTarget,
-} from './components/artifacts/LinkedMarkdown';
+  confirmStoryHashNavigation,
+  confirmStoryNavigation,
+  hashForRoute,
+  pageNavigationIsNoop,
+  RecordRoute,
+  recordRouteForIri,
+  recordRouteFromHash,
+  recordUuidFromHash,
+  routeForArtifact,
+  storyEntityHash,
+  storyEntityUuidFromHash,
+  storySubjectNeedsResolving,
+} from './routing';
 import { MooseThemeMode } from './styles/theme';
 
 interface AppProps {
   themeMode: MooseThemeMode;
   onToggleThemeMode: () => void;
-}
-
-export function confirmStoryNavigation(
-  hasUnsavedChanges: boolean,
-  confirmDiscard: () => boolean = () => window.confirm('Discard your unsaved Story changes?'),
-): boolean {
-  return !hasUnsavedChanges || confirmDiscard();
-}
-
-export function confirmStoryHashNavigation(
-  hasUnsavedChanges: boolean,
-  nextRoute: RecordRoute | null,
-  restoreAcceptedLocation: () => void,
-  confirmDiscard?: () => boolean,
-): boolean {
-  if (!nextRoute || confirmStoryNavigation(hasUnsavedChanges, confirmDiscard)) {
-    return true;
-  }
-  restoreAcceptedLocation();
-  return false;
-}
-
-export interface RecordRoute {
-  kind: ArtifactKind | 'record';
-  uuid: string;
-}
-
-export function pageNavigationIsNoop(
-  currentPage: PageKey,
-  nextPage: PageKey,
-  activeRoute: RecordRoute | null,
-): boolean {
-  return currentPage === nextPage && activeRoute === null;
-}
-
-type ArtifactRoute = RecordRoute & { kind: ArtifactKind };
-
-export function recordRouteFromHash(hash: string): RecordRoute | null {
-  const match = /^#\/(record|adrs|requirements|lessons|constraints)\/([^/]+)$/.exec(hash);
-  if (!match) {
-    return null;
-  }
-  try {
-    const uuid = decodeURIComponent(match[2]);
-    return uuid.includes('/')
-      ? null
-      : { kind: match[1] as RecordRoute['kind'], uuid };
-  } catch {
-    return null;
-  }
-}
-
-export function recordUuidFromHash(hash: string): string | null {
-  const route = recordRouteFromHash(hash);
-  return route?.kind === 'record' ? route.uuid : null;
-}
-
-function uuidFromIri(iri: string): string | null {
-  const uuid = iri.slice(Math.max(iri.lastIndexOf('/'), iri.lastIndexOf('#')) + 1);
-  return uuid || null;
-}
-
-export function recordRouteForIri(iri: string): RecordRoute | null {
-  const uuid = uuidFromIri(iri);
-  if (!uuid) {
-    return null;
-  }
-  const artifact = artifactTargetForIri(iri);
-  if (artifact) {
-    return { kind: artifact.kind, uuid };
-  }
-  return iri.startsWith('https://moosedev.dev/kg/') ? { kind: 'record', uuid } : null;
-}
-
-function routeForArtifact(target: ArtifactTarget): ArtifactRoute | null {
-  const uuid = uuidFromIri(target.iri);
-  return uuid ? { kind: target.kind, uuid } : null;
-}
-
-function hashForRoute(route: RecordRoute) {
-  return `#/${route.kind}/${encodeURIComponent(route.uuid)}`;
 }
 
 export default function App({ themeMode, onToggleThemeMode }: AppProps) {
@@ -124,10 +53,27 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   const [recordRoute, setRecordRoute] = useState<RecordRoute | null>(() =>
     recordRouteFromHash(window.location.hash),
   );
-  const [storyComponentIri, setStoryComponentIri] = useState<string | null>(null);
+  const [storySubjectIri, setStorySubjectIri] = useState<string | null>(null);
+  // Which Story deep-link uuid `storySubjectIri` was resolved from, so a repeat
+  // visit to the same uuid is not re-resolved.
+  const resolvedSubjectUuidRef = useRef<string | null>(null);
+  const [storyEntityUuid, setStoryEntityUuid] = useState<string | null>(() =>
+    storyEntityUuidFromHash(window.location.hash),
+  );
   const [storyDirty, setStoryDirty] = useState(false);
+  // Deep-link failures are route-local: folding them into the app-wide
+  // health `error` left a banner that nothing could clear.
+  const [routeError, setRouteError] = useState<string | null>(null);
+  // The page a Story deep link was launched from, so Back can return there.
+  const pageBeforeStoryRef = useRef<PageKey | null>(null);
   const storyDirtyRef = useRef(storyDirty);
   const acceptedHashRef = useRef(window.location.hash);
+  // A traversal fires popstate AND hashchange for ONE navigation. Coalescing
+  // by task (rather than by URL) suppresses the companion event without
+  // swallowing a genuinely new navigation that happens to land on the same
+  // URL — e.g. backing out of a Story to a hashless origin, where both
+  // entries have an empty hash.
+  const coalescingRef = useRef(false);
   // The once-installed hash listener reads the current dirty state through this ref.
   storyDirtyRef.current = storyDirty;
 
@@ -151,24 +97,92 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
   useEffect(() => {
     const syncRecordHash = () => {
       const route = recordRouteFromHash(window.location.hash);
+      const storyEntity = storyEntityUuidFromHash(window.location.hash);
+      // Backing out to a hashless origin unmounts StoriesPage, so it is a real
+      // destination for guard purposes even though the hash is empty. Passing
+      // null here would discard unsaved curation without asking.
+      const leavingToOrigin =
+        !route && !storyEntity ? pageBeforeStoryRef.current : null;
       if (
-        !confirmStoryHashNavigation(storyDirtyRef.current, route, () => {
-          const acceptedUrl = `${window.location.pathname}${window.location.search}${acceptedHashRef.current}`;
-          window.history.pushState(null, '', acceptedUrl);
-        })
+        !confirmStoryHashNavigation(
+          storyDirtyRef.current,
+          route ?? storyEntity ?? leavingToOrigin,
+          () => {
+            const acceptedUrl = `${window.location.pathname}${window.location.search}${acceptedHashRef.current}`;
+            window.history.pushState(null, '', acceptedUrl);
+          },
+        )
       ) {
         return;
       }
       acceptedHashRef.current = window.location.hash;
+      // A failed Story lookup's banner belongs to the route that failed. Once
+      // navigation is accepted the destination is a different route, so leaving
+      // it up would report that failure over unrelated content.
+      setRouteError(null);
       setRecordRoute(route);
-      if (route && route.kind !== 'record') {
+      setStoryEntityUuid(storyEntity);
+      if (storyEntity) {
+        setPage('stories');
+      } else if (route && route.kind !== 'record') {
         setPage(route.kind);
+      } else if (!route && pageBeforeStoryRef.current) {
+        // Back out of a Story deep link returns to the page it was launched
+        // from; without this the empty hash leaves the user stranded on
+        // Stories with no way back to a hashless origin like Debt.
+        setPage(pageBeforeStoryRef.current);
+        pageBeforeStoryRef.current = null;
       }
     };
+    const handleLocationChange = () => {
+      if (coalescingRef.current) return;
+      coalescingRef.current = true;
+      window.setTimeout(() => {
+        coalescingRef.current = false;
+      }, 0);
+      syncRecordHash();
+    };
     syncRecordHash();
-    window.addEventListener('hashchange', syncRecordHash);
-    return () => window.removeEventListener('hashchange', syncRecordHash);
+    window.addEventListener('hashchange', handleLocationChange);
+    // Also listen for popstate: a Story hash that was REPLACED with the same
+    // empty-hash URL as its origin traverses back without any hash change, so
+    // `hashchange` alone would strand the user on Stories. The handler reads
+    // the current location and is idempotent, so the overlap is harmless.
+    window.addEventListener('popstate', handleLocationChange);
+    return () => {
+      window.removeEventListener('hashchange', handleLocationChange);
+      window.removeEventListener('popstate', handleLocationChange);
+    };
   }, []);
+
+  // A Story deep link names a record UUID; the daemon resolves which entity
+  // that is, so the browser never has to reconstruct an IRI. The Story is then
+  // told about THAT exact entity.
+  useEffect(() => {
+    if (!storySubjectNeedsResolving(storyEntityUuid, resolvedSubjectUuidRef.current, storySubjectIri))
+      return;
+    let cancelled = false;
+    // Drop the previous subject BEFORE resolving: if this lookup fails, the URL
+    // must not keep naming entity B while entity A's Story is still on screen.
+    setStorySubjectIri(null);
+    setRouteError(null);
+    api
+      .record(storyEntityUuid)
+      .then((record) => {
+        if (!cancelled) {
+          resolvedSubjectUuidRef.current = storyEntityUuid;
+          setStorySubjectIri(record.iri);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setRouteError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storyEntityUuid]);
 
   const nav = [
     { key: 'chat' as const, label: 'Chat', icon: <ChatIcon fontSize="small" /> },
@@ -225,16 +239,59 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
     }
     setStoryDirty(false);
     setRecordRoute(null);
-    setStoryComponentIri(null);
+    setStoryEntityUuid(null);
+    setStorySubjectIri(null);
+    // An explicit page choice outranks the remembered Story origin, and
+    // retires any deep-link failure with it.
+    pageBeforeStoryRef.current = null;
+    setRouteError(null);
     setPage(nextPage);
   };
 
-  const navigateStory = (componentIri: string) => {
+  // Route through the canonical Story hash so the destination is refreshable
+  // and linkable; only a subject with no addressable UUID falls back to
+  // in-memory navigation.
+  // The displayed Story changed from inside the page (selector, topic, saved
+  // recipe). The URL must stop naming the old subject, or a refresh would
+  // regenerate something the user is no longer looking at. Replace rather than
+  // push, so Back still returns to wherever the Story was launched from.
+  const syncStoryHash = (subjectIri: string | null) => {
+    const next = (subjectIri && storyEntityHash(subjectIri)) || '';
+    if (window.location.hash === next) return;
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}${next}`,
+    );
+    acceptedHashRef.current = next;
+    // `replaceState` fires neither `hashchange` nor `popstate`, so the route
+    // state the hash handler would have set has to be written here. Without it
+    // a Story generated from the hashless page leaves `storyEntityUuid` null,
+    // and backing out of an evidence record later looks like a FIRST visit to
+    // that Story — tearing down the mounted reader to regenerate what is
+    // already on screen. Recording the subject as already resolved is the point.
+    const uuid = storyEntityUuidFromHash(next);
+    resolvedSubjectUuidRef.current = uuid;
+    setStoryEntityUuid(uuid);
+    setStorySubjectIri(uuid ? subjectIri : null);
+  };
+
+  const navigateStory = (subjectIri: string) => {
+    const hash = storyEntityHash(subjectIri);
+    if (hash) {
+      // Remember where this was launched from: the hash entry is what Back
+      // returns to, and a hashless origin (Debt, Chat) has nothing else to
+      // restore it from.
+      if (page !== 'stories') pageBeforeStoryRef.current = page;
+      window.location.hash = hash;
+      return;
+    }
     if (window.location.hash) {
       window.location.hash = '';
     }
     setRecordRoute(null);
-    setStoryComponentIri(componentIri);
+    setStoryEntityUuid(null);
+    setStorySubjectIri(subjectIri);
     setPage('stories');
   };
 
@@ -252,6 +309,11 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
           {error}
         </Alert>
       )}
+      {routeError && (
+        <Alert severity="error" sx={{ m: 2 }} onClose={() => setRouteError(null)}>
+          {routeError}
+        </Alert>
+      )}
       {!health && !error ? (
         <Box sx={{ height: '100%', display: 'grid', placeItems: 'center' }}>
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -267,7 +329,9 @@ export default function App({ themeMode, onToggleThemeMode }: AppProps) {
           <Box sx={{ display: recordRoute?.kind === 'record' ? 'none' : 'block', height: '100%' }}>
             <StoriesPage
               onNavigateRecord={navigateRecord}
-              initialComponentIri={storyComponentIri}
+              initialSubjectIri={storySubjectIri}
+              subjectResolving={Boolean(storyEntityUuid) && !storySubjectIri}
+              onSubjectChange={syncStoryHash}
               onDirtyChange={setStoryDirty}
             />
           </Box>

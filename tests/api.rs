@@ -1779,3 +1779,387 @@ async fn automatic_capture_reports_journal_write_failure() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// CodeEntity workbench: record detail + trusted source reads.
+//
+// Every assertion here is about a PROJECTION of the substrate. The graph is
+// never written by these routes, which the quad snapshot in the first test
+// pins explicitly.
+// ---------------------------------------------------------------------------
+
+const RUNTIME_SYMBOL: &str = "rust-analyzer cargo testpkg 0.1.0 runtime/build_server().";
+/// Minted entities carry the version-normalized identity (Constraint 00b3986e).
+const RUNTIME_SYMBOL_NORM: &str = "rust-analyzer cargo testpkg . runtime/build_server().";
+/// 0-based line of `pub fn build_server()` in the fixture file.
+const RUNTIME_DEF_LINE: usize = 30;
+const RUNTIME_FILE_LINES: usize = 60;
+
+fn runtime_source() -> String {
+    (0..RUNTIME_FILE_LINES)
+        .map(|line| match line {
+            RUNTIME_DEF_LINE => "pub fn build_server() {}".to_string(),
+            // A multi-byte line inside the context window: byte columns and
+            // whole-line clipping must both survive it.
+            25 => "// naïve — filler line 25 ✅".to_string(),
+            other => format!("// filler line {other}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn runtime_index() -> Index {
+    let mut index = Index::new();
+    let mut document = code_doc("src/runtime.rs");
+    let mut info = SymbolInformation::new();
+    info.symbol = RUNTIME_SYMBOL.to_string();
+    info.display_name = "build_server".to_string();
+    info.kind = EnumOrUnknown::new(symbol_information::Kind::Function);
+    let mut signature = Signature::new();
+    signature.text = "pub fn build_server()".to_string();
+    info.signature_documentation = MessageField::some(signature);
+    document.symbols.push(info);
+    let mut occurrence = Occurrence::new();
+    occurrence.symbol = RUNTIME_SYMBOL.to_string();
+    occurrence.range = vec![RUNTIME_DEF_LINE as i32, 7, 19];
+    occurrence.symbol_roles = 1;
+    occurrence.enclosing_range = vec![RUNTIME_DEF_LINE as i32, 0, RUNTIME_DEF_LINE as i32, 24];
+    document.occurrences.push(occurrence);
+    index.documents.push(document);
+    index
+}
+
+/// A substrate over `src/runtime.rs`.
+///
+/// `trusted` decides whether the producer run started AFTER the file was
+/// written. Untrusted is the everyday case of a working tree edited since the
+/// last index — same bytes on disk, no longer provably the indexed ones.
+fn runtime_substrate(repo_root: &std::path::Path, source: &str, trusted: bool) -> Substrate {
+    std::fs::create_dir_all(repo_root.join("src")).expect("create src");
+    std::fs::write(repo_root.join("src/runtime.rs"), source).expect("write source");
+
+    let mut meta = SubstrateMeta::single("rust-analyzer", "c0", Utc::now(), 1, 1);
+    let skew = chrono::Duration::seconds(30);
+    meta.indexed_started_at = Some(if trusted {
+        Utc::now() + skew
+    } else {
+        Utc::now() - skew
+    });
+    Substrate::from_index_rooted(runtime_index(), meta, false, repo_root).expect("substrate")
+}
+
+fn trusted_runtime_substrate(repo_root: &std::path::Path) -> Substrate {
+    runtime_substrate(repo_root, &runtime_source(), true)
+}
+
+/// Mint the CodeEntity for the fixture symbol and return its UUID.
+fn mint_runtime_entity(state: &AppState) -> String {
+    let record = record_api_decision(state, "runtime builder decision");
+    let outcome = graph::link_code(
+        state,
+        &record,
+        "concerns",
+        &graph::CodeSelector::Symbol(RUNTIME_SYMBOL.to_string()),
+        "tester",
+    )
+    .expect("mint code entity");
+    outcome
+        .entity_iri
+        .rsplit('/')
+        .next()
+        .expect("entity uuid")
+        .to_string()
+}
+
+#[tokio::test]
+async fn code_entity_detail_and_source_project_the_current_substrate() {
+    let project = temp_dir("code-source");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state = Arc::new(
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap"),
+    );
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let adr_uuid = record_api_decision(&state, "plain decision")
+        .rsplit('/')
+        .next()
+        .expect("adr uuid")
+        .to_string();
+    let before = project_quads(&state);
+    let server = TestServer::new(build_routes(state.clone())).expect("build code test server");
+
+    let detail = server.get(&format!("/api/v1/records/{uuid}")).await;
+    detail.assert_status_ok();
+    let code = detail.json::<Value>()["code"].clone();
+    assert_eq!(code["symbol"], RUNTIME_SYMBOL_NORM);
+    assert_eq!(code["name"], "build_server");
+    assert_eq!(code["entity_kind"], "Function");
+    assert_eq!(code["defined_in_path"], "src/runtime.rs");
+    assert_eq!(code["source_path"], "src/runtime.rs");
+    assert_eq!(code["signature"], "pub fn build_server()");
+    assert_eq!(code["source_available"], true);
+    assert!(code["source_unavailable_reason"].is_null());
+    assert_eq!(code["substrate_stale"], false);
+    // Public coordinates are 1-based on both axes.
+    assert_eq!(
+        code["definition"]["start_line"],
+        RUNTIME_DEF_LINE as u64 + 1
+    );
+    assert_eq!(code["definition"]["start_col"], 8);
+    assert_eq!(code["definition"]["end_col"], 20);
+
+    // context = the definition plus 12 lines of padding on each side.
+    let context = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    context.assert_status_ok();
+    let context = context.json::<Value>();
+    assert_eq!(context["scope"], "context");
+    assert_eq!(context["path"], "src/runtime.rs");
+    assert_eq!(context["start_line"], RUNTIME_DEF_LINE as u64 - 11);
+    assert_eq!(context["end_line"], RUNTIME_DEF_LINE as u64 + 13);
+    assert_eq!(context["total_lines"], RUNTIME_FILE_LINES as u64);
+    assert_eq!(context["truncated"], false);
+    assert_eq!(
+        context["definition"]["start_line"],
+        RUNTIME_DEF_LINE as u64 + 1
+    );
+    let text = context["text"].as_str().expect("text");
+    assert_eq!(text.lines().count(), 25);
+    assert!(text.starts_with("// filler line 18\n"), "{text}");
+    assert!(text.contains("pub fn build_server() {}"), "{text}");
+    assert!(text.ends_with("// filler line 42"), "{text}");
+    // Multi-byte source survives the window intact.
+    assert!(text.contains("// naïve — filler line 25 ✅"), "{text}");
+
+    // full = the whole indexed file.
+    let full = server
+        .get(&format!("/api/v1/records/{uuid}/source?scope=full"))
+        .await;
+    full.assert_status_ok();
+    let full = full.json::<Value>();
+    assert_eq!(full["scope"], "full");
+    assert_eq!(full["start_line"], 1);
+    assert_eq!(full["end_line"], RUNTIME_FILE_LINES as u64);
+    assert_eq!(full["truncated"], false);
+    assert_eq!(
+        full["text"].as_str().expect("text").lines().count(),
+        RUNTIME_FILE_LINES
+    );
+
+    // An ordinary record has no code block and no source.
+    let adr = server.get(&format!("/api/v1/records/{adr_uuid}")).await;
+    adr.assert_status_ok();
+    assert!(adr.json::<Value>()["code"].is_null());
+    server
+        .get(&format!("/api/v1/records/{adr_uuid}/source"))
+        .await
+        .assert_status_bad_request();
+
+    // Reading source never writes the graph.
+    assert_eq!(before, project_quads(&state));
+}
+
+#[tokio::test]
+async fn source_is_withheld_when_the_indexed_baseline_cannot_be_trusted() {
+    let project = temp_dir("code-source-stale");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    let substrate = runtime_substrate(&repo_root, &runtime_source(), false);
+    state.set_substrate(Arc::new(substrate));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let detail = server.get(&format!("/api/v1/records/{uuid}")).await;
+    detail.assert_status_ok();
+    let code = detail.json::<Value>()["code"].clone();
+    assert_eq!(code["source_available"], false);
+    let reason = code["source_unavailable_reason"]
+        .as_str()
+        .expect("reason")
+        .to_string();
+    assert!(reason.contains("moosedev index"), "{reason}");
+    assert!(reason.contains("src/runtime.rs"), "{reason}");
+    // Location metadata still answers "where does this live".
+    assert_eq!(
+        code["definition"]["start_line"],
+        RUNTIME_DEF_LINE as u64 + 1
+    );
+    assert_eq!(code["source_path"], "src/runtime.rs");
+
+    let source = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    source.assert_status_service_unavailable();
+    assert!(source.text().contains("moosedev index"));
+}
+
+#[tokio::test]
+async fn source_route_refuses_cross_origin_browser_reads() {
+    let project = temp_dir("code-source-origin");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+    let path = format!("/api/v1/records/{uuid}/source");
+
+    // A local non-browser caller sends no Origin.
+    server.get(&path).await.assert_status_ok();
+
+    // A page on another origin does, and must not be able to read the tree.
+    let denied = server
+        .get(&path)
+        .add_header("origin", "http://evil.example")
+        .await;
+    denied.assert_status_forbidden();
+    assert!(denied.text().contains("cross-origin"));
+    assert!(!denied.text().contains("build_server"));
+
+    // Opaque origins are refused for the same reason.
+    server
+        .get(&path)
+        .add_header("origin", "null")
+        .await
+        .assert_status_forbidden();
+
+    // The WebUI is same-origin with the daemon, so it is served.
+    server
+        .get(&path)
+        .add_header("host", "127.0.0.1:7474")
+        .add_header("origin", "http://127.0.0.1:7474")
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn source_route_validates_scope_and_record_identity() {
+    let project = temp_dir("code-source-args");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let bad_scope = server
+        .get(&format!("/api/v1/records/{uuid}/source?scope=everything"))
+        .await;
+    bad_scope.assert_status_bad_request();
+    assert!(bad_scope.text().contains("context"));
+
+    server
+        .get("/api/v1/records/does-not-exist/source")
+        .await
+        .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn full_source_is_capped_and_says_so() {
+    let project = temp_dir("code-source-cap");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    // Comfortably past the 20,000-line ceiling on `scope=full`.
+    let huge = (0..20_500)
+        .map(|line| {
+            if line == RUNTIME_DEF_LINE {
+                "pub fn build_server() {}".to_string()
+            } else {
+                format!("// filler line {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    state.set_substrate(Arc::new(runtime_substrate(&repo_root, &huge, true)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let full = server
+        .get(&format!("/api/v1/records/{uuid}/source?scope=full"))
+        .await;
+    full.assert_status_ok();
+    let full = full.json::<Value>();
+    assert_eq!(full["truncated"], true);
+    assert_eq!(full["start_line"], 1);
+    // The reported range matches the text exactly, so a client never numbers
+    // lines it was not given.
+    assert_eq!(full["end_line"], 20_000);
+    assert_eq!(full["total_lines"], 20_500);
+    assert_eq!(full["text"].as_str().expect("text").lines().count(), 20_000);
+
+    // The bounded context view is unaffected by the file's size.
+    let context = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    context.assert_status_ok();
+    let context = context.json::<Value>();
+    assert_eq!(context["truncated"], false);
+    assert_eq!(context["text"].as_str().expect("text").lines().count(), 25);
+}
+
+#[tokio::test]
+async fn a_head_stale_index_still_serves_a_provably_unchanged_file_and_says_it_is_behind() {
+    let project = temp_dir("code-source-head-stale");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    // HEAD has moved on since indexing, but THIS file provably has not: its
+    // bytes are the ones the producer saw, so its line numbers are still true.
+    // Serving with `substrate_stale: true` is the contract — withholding here
+    // would blind the workbench every time any unrelated file changed, and
+    // serving silently would hide that the wider index is behind.
+    let mut meta = SubstrateMeta::single("rust-analyzer", "not-the-current-head", Utc::now(), 1, 1);
+    meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(30));
+    std::fs::create_dir_all(repo_root.join("src")).expect("create src");
+    std::fs::write(repo_root.join("src/runtime.rs"), runtime_source()).expect("write source");
+    let substrate =
+        Substrate::from_index_rooted(runtime_index(), meta, true, &repo_root).expect("substrate");
+    assert!(substrate.is_stale(), "fixture must be HEAD-stale");
+    state.set_substrate(Arc::new(substrate));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let detail = server.get(&format!("/api/v1/records/{uuid}")).await;
+    detail.assert_status_ok();
+    let code = detail.json::<Value>()["code"].clone();
+    assert_eq!(code["substrate_stale"], true);
+    assert_eq!(code["source_available"], true);
+
+    let source = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    source.assert_status_ok();
+    let text = source.json::<Value>()["text"].as_str().unwrap().to_string();
+    assert!(text.contains("pub fn build_server() {}"), "{text}");
+}
+
+#[tokio::test]
+async fn source_route_refuses_a_dns_rebinding_authority() {
+    let project = temp_dir("code-source-rebind");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+    let path = format!("/api/v1/records/{uuid}/source");
+
+    // Origin and Host agree — and both are the attacker's, which is exactly
+    // what a rebound hostname produces. Origin/Host equality alone would pass.
+    let rebound = server
+        .get(&path)
+        .add_header("host", "rebind.example:7474")
+        .add_header("origin", "http://rebind.example:7474")
+        .await;
+    rebound.assert_status_forbidden();
+    assert!(!rebound.text().contains("build_server"));
+
+    // Same page without an Origin header is refused on the authority alone.
+    server
+        .get(&path)
+        .add_header("host", "rebind.example:7474")
+        .await
+        .assert_status_forbidden();
+}

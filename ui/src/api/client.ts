@@ -16,8 +16,10 @@ import {
   ProposalListResponse,
   QueryResponse,
   RecordDetailResponse,
+  RecordSourceResponse,
   RequirementDetailResponse,
   RequirementListResponse,
+  SourceScope,
   StoryCheckGradeResponse,
   StoryGenerateRequest,
   StoryGenerateResponse,
@@ -82,6 +84,10 @@ export const api = {
     request<ConstraintDetailResponse>(`/constraints/${encodeURIComponent(num)}`),
   downloadConstraintArchive: () => download('/constraints/archive.zip'),
   record: (uuid: string) => request<RecordDetailResponse>(`/records/${encodeURIComponent(uuid)}`),
+  recordSource: (uuid: string, scope: SourceScope = 'context') =>
+    request<RecordSourceResponse>(
+      `/records/${encodeURIComponent(uuid)}/source?scope=${encodeURIComponent(scope)}`,
+    ),
   chat: (payload: {
     session_id?: string;
     messages: ChatMessage[];

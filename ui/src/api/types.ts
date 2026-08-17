@@ -454,8 +454,45 @@ export interface RecordDetailResponse {
   timestamp: string | null;
   author: string | null;
   story_component_iri: string | null;
+  /** Present only for CodeEntity records. A substrate projection, not a graph claim. */
+  code: RecordCodeDetail | null;
   outgoing: RecordOutgoingEdge[];
   incoming: RecordIncomingEdge[];
+}
+
+/** A 1-based, UTF-8-byte source span. */
+export interface SourceSpan {
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+}
+
+export interface RecordCodeDetail {
+  symbol: string | null;
+  name: string | null;
+  entity_kind: string | null;
+  logical_path: string | null;
+  defined_in_path: string | null;
+  signature: string | null;
+  source_path: string | null;
+  definition: SourceSpan | null;
+  source_available: boolean;
+  source_unavailable_reason: string | null;
+  substrate_stale: boolean;
+}
+
+export type SourceScope = 'context' | 'full';
+
+export interface RecordSourceResponse {
+  path: string;
+  scope: SourceScope;
+  start_line: number;
+  end_line: number;
+  total_lines: number;
+  truncated: boolean;
+  definition: SourceSpan | null;
+  text: string;
 }
 
 export interface ChatMessage {

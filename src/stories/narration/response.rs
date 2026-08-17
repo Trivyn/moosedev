@@ -161,6 +161,22 @@ pub(super) fn validate_packet_response(
     if expanded != expected_iris {
         return Err(ValidationFailure::CitationMismatch);
     }
+    // Sources expand back to PUBLIC evidence IRIs only. compact_narration_evidence
+    // mints private packet sources from code anchors the bounded dossier omitted;
+    // they legitimately ground the prose, but they are absent from run.evidence, so
+    // citing them ships a reference the reader cannot resolve to anything.
+    let public_iris = run
+        .evidence
+        .iter()
+        .map(|item| item.iri.as_str())
+        .collect::<BTreeSet<_>>();
+    for paragraphs in paragraphs_by_section.values_mut() {
+        for paragraph in paragraphs {
+            paragraph
+                .citation_iris
+                .retain(|iri| public_iris.contains(iri.as_str()));
+        }
+    }
     run.narrative
         .iter()
         .map(|section| {

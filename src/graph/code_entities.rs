@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 
+pub(crate) use crate::code::substrate::is_test_path;
 use crate::code::substrate::{symbols, DefinitionEntry, Substrate};
 use crate::provenance;
 
@@ -617,16 +618,6 @@ fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, us
         }
     }
     (kept, skipped_scope, skipped_tests)
-}
-
-pub(crate) fn is_test_path(path: &str) -> bool {
-    let file_name = path.rsplit('/').next().unwrap_or(path);
-    path.starts_with("tests/")
-        || path
-            .split('/')
-            .any(|segment| matches!(segment, "test" | "tests"))
-        || file_name.contains(".test.")
-        || file_name.contains(".spec.")
 }
 
 /// Deterministically keep the first `(file, symbol)` entry per normalized symbol.

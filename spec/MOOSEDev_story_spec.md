@@ -53,6 +53,52 @@ Every run has a visible trust state:
 A matching published recipe is preferred, but a reader can always request a fresh generated Story.
 The page remains text-led and does not add a decorative Story illustration.
 
+### Entry points from code
+
+A Story is most often wanted while reading code, so two entry points lead into it from there.
+
+- **The editor.** An LSP hover that already carries knowledge also carries a `[Tell me the Story]`
+  link near the top, addressed at the exact entity under the cursor. The link is built from the
+  daemon's live published HTTP address and is omitted entirely when this daemon run is not serving
+  the workbench, so it never offers a dead port. It changes no silence policy: an entity with no
+  direct records and no judgments still produces no hover, so the link never manufactures a reason
+  to interrupt. No editor-client-specific code is involved.
+- **The workbench.** `#/stories/entity/{uuid}` is the canonical Story deep link. It carries a record
+  UUID like every other workbench route; on load or hash navigation the UUID is resolved through the
+  record API and the Story is generated for the exact entity IRI returned. The route is refreshable
+  and linkable, and it honors the same unsaved-curation guard as record routes.
+
+A `CodeEntity` is its own Story subject. "Tell this Story" on a code entity's record page launches
+the Story for that entity, not for its containing component — redirecting would answer a different
+question than the one the reader asked.
+
+### The CodeEntity record page
+
+`#/record/{uuid}` remains the canonical destination for every record, including code entities, but a
+`CodeEntity` renders a source-aware section above the relationship graph: kind, signature, substrate
+symbol, repo-relative path, and a line-numbered preview of the definition with its lines marked and
+a **Show full file** expansion. The viewer is plain monospace text — no syntax-highlighting
+dependency — and source is always rendered escaped, never as markup. Non-`CodeEntity` records keep
+their existing presentation.
+
+Source is served only when it can be trusted:
+
+- Definitions are located through one substrate helper covering SCIP and the tree-sitter fallback.
+  No surface locates a definition by searching a file for its name; a miss stays a miss.
+- Bytes are admitted only through the generation-proven read (`indexed_started_at` plus a stable
+  stat/read/stat), so an edited working tree or an unverifiable baseline yields metadata plus a
+  reindex explanation and **no preview**. The unit of proof is the FILE, not `HEAD`: a moved `HEAD`
+  whose file is provably unchanged is still served, flagged `substrate_stale`, because its line
+  numbers are still true and withholding would blind the workbench whenever any unrelated file
+  changed. A line number is published for a Story code anchor on the same terms.
+- Containment is checked after canonicalization, not by rejecting `..`. An indexed path can itself
+  be a symlink, or sit under one, and reads follow symlinks — only paths that still resolve inside
+  the repository root are servable.
+- Source locations are runtime substrate projections. They are never persisted into the project
+  knowledge graph, and reading them never writes it.
+- A definition that does not lie inside the file actually read is refused rather than clamped: a
+  clamped window would render an arbitrary slice under a highlight pointing at nothing.
+
 ## Deterministic Story dossier
 
 One backend planner constructs a typed `StoryDossier` before any prose generation. It starts from the
@@ -216,6 +262,61 @@ outline sections are represented.
 Reader progress and check results remain local session state. Checks refer readers back with
 `revisit_section_id`; the removed beat IDs are not part of the v3 response.
 
+`StoryCodeAnchor.line` is populated from the current substrate definition lookup when one can be
+proven, and is absent otherwise.
+
+### CodeEntity detail and source
+
+`GET /api/v1/records/{uuid}` gains an optional `code` block, present only for a `CodeEntity`:
+
+```ts
+interface RecordCodeDetail {
+  symbol?: string;              // substrate symbol recorded in the graph
+  name?: string;
+  entity_kind?: string;         // e.g. "Function"
+  logical_path?: string;
+  defined_in_path?: string;     // as recorded in the graph
+  source_path?: string;         // where the CURRENT substrate defines it
+  signature?: string;
+  definition?: SourceSpan;      // 1-based, UTF-8 byte coordinates
+  source_available: boolean;
+  source_unavailable_reason?: string;
+  substrate_stale: boolean;
+}
+```
+
+`GET /api/v1/records/{uuid}/source?scope=context|full` serves the trusted text:
+
+- `context` (the default) returns the definition plus 12 lines on each side, capped at 400 lines and
+  256 KiB; `full` returns the whole indexed file, capped at 20,000 lines and 1 MiB.
+- Caps drop whole lines, so `start_line`/`end_line` always describe the text actually returned, and
+  `truncated` says when a cap applied. A single line too large to fit alone is cut at a character
+  boundary, since whole-line clipping bottoms out at one line.
+- Peak memory follows the window, not the file. The file is streamed and only the lines a scope can
+  serve are retained, so previewing 25 lines of a multi-megabyte file costs 25 lines. The hard read
+  ceiling bounds the streaming; the scope caps bound what is held. Both bounds apply to the read
+  itself, never to a preceding size check — a file can grow between a `stat` and the read that
+  follows it, which is exactly when a concurrent writer makes the limit matter.
+- Availability is decided from file metadata alone, so describing an indexed record costs no file
+  read, and a file past a hard read ceiling is declined rather than loaded. A syntactic-fallback
+  entity is the exception, and unavoidably so: its declaration range exists nowhere but the file, so
+  locating it costs one parse, bounded by its own ceiling and cached by mtime. Record detail is a
+  single-record route, so that parse never fans out across a listing.
+- The route answers `503` with the reindex explanation when source cannot be trusted, `400` for an
+  unknown scope or a non-`CodeEntity` record, and `404` for an unknown UUID.
+- It answers `403` unless the request is same-origin AND names this machine by address. The
+  knowledge API's CORS policy is permissive, but source text is the one payload where that would let
+  any page a developer visits read their working tree from a localhost daemon. Comparing `Origin` to
+  `Host` is not sufficient on its own: both are caller-controlled, so a page whose DNS is rebound to
+  loopback sends matching attacker-chosen values — and because that fetch is same-origin to the
+  browser, it carries no `Origin` at all. A present `Host` must therefore be `localhost` or an
+  address literal in every case; a DNS name is refused. Requests with no `Host` are not browser
+  requests and are served.
+
+`SourceSpan` mirrors the substrate: the start is inclusive and the end is EXCLUSIVE. A declaration
+ending at column 1 of a line contains none of that line, so a renderer highlighting an inclusive
+range would mark one line too many.
+
 ## Curated recipes and migration
 
 Generated runs are ephemeral unless saved. Draft and published recipes are version-controlled JSON
@@ -275,6 +376,8 @@ Only schema v3 is written after migration. Recipe summaries no longer expose a b
   available.
 - Without a usable code substrate, the knowledge narrative remains available and code coverage is
   reported as reduced.
+- Source that cannot be proven current is withheld and explained. Degrading to a warning is correct;
+  degrading to approximately-right source is not.
 - Missing, stale, proposed, rejected, superseded, and deprecated knowledge is represented according
   to its lifecycle state and never silently promoted.
 - Generating, reading, narrating, saving, publishing, or completing a Story never writes the project
@@ -307,6 +410,13 @@ Only schema v3 is written after migration. Recipe summaries no longer expose a b
 - Question order and handles do not reveal answers, and grading revalidates current graph state.
 - Story activity leaves the project graph byte-for-byte unchanged and adds no ontology or capture
   behavior.
+- A knowledge-bearing hover carries a Story link for the exact entity under the cursor, omits it when
+  no workbench is serving, and leaves the hover-silence policy unchanged.
+- `#/stories/entity/{uuid}` survives a refresh, resolves through the record API, and tells the Story
+  of the exact returned entity.
+- A `CodeEntity` record page shows its kind, signature, path, and a line-numbered definition preview
+  with a full-file expansion; a stale or unverifiable index yields metadata and an explanation with
+  no preview; and source is never readable cross-origin.
 
 ## Deferred
 

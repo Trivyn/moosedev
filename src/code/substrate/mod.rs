@@ -24,8 +24,8 @@ pub use producer::{
     registry, run_index, IndexReport, ProducerReport, ProducerSpec, ProducerTarget,
 };
 pub use resolver::{
-    DefinitionEntry, Position, Resolution, ResolutionMode, SourceRange, Substrate, SubstrateStats,
-    STALE_CHECK_TTL,
+    DefinitionEntry, FileDefinition, Position, Resolution, ResolutionMode, SourceRange,
+    SourceWindowRequest, Substrate, SubstrateStats, STALE_CHECK_TTL,
 };
 
 pub const SUBSTRATE_DIR: &str = "substrate";
@@ -83,4 +83,18 @@ pub fn index_log_path(data_dir: &Path) -> PathBuf {
 
 pub fn meta_path(data_dir: &Path) -> PathBuf {
     substrate_dir(data_dir).join(META_FILE_NAME)
+}
+
+/// Whether a repo-relative path is test code.
+///
+/// Exposed here, with the rest of source-path policy, because the minting scope
+/// in `graph::code_entities`, the debt denominator, and the resolver's collision
+/// preference must all agree on it — a second copy would let them drift and
+/// resolve a minted entity to a definition minting dropped.
+///
+/// The ANSWER comes from the language registry: directory conventions are
+/// shared, but test NAMING is a per-language idiom and belongs with the language
+/// (AD `6fc36a85`).
+pub fn is_test_path(path: &str) -> bool {
+    lang::is_test_path(path)
 }

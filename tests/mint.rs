@@ -576,11 +576,14 @@ fn repo_substrate_plan_counts_when_index_present() -> anyhow::Result<()> {
         state.substrate().as_deref(),
     )?;
 
-    // Envelope for the dual-producer substrate: ~930 rust entities plus the
-    // scip-typescript top-level surface of ui/ (~950; export-ness is not
-    // encoded, so private top-level declarations are included by design).
+    // A sanity BAND, not a fixture: the exact count tracks repo size, since the
+    // substrate spans the whole Rust crate (tests/ and examples/ included) plus
+    // the ui/ TypeScript top-level surface, where export-ness is not encoded so
+    // private top-level declarations are included by design. The band catches a
+    // plan that has collapsed to nothing or exploded, and deliberately leaves
+    // room to grow — a tight ceiling only fails later for the wrong reason.
     assert!(
-        (300..=3000).contains(&plan.create.len()),
+        (300..=6000).contains(&plan.create.len()),
         "expected repo mint creates in range, got {}",
         plan.create.len()
     );

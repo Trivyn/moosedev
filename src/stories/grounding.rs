@@ -176,6 +176,7 @@ pub(super) fn build_story_document(
         .flat_map(|beat| beat.code_anchors.iter().cloned())
         .collect::<Vec<_>>();
     code_anchors = dedupe_code_anchors(code_anchors);
+    resolve_anchor_lines(state, &mut code_anchors);
     let current_count = evidence
         .iter()
         .filter(|item| in_working_set(&item.status))
@@ -693,10 +694,24 @@ fn timeline_instant(event: &StoryTimelineEvent) -> Option<i64> {
         .timestamp_nanos_opt()
 }
 
+/// Whether a neighboring SystemComponent contributes its ENTIRE code listing.
+///
+/// A record often has no code of its own, so the component it concerns is its
+/// only grounding — those subjects expand. A CodeEntity subject already names
+/// its own position precisely: the component's other members are siblings, not
+/// anchors of the subject, and expanding them buries the subject under its
+/// whole layer (`propose_link` drew 512 anchors across 26 files).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ComponentExpansion {
+    Full,
+    SubjectOnly,
+}
+
 pub(super) fn entity_code(
     state: &AppState,
     code_entities: &[StoryCodeAnchor],
     entity_iri: &str,
+    expansion: ComponentExpansion,
 ) -> anyhow::Result<Vec<StoryCodeAnchor>> {
     let mut anchors = code_entities
         .iter()
@@ -710,7 +725,7 @@ pub(super) fn entity_code(
                 .filter(|anchor| anchor.entity_iri.as_deref() == Some(neighbor.as_str()))
                 .cloned(),
         );
-        if component_iri_is_current(state, &neighbor)? {
+        if expansion == ComponentExpansion::Full && component_iri_is_current(state, &neighbor)? {
             anchors.extend(component_code(state, &neighbor)?);
         }
     }
@@ -755,7 +770,12 @@ pub(super) fn code_for_records(
 ) -> anyhow::Result<Vec<StoryCodeAnchor>> {
     let mut anchors = Vec::new();
     for record in records.iter().take(12) {
-        anchors.extend(entity_code(state, code_entities, &record.evidence.iri)?);
+        anchors.extend(entity_code(
+            state,
+            code_entities,
+            &record.evidence.iri,
+            ComponentExpansion::Full,
+        )?);
     }
     Ok(dedupe_code_anchors(anchors))
 }
@@ -991,6 +1011,46 @@ pub(super) fn all_code(
     entities.sort_by(code_anchor_order);
     entities.dedup_by(|left, right| left.entity_iri == right.entity_iri);
     Ok((by_symbol, entities))
+}
+
+/// Give the anchors a Story actually renders their current definition line.
+///
+/// Resolved here rather than in [`all_code`] because that catalog spans every
+/// minted entity, while this list is bounded by the beats. Lines come from the
+/// substrate's definition lookup only — a miss stays a miss rather than
+/// becoming a guess found by searching the file for the symbol's name.
+///
+/// A line is a claim about the file as it is NOW, so it is published only when
+/// the defining file is provably the one this generation indexed. Without that
+/// proof the index's line numbers may have drifted, and a Story would send a
+/// reader to the wrong place with no way to tell.
+fn resolve_anchor_lines(state: &AppState, anchors: &mut [StoryCodeAnchor]) {
+    let Some(substrate) = state.substrate() else {
+        return;
+    };
+    // Anchors cluster into a handful of files, so the baseline verdict is
+    // memoized per file rather than re-stat'ed per anchor.
+    let mut trusted_files: BTreeMap<String, bool> = BTreeMap::new();
+    for anchor in anchors {
+        let located = substrate
+            .definition_location(&anchor.symbol)
+            .filter(|found| {
+                *trusted_files
+                    .entry(found.entry.file.clone())
+                    .or_insert_with(|| substrate.indexed_source_len(&found.entry.file).is_some())
+            });
+        // Take the path from the SAME FileDefinition as the line. The anchor's
+        // path came from the graph's defined_in_path, which a file move
+        // outdates until the next mint — pairing that stale path with a fresh
+        // line would read as `old/path.rs:<line in new/path.rs>` and send the
+        // reader somewhere the definition is not.
+        if let Some(found) = located {
+            anchor.line = Some(found.range.start.line.saturating_add(1));
+            anchor.path = Some(found.entry.file);
+        } else {
+            anchor.line = None;
+        }
+    }
 }
 
 pub(super) fn insert_code_anchor(

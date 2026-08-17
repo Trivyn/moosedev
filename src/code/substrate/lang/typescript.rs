@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use super::file_name;
 use super::{first_matching_subdir, LanguageSpec, ProducerHooks};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -29,7 +30,15 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     // scip-typescript indexes JS too (allowJs), so JavaScript buffers are a
     // real substrate surface, not over-claiming.
     zed_languages: &["TypeScript", "TSX", "JavaScript"],
+    is_test_path: Some(is_test_path),
 };
+
+/// The `*.test.*` / `*.spec.*` infix every JS test runner recognizes. A JS
+/// idiom, not a universal one: `.spec.` means nothing in Rust or Python.
+fn is_test_path(path: &str) -> bool {
+    let file_name = file_name(path);
+    file_name.contains(".test.") || file_name.contains(".spec.")
+}
 
 fn detect(repo_root: &Path) -> Option<ProducerTarget> {
     if is_project(repo_root) {
