@@ -527,12 +527,19 @@ pub(super) enum CheckKind {
     Concerns,
     Realizes,
     RecordKind,
+    /// Which record replaced this one — the "why we moved" probe.
+    Supersedes,
+    /// Which approach a decision rejected.
+    Weighs,
 }
 
 #[derive(Clone)]
 pub(super) struct CheckGrant {
     pub(super) kind: CheckKind,
-    pub(super) component_iri: String,
+    /// The relationship's OTHER endpoint, whose meaning follows `kind`: a
+    /// SystemComponent for `Concerns`/`Realizes`, the superseded record for
+    /// `Supersedes`, the deciding record for `Weighs`, unused for `RecordKind`.
+    pub(super) counterpart_iri: String,
     pub(super) section_id: String,
     pub(super) correct_option_token: String,
     pub(super) option_entities: BTreeMap<String, String>,

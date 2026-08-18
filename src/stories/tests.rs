@@ -1430,11 +1430,272 @@ fn comprehension_checks_require_two_unique_options() {
 }
 
 #[test]
+fn a_superseded_record_yields_a_which_replaced_it_question() {
+    let state = story_state("supersession-check");
+    let component = "https://example.test/component/super";
+    let old_decision = "https://example.test/record/old";
+    let new_decision = "https://example.test/record/new";
+    let sibling = "https://example.test/record/sibling";
+    type_component(&state, component);
+    type_raw_record(&state, old_decision, "Read the whole file then slice it");
+    type_raw_record(
+        &state,
+        new_decision,
+        "Stream the file and keep only the window",
+    );
+    type_raw_record(&state, sibling, "Serve source only from a proven baseline");
+    // The retired record is retired; that is the fact the question is about.
+    add_literal(&state, old_decision, &state.capture.status, "superseded");
+    // Real supersession writes both directions; the check reads the forward edge.
+    link_edge(&state, new_decision, "supersedes", old_decision);
+    link_edge(&state, old_decision, "isSupersededBy", new_decision);
+    for record in [old_decision, new_decision, sibling] {
+        link_edge(&state, record, "concerns", component);
+    }
+
+    let run = generate_consistent_story(
+        &state,
+        &StoryRecipeSubject::Entity {
+            iri: component.to_string(),
+        },
+        None,
+        true,
+    )
+    .unwrap();
+
+    let check = run
+        .checks
+        .iter()
+        .find(|check| check.question.contains("replaced"))
+        .expect("a supersession check");
+    assert!(check.question.contains("Read the whole file then slice it"));
+    let labels = check
+        .options
+        .iter()
+        .map(|option| option.label.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(labels.contains("Stream the file and keep only the window"));
+
+    // Grading still comes from the live edge, not from the issued option.
+    let correct = check
+        .options
+        .iter()
+        .find(|option| option.label == "Stream the file and keep only the window")
+        .expect("correct option");
+    let graded = grade_check(&state, &check.id, std::slice::from_ref(&correct.id)).unwrap();
+    assert!(graded.correct);
+}
+
+#[test]
+fn a_supersession_check_goes_stale_when_the_edge_is_withdrawn() {
+    let state = story_state("supersession-stale");
+    let component = "https://example.test/component/stale";
+    let old_decision = "https://example.test/record/old";
+    let new_decision = "https://example.test/record/new";
+    let sibling = "https://example.test/record/sibling";
+    type_component(&state, component);
+    type_raw_record(&state, old_decision, "The first approach");
+    type_raw_record(&state, new_decision, "The replacement approach");
+    type_raw_record(&state, sibling, "An unrelated decision");
+    add_literal(&state, old_decision, &state.capture.status, "superseded");
+    // Real supersession writes both directions; the check reads the forward edge.
+    link_edge(&state, new_decision, "supersedes", old_decision);
+    link_edge(&state, old_decision, "isSupersededBy", new_decision);
+    for record in [old_decision, new_decision, sibling] {
+        link_edge(&state, record, "concerns", component);
+    }
+    let run = generate_consistent_story(
+        &state,
+        &StoryRecipeSubject::Entity {
+            iri: component.to_string(),
+        },
+        None,
+        true,
+    )
+    .unwrap();
+    let check = run
+        .checks
+        .iter()
+        .find(|check| check.question.contains("replaced"))
+        .expect("a supersession check");
+    let any_option = check.options[0].id.clone();
+
+    // Retract the successor. The issued question is no longer answerable from
+    // the current graph, so it must refuse rather than grade against history.
+    state
+        .store
+        .remove(&Quad::new(
+            NamedNode::new(new_decision).unwrap(),
+            NamedNode::new(state.resolve_object_property("supersedes").unwrap()).unwrap(),
+            NamedNode::new(old_decision).unwrap(),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+    state
+        .store
+        .remove(&Quad::new(
+            NamedNode::new(old_decision).unwrap(),
+            NamedNode::new(state.resolve_object_property("isSupersededBy").unwrap()).unwrap(),
+            NamedNode::new(new_decision).unwrap(),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+
+    let error = grade_check(&state, &check.id, &[any_option]).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<StoryCheckError>(),
+        Some(&StoryCheckError::Stale),
+        "{error}"
+    );
+}
+
+#[test]
+fn distractors_prefer_evidence_the_reader_actually_saw() {
+    // The reported failure: distractors were taken in label order, so entities
+    // whose labels lead with punctuation won every draw regardless of whether
+    // the reader had ever seen them.
+    let fact = |id: &str, label: &str, shown_in_story: bool| CheckOptionFact {
+        id: id.to_string(),
+        label: label.to_string(),
+        matches_target: false,
+        kind: "CodeEntity".to_string(),
+        shown_in_story,
+    };
+    let displayed = vec!["correct".to_string()];
+    let (_, options) = unambiguous_check_options(
+        &displayed,
+        vec![
+            CheckOptionFact {
+                id: "correct".to_string(),
+                label: "build_routes".to_string(),
+                matches_target: true,
+                kind: "CodeEntity".to_string(),
+                shown_in_story: true,
+            },
+            // Sorts first by label, and did win before this ranking existed.
+            fact("junk-a", "'& h1'0", false),
+            fact("junk-b", "'& code'0", false),
+            fact("seen-a", "render_dossier_markdown", true),
+            fact("seen-b", "resolve_anchor_lines", true),
+        ],
+    )
+    .expect("options");
+
+    let chosen = options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        chosen.contains("seen-a") && chosen.contains("seen-b"),
+        "{chosen:?}"
+    );
+    assert!(
+        !chosen.contains("junk-a") && !chosen.contains("junk-b"),
+        "{chosen:?}"
+    );
+}
+
+#[test]
+fn distractors_prefer_the_answers_own_kind_so_kind_cannot_leak_it() {
+    let fact = |id: &str, label: &str, kind: &str| CheckOptionFact {
+        id: id.to_string(),
+        label: label.to_string(),
+        matches_target: false,
+        kind: kind.to_string(),
+        shown_in_story: true,
+    };
+    let displayed = vec!["correct".to_string()];
+    let (_, options) = unambiguous_check_options(
+        &displayed,
+        vec![
+            CheckOptionFact {
+                id: "correct".to_string(),
+                label: "A lesson".to_string(),
+                matches_target: true,
+                kind: "Lesson".to_string(),
+                shown_in_story: true,
+            },
+            fact("other-kind-a", "A requirement", "Requirement"),
+            fact("other-kind-b", "A constraint", "Constraint"),
+            fact("same-kind-a", "Another lesson", "Lesson"),
+            fact("same-kind-b", "A third lesson", "Lesson"),
+        ],
+    )
+    .expect("options");
+
+    let chosen = options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        chosen.contains("same-kind-a") && chosen.contains("same-kind-b"),
+        "{chosen:?}"
+    );
+}
+
+#[test]
+fn distractor_selection_is_reproducible_across_runs() {
+    // Presentation order is randomized in `opaque_options`; SELECTION must not
+    // be, or the same Story would grade differently run to run.
+    let facts = || {
+        vec![
+            CheckOptionFact {
+                id: "correct".to_string(),
+                label: "Correct".to_string(),
+                matches_target: true,
+                kind: "Lesson".to_string(),
+                shown_in_story: true,
+            },
+            CheckOptionFact {
+                id: "alpha".to_string(),
+                label: "Alpha".to_string(),
+                matches_target: false,
+                kind: "Lesson".to_string(),
+                shown_in_story: true,
+            },
+            CheckOptionFact {
+                id: "beta".to_string(),
+                label: "Beta".to_string(),
+                matches_target: false,
+                kind: "Lesson".to_string(),
+                shown_in_story: true,
+            },
+            CheckOptionFact {
+                id: "gamma".to_string(),
+                label: "Gamma".to_string(),
+                matches_target: false,
+                kind: "Lesson".to_string(),
+                shown_in_story: true,
+            },
+        ]
+    };
+    let displayed = vec!["correct".to_string()];
+    let first = unambiguous_check_options(&displayed, facts()).expect("options");
+    for _ in 0..5 {
+        let again = unambiguous_check_options(&displayed, facts()).expect("options");
+        assert_eq!(first.1, again.1);
+    }
+}
+
+#[test]
+fn a_code_option_whose_label_is_not_an_identifier_is_not_offered() {
+    assert!(reads_as_code_identifier("build_routes"));
+    assert!(reads_as_code_identifier("graph::store::Entry"));
+    // Real labels carry spaces and punctuation; only the SHAPE is checked.
+    assert!(reads_as_code_identifier("HashMap<String, u32>"));
+    assert!(!reads_as_code_identifier("'& h1'0"));
+    assert!(!reads_as_code_identifier("'background-color'1"));
+    assert!(!reads_as_code_identifier(""));
+}
+
+#[test]
 fn check_options_reject_mixed_truth_labels_and_cap_after_deduplication() {
     let fact = |id: &str, label: &str, matches_target| CheckOptionFact {
         id: id.to_string(),
         label: label.to_string(),
         matches_target,
+        kind: "Lesson".to_string(),
+        shown_in_story: false,
     };
     let displayed = vec!["correct".to_string()];
     let (_, options) = unambiguous_check_options(
@@ -1451,13 +1712,25 @@ fn check_options_reject_mixed_truth_labels_and_cap_after_deduplication() {
         ],
     )
     .expect("two unambiguous distractor labels remain");
-    assert_eq!(
-        options
-            .iter()
-            .map(|option| option.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["correct", "duplicate-a", "first"]
-    );
+    // The IDENTITY of the distractors is a ranking concern, covered separately;
+    // what this case pins is that ambiguous and duplicate labels are removed and
+    // the option count is capped.
+    assert_eq!(options.len(), 3);
+    assert_eq!(options[0].id, "correct");
+    let chosen = options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(chosen.is_subset(&BTreeSet::from([
+        "correct",
+        "duplicate-a",
+        "duplicate-b",
+        "first",
+        "second",
+        "third",
+    ])));
+    // A label shared with a TRUE answer is ambiguous and cannot be a distractor.
+    assert!(!chosen.contains("looks-valid"));
     assert!(!options.iter().any(|option| option.label == "Shared answer"));
 
     let ambiguous_only = unambiguous_check_options(
@@ -1519,7 +1792,7 @@ fn check_grants_are_project_scoped_and_distinguish_error_states() {
         &state,
         CheckGrant {
             kind: CheckKind::Concerns,
-            component_iri: "https://example.test/component".to_string(),
+            counterpart_iri: "https://example.test/component".to_string(),
             section_id: "orientation".to_string(),
             correct_option_token: allowed.clone(),
             option_entities: BTreeMap::from([(
@@ -1555,7 +1828,7 @@ fn check_grants_are_project_scoped_and_distinguish_error_states() {
         &state,
         CheckGrant {
             kind: CheckKind::Concerns,
-            component_iri: "https://example.test/component".to_string(),
+            counterpart_iri: "https://example.test/component".to_string(),
             section_id: "orientation".to_string(),
             correct_option_token: "token".to_string(),
             option_entities: BTreeMap::from([(
@@ -1587,7 +1860,7 @@ fn grading_rejects_retired_subjects_and_newly_valid_distractors() {
 
     let grant = || CheckGrant {
         kind: CheckKind::Concerns,
-        component_iri: component.to_string(),
+        counterpart_iri: component.to_string(),
         section_id: "orientation".to_string(),
         correct_option_token: "correct-token".to_string(),
         option_entities: BTreeMap::from([
@@ -1621,7 +1894,7 @@ fn grading_rejects_retired_subjects_and_newly_valid_distractors() {
         &state,
         CheckGrant {
             kind: CheckKind::Concerns,
-            component_iri: other_component.to_string(),
+            counterpart_iri: other_component.to_string(),
             section_id: "orientation".to_string(),
             correct_option_token: "only-token".to_string(),
             option_entities: BTreeMap::from([("only-token".to_string(), other_record.clone())]),
@@ -1653,7 +1926,7 @@ fn capacity_evicted_check_reports_unavailable() {
     let state = story_state("check-capacity");
     let grant = || CheckGrant {
         kind: CheckKind::Concerns,
-        component_iri: "https://example.test/component".to_string(),
+        counterpart_iri: "https://example.test/component".to_string(),
         section_id: "orientation".to_string(),
         correct_option_token: "token".to_string(),
         option_entities: BTreeMap::from([(

@@ -1167,6 +1167,64 @@ pub(super) fn code_realizes_component(
     edge_exists(state, entity, "realizes", component)
 }
 
+/// Whether `successor` still supersedes `superseded`.
+///
+/// The superseded record is deliberately NOT required to be in the working set —
+/// being retired is the very fact the question is about — but the successor must
+/// still be current, or the Story would teach a replacement that itself went away.
+pub(super) fn record_supersedes(
+    state: &AppState,
+    successor: &str,
+    superseded: &str,
+) -> anyhow::Result<bool> {
+    let Some(record) = record_data(state, successor)? else {
+        return Ok(false);
+    };
+    if !in_working_set(&record.evidence.status) {
+        return Ok(false);
+    }
+    edge_exists(state, successor, "supersedes", superseded)
+}
+
+/// Whether `decision` still weighs `alternative`. The edge runs from the
+/// decision, so the option and the counterpart swap places here.
+pub(super) fn record_weighs(
+    state: &AppState,
+    alternative: &str,
+    decision: &str,
+) -> anyhow::Result<bool> {
+    edge_exists(state, decision, "weighs", alternative)
+}
+
+/// Targets of `subject -predicate-> ?`, in a deterministic order.
+pub(super) fn edge_targets(
+    state: &AppState,
+    subject: &str,
+    predicate: &str,
+) -> anyhow::Result<Vec<String>> {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let subject = NamedNodeRef::new(subject)?;
+    let predicate_iri = state.resolve_object_property(predicate)?;
+    let predicate = NamedNodeRef::new(&predicate_iri)?;
+    let mut targets = state
+        .store
+        .quads_for_pattern(
+            Some(subject.into()),
+            Some(predicate),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .filter_map(|quad| match quad.object {
+            oxigraph::model::Term::NamedNode(node) => Some(node.into_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+    Ok(targets)
+}
+
 fn edge_exists(
     state: &AppState,
     subject: &str,

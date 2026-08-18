@@ -7,7 +7,8 @@ use crate::graph::{in_working_set, relevant_context_snapshot, AppState, Componen
 
 use super::grounding::{
     code_entity_is_current, code_realizes_component, component_iri_is_current, component_records,
-    record_concerns_component, record_data, story_entity_is_current, RecordData,
+    edge_targets, record_concerns_component, record_data, record_supersedes, record_weighs,
+    story_entity_is_current, RecordData,
 };
 use super::model::{
     friendly_record_kind, CheckGrant, CheckKind, GradeResult, RetiredCheckKind, StoryBeat,
@@ -35,6 +36,11 @@ pub(super) fn prepare_record_kind_checks(
                 && evidence.kind != "Entity"
         })
         .collect::<Vec<_>>();
+    let shown_evidence_iris = beats
+        .iter()
+        .flat_map(|beat| &beat.evidence)
+        .map(|evidence| evidence.iri.clone())
+        .collect::<BTreeSet<_>>();
     let all_records = relevant_context_snapshot(state, None, 96, false)?
         .into_iter()
         .filter_map(|item| record_data(state, &item.iri).transpose())
@@ -49,6 +55,8 @@ pub(super) fn prepare_record_kind_checks(
             id: record.evidence.iri.clone(),
             label: record.evidence.title.clone(),
             matches_target: record.evidence.kind == correct.kind,
+            kind: record.evidence.kind.clone(),
+            shown_in_story: shown_evidence_iris.contains(&record.evidence.iri),
         });
         let Some((correct_id, options)) =
             unambiguous_check_options(std::slice::from_ref(&correct.iri), facts)
@@ -59,7 +67,7 @@ pub(super) fn prepare_record_kind_checks(
             &mut checks,
             CheckSpec {
                 kind: CheckKind::RecordKind,
-                component_iri: "",
+                counterpart_iri: "",
                 correct_option_id: &correct_id,
                 correct_kind: Some(&correct.kind),
                 subject_entity: match subject {
@@ -74,6 +82,136 @@ pub(super) fn prepare_record_kind_checks(
             },
         );
         if checks.len() == 2 {
+            break;
+        }
+    }
+    Ok(checks)
+}
+
+/// Checks that ask WHY, from the relationships the Story is built to explain:
+/// which record replaced a retired one, and which approach a decision rejected.
+///
+/// These probe the reasoning a reader is meant to carry away, where the
+/// membership questions only probe which end of an edge something sits on. Both
+/// are emitted only when the Story's OWN evidence contains the pair — a question
+/// about material the reader never saw is a lookup, not a check.
+pub(super) fn prepare_relationship_checks(
+    state: &AppState,
+    subject: &StorySubject,
+    beats: &[StoryBeat],
+) -> anyhow::Result<Vec<PreparedStoryCheck>> {
+    let shown = beats
+        .iter()
+        .flat_map(|beat| &beat.evidence)
+        .filter(|evidence| evidence.kind != "SystemComponent" && evidence.kind != "CodeEntity")
+        .collect::<Vec<_>>();
+    let shown_iris = shown
+        .iter()
+        .map(|evidence| evidence.iri.clone())
+        .collect::<BTreeSet<_>>();
+    let subject_entity = match subject {
+        StorySubject::Entity { iri, kind, .. } => Some((iri.as_str(), kind.as_str())),
+        StorySubject::Topic { .. } => None,
+    };
+    let mut checks = Vec::new();
+
+    // "Which record replaced X?" — anchored on the CURRENT record, which is what
+    // a Story shows. The retired record it replaced is named in the question but
+    // is not itself an option: working-set filtering keeps it out of the
+    // evidence, and every option must be something the reader could have seen.
+    for successor in &shown {
+        let superseded = edge_targets(state, &successor.iri, "supersedes")?;
+        let Some(retired) = superseded.first() else {
+            continue;
+        };
+        let Some(retired_data) = record_data(state, retired)? else {
+            continue;
+        };
+        let facts = shown.iter().map(|evidence| CheckOptionFact {
+            matches_target: evidence.iri == successor.iri,
+            shown_in_story: true,
+            kind: evidence.kind.clone(),
+            id: evidence.iri.clone(),
+            label: evidence.title.clone(),
+        });
+        let Some((correct_id, options)) =
+            unambiguous_check_options(std::slice::from_ref(&successor.iri), facts)
+        else {
+            continue;
+        };
+        if prepare_check(
+            &mut checks,
+            CheckSpec {
+                kind: CheckKind::Supersedes,
+                counterpart_iri: retired,
+                correct_option_id: &correct_id,
+                correct_kind: None,
+                subject_entity,
+                question: format!(
+                    "Which record replaced \u{201c}{}\u{201d}?",
+                    retired_data.evidence.title
+                ),
+                options,
+            },
+        ) {
+            break;
+        }
+    }
+
+    // "Which approach did X reject?" — the rationale a Story exists to carry.
+    for decision in &shown {
+        let alternatives = edge_targets(state, &decision.iri, "weighs")?;
+        let Some(rejected) = alternatives.first() else {
+            continue;
+        };
+        let Some(rejected_data) = record_data(state, rejected)? else {
+            continue;
+        };
+        let mut facts = vec![CheckOptionFact {
+            matches_target: true,
+            shown_in_story: shown_iris.contains(rejected),
+            kind: rejected_data.evidence.kind.clone(),
+            id: rejected_data.evidence.iri.clone(),
+            label: rejected_data.evidence.title.clone(),
+        }];
+        // Distractors: approaches OTHER decisions in this Story rejected. A
+        // reader who followed the reasoning knows which decision weighed which.
+        for other in shown.iter().filter(|other| other.iri != decision.iri) {
+            for candidate in edge_targets(state, &other.iri, "weighs")? {
+                if candidate == *rejected {
+                    continue;
+                }
+                if let Some(data) = record_data(state, &candidate)? {
+                    facts.push(CheckOptionFact {
+                        matches_target: false,
+                        shown_in_story: shown_iris.contains(&candidate),
+                        kind: data.evidence.kind.clone(),
+                        id: data.evidence.iri.clone(),
+                        label: data.evidence.title.clone(),
+                    });
+                }
+            }
+        }
+        let Some((correct_id, options)) =
+            unambiguous_check_options(std::slice::from_ref(rejected), facts)
+        else {
+            continue;
+        };
+        if prepare_check(
+            &mut checks,
+            CheckSpec {
+                kind: CheckKind::Weighs,
+                counterpart_iri: &decision.iri,
+                correct_option_id: &correct_id,
+                correct_kind: None,
+                subject_entity,
+                question: format!(
+                    "Which approach did \u{201c}{}\u{201d} reject?",
+                    decision.title
+                ),
+                options,
+            },
+        ) {
             break;
         }
     }
@@ -101,11 +239,18 @@ pub(super) fn prepare_checks(
         })
         .map(|evidence| evidence.iri.clone())
         .collect::<Vec<_>>();
+    let shown_evidence_iris = beats
+        .iter()
+        .flat_map(|beat| beat.evidence.iter())
+        .map(|evidence| evidence.iri.clone())
+        .collect::<BTreeSet<_>>();
     let record_facts = records_for_components(state, &index.components)?
         .into_iter()
         .chain(component_records.iter().cloned())
         .map(|record| CheckOptionFact {
             matches_target: target_record_ids.contains(&record.evidence.iri),
+            shown_in_story: shown_evidence_iris.contains(&record.evidence.iri),
+            kind: record.evidence.kind.clone(),
             id: record.evidence.iri,
             label: record.evidence.title,
         });
@@ -116,7 +261,7 @@ pub(super) fn prepare_checks(
             &mut checks,
             CheckSpec {
                 kind: CheckKind::Concerns,
-                component_iri: &component.iri,
+                counterpart_iri: &component.iri,
                 correct_option_id: &correct_id,
                 correct_kind: None,
                 subject_entity: None,
@@ -137,6 +282,11 @@ pub(super) fn prepare_checks(
             .filter(|entity| target_code_ids.contains(*entity))
             .cloned()
             .collect::<Vec<_>>();
+        let shown_code_iris = beats
+            .iter()
+            .flat_map(|beat| beat.code_anchors.iter())
+            .filter_map(|anchor| anchor.entity_iri.clone())
+            .collect::<BTreeSet<_>>();
         let code_facts = index
             .code_entities
             .iter()
@@ -144,10 +294,13 @@ pub(super) fn prepare_checks(
             .filter_map(|anchor| {
                 anchor.entity_iri.as_ref().map(|entity| CheckOptionFact {
                     matches_target: target_code_ids.contains(entity),
+                    shown_in_story: shown_code_iris.contains(entity),
+                    kind: "CodeEntity".to_string(),
                     id: entity.clone(),
                     label: anchor.label.clone(),
                 })
-            });
+            })
+            .filter(|fact| fact.matches_target || reads_as_code_identifier(&fact.label));
         if let Some((correct_id, options)) =
             unambiguous_check_options(&displayed_code_ids, code_facts)
         {
@@ -155,7 +308,7 @@ pub(super) fn prepare_checks(
                 &mut checks,
                 CheckSpec {
                     kind: CheckKind::Realizes,
-                    component_iri: &component.iri,
+                    counterpart_iri: &component.iri,
                     correct_option_id: &correct_id,
                     correct_kind: None,
                     subject_entity: None,
@@ -175,6 +328,11 @@ pub(super) struct CheckOptionFact {
     pub(super) id: String,
     pub(super) label: String,
     pub(super) matches_target: bool,
+    /// Typed kind, so a distractor can be drawn from the answer's OWN kind
+    /// instead of letting the kind give the answer away.
+    pub(super) kind: String,
+    /// Whether this candidate appears in the Story the reader just read.
+    pub(super) shown_in_story: bool,
 }
 
 pub(super) fn unambiguous_check_options(
@@ -212,26 +370,75 @@ pub(super) fn unambiguous_check_options(
     })?;
     let mut options = vec![StoryCheckOption {
         id: correct.id.clone(),
-        label: correct.label,
+        label: correct.label.clone(),
     }];
-    for group in groups.values() {
-        if group.iter().all(|fact| !fact.matches_target) {
-            let candidate = &group[0];
-            options.push(StoryCheckOption {
-                id: candidate.id.clone(),
-                label: candidate.label.clone(),
-            });
-            if options.len() == MAX_CHECK_OPTIONS {
-                break;
-            }
+
+    // RANK the candidates; do not take whatever the map happened to yield.
+    // Iterating `groups` directly means "prefer whatever label sorts first",
+    // which let punctuation-leading labels win every draw.
+    let mut candidates = groups
+        .values()
+        .filter(|group| group.iter().all(|fact| !fact.matches_target))
+        .map(|group| &group[0])
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|fact| {
+        (
+            // A candidate the reader just read is the most demanding wrong
+            // answer: choosing correctly means knowing which subject it
+            // belonged to, not which title shares words with the question.
+            !fact.shown_in_story,
+            // Matching the answer's kind keeps the kind from leaking it.
+            fact.kind != correct.kind,
+            stable_rank(&fact.id),
+        )
+    });
+    for candidate in candidates {
+        options.push(StoryCheckOption {
+            id: candidate.id.clone(),
+            label: candidate.label.clone(),
+        });
+        if options.len() == MAX_CHECK_OPTIONS {
+            break;
         }
     }
     (options.len() >= 2).then_some((correct.id, options))
 }
 
+/// Deterministic order for candidates of equal rank (FNV-1a over the IRI).
+///
+/// Deliberately not derived from the LABEL: label ordering is the defect this
+/// replaces. Hashing the IRI keeps a Story's checks reproducible — which
+/// Constraint `c1b8a8db` requires — without letting the text shape decide.
+/// Presentation order is randomized separately, in `opaque_options`.
+fn stable_rank(id: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Whether a label reads as a code identifier.
+///
+/// Only distractors are filtered on this. A producer can mint entities whose
+/// display label is not an identifier at all — quoted object keys such as
+/// `'& h1'0` — and offering those as wrong answers makes a question absurd
+/// rather than difficult.
+pub(super) fn reads_as_code_identifier(label: &str) -> bool {
+    // Deliberately narrow: it must BEGIN like a name and carry no quotes. A
+    // stricter char-by-char rule would reject real labels that legitimately
+    // contain spaces and punctuation, such as `HashMap<String, u32>`.
+    label
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && !label.contains(['\'', '"'])
+}
+
 struct CheckSpec<'a> {
     kind: CheckKind,
-    component_iri: &'a str,
+    counterpart_iri: &'a str,
     correct_option_id: &'a str,
     correct_kind: Option<&'a str>,
     subject_entity: Option<(&'a str, &'a str)>,
@@ -256,7 +463,7 @@ fn prepare_check(checks: &mut Vec<PreparedStoryCheck>, mut spec: CheckSpec<'_>) 
         options,
         grant: CheckGrant {
             kind: spec.kind,
-            component_iri: spec.component_iri.to_string(),
+            counterpart_iri: spec.counterpart_iri.to_string(),
             section_id: String::new(),
             correct_option_token,
             option_entities,
@@ -478,14 +685,28 @@ pub fn grade_check(
             return Err(StoryCheckError::Stale.into());
         }
     }
-    if !matches!(grant.kind, CheckKind::RecordKind)
-        && !component_iri_is_current(state, &grant.component_iri)?
-    {
+    let counterpart_is_current = match grant.kind {
+        // The question is about the record itself; there is no other endpoint.
+        CheckKind::RecordKind => true,
+        CheckKind::Concerns | CheckKind::Realizes => {
+            component_iri_is_current(state, &grant.counterpart_iri)?
+        }
+        // Only EXISTENCE is required: a superseded record is retired by
+        // definition, and demanding it be current would retire every such check
+        // the moment it became answerable.
+        CheckKind::Supersedes => record_data(state, &grant.counterpart_iri)?.is_some(),
+        CheckKind::Weighs => record_data(state, &grant.counterpart_iri)?
+            .is_some_and(|record| in_working_set(&record.evidence.status)),
+    };
+    if !counterpart_is_current {
         return Err(StoryCheckError::Stale.into());
     }
     let endpoint_is_current = |entity: &str| -> anyhow::Result<bool> {
         match grant.kind {
-            CheckKind::Concerns | CheckKind::RecordKind => Ok(record_data(state, entity)?
+            CheckKind::Concerns
+            | CheckKind::RecordKind
+            | CheckKind::Supersedes
+            | CheckKind::Weighs => Ok(record_data(state, entity)?
                 .is_some_and(|record| in_working_set(&record.evidence.status))),
             CheckKind::Realizes => code_entity_is_current(state, entity),
         }
@@ -496,11 +717,13 @@ pub fn grade_check(
         }
     }
     let relationship_is_current = |entity: &str| match grant.kind {
-        CheckKind::Concerns => record_concerns_component(state, entity, &grant.component_iri),
-        CheckKind::Realizes => code_realizes_component(state, entity, &grant.component_iri),
+        CheckKind::Concerns => record_concerns_component(state, entity, &grant.counterpart_iri),
+        CheckKind::Realizes => code_realizes_component(state, entity, &grant.counterpart_iri),
         CheckKind::RecordKind => Ok(record_data(state, entity)?.is_some_and(|record| {
             grant.correct_kind.as_deref() == Some(record.evidence.kind.as_str())
         })),
+        CheckKind::Supersedes => record_supersedes(state, entity, &grant.counterpart_iri),
+        CheckKind::Weighs => record_weighs(state, entity, &grant.counterpart_iri),
     };
     let mut distractor_became_valid = false;
     for (token, entity) in &grant.option_entities {

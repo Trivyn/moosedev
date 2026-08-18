@@ -2,7 +2,7 @@
 
 use super::checks::{
     bind_prepared_check_sections, issue_prepared_checks, prepare_checks,
-    prepare_record_kind_checks, PreparedStoryCheck,
+    prepare_record_kind_checks, prepare_relationship_checks, PreparedStoryCheck,
 };
 use super::grounding::{
     build_story_document, code_for_records, component_code, component_records, dedupe_code_anchors,
@@ -70,9 +70,19 @@ pub(super) fn prepare_checks_for_stable_story(
             // a valid but undisplayed entity could be presented as false.
             let records = component_records(state, iri)?;
             let code = component_code(state, iri)?;
-            prepare_checks(state, &component, &run.beats, index, &records, &code)?
+            with_relationship_checks_first(
+                state,
+                &run.subject,
+                &run.beats,
+                prepare_checks(state, &component, &run.beats, index, &records, &code)?,
+            )?
         }
-        _ => prepare_record_kind_checks(state, &run.subject, &run.beats)?,
+        _ => with_relationship_checks_first(
+            state,
+            &run.subject,
+            &run.beats,
+            prepare_record_kind_checks(state, &run.subject, &run.beats)?,
+        )?,
     };
     bind_prepared_check_sections(&mut prepared, &run.narrative);
     Ok(prepared)
@@ -292,7 +302,12 @@ fn finish_generic_story(
     subject_is_current: bool,
 ) -> anyhow::Result<StoryRun> {
     let prepared_checks = if subject_is_current {
-        prepare_record_kind_checks(state, &subject, &beats)?
+        with_relationship_checks_first(
+            state,
+            &subject,
+            &beats,
+            prepare_record_kind_checks(state, &subject, &beats)?,
+        )?
     } else {
         Vec::new()
     };
@@ -470,8 +485,18 @@ pub(super) fn generate_component_story(
         }
     }
     let subject_is_current = index.components_by_iri.contains_key(&component.iri);
+    let component_subject = StorySubject::Entity {
+        iri: component.iri.clone(),
+        kind: "SystemComponent".to_string(),
+        label: component.label.clone(),
+    };
     let prepared_checks = if subject_is_current {
-        prepare_checks(state, component, &beats, index, &records, &code)?
+        with_relationship_checks_first(
+            state,
+            &component_subject,
+            &beats,
+            prepare_checks(state, component, &beats, index, &records, &code)?,
+        )?
     } else {
         // A drifted recipe remains readable for recovery, but it cannot issue
         // an authoritative quiz about a subject outside the working set.
@@ -499,6 +524,29 @@ pub(super) fn generate_component_story(
             unavailable_check_detail: "Current authoritative knowledge does not provide two distinct, unambiguous options for a symbolic relationship check.",
         },
     )
+}
+
+/// Put the "why" checks first and fall back to the membership ones.
+///
+/// A relationship check asks what a reader is meant to carry away; a membership
+/// check only asks which end of an edge something sits on. Sparse graphs support
+/// only the latter, so both are kept and ordered rather than one replacing the
+/// other. The response cap is unchanged.
+fn with_relationship_checks_first(
+    state: &AppState,
+    subject: &StorySubject,
+    beats: &[StoryBeat],
+    fallback: Vec<PreparedStoryCheck>,
+) -> anyhow::Result<Vec<PreparedStoryCheck>> {
+    let mut prepared = prepare_relationship_checks(state, subject, beats)?;
+    for check in fallback {
+        if prepared.len() >= 2 {
+            break;
+        }
+        prepared.push(check);
+    }
+    prepared.truncate(2);
+    Ok(prepared)
 }
 
 pub(super) fn generated_beats(

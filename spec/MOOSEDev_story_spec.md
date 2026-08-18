@@ -193,6 +193,14 @@ exists only in a bounded, expiring daemon grant and is revalidated, together wit
 every offered option, when answered. If no nontrivial distractor exists, the missing assessment is a
 gap rather than a trivial question.
 
+Questions prefer the relationships the Story exists to explain — which record replaced a retired one,
+which approach a decision rejected — over which end of an edge something sits on, and fall back to
+the membership forms when the graph supports nothing richer. Wrong answers are drawn from evidence
+the Story actually showed, then from the answer's own kind, so that answering correctly requires
+having followed the account rather than matching words in the question against an unfamiliar title.
+Selection is deterministic and never derives from label order; only presentation order is randomized.
+A candidate whose label is not shaped like a code identifier is never offered as a wrong answer.
+
 ## HTTP response contract
 
 Existing Story routes remain, but Story generation returns schema version 3:

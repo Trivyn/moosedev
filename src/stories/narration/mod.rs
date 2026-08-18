@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const NARRATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// A coalesced follower waits a little beyond its leader's own ceiling, never
+/// indefinitely.
+const FOLLOWER_TIMEOUT: Duration = Duration::from_secs(75);
 
 #[derive(Clone)]
 struct NarrationValue {
@@ -94,10 +97,24 @@ pub async fn narrate_with_llm(state: &AppState, mut run: StoryRun, assist_level:
     let started = Instant::now();
     let (cache_status, result) = match state.story_narrations.begin(&key) {
         CacheStart::Hit(value) => ("hit", Ok(value)),
-        CacheStart::Follower(flight) => ("coalesced", flight.wait().await),
-        CacheStart::Leader(flight) => {
+        CacheStart::Follower(flight) => (
+            "coalesced",
+            // The lease guarantees a leader resolves its flight even when
+            // dropped, so this bound should never be reached. It is kept so a
+            // follower can never wait longer than a leader is itself allowed to
+            // run — a coalesced reader must not be able to hang.
+            match tokio::time::timeout(FOLLOWER_TIMEOUT, flight.wait()).await {
+                Ok(result) => result,
+                Err(_) => Err(NarrationFailure {
+                    outcome: NarrationOutcome::Timeout,
+                    reason: None,
+                    category: "coalesced_timeout",
+                }),
+            },
+        ),
+        CacheStart::Leader(lease) => {
             let result = synthesize_packet(state, &run, &packet).await.map(Arc::new);
-            state.story_narrations.finish(&key, &flight, result.clone());
+            lease.finish(result.clone());
             ("miss", result)
         }
     };
