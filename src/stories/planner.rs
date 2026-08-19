@@ -64,6 +64,7 @@ pub(super) fn prepare_checks_for_stable_story(
                 kind: kind.clone(),
                 label: label.clone(),
                 description: None,
+                no_recorded_knowledge: false,
             };
             // The beats choose the displayed correct answer. Distractor truth
             // must be checked against the complete current component sets, or
@@ -189,6 +190,7 @@ fn generate_topic_story(
         kind: "Topic".to_string(),
         label: query.trim().to_string(),
         description: None,
+        no_recorded_knowledge: false,
     };
     let (beats, mut gaps) = generic_generated_beats(state, &topic, &records, &code);
     gaps.extend(focus_gaps);

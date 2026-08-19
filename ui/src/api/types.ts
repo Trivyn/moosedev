@@ -83,6 +83,8 @@ export interface StorySubjectCandidate {
   kind: string;
   label: string;
   description?: string | null;
+  /** The graph records nothing about this subject beyond its own existence. */
+  no_recorded_knowledge?: boolean;
 }
 
 export interface StorySubjectListResponse {

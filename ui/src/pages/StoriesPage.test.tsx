@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { api } from '../api/client';
-import { StoryRecipe, StoryRun } from '../api/types';
+import { StoryRecipe, StoryRun, StorySubjectCandidate } from '../api/types';
 import StoriesPage, { applyAssistedNarration } from './StoriesPage';
 
 vi.mock('../api/client', () => ({
@@ -19,6 +19,19 @@ vi.mock('../api/client', () => ({
 }));
 
 const componentIri = 'https://moosedev.dev/kg/SystemComponent/graph';
+const componentSubject: StorySubjectCandidate = {
+  iri: componentIri,
+  kind: 'SystemComponent',
+  label: 'graph/store layer',
+  description: 'Owns src/graph/',
+};
+const unrecordedSubject: StorySubjectCandidate = {
+  iri: 'https://moosedev.dev/kg/CodeEntity/read-proven',
+  kind: 'CodeEntity',
+  label: 'read_proven',
+  description: 'src/code/substrate/resolver.rs',
+  no_recorded_knowledge: true,
+};
 const requirementIri = 'https://moosedev.dev/kg/Requirement/one';
 const oldDecisionIri = 'https://moosedev.dev/kg/ArchitecturalDecision/old';
 const suppressedIri = 'https://moosedev.dev/kg/ArchitecturalDecision/excluded';
@@ -206,9 +219,7 @@ beforeEach(() => {
       curator: recipe.curator,
     }],
   });
-  vi.mocked(api.listStorySubjects).mockResolvedValue({
-    subjects: [{ iri: componentIri, kind: 'SystemComponent', label: 'graph/store layer', description: 'Owns src/graph/' }],
-  });
+  vi.mocked(api.listStorySubjects).mockResolvedValue({ subjects: [componentSubject] });
   vi.mocked(api.getStory).mockResolvedValue({ recipe });
   vi.mocked(api.saveStory).mockImplementation(async (value) => ({ recipe: { ...value, updated_at: '2026-08-13T20:01:00Z' } }));
   vi.mocked(api.publishStory).mockResolvedValue({ recipe: { ...recipe, status: 'published', updated_at: '2026-08-13T20:02:00Z' } });
@@ -396,6 +407,75 @@ describe('Story v3 workbench', () => {
     await act(async () => save.resolve({ recipe: { ...saved, updated_at: 'token' } }));
     await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: saved.id, assist_level: 0 }));
     await waitFor(() => expect(api.generateStory).toHaveBeenCalledWith({ recipe_id: saved.id, assist_level: 1, include_checks: false }));
+  });
+
+  it('browses recorded subjects only, and finds an unrecorded one by name', async () => {
+    vi.mocked(api.listStorySubjects).mockImplementation(async () => ({
+      subjects: [componentSubject, unrecordedSubject],
+    }));
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    expect(await screen.findByRole('option', { name: /graph\/store layer/i })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /read_proven/i })).not.toBeInTheDocument();
+
+    fireEvent.change(selector, { target: { value: 'read_proven' } });
+    const option = await screen.findByRole('option', { name: /read_proven/i });
+    expect(within(option).getByText('Nothing recorded about this yet')).toBeInTheDocument();
+  });
+
+  it('keeps a deep-linked unrecorded subject browsable once it is the selection', async () => {
+    // Arriving from an editor hover on an unrecorded entity is the common path
+    // for the VS Code and Emacs clients; the reader must still see what they
+    // are reading about when they open the dropdown.
+    vi.mocked(api.listStorySubjects).mockImplementation(async () => ({
+      subjects: [componentSubject, unrecordedSubject],
+    }));
+    render(<StoriesPage onNavigateRecord={vi.fn()} initialSubjectIri={unrecordedSubject.iri} />);
+
+    const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
+    await waitFor(() => expect(selector).toHaveValue('read_proven'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    expect(await screen.findByRole('option', { name: /read_proven/i })).toBeInTheDocument();
+  });
+
+  it('lets the reader change subject while the URL names one', async () => {
+    // The catalog is refetched every time the dropdown opens, which hands back a
+    // new `subjects` array. Re-naming the selector on that refresh overwrote the
+    // reader's choice, so a URL-named subject made the dropdown unchangeable.
+    const otherIri = 'https://moosedev.dev/kg/SystemComponent/http';
+    // A FRESH array per call, as a real fetch produces. `mockResolvedValue`
+    // would hand back one reference forever, so `subjects` identity would never
+    // change and the effect under test would never re-run — the test would pass
+    // against the bug.
+    vi.mocked(api.listStorySubjects).mockImplementation(async () => ({
+      subjects: [
+        componentSubject,
+        { iri: otherIri, kind: 'SystemComponent', label: 'HTTP API' },
+      ],
+    }));
+
+    render(<StoriesPage onNavigateRecord={vi.fn()} initialSubjectIri={componentIri} />);
+
+    const selector = await screen.findByRole('combobox', { name: 'Find an entity' });
+    // The deep-linked subject still names the selector when it arrives.
+    await waitFor(() => expect(selector).toHaveValue('graph/store layer'));
+
+    // Typing opens the popup, which is what refreshes the catalog.
+    fireEvent.change(selector, { target: { value: 'HTTP' } });
+    fireEvent.click(await screen.findByRole('option', { name: /HTTP API/i }));
+
+    await waitFor(() => expect(selector).toHaveValue('HTTP API'));
+    fireEvent.click(screen.getByRole('button', { name: 'Tell Story' }));
+
+    await waitFor(() =>
+      expect(api.generateStory).toHaveBeenCalledWith({
+        subject_iri: otherIri,
+        assist_level: 0,
+      }),
+    );
   });
 
   it('does not regenerate when told about the subject already on screen', async () => {

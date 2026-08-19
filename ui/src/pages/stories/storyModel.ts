@@ -128,12 +128,23 @@ export function applyAssistedNarration(symbolic: StoryRun, assisted: StoryRun): 
   };
 }
 
+/**
+ * Browsing lists the subjects the graph records knowledge about; searching still
+ * reaches every indexed name, so nothing becomes unfindable. The reader's own
+ * selection is always browsable, however it was reached — a Story opened from an
+ * editor can name an unrecorded entity.
+ */
 export function filterStorySubjects(
   options: StorySubjectCandidate[],
   query: string,
+  selected?: StorySubjectCandidate | null,
 ): StorySubjectCandidate[] {
   const normalized = query.trim().toLocaleLowerCase();
-  if (!normalized) return options;
+  if (!normalized) {
+    return options.filter(
+      (option) => !option.no_recorded_knowledge || option.iri === selected?.iri,
+    );
+  }
   return options.filter((option) =>
     option.label.toLocaleLowerCase().includes(normalized) ||
     option.kind.toLocaleLowerCase().includes(normalized) ||

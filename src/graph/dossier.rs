@@ -182,6 +182,67 @@ pub(crate) fn direct_records_for_entity(
     Ok(direct_records)
 }
 
+/// Which of `code_iris` have at least one dossier-visible record linked to them.
+///
+/// The bulk form of [`direct_records_for_entity`], for callers that must ask the
+/// question of a whole catalog at once rather than one entity at a time. It
+/// shares the same predicate pairs and the same lifecycle policy, so a browse
+/// surface cannot promise knowledge that hover would then decline to show —
+/// the reuse `debt::why_coverage` already relies on for the same reason.
+///
+/// Judgments are deliberately NOT counted here, unlike [`build_dossier`]'s
+/// silence-rule amendment: a ratified role is a reason for hover to speak, but
+/// it is not a record any reading surface can render yet.
+///
+/// One predicate-bound scan per pair and direction, so the cost tracks the
+/// number of links rather than the size of the catalog.
+pub(crate) fn code_entities_with_records(
+    state: &AppState,
+    code_iris: &BTreeSet<String>,
+) -> anyhow::Result<BTreeSet<String>> {
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let pairs = LinkPairs::resolve(state)?;
+    let mut linked = BTreeSet::new();
+    for pair in &pairs.all {
+        for (predicate_iri, entity_is_subject) in [
+            (
+                &pair.canonical_iri,
+                matches!(pair.direction, CanonicalDirection::EntityToRecord),
+            ),
+            (
+                &pair.inverse_iri,
+                matches!(pair.direction, CanonicalDirection::RecordToEntity),
+            ),
+        ] {
+            let predicate = NamedNodeRef::new(predicate_iri)?;
+            for quad in state.store.quads_for_pattern(
+                None,
+                Some(predicate),
+                None,
+                Some(GraphNameRef::NamedNode(graph)),
+            ) {
+                let quad = quad?;
+                let (oxigraph::model::NamedOrBlankNode::NamedNode(subject), Term::NamedNode(object)) =
+                    (quad.subject, quad.object)
+                else {
+                    continue;
+                };
+                let (entity, record) = if entity_is_subject {
+                    (subject.as_str(), object.as_str())
+                } else {
+                    (object.as_str(), subject.as_str())
+                };
+                if code_iris.contains(entity)
+                    && summarize_record(state, record, pair.canonical_local).is_some()
+                {
+                    linked.insert(entity.to_string());
+                }
+            }
+        }
+    }
+    Ok(linked)
+}
+
 /// Render a stable Markdown view suitable for MCP and future hover surfaces.
 pub fn render_markdown(dossier: &Dossier) -> String {
     render_dossier_markdown(dossier, None)

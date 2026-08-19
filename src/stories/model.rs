@@ -511,6 +511,12 @@ pub struct StoryCandidate {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// True when the project graph records nothing about this subject beyond
+    /// its own existence, so its Story closes over the subject and the
+    /// component it realizes and nothing else. Only ever set for CodeEntity
+    /// subjects: they are the only kind the indexer mints in bulk.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_recorded_knowledge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

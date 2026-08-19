@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode};
 
 use crate::graph::{
-    first_literal, in_working_set, load_components, resolve_component_query, AppState,
-    ComponentEntry, PROJECT_KG_GRAPH_IRI,
+    code_entities_with_records, first_literal, in_working_set, load_components,
+    resolve_component_query, AppState, ComponentEntry, PROJECT_KG_GRAPH_IRI,
 };
 
 use super::grounding::{
@@ -96,6 +96,7 @@ impl StoryResolutionIndex {
             kind: "Entity".to_string(),
             label: iri.to_string(),
             description: None,
+            no_recorded_knowledge: false,
         })
     }
 }
@@ -106,6 +107,7 @@ fn record_candidate(record: RecordData) -> StoryCandidate {
         kind: record.evidence.kind,
         label: record.evidence.title,
         description: record.description,
+        no_recorded_knowledge: false,
     }
 }
 
@@ -115,6 +117,7 @@ fn code_candidate(anchor: &StoryCodeAnchor) -> StoryCandidate {
         kind: "CodeEntity".to_string(),
         label: anchor.label.clone(),
         description: anchor.path.clone(),
+        no_recorded_knowledge: false,
     }
 }
 
@@ -129,17 +132,31 @@ pub fn story_subjects(
         .filter(|component| component_is_current(state, component))
         .map(|component| candidate(&component))
         .collect::<Vec<_>>();
-    subjects.extend(current_record_subjects(state)?);
-    subjects.extend(
-        all_code(state)?
-            .1
-            .into_iter()
-            .filter(|anchor| anchor.entity_iri.is_some())
-            .map(|anchor| code_candidate(&anchor)),
-    );
+    let code = all_code(state)?
+        .1
+        .into_iter()
+        .filter_map(|anchor| Some((anchor.entity_iri.clone()?, anchor)))
+        .collect::<Vec<_>>();
+    let code_iris = code
+        .iter()
+        .map(|(iri, _)| iri.clone())
+        .collect::<BTreeSet<_>>();
+    subjects.extend(current_record_subjects(state, &code_iris)?);
+    // A code entity nothing is recorded against would tell a Story of itself
+    // and the component it realizes and nothing else — `expands_story_closure`
+    // stops at a component hub past depth 0. The selector needs that known per
+    // candidate, and the dossier already owns what counts as recorded.
+    let recorded = code_entities_with_records(state, &code_iris)?;
+    subjects.extend(code.iter().map(|(iri, anchor)| StoryCandidate {
+        no_recorded_knowledge: !recorded.contains(iri),
+        ..code_candidate(anchor)
+    }));
     subjects.sort_by(story_subject_order);
     subjects.dedup_by(|left, right| left.iri == right.iri);
 
+    // `limit` bounds SEARCH results only. Browsing returns the whole catalog on
+    // purpose: it is a categorized list the reader scrolls, and truncating it
+    // would drop subjects with no way to tell which.
     if let Some(query) = query {
         let query = query.to_lowercase();
         subjects.retain(|subject| {
@@ -155,7 +172,10 @@ pub fn story_subjects(
     Ok(subjects)
 }
 
-fn current_record_subjects(state: &AppState) -> anyhow::Result<Vec<StoryCandidate>> {
+fn current_record_subjects(
+    state: &AppState,
+    code_iris: &BTreeSet<String>,
+) -> anyhow::Result<Vec<StoryCandidate>> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
     let mut iris = BTreeSet::new();
     for quad in state.store.quads_for_pattern(
@@ -171,6 +191,11 @@ fn current_record_subjects(state: &AppState) -> anyhow::Result<Vec<StoryCandidat
     }
     let mut records = Vec::new();
     for iri in iris {
+        // Code entities outnumber records three to one here and can never be
+        // one, so skipping them saves a subclass walk each.
+        if code_iris.contains(&iri) {
+            continue;
+        }
         let Some(record) = record_data(state, &iri)? else {
             continue;
         };
@@ -189,6 +214,7 @@ fn story_subject_order(left: &StoryCandidate, right: &StoryCandidate) -> std::cm
     story_subject_kind_rank(&left.kind)
         .cmp(&story_subject_kind_rank(&right.kind))
         .then_with(|| left.kind.cmp(&right.kind))
+        .then_with(|| left.no_recorded_knowledge.cmp(&right.no_recorded_knowledge))
         .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
         .then_with(|| left.iri.cmp(&right.iri))
 }
@@ -337,6 +363,7 @@ fn candidate(component: &ComponentEntry) -> StoryCandidate {
         iri: component.iri.clone().unwrap_or_default(),
         kind: "SystemComponent".to_string(),
         label: component.name.clone(),
+        no_recorded_knowledge: false,
         description: (!component.covers_paths.is_empty()).then(|| {
             format!(
                 "Owns {}",

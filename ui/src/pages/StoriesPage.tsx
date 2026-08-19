@@ -178,6 +178,9 @@ export default function StoriesPage({
   const editorOperationRef = useRef(false);
   const libraryActionRef = useRef(false);
   const subjectCatalogRequestRef = useRef(0);
+  // Which subject the selector has already been named for, so a catalog
+  // refresh never re-asserts it over the reader's own choice.
+  const namedSubjectRef = useRef<string | null>(null);
   const editorDirty = Boolean(
     editor && editorBaseline && JSON.stringify(editor) !== JSON.stringify(editorBaseline),
   );
@@ -357,6 +360,9 @@ export default function StoriesPage({
     // these — leaving the form ready to regenerate the wrong Story.
     setSelectedSubject(null);
     setSubjectQuery('');
+    // The selector was cleared on purpose, so the arriving subject has not been
+    // named yet and must be allowed to name it again.
+    namedSubjectRef.current = null;
   }, [subjectResolving]);
 
   useEffect(() => {
@@ -380,9 +386,15 @@ export default function StoriesPage({
   // then the selector stays empty rather than showing a guessed kind or an
   // IRI as if it were a label.
   useEffect(() => {
-    if (!initialSubjectIri) return;
+    // Name each subject at most ONCE. The catalog is refetched on every open
+    // (Lesson 7039c7f3), so this effect re-runs and would overwrite the reader's
+    // choice — a URL-named subject made the dropdown impossible to change.
+    // "The selector is empty" is not a usable guard: typing clears
+    // `selectedSubject`, so searching would re-arm the assignment.
+    if (!initialSubjectIri || namedSubjectRef.current === initialSubjectIri) return;
     const match = subjects.find((subject) => subject.iri === initialSubjectIri);
     if (match) {
+      namedSubjectRef.current = initialSubjectIri;
       setSelectedSubject(match);
       setSubjectQuery(match.label);
     }
@@ -553,7 +565,9 @@ export default function StoriesPage({
                   options={subjects}
                   value={selectedSubject}
                   inputValue={subjectQuery}
-                  filterOptions={(options, state) => filterStorySubjects(options, state.inputValue)}
+                  filterOptions={(options, state) =>
+                    filterStorySubjects(options, state.inputValue, selectedSubject)
+                  }
                   groupBy={(option) => option.kind}
                   getOptionLabel={(option) => option.label}
                   isOptionEqualToValue={(option, value) => option.iri === value.iri}
@@ -579,7 +593,7 @@ export default function StoriesPage({
                       {...params}
                       label="Find an entity"
                       placeholder="Component, decision, requirement, lesson, or code symbol"
-                      helperText="Browse the complete current catalog by category, or type to filter."
+                      helperText="Browse the subjects MOOSEDev has recorded knowledge about, or type to search every indexed name."
                     />
                   )}
                   renderOption={(props, option) => (
@@ -587,8 +601,13 @@ export default function StoriesPage({
                       <Box>
                         <Typography variant="body2">{option.label}</Typography>
                         {option.description ? (
-                          <Typography variant="caption" color="text.secondary">
+                          <Typography variant="caption" color="text.secondary" display="block">
                             {option.description}
+                          </Typography>
+                        ) : null}
+                        {option.no_recorded_knowledge ? (
+                          <Typography variant="caption" color="warning.main" display="block">
+                            Nothing recorded about this yet
                           </Typography>
                         ) : null}
                       </Box>

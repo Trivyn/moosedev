@@ -562,6 +562,7 @@ fn generated_boundary_round_trips_as_intrinsic_subject_evidence() {
         kind: "SystemComponent".to_string(),
         label: "Boundary component".to_string(),
         description: Some("Owns src/boundary/".to_string()),
+        no_recorded_knowledge: false,
     };
     let (generated, _) = generated_beats(&component, "unknown", &[], &[]);
     let draft = StoryRecipe {
@@ -628,7 +629,10 @@ fn record_and_topic_subjects_generate_from_current_project_knowledge() {
 
     let catalog = story_subjects(&state, None, 1).unwrap();
     assert!(catalog.iter().any(|subject| subject.iri == record_iri));
-    assert!(catalog.iter().any(|subject| subject.iri == code_iri));
+    // Nothing is recorded about this code entity, so the catalog marks it.
+    assert!(catalog
+        .iter()
+        .any(|subject| subject.iri == code_iri && subject.no_recorded_knowledge));
     let search = story_subjects(&state, Some("plain language"), 12).unwrap();
     assert!(search
         .iter()
@@ -927,6 +931,7 @@ fn presentation_only_generation_preserves_structure_without_issuing_grants() {
         kind: "SystemComponent".to_string(),
         label: "Other".to_string(),
         description: None,
+        no_recorded_knowledge: false,
     };
     let empty_index = StoryResolutionIndex::build(&state).unwrap();
     let sparse = generate_component_story(
@@ -992,6 +997,7 @@ fn drifted_subjects_remain_readable_but_never_issue_checks() {
             kind: "SystemComponent".to_string(),
             label: "Retired component".to_string(),
             description: None,
+            no_recorded_knowledge: false,
         },
         None,
     )
@@ -2801,4 +2807,40 @@ fn narration_excludes_proposed_but_allows_labeled_history() {
         section_kind: None,
     });
     assert!(!narration_evidence_is_eligible(&run));
+}
+
+#[test]
+fn catalog_marks_code_the_graph_records_nothing_about() {
+    let state = story_state("knowledge-bearing-catalog");
+    let recorded_code = "https://example.test/code/catalog_recorded";
+    let bare_code = "https://example.test/code/catalog_bare";
+    let code_first = "https://example.test/code/catalog_satisfies";
+    let mint = |iri: &str, name: &str| {
+        type_code_entity(&state, iri, &format!("catalog {name} symbol"), name)
+    };
+    mint(recorded_code, "catalog_recorded");
+    mint(bare_code, "catalog_bare");
+    mint(code_first, "catalog_satisfies");
+
+    // Superseded knowledge still makes a Story worth reading, so it still counts
+    // as knowledge recorded about the entity.
+    let retired = record_with_status(&state, "Retired catalog decision", "superseded");
+    link_edge(&state, &retired, "concerns", recorded_code);
+    // A link written from the code end, which the graph does not always
+    // materialize in both directions, counts the same.
+    let satisfied = record_with_status(&state, "Catalog requirement", "accepted");
+    link_edge(&state, code_first, "satisfies", &satisfied);
+
+    let catalog = story_subjects(&state, None, 300).unwrap();
+    let position = |iri: &str| {
+        catalog
+            .iter()
+            .position(|subject| subject.iri == iri)
+            .unwrap_or_else(|| panic!("{iri} must be in the catalog"))
+    };
+    assert!(!catalog[position(recorded_code)].no_recorded_knowledge);
+    assert!(!catalog[position(code_first)].no_recorded_knowledge);
+    assert!(catalog[position(bare_code)].no_recorded_knowledge);
+    // Whatever the labels, knowledge-bearing code is offered first.
+    assert!(position(recorded_code) < position(bare_code));
 }
