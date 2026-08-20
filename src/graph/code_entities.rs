@@ -618,9 +618,29 @@ fn has_realizes(state: &AppState, terms: &CodeTerms, iri: &str) -> anyhow::Resul
 /// can never change anything, instead of to the lazy `link_code` path that is
 /// actually how records attach there.
 pub fn has_mintable_definitions(definitions: &[DefinitionEntry]) -> bool {
-    definitions
-        .iter()
-        .any(|entry| (entry.is_module || entry.is_public) && !is_test_path(&entry.file))
+    definitions.iter().any(|entry| {
+        (entry.is_module || entry.is_public) && !is_test_path(&entry.file) && !is_type_member(entry)
+    })
+}
+
+/// True when the definition is a member of another declaration rather than a
+/// declaration that can carry rationale of its own.
+///
+/// A `pub` field is public API by visibility, so the visibility gate admits it —
+/// but nobody records an architectural decision about a field. The reason a
+/// field exists is the reason its TYPE exists, and that rationale attaches to
+/// the type. Batch-minting one entity per field made fields 44% of this
+/// project's catalog (759 of 1,723) carrying 2 records between them, and
+/// charged all 759 to the comprehension-debt denominator as public API that
+/// would never be documented.
+///
+/// Excluding them from BATCH minting does not make them unlinkable. It is
+/// exactly the treatment private items already get: `link_code` still lazily
+/// mints any field that turns out to deserve an anchor, which is the right path
+/// for the occasional field carrying its own invariant.
+pub(crate) fn is_type_member(entry: &DefinitionEntry) -> bool {
+    // SCIP `SymbolInformation.Kind`, rendered by its Debug name at ingest.
+    entry.kind.as_deref() == Some("Field")
 }
 
 /// Apply the batch minting scope rule and count the two skip classes.
@@ -631,7 +651,7 @@ fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, us
     for entry in definitions {
         if is_test_path(&entry.file) {
             skipped_tests += 1;
-        } else if !(entry.is_module || entry.is_public) {
+        } else if !(entry.is_module || entry.is_public) || is_type_member(entry) {
             skipped_scope += 1;
         } else {
             kept.push(entry.clone());
@@ -759,6 +779,38 @@ mod tests {
         assert_eq!(kept, vec![module, public_fn]);
         assert_eq!(skipped_scope, 1);
         assert_eq!(skipped_tests, 1);
+    }
+
+    #[test]
+    fn mint_rule_skips_public_fields_as_members_of_their_type() {
+        // A `pub` field passes the visibility gate, so only the kind rule keeps
+        // it out. On this project that was 759 entities carrying 2 records.
+        let declaration = entry(
+            "rust-analyzer cargo moosedev 0.6.3 graph/Widget#",
+            "src/graph.rs",
+            false,
+            true,
+        );
+        let field = DefinitionEntry {
+            kind: Some("Field".to_string()),
+            ..entry(
+                "rust-analyzer cargo moosedev 0.6.3 graph/Widget#size.",
+                "src/graph.rs",
+                false,
+                true,
+            )
+        };
+
+        let (kept, skipped_scope, skipped_tests) =
+            mint_candidates(&[declaration.clone(), field.clone()]);
+
+        assert_eq!(kept, vec![declaration]);
+        assert_eq!(skipped_scope, 1, "the field is a scope skip, not a test skip");
+        assert_eq!(skipped_tests, 0);
+        // Batch scope only: lazy anchoring must still reach it, exactly as it
+        // does for private items.
+        assert!(is_type_member(&field));
+        assert!(!has_mintable_definitions(&[field]));
     }
 
     #[test]
