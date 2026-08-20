@@ -69,7 +69,8 @@ pub fn last_descriptor_name(raw: &str) -> Option<String> {
         .map(|descriptor| descriptor.name.clone())
 }
 
-/// True for a parsed, non-module symbol whose ancestors are all namespaces.
+/// True for a parsed symbol whose ancestor descriptors are all namespaces and
+/// whose last descriptor declares an entity.
 pub(crate) fn is_top_level_declaration(raw: &str) -> bool {
     let Ok(symbol) = parse_symbol(raw) else {
         return false;
@@ -77,10 +78,34 @@ pub(crate) fn is_top_level_declaration(raw: &str) -> bool {
     let Some((last, ancestors)) = symbol.descriptors.split_last() else {
         return false;
     };
-    let suffix = |descriptor: &scip::types::Descriptor| {
-        descriptor.suffix.enum_value().ok() == Some(descriptor::Suffix::Namespace)
+    ancestors.iter().all(is_namespace) && declares_an_entity(last)
+}
+
+/// True when a descriptor names something declarable: a type (`#`), a term
+/// (`.`), a method (`().`), or a macro (`!`).
+///
+/// An allowlist, deliberately, rather than "anything that is not a namespace".
+/// The negative form admitted every suffix nobody had enumerated — above all
+/// `Meta` (`:`), which producers emit for anonymous members such as
+/// object-literal keys. Parameters and type parameters are excluded for the
+/// same reason: they are parts of a declaration, not declarations.
+fn declares_an_entity(descriptor: &scip::types::Descriptor) -> bool {
+    let Ok(suffix) = descriptor.suffix.enum_value() else {
+        return false;
     };
-    ancestors.iter().all(suffix) && !suffix(last)
+    // Compared by value, never pattern-matched. The generated `Suffix` aliases
+    // `Package` onto `Namespace`'s protobuf value, and its own header warns
+    // that matching is unsound for aliased enums; `==` routes through the
+    // protobuf-value `PartialEq`, where `matches!` would silently disagree.
+    suffix == descriptor::Suffix::Type
+        || suffix == descriptor::Suffix::Term
+        || suffix == descriptor::Suffix::Method
+        || suffix == descriptor::Suffix::Macro
+}
+
+/// True when a descriptor names a namespace, i.e. a module or package segment.
+fn is_namespace(descriptor: &scip::types::Descriptor) -> bool {
+    descriptor.suffix.enum_value().ok() == Some(descriptor::Suffix::Namespace)
 }
 
 /// True when the symbol's last descriptor is a namespace, i.e. the symbol names
@@ -124,6 +149,55 @@ mod tests {
         "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/ExportedClass#method().";
     const TS_PARAMETER: &str =
         "scip-typescript npm vis-fixture 1.2.3 src/`vis.ts`/exportedFn().(x)";
+
+    // Grammar-generic fixtures, one per descriptor suffix. Producer-specific
+    // symbol shapes belong in the `lang/` module for that producer.
+    const PKG: &str = "fixture manager pkg 1.0.0";
+
+    #[test]
+    fn top_level_declaration_accepts_every_declaration_suffix() {
+        for (suffix, raw) in [
+            ("type", format!("{PKG} ns/Thing#")),
+            ("term", format!("{PKG} ns/value.")),
+            ("method", format!("{PKG} ns/call().")),
+            ("macro", format!("{PKG} ns/expand!")),
+        ] {
+            assert!(is_top_level_declaration(&raw), "{suffix}: {raw}");
+        }
+    }
+
+    #[test]
+    fn top_level_declaration_rejects_every_non_declaration_suffix() {
+        // The allowlist exists for these. A gate phrased as "anything but a
+        // namespace" accepted all but the first, which is how object-literal
+        // members reached the always-mint surface.
+        for (suffix, raw) in [
+            ("namespace", format!("{PKG} ns/inner/")),
+            ("meta", format!("{PKG} ns/anonymous:")),
+            ("parameter", format!("{PKG} ns/call().(arg)")),
+            ("type parameter", format!("{PKG} ns/Thing#[T]")),
+        ] {
+            assert!(!is_top_level_declaration(&raw), "{suffix}: {raw}");
+        }
+    }
+
+    #[test]
+    fn top_level_declaration_requires_namespace_ancestors() {
+        // A declaration suffix is necessary but not sufficient: a member of a
+        // declared type is addressable only through its parent.
+        assert!(!is_top_level_declaration(&format!("{PKG} ns/Thing#member.")));
+        assert!(!is_top_level_declaration(&format!(
+            "{PKG} ns/Outer#Inner#deep."
+        )));
+    }
+
+    #[test]
+    fn top_level_declaration_reports_rather_than_guesses() {
+        assert!(!is_top_level_declaration("not a scip symbol"));
+        assert!(!is_top_level_declaration(""));
+        // Tree-sitter identities are not SCIP and have no descriptors.
+        assert!(!is_top_level_declaration("ts:rust:src/a.rs:fn:a::b"));
+    }
 
     #[test]
     fn normalizes_package_version() {

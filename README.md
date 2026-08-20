@@ -79,7 +79,7 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 
 ## Status
 
-The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.9.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
+The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.10.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
 
 The v1 memory foundation remains intact: typed capture and lifecycle management, symbolic query and recall, alignment, SPARQL, SHACL validation, graph import/export, shared multi-client operation, bootstrap workflows, generated documentation, and a loopback web workbench.
 

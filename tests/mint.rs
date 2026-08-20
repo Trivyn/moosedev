@@ -289,6 +289,65 @@ fn lazy_minted_private_entity_is_not_reported_as_orphan() {
 }
 
 #[test]
+fn an_entity_narrowed_out_of_scope_is_reported_rather_than_vanishing() {
+    // Narrowing the mint scope leaves already-minted entities alive in the
+    // substrate but unmanaged by minting. They are not orphans (the symbol is
+    // still defined) and not `unchanged` (they are never planned), so without
+    // the out_of_scope bucket they appear in no line of the report at all.
+    let state = bootstrap("narrowed-out-of-scope");
+    seed_component(&state, "runtime component", "src/");
+    let components = graph::load_components(&state).unwrap();
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+
+    let in_scope = def(
+        "runtime/widget().",
+        "src/runtime.rs",
+        Some("widget"),
+        Some("Function"),
+        Some("pub fn widget()"),
+        false,
+        true,
+    );
+    let plan = graph::plan_mint(
+        &state,
+        std::slice::from_ref(&in_scope),
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
+    assert_eq!(plan.create.len(), 1);
+    assert_eq!(plan.out_of_scope, Vec::<(String, String)>::new());
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+
+    // The same definition, now judged out of scope — exactly what a narrowed
+    // visibility predicate does to a previously minted symbol.
+    let narrowed = DefinitionEntry {
+        is_public: false,
+        ..in_scope.clone()
+    };
+    let plan = graph::plan_mint(
+        &state,
+        std::slice::from_ref(&narrowed),
+        &terms,
+        &components,
+        state.substrate().as_deref(),
+    )
+    .unwrap();
+
+    assert_eq!(plan.create.len(), 0);
+    assert_eq!(plan.update.len(), 0);
+    assert_eq!(plan.unchanged, 0, "it is no longer planned");
+    assert_eq!(
+        plan.orphaned,
+        Vec::<(String, String)>::new(),
+        "its symbol is still a live workspace definition"
+    );
+    assert_eq!(plan.out_of_scope.len(), 1);
+    assert_eq!(plan.out_of_scope[0].1, narrowed.normalized_symbol);
+}
+
+#[test]
 fn syntactic_entity_is_orphaned_only_when_the_substrate_proves_it_dead() {
     let state = bootstrap("syntactic-orphan");
     seed_component(&state, "fixture component", "tests/fixtures/");

@@ -1191,7 +1191,7 @@ fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]
     }
 
     println!(
-        "summary: create={} update={} unchanged={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={}",
+        "summary: create={} update={} unchanged={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={} out-of-scope={}",
         plan.create.len(),
         plan.update.len(),
         plan.unchanged,
@@ -1199,7 +1199,8 @@ fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]
         plan.skipped_tests,
         plan.collisions.len(),
         plan.unmapped_paths.len(),
-        plan.orphaned.len()
+        plan.orphaned.len(),
+        plan.out_of_scope.len()
     );
 }
 

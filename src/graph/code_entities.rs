@@ -85,6 +85,17 @@ pub struct MintPlan {
     /// definitions. Out-of-scope (lazily minted private) entities are NOT
     /// orphans while their symbol still exists. Report only.
     pub orphaned: Vec<(String, String)>,
+    /// (iri, normalized_symbol) minted entities whose symbol is STILL a live
+    /// workspace definition but which batch minting does not manage: they fall
+    /// outside the scope rule. Not orphans (the symbol exists) and not
+    /// `unchanged` (they were never planned), so without this bucket they are
+    /// invisible in every line of the report.
+    ///
+    /// Deliberately includes legitimately lazy-minted private entities — the
+    /// plan cannot tell those apart from entities a scope NARROWING left
+    /// behind, and pretending otherwise would be a guess. Report only;
+    /// deciding which are prunable needs evidence this plan does not hold.
+    pub out_of_scope: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +205,12 @@ pub fn plan_mint(
 ) -> anyhow::Result<MintPlan> {
     let (candidates, skipped_scope, skipped_tests) = mint_candidates(definitions);
     let (kept, collisions) = dedupe_collisions(candidates);
+    // Snapshotted from the same `kept` minting itself walks, so the scope test
+    // below cannot drift from the scope actually applied.
+    let in_scope = kept
+        .iter()
+        .map(|entry| entry.normalized_symbol.clone())
+        .collect::<BTreeSet<_>>();
     let existing = entities_by_symbol(state, terms)?;
     // Orphans are judged against ALL workspace definitions, not the mint scope:
     // lazily minted private entities are alive in the substrate and must not be
@@ -242,23 +259,26 @@ pub fn plan_mint(
         }
     }
 
-    plan.orphaned = existing
-        .into_iter()
-        .filter_map(|(symbol, iri)| {
-            if substrate_symbols.contains(&symbol) {
-                return None;
+    for (symbol, iri) in existing {
+        if substrate_symbols.contains(&symbol) {
+            if !in_scope.contains(&symbol) {
+                plan.out_of_scope.push((iri, symbol));
             }
-            if symbol.starts_with("ts:") {
-                // Syntactic anchors are orphaned only when the substrate can
-                // positively prove their declaration or file is gone.
-                return substrate
-                    .and_then(|substrate| substrate.identity_alive(&symbol))
-                    .is_some_and(|alive| !alive)
-                    .then_some((iri, symbol));
+            continue;
+        }
+        if symbol.starts_with("ts:") {
+            // Syntactic anchors are orphaned only when the substrate can
+            // positively prove their declaration or file is gone.
+            if substrate
+                .and_then(|substrate| substrate.identity_alive(&symbol))
+                .is_some_and(|alive| !alive)
+            {
+                plan.orphaned.push((iri, symbol));
             }
-            Some((iri, symbol))
-        })
-        .collect();
+            continue;
+        }
+        plan.orphaned.push((iri, symbol));
+    }
     Ok(plan)
 }
 

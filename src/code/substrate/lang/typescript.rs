@@ -75,35 +75,20 @@ fn command(target: &ProducerTarget, output_tmp: &Path) -> Command {
 }
 
 fn is_public(symbol: &SymbolData) -> bool {
-    // scip-typescript 0.4.0 does not encode export-ness. This structural
-    // over-approximation therefore includes private top-level declarations,
-    // while members and parameters remain lazy-mint-only.
-    !symbol.is_local
-        && symbols::is_top_level_declaration(&symbol.symbol)
-        && names_an_identifier(&symbol.symbol)
-}
-
-/// Whether the terminal descriptor is a real identifier.
-///
-/// scip-typescript emits object-literal and interface keys as descriptors with
-/// their quotes intact — `'& h1'`, `'background-color'`, `'Content-Type'` — and
-/// a top-level styled/theme object puts them directly under the file namespace,
-/// where [`symbols::is_top_level_declaration`] cannot tell them from a declared
-/// surface. They are properties of a value, addressable by name from nowhere, so
-/// minting them as project API produced entities like `'& h1'0`.
-fn names_an_identifier(raw: &str) -> bool {
-    symbols::last_descriptor_name(raw).is_some_and(|name| {
-        let mut characters = name.chars();
-        characters
-            .next()
-            .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
-            && characters.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-    })
+    // scip-typescript 0.4.0 does not encode export-ness, so this structural
+    // gate is a documented over-approximation: private top-level declarations
+    // batch-mint too. Members and parameters stay lazy-mint-only, which
+    // `is_top_level_declaration`'s declaration-suffix allowlist enforces —
+    // scip-typescript parents a PropertyAssignment straight to the file
+    // namespace (FileIndexer.ts), so an `sx={{ height: 8 }}` key has
+    // all-namespace ancestors and is told apart from a declaration only by its
+    // `Meta` suffix.
+    !symbol.is_local && symbols::is_top_level_declaration(&symbol.symbol)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_public, names_an_identifier};
+    use super::is_public;
     use crate::code::substrate::scip::SymbolData;
 
     fn symbol(raw: &str) -> SymbolData {
@@ -118,35 +103,56 @@ mod tests {
         }
     }
 
+    // Every fixture below is copied verbatim out of this repository's own
+    // scip-typescript index. Hand-written symbol shapes are what let the
+    // object-literal defect survive a guard written specifically for it: the
+    // guard's test asserted on a `.` tail, while the producer emits `:`.
+
     #[test]
-    fn a_declared_surface_still_mints() {
-        let raw = "scip-typescript npm moosedev-ui 0.6.3 src/pages/`RecordPage.tsx`/RecordPage().";
-        assert!(names_an_identifier(raw));
-        assert!(is_public(&symbol(raw)));
+    fn declared_surface_mints_across_every_declaration_suffix() {
+        for raw in [
+            // Method
+            "scip-typescript npm moosedev-ui 0.8.0 src/pages/`StoriesPage.tsx`/StoriesPage().",
+            // Type
+            "scip-typescript npm moosedev-ui 0.8.0 src/pages/`StoriesPage.tsx`/StoriesPageProps#",
+            // Term
+            "scip-typescript npm moosedev-ui 0.8.0 src/api/`client.ts`/api.",
+        ] {
+            assert!(is_public(&symbol(raw)), "{raw}");
+        }
     }
 
     #[test]
-    fn quoted_object_keys_do_not_mint_as_project_api() {
-        // A styled/theme object at file scope puts its CSS keys directly under
-        // the file namespace, where the structural top-level test cannot tell
-        // them from a declaration. These produced entities like `'& h1'0`.
+    fn object_literal_keys_do_not_mint_as_project_api() {
+        // scip-typescript emits one symbol per object-literal member, parented
+        // to the file namespace. These minted 746 entities on this repository —
+        // 30% of the catalog — every one an `sx` prop or a CSS key, none of
+        // them addressable as project API. Note `'& code'0`, which reached the
+        // Story subject selector as a browsable subject.
         for raw in [
-            "scip-typescript npm moosedev-ui 0.6.3 src/styles/`theme.ts`/`'& h1'0`.",
-            "scip-typescript npm moosedev-ui 0.6.3 src/styles/`theme.ts`/`'background-color'1`.",
-            "scip-typescript npm moosedev-ui 0.6.3 src/api/`client.ts`/`'Content-Type'0`.",
+            "scip-typescript npm moosedev-ui 0.8.0 src/components/layout/`AppShell.tsx`/height0:",
+            "scip-typescript npm moosedev-ui 0.8.0 src/api/`client.ts`/`'Content-Type'0`:",
+            "scip-typescript npm moosedev-ui 0.8.0 src/components/artifacts/`GeneratedArtifactPage.tsx`/`'& code'0`:",
         ] {
-            assert!(!names_an_identifier(raw), "{raw}");
             assert!(!is_public(&symbol(raw)), "{raw}");
         }
     }
 
     #[test]
-    fn identifier_shapes_typescript_actually_uses_are_kept() {
-        assert!(names_an_identifier(
-            "scip-typescript npm ui 1.0.0 src/`a.ts`/$dollarNamed."
-        ));
-        assert!(names_an_identifier(
-            "scip-typescript npm ui 1.0.0 src/`a.ts`/_private2."
-        ));
+    fn members_of_a_declared_type_stay_lazy_mint_only() {
+        // A Term, but with a Type ancestor — rejected on the ancestor rule
+        // rather than the suffix allowlist.
+        let raw = concat!(
+            "scip-typescript npm moosedev-ui 0.8.0 ",
+            "src/pages/`StoriesPage.tsx`/StoriesPageProps#onNavigateRecord."
+        );
+        assert!(!is_public(&symbol(raw)), "{raw}");
+    }
+
+    #[test]
+    fn local_symbols_never_mint() {
+        let mut local = symbol("scip-typescript npm moosedev-ui 0.8.0 src/api/`client.ts`/api.");
+        local.is_local = true;
+        assert!(!is_public(&local));
     }
 }
