@@ -49,8 +49,78 @@ pub struct RecordDetailResponse {
     pub status: Option<String>,
     pub timestamp: Option<String>,
     pub author: Option<String>,
+    /// The sole current SystemComponent whose Story can be launched from this
+    /// record, selected by the daemon's lifecycle and relation policy.
+    pub story_component_iri: Option<String>,
+    /// Present only for CodeEntity records: the runtime substrate projection
+    /// of where this entity lives. Never a persisted graph claim.
+    pub code: Option<RecordCodeDetail>,
     pub outgoing: Vec<RecordOutgoingEdge>,
     pub incoming: Vec<RecordIncomingEdge>,
+}
+
+/// Source-aware detail for one CodeEntity record.
+///
+/// Graph-sourced fields (symbol, name, kind, paths) are always present when
+/// minted. The substrate-sourced fields (signature, definition,
+/// `source_available`) reflect the CURRENT index and go quiet whenever the
+/// index cannot vouch for them.
+#[derive(Serialize)]
+pub struct RecordCodeDetail {
+    /// Substrate symbol recorded in the graph — SCIP, or a `ts:` identity.
+    pub symbol: Option<String>,
+    pub name: Option<String>,
+    /// Code-layer kind literal, such as `Function`.
+    pub entity_kind: Option<String>,
+    pub logical_path: Option<String>,
+    /// Repo-relative defining path recorded in the graph.
+    pub defined_in_path: Option<String>,
+    /// Declaration signature from the current substrate, when the producer
+    /// supplied one.
+    pub signature: Option<String>,
+    /// Repo-relative path the substrate currently defines this entity in.
+    /// It can differ from `defined_in_path` after a move without a re-mint.
+    pub source_path: Option<String>,
+    /// 1-based definition range from the current substrate.
+    pub definition: Option<SourceSpan>,
+    /// True when `GET /records/{uuid}/source` will serve text.
+    pub source_available: bool,
+    /// Why no preview is offered, when `source_available` is false.
+    pub source_unavailable_reason: Option<String>,
+    /// True when the loaded substrate was built from a different commit.
+    pub substrate_stale: bool,
+}
+
+/// A 1-based, UTF-8-byte source span. Public coordinates are 1-based on both
+/// axes; the substrate's internal ranges are 0-based and end-exclusive.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+/// A bounded slice of trusted, indexed source text.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct RecordSourceResponse {
+    /// Repo-relative path the text was read from.
+    pub path: String,
+    /// `context` or `full`.
+    pub scope: String,
+    /// 1-based line number of `text`'s first line.
+    pub start_line: u32,
+    /// 1-based line number of `text`'s last line.
+    pub end_line: u32,
+    /// Total lines in the indexed file, so a client can describe what it is
+    /// NOT showing.
+    pub total_lines: u32,
+    /// True when a cap dropped lines that the requested scope would include.
+    pub truncated: bool,
+    /// 1-based definition range, for highlighting.
+    pub definition: Option<SourceSpan>,
+    /// Plain text. Clients must render it escaped, never as markup.
+    pub text: String,
 }
 
 #[derive(Serialize)]
@@ -95,6 +165,10 @@ pub struct WhyCoverageResponse {
 #[derive(Serialize)]
 pub struct ComponentCoverageDto {
     pub iri: Option<String>,
+    /// Present when the component is eligible for Story generation.
+    pub story_component_iri: Option<String>,
+    /// Lifecycle status used by clients to mirror the backend working-set rule.
+    pub status: Option<String>,
     pub name: String,
     pub numerator: usize,
     pub denominator: usize,

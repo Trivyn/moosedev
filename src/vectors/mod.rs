@@ -19,8 +19,8 @@
 //! several generations no different from a single one. Bump that constant when
 //! changing the DDL, the columns written, or the namespace.
 
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -205,10 +205,12 @@ async fn write_schema_version(db_path: &Path) -> anyhow::Result<()> {
         .connect_with(opts)
         .await
         .map_err(|e| anyhow::anyhow!("open vector db to stamp schema version: {e}"))?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        .execute(&pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("create store_meta: {e}"))?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("create store_meta: {e}"))?;
     sqlx::query(
         "INSERT INTO store_meta(key, value) VALUES(?, ?) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",

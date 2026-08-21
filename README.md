@@ -79,7 +79,7 @@ All of the tools below are live. They speak MCP over stdio; the LLM acts only as
 
 ## Status
 
-The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.9.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
+The complete **v2.0–v2.3 product scope is implemented and acceptance-tested on this branch**. MOOSEDev remains early, pre-production software; “v2” describes the delivered product phase, not a claim of production maturity. The source tree is version `0.10.0`; the install script and Homebrew formula deliver the latest published release, which can lag the branch until it is tagged.
 
 The v1 memory foundation remains intact: typed capture and lifecycle management, symbolic query and recall, alignment, SPARQL, SHACL validation, graph import/export, shared multi-client operation, bootstrap workflows, generated documentation, and a loopback web workbench.
 
@@ -91,6 +91,13 @@ v2 adds the code-aware and active layers:
 - **v2.3 — ratified editor writes:** LSP code actions propose record links, roles, and criticality; every change goes through the ratification queue, with no direct LSP graph-write path. Push/pull diagnostic parity and the real Neovim conformance client are covered by tests.
 
 The phase definitions and acceptance criteria are in [`spec/MOOSEDev_v2_spec.md`](./spec/MOOSEDev_v2_spec.md). Delivered editor clients: Zed, Neovim, VS Code, and Emacs (eglot/lsp-mode) — all thin stanzas over the same server.
+
+The human workbench also includes **Story**, a concise guided view that projects
+current, accepted graph knowledge into an ordered explanation of a subsystem,
+with evidence and code anchors kept visible. Story remains symbolic without an
+LLM and can use a configured model only to polish the narration; curated routes
+stay outside the authoritative project graph. See the
+[Story feature specification](./spec/MOOSEDev_story_spec.md).
 
 ## Getting started
 
@@ -340,7 +347,7 @@ The `.env` is looked up from the current directory upward, stopping at the first
 directory holding `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `setup.py`, `setup.cfg`,
 or `requirements.txt`. The nearest `.env` wins, and the search never escapes past the project root.
 
-- **LLM endpoint** (optional, for assisted NLQ/chat): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL` / `MOOSEDEV_LLM_ASSIST_LEVEL` (how aggressively the LLM sensor assists). When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode; `get_relevant_context`, `sparql`, capture, validation, and symbolic `query` remain available. *Local-first; cloud is opt-in.*
+- **LLM endpoint** (optional, for assisted NLQ/chat/Story narration): set `MOOSEDEV_LLM_BASE_URL` to an OpenAI-compatible endpoint, plus optional `MOOSEDEV_LLM_API_KEY`, `MOOSEDEV_LLM_MODEL`, and `MOOSEDEV_LLM_ASSIST_LEVEL`. `MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS` declares the loaded model capacity (default 32768); Story conservatively uses at most one quarter, capped at 32K tokens, for one structured narration request. `MOOSEDEV_LLM_STRUCTURED_OUTPUT` is `auto` (default), `required`, or `disabled`. When no base URL is configured, MOOSEDev pins LLM assistance to pure-symbolic mode. *Local-first; cloud is opt-in.*
 - **Data directory** (`MOOSEDEV_DATA_DIR`): where the durable knowledge graph and session database live. Runtime state is kept out of version control except `kg.nq`, the committed canonical serialization of the project graph (see "Version-controlled memory").
 - **Socket** (`MOOSEDEV_SOCKET`, shared mode): override the per-data-dir Unix socket path used by `--serve` / `--connect`.
 - **Web UI address** (`MOOSEDEV_HTTP_ADDR`, shared mode): bind address for the human-facing web UI. Defaults to an ephemeral loopback port (`127.0.0.1:0`); set a fixed `host:port` for a stable URL or network exposure. `MOOSEDEV_NO_HTTP=1` disables the UI entirely.

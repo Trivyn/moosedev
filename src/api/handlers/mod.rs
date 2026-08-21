@@ -1,5 +1,6 @@
 pub mod adrs;
 pub mod chat;
+pub mod code;
 pub mod constraints;
 pub mod debt;
 pub mod export;
@@ -11,9 +12,11 @@ pub mod records;
 pub mod requirements;
 pub mod sparql;
 pub mod static_files;
+pub mod stories;
 
 pub use adrs::*;
 pub use chat::*;
+pub use code::*;
 pub use constraints::*;
 pub use debt::*;
 pub use export::*;
@@ -24,3 +27,4 @@ pub use proposals::*;
 pub use records::*;
 pub use requirements::*;
 pub use sparql::*;
+pub use stories::*;

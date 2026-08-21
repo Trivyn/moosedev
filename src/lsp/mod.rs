@@ -39,7 +39,7 @@ use crate::code::substrate::{
 };
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, get_entity_dossier, is_debt_surface,
-    looks_unminted, pending_count, render_markdown, AppState, CodeTerms, DossierTarget,
+    looks_unminted, pending_count, render_dossier_markdown, AppState, CodeTerms, DossierTarget,
     ProposalKind, RecordSummary, CRITICALITY_LOCALS, ROLE_LOCALS, UNMINTED_STORE_HINT,
 };
 
@@ -1785,10 +1785,15 @@ impl LspSession {
                 }
             };
 
+        // Reached only for an entity that already broke the silence rule, so
+        // the link rides existing knowledge rather than creating a new reason
+        // to interrupt. It is omitted when this daemon run is not serving the
+        // workbench, so hover never offers a dead port.
+        let story_url = crate::graph::workbench_story_url(&self.state, &dossier.entity_iri);
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: render_markdown(&dossier),
+                value: render_dossier_markdown(&dossier, story_url.as_deref()),
             }),
             range: None,
         })

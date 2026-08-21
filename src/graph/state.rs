@@ -46,6 +46,25 @@ pub fn open_store(data_dir: &Path) -> anyhow::Result<Store> {
     Store::open(data_dir.join("kg")).map_err(|e| anyhow::anyhow!("open persistent store: {e}"))
 }
 
+fn initial_project_root(data_dir: &Path) -> PathBuf {
+    let data_dir = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    if data_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".moosedev" || name == "data")
+    {
+        data_dir
+            .parent()
+            .filter(|parent| parent.parent().is_some())
+            .unwrap_or(data_dir.as_path())
+            .to_path_buf()
+    } else {
+        data_dir
+    }
+}
+
 /// Architecture-ontology predicate IRIs the capture tool writes, resolved from
 /// the loaded vocabulary at bootstrap by local name (see the `CAPTURE_*_LOCAL`
 /// constants). Resolving up front fails fast if the ontology lacks an expected
@@ -105,6 +124,9 @@ pub struct AppState {
     pub llm: OpenAiCompatClient,
     /// True only when `MOOSEDEV_LLM_BASE_URL` explicitly opts into an LLM provider.
     pub llm_configured: bool,
+    /// Loaded provider/model context capacity. Story uses a conservative
+    /// fraction as its complete request budget rather than trying to fill it.
+    pub llm_context_window_tokens: usize,
     pub ontology_resolver: MooseDevOntologyResolver,
     pub model: String,
     /// Durable multi-turn MOOSE chat sessions, enabled by the shared backend for
@@ -112,6 +134,12 @@ pub struct AppState {
     pub session_db: Option<Arc<SessionDb>>,
     /// Data dir (the persistent KG store and the built vector DB live here).
     pub data_dir: PathBuf,
+    /// Canonical repository identity used by project-owned file features.
+    project_root: RwLock<PathBuf>,
+    /// Project-scoped, bounded grants for opaque Story comprehension checks.
+    pub(crate) story_checks: std::sync::Mutex<crate::stories::StoryCheckRegistry>,
+    /// Successful, presentation-only Story narration projections.
+    pub(crate) story_narrations: crate::stories::StoryNarrationCache,
     /// Best-effort code substrate. Absent when no index has been built; position-
     /// based tools degrade with honest errors instead of blocking server startup.
     substrate: RwLock<Option<Arc<Substrate>>>,
@@ -163,7 +191,7 @@ impl AppState {
     /// assemble the query engine configuration (LLM endpoint + assist level read
     /// from the environment).
     pub fn bootstrap(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result<Self> {
-        Self::bootstrap_with_llm_config(data_dir, ontology_dir, LlmConfig::from_env())
+        Self::bootstrap_with_llm_config(data_dir, ontology_dir, LlmConfig::from_env()?)
     }
 
     /// Variant of [`bootstrap`](Self::bootstrap) for tests and embedded hosts
@@ -203,7 +231,12 @@ impl AppState {
         let entity_index = Arc::new(EntityIndexCache::new(64));
 
         let llm_configured = llm_cfg.configured;
-        let llm = OpenAiCompatClient::new(llm_cfg.base_url, llm_cfg.api_key);
+        let llm_context_window_tokens = llm_cfg.context_window_tokens;
+        let llm = OpenAiCompatClient::new_with_structured_output(
+            llm_cfg.base_url,
+            llm_cfg.api_key,
+            llm_cfg.structured_output,
+        );
         let ontology_resolver = MooseDevOntologyResolver::new();
 
         let engine_config = EngineConfig {
@@ -247,11 +280,15 @@ impl AppState {
             engine_config,
             llm,
             llm_configured,
+            llm_context_window_tokens,
             ontology_resolver,
             model: llm_cfg.model,
             session_db: None,
             vector_store: None,
             data_dir: data_dir.to_path_buf(),
+            project_root: RwLock::new(initial_project_root(data_dir)),
+            story_checks: std::sync::Mutex::new(crate::stories::StoryCheckRegistry::default()),
+            story_narrations: crate::stories::StoryNarrationCache::default(),
             substrate: RwLock::new(None),
             substrate_repo_root: RwLock::new(None),
             substrate_reload_lock: std::sync::Mutex::new(()),
@@ -449,15 +486,38 @@ impl AppState {
     /// indexes are normal before `moosedev index`; callers should surface
     /// substrate absence at tool-use time.
     pub fn load_substrate(&self, repo_root: &Path) {
+        let canonical_root = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf());
+        if canonical_root.parent().is_none() {
+            tracing::warn!(
+                "MOOSEDev: refusing filesystem root as project root: {}",
+                canonical_root.display()
+            );
+            return;
+        }
         *self
             .substrate_repo_root
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(repo_root.to_path_buf());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(canonical_root.clone());
+        *self
+            .project_root
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = canonical_root;
         if self.substrate().is_none() {
             tracing::info!(
                 "MOOSEDev: code substrate unavailable; it will load automatically after `moosedev index` completes"
             );
         }
+    }
+
+    /// Canonical project root configured for this state. Production substrate
+    /// configuration wins; bootstrap uses the shared project-root resolver.
+    pub fn project_root(&self) -> PathBuf {
+        self.project_root
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Install the debounced-reindex entry point. Serve-path wiring only.
@@ -833,6 +893,31 @@ mod tests {
             assist_level_from_raw(Some("5"), true),
             LlmAssistLevel::SensorWithFallback
         ));
+    }
+
+    #[test]
+    fn bootstrap_project_root_never_climbs_above_its_data_anchor() {
+        let outer = std::env::temp_dir().join(format!(
+            "moosedev-root-anchor-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let nested = outer.join("nested");
+        let conventional = nested.join(".moosedev");
+        let custom = nested.join("custom-cache");
+        std::fs::create_dir_all(&conventional).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(outer.join("Cargo.toml"), "[package]").unwrap();
+
+        assert_eq!(
+            initial_project_root(&conventional),
+            nested.canonicalize().unwrap()
+        );
+        assert_eq!(
+            initial_project_root(&custom),
+            custom.canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(outer);
     }
 
     #[test]

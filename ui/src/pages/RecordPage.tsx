@@ -2,15 +2,18 @@ import { useEffect, useState } from 'react';
 import {
   Alert,
   Box,
+  Button,
   Chip,
   CircularProgress,
   Divider,
   Stack,
   Typography,
 } from '@mui/material';
+import AutoStoriesIcon from '@mui/icons-material/AutoStories';
 import { api } from '../api/client';
 import { RecordDetailResponse } from '../api/types';
 import LinkedMarkdown, { artifactTargetForIri, ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
+import CodeEntityPanel from '../components/code/CodeEntityPanel';
 import RecordNeighborhoodGraph from '../components/graph/RecordNeighborhoodGraph';
 
 interface RecordPageProps {
@@ -18,6 +21,22 @@ interface RecordPageProps {
   onNavigateArtifact?: (target: ArtifactTarget) => void;
   onNavigateRecord?: (iri: string) => void;
   onResolveArtifact?: (target: ArtifactTarget) => void;
+  onTellStory?: (subjectIri: string) => void;
+  resolveArtifacts?: boolean;
+}
+
+/**
+ * The subject whose Story this record can launch.
+ *
+ * A CodeEntity is its own Story subject — redirecting to its containing
+ * component would answer a different question than the one the reader asked.
+ * Every other record still defers to the daemon's chosen component.
+ */
+export function storySubjectForRecord(record: RecordDetailResponse): string | null {
+  if (record.code) {
+    return record.iri;
+  }
+  return record.story_component_iri ?? null;
 }
 
 export default function RecordPage({
@@ -25,6 +44,8 @@ export default function RecordPage({
   onNavigateArtifact,
   onNavigateRecord,
   onResolveArtifact,
+  onTellStory,
+  resolveArtifacts = true,
 }: RecordPageProps) {
   const [record, setRecord] = useState<RecordDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +63,7 @@ export default function RecordPage({
         }
         const artifact = artifactTargetForIri(response.iri);
         const resolveArtifact = onResolveArtifact ?? onNavigateArtifact;
-        if (artifact && resolveArtifact) {
+        if (resolveArtifacts && artifact && resolveArtifact) {
           resolveArtifact(artifact);
           return;
         }
@@ -57,7 +78,7 @@ export default function RecordPage({
     return () => {
       cancelled = true;
     };
-  }, [uuid]);
+  }, [uuid, onNavigateArtifact, onResolveArtifact, resolveArtifacts]);
 
   if (error) {
     return (
@@ -78,6 +99,7 @@ export default function RecordPage({
   const metadata = [record.status, record.timestamp, record.author].filter(
     (value): value is string => Boolean(value),
   );
+  const storySubjectIri = storySubjectForRecord(record);
   return (
     <Box sx={{ height: '100%', overflow: 'auto', p: { xs: 2, md: 3 }, bgcolor: 'background.default' }}>
       <Stack spacing={2.5} sx={{ maxWidth: 1100 }}>
@@ -85,6 +107,11 @@ export default function RecordPage({
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
             <Chip size="small" label={record.kind} />
             <Typography variant="h5">{record.title}</Typography>
+            {storySubjectIri && onTellStory && (
+              <Button size="small" startIcon={<AutoStoriesIcon />} onClick={() => onTellStory(storySubjectIri)}>
+                Tell this Story
+              </Button>
+            )}
           </Stack>
           {metadata.length > 0 && (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
@@ -92,6 +119,8 @@ export default function RecordPage({
             </Typography>
           )}
         </Box>
+
+        {record.code && <CodeEntityPanel uuid={uuid} code={record.code} />}
 
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 650, mb: 1 }}>

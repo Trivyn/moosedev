@@ -5,7 +5,7 @@ use axum::Json;
 
 use crate::api::error::ApiError;
 use crate::api::models::{ComponentCoverageDto, WhyCoverageResponse};
-use crate::graph::{compute_why_coverage, AppState};
+use crate::graph::{compute_why_coverage, in_working_set, AppState};
 
 /// `GET /api/v1/debt` — per-component why-coverage (documented fraction of the
 /// public code surface). Thin adapter over `graph::compute_why_coverage`.
@@ -18,7 +18,15 @@ pub async fn why_coverage(
         .into_iter()
         .map(|c| {
             let coverage = c.ratio();
+            let status = c.iri.as_deref().and_then(|iri| {
+                crate::graph::context::first_literal(&state.store, iri, &state.capture.status)
+            });
             ComponentCoverageDto {
+                story_component_iri: c
+                    .iri
+                    .clone()
+                    .filter(|_| status.as_deref().is_none_or(in_working_set)),
+                status,
                 iri: c.iri,
                 name: c.name,
                 numerator: c.numerator,

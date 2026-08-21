@@ -87,9 +87,9 @@ fn main() -> anyhow::Result<()> {
 
         // Already retired (or carries no status literal to correct) — leave it.
         if statuses.is_empty()
-            || statuses.iter().any(|quad| {
-                matches!(&quad.object, Term::Literal(lit) if RETIRED.contains(&lit.value()))
-            })
+            || statuses.iter().any(
+                |quad| matches!(&quad.object, Term::Literal(lit) if RETIRED.contains(&lit.value())),
+            )
         {
             continue;
         }

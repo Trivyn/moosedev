@@ -526,13 +526,68 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
         },
     )?
     .expect("expected dossier");
-    let expected = graph::render_markdown(&expected_dossier);
+    // Hover is the dossier plus one entry point: the Story of THIS entity.
+    let story_url = format!(
+        "http://127.0.0.1:7474/#/stories/entity/{}",
+        expected_dossier
+            .entity_iri
+            .rsplit('/')
+            .next()
+            .expect("entity uuid")
+    );
+    let expected = graph::render_dossier_markdown(&expected_dossier, Some(&story_url));
 
     assert_eq!(hover_markdown(&response), expected);
     assert!(hover_markdown(&response).contains("Runtime builder hover decision"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/adrs/"));
     assert!(hover_markdown(&response).contains("Runtime builder hover constraint"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/constraints/"));
+    // Near the top: after the identity block, before the records it summarizes.
+    let markdown = hover_markdown(&response);
+    let story_offset = markdown
+        .find("[Tell me the Story](")
+        .expect("hover carries the Story link");
+    assert!(markdown.contains(&format!("[Tell me the Story]({story_url})")));
+    assert!(story_offset < markdown.find("**Records**").expect("records section"));
+    // The subject is the entity itself, not its realized component.
+    assert!(!markdown.contains("#/stories/entity/runtime"));
+
+    client.shutdown_and_exit().await?;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hover_omits_the_story_link_without_a_serving_workbench() -> anyhow::Result<()> {
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::remove("MOOSEDEV_NO_LSP");
+    let repo_root = synthetic_repo_root("no-workbench-root", "    build_server();");
+    let data_dir = fresh_dir("no-workbench-data");
+    let state = Arc::new(state_with_substrate("no-workbench-state", 4));
+    // Deliberately no publish_http_addr: this daemon run serves no workbench,
+    // so a Story link would point at a dead port.
+    let decision = record(
+        &state,
+        "ArchitecturalDecision",
+        "Runtime builder hover decision",
+    );
+    link_public(&state, &decision, 4);
+    let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
+
+    let mut client = direct_client(&socket).await?;
+    client.initialize(true).await?;
+    let response = client
+        .hover(2, file_uri(&repo_root.join("src/runtime.rs")), 7, 4)
+        .await?;
+    let markdown = hover_markdown(&response);
+
+    assert!(
+        markdown.contains("Runtime builder hover decision"),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("Tell me the Story"), "{markdown}");
+    assert!(!markdown.contains("http://"), "{markdown}");
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);

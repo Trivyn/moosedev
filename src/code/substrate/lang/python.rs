@@ -6,6 +6,7 @@ use std::process::Command;
 use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
+use super::file_name;
 use super::{first_matching_subdir, FallbackSpec, LanguageSpec, ProducerHooks};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -34,7 +35,21 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         declaration_name: None,
     }),
     zed_languages: &["Python"],
+    is_test_path: Some(is_test_path),
 };
+
+/// pytest's default discovery: `test_*.py` and `*_test.py`, plus the `conftest`
+/// fixture module. None of these sit in a test DIRECTORY by convention, so a
+/// shared path rule misses Python's primary idiom entirely.
+fn is_test_path(path: &str) -> bool {
+    let file_name = file_name(path);
+    let stem = file_name
+        .strip_suffix(".py")
+        .or_else(|| file_name.strip_suffix(".pyi"));
+    stem.is_some_and(|stem| {
+        stem.starts_with("test_") || stem.ends_with("_test") || stem == "conftest"
+    })
+}
 
 fn detect(repo_root: &Path) -> Option<ProducerTarget> {
     // Root-level requirements.txt counts as a marker (the historical plain-pip

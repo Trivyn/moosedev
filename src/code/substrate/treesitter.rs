@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -15,6 +16,9 @@ use super::lang::{self, FallbackSpec};
 use super::resolver::{Position, SourceRange};
 
 const CACHE_CAPACITY: usize = 16;
+/// Largest file the syntactic fallback will read and parse. Real source sits
+/// far below this; anything above is generated or vendored.
+const MAX_PARSE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SyntacticResolution {
@@ -72,6 +76,20 @@ impl TreeSitterFallback {
     /// `None` means the identity cannot be verified by this fallback. `false`
     /// is returned only when the file or exact declaration is positively gone.
     pub(crate) fn identity_alive(&self, repo_root: &Path, identity: &str) -> Option<bool> {
+        Some(self.identity_location(repo_root, identity)?.is_some())
+    }
+
+    /// The declaration range of a live syntactic identity, or `None` when the
+    /// identity is gone or unverifiable. Callers that must distinguish those
+    /// two outcomes use [`Self::identity_location`].
+    pub(crate) fn identity_range(&self, repo_root: &Path, identity: &str) -> Option<SourceRange> {
+        self.identity_location(repo_root, identity).flatten()
+    }
+
+    /// Locate an identity in the current file. The outer `None` means this
+    /// fallback cannot verify the identity at all; the inner `None` means the
+    /// file or exact declaration is positively gone.
+    fn identity_location(&self, repo_root: &Path, identity: &str) -> Option<Option<SourceRange>> {
         let parsed = parse_identity(identity)?;
         let relative = safe_relative_path(parsed.path)?;
         let fallback = lang::fallback_for_path(relative)?;
@@ -82,10 +100,10 @@ impl TreeSitterFallback {
         }
         let absolute = repo_root.join(relative);
         if !absolute.is_file() {
-            return Some(false);
+            return Some(None);
         }
         let (source, tree) = self.parse_file(fallback, &absolute)?;
-        Some(tree_contains_identity(
+        Some(identity_range_in_tree(
             fallback,
             tree.root_node(),
             parsed.path,
@@ -95,7 +113,16 @@ impl TreeSitterFallback {
     }
 
     fn parse_file(&self, fallback: &FallbackSpec, absolute: &Path) -> Option<(String, Tree)> {
-        let modified = fs::metadata(absolute).ok()?.modified().ok()?;
+        let metadata = fs::metadata(absolute).ok()?;
+        // Bound the read AND the parse. Callers reach here before any
+        // response-shaping cap applies, so without this a single very large
+        // generated or vendored file could be slurped and parsed in full just
+        // to answer "where is this declared". Declining is honest: an
+        // unverifiable identity is already a miss everywhere downstream.
+        if metadata.len() > MAX_PARSE_BYTES {
+            return None;
+        }
+        let modified = metadata.modified().ok()?;
         let mut cache = self
             .cache
             .lock()
@@ -106,7 +133,19 @@ impl TreeSitterFallback {
             }
         }
 
-        let source = fs::read_to_string(absolute).ok()?;
+        // Re-apply the ceiling to the READ, not just the earlier stat. A file
+        // still being written can cross it between the two, and the stat-only
+        // check would then wave through exactly the oversized slurp the ceiling
+        // exists to prevent. One byte past the limit is enough to detect it.
+        let mut source = String::new();
+        fs::File::open(absolute)
+            .ok()?
+            .take(MAX_PARSE_BYTES + 1)
+            .read_to_string(&mut source)
+            .ok()?;
+        if source.len() as u64 > MAX_PARSE_BYTES {
+            return None;
+        }
         let mut parser = Parser::new();
         parser.set_language(&(fallback.grammar)()).ok()?;
         let tree = parser.parse(&source, None)?;
@@ -213,23 +252,24 @@ pub(crate) fn node_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> 
     source.get(node.byte_range())
 }
 
-fn tree_contains_identity(
+fn identity_range_in_tree(
     fallback: &FallbackSpec,
     node: Node<'_>,
     path: &str,
     source: &str,
     identity: &str,
-) -> bool {
-    if (fallback.declaration_kind)(node.kind()).is_some()
-        && resolution_for_node(fallback, path, source, node)
-            .is_some_and(|resolution| resolution.identity == identity)
-    {
-        return true;
+) -> Option<SourceRange> {
+    if (fallback.declaration_kind)(node.kind()).is_some() {
+        if let Some(resolution) = resolution_for_node(fallback, path, source, node) {
+            if resolution.identity == identity {
+                return Some(resolution.range);
+            }
+        }
     }
     let mut cursor = node.walk();
     let found = node
         .named_children(&mut cursor)
-        .any(|child| tree_contains_identity(fallback, child, path, source, identity));
+        .find_map(|child| identity_range_in_tree(fallback, child, path, source, identity));
     found
 }
 
@@ -389,6 +429,38 @@ mod tests {
         assert_eq!(parsed.path, FIXTURE_PATH);
         assert_eq!(parsed.kind, "fn");
         assert_eq!(parsed.qualified_name, "<Widget as Render>::render");
+    }
+
+    #[test]
+    fn oversized_files_are_declined_rather_than_parsed() {
+        // The fallback is reached before any response-shaping cap applies, so
+        // it bounds its own read. Declining is honest: downstream already
+        // treats an unverifiable identity as a miss.
+        let dir = std::env::temp_dir().join(format!(
+            "moosedev-ts-huge-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let huge = dir.join("huge.rs");
+        let line = "pub struct Widget { pub label: String }\n";
+        let repeats = (MAX_PARSE_BYTES as usize / line.len()) + 64;
+        fs::write(&huge, line.repeat(repeats)).unwrap();
+        assert!(fs::metadata(&huge).unwrap().len() > MAX_PARSE_BYTES);
+
+        let fallback = TreeSitterFallback::new();
+        assert!(fallback
+            .resolve_position(&dir, "huge.rs", Position { line: 0, col: 11 })
+            .is_none());
+        assert_eq!(
+            fallback.identity_alive(&dir, "ts:rust:huge.rs:struct:Widget"),
+            None
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

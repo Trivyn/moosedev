@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 
+pub(crate) use crate::code::substrate::is_test_path;
 use crate::code::substrate::{symbols, DefinitionEntry, Substrate};
 use crate::provenance;
 
@@ -84,6 +85,17 @@ pub struct MintPlan {
     /// definitions. Out-of-scope (lazily minted private) entities are NOT
     /// orphans while their symbol still exists. Report only.
     pub orphaned: Vec<(String, String)>,
+    /// (iri, normalized_symbol) minted entities whose symbol is STILL a live
+    /// workspace definition but which batch minting does not manage: they fall
+    /// outside the scope rule. Not orphans (the symbol exists) and not
+    /// `unchanged` (they were never planned), so without this bucket they are
+    /// invisible in every line of the report.
+    ///
+    /// Deliberately includes legitimately lazy-minted private entities — the
+    /// plan cannot tell those apart from entities a scope NARROWING left
+    /// behind, and pretending otherwise would be a guess. Report only;
+    /// deciding which are prunable needs evidence this plan does not hold.
+    pub out_of_scope: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +205,12 @@ pub fn plan_mint(
 ) -> anyhow::Result<MintPlan> {
     let (candidates, skipped_scope, skipped_tests) = mint_candidates(definitions);
     let (kept, collisions) = dedupe_collisions(candidates);
+    // Snapshotted from the same `kept` minting itself walks, so the scope test
+    // below cannot drift from the scope actually applied.
+    let in_scope = kept
+        .iter()
+        .map(|entry| entry.normalized_symbol.clone())
+        .collect::<BTreeSet<_>>();
     let existing = entities_by_symbol(state, terms)?;
     // Orphans are judged against ALL workspace definitions, not the mint scope:
     // lazily minted private entities are alive in the substrate and must not be
@@ -241,23 +259,26 @@ pub fn plan_mint(
         }
     }
 
-    plan.orphaned = existing
-        .into_iter()
-        .filter_map(|(symbol, iri)| {
-            if substrate_symbols.contains(&symbol) {
-                return None;
+    for (symbol, iri) in existing {
+        if substrate_symbols.contains(&symbol) {
+            if !in_scope.contains(&symbol) {
+                plan.out_of_scope.push((iri, symbol));
             }
-            if symbol.starts_with("ts:") {
-                // Syntactic anchors are orphaned only when the substrate can
-                // positively prove their declaration or file is gone.
-                return substrate
-                    .and_then(|substrate| substrate.identity_alive(&symbol))
-                    .is_some_and(|alive| !alive)
-                    .then_some((iri, symbol));
+            continue;
+        }
+        if symbol.starts_with("ts:") {
+            // Syntactic anchors are orphaned only when the substrate can
+            // positively prove their declaration or file is gone.
+            if substrate
+                .and_then(|substrate| substrate.identity_alive(&symbol))
+                .is_some_and(|alive| !alive)
+            {
+                plan.orphaned.push((iri, symbol));
             }
-            Some((iri, symbol))
-        })
-        .collect();
+            continue;
+        }
+        plan.orphaned.push((iri, symbol));
+    }
     Ok(plan)
 }
 
@@ -597,9 +618,29 @@ fn has_realizes(state: &AppState, terms: &CodeTerms, iri: &str) -> anyhow::Resul
 /// can never change anything, instead of to the lazy `link_code` path that is
 /// actually how records attach there.
 pub fn has_mintable_definitions(definitions: &[DefinitionEntry]) -> bool {
-    definitions
-        .iter()
-        .any(|entry| (entry.is_module || entry.is_public) && !is_test_path(&entry.file))
+    definitions.iter().any(|entry| {
+        (entry.is_module || entry.is_public) && !is_test_path(&entry.file) && !is_type_member(entry)
+    })
+}
+
+/// True when the definition is a member of another declaration rather than a
+/// declaration that can carry rationale of its own.
+///
+/// A `pub` field is public API by visibility, so the visibility gate admits it —
+/// but nobody records an architectural decision about a field. The reason a
+/// field exists is the reason its TYPE exists, and that rationale attaches to
+/// the type. Batch-minting one entity per field made fields 44% of this
+/// project's catalog (759 of 1,723) carrying 2 records between them, and
+/// charged all 759 to the comprehension-debt denominator as public API that
+/// would never be documented.
+///
+/// Excluding them from BATCH minting does not make them unlinkable. It is
+/// exactly the treatment private items already get: `link_code` still lazily
+/// mints any field that turns out to deserve an anchor, which is the right path
+/// for the occasional field carrying its own invariant.
+pub(crate) fn is_type_member(entry: &DefinitionEntry) -> bool {
+    // SCIP `SymbolInformation.Kind`, rendered by its Debug name at ingest.
+    entry.kind.as_deref() == Some("Field")
 }
 
 /// Apply the batch minting scope rule and count the two skip classes.
@@ -610,23 +651,13 @@ fn mint_candidates(definitions: &[DefinitionEntry]) -> (Vec<DefinitionEntry>, us
     for entry in definitions {
         if is_test_path(&entry.file) {
             skipped_tests += 1;
-        } else if !(entry.is_module || entry.is_public) {
+        } else if !(entry.is_module || entry.is_public) || is_type_member(entry) {
             skipped_scope += 1;
         } else {
             kept.push(entry.clone());
         }
     }
     (kept, skipped_scope, skipped_tests)
-}
-
-pub(crate) fn is_test_path(path: &str) -> bool {
-    let file_name = path.rsplit('/').next().unwrap_or(path);
-    path.starts_with("tests/")
-        || path
-            .split('/')
-            .any(|segment| matches!(segment, "test" | "tests"))
-        || file_name.contains(".test.")
-        || file_name.contains(".spec.")
 }
 
 /// Deterministically keep the first `(file, symbol)` entry per normalized symbol.
@@ -748,6 +779,38 @@ mod tests {
         assert_eq!(kept, vec![module, public_fn]);
         assert_eq!(skipped_scope, 1);
         assert_eq!(skipped_tests, 1);
+    }
+
+    #[test]
+    fn mint_rule_skips_public_fields_as_members_of_their_type() {
+        // A `pub` field passes the visibility gate, so only the kind rule keeps
+        // it out. On this project that was 759 entities carrying 2 records.
+        let declaration = entry(
+            "rust-analyzer cargo moosedev 0.6.3 graph/Widget#",
+            "src/graph.rs",
+            false,
+            true,
+        );
+        let field = DefinitionEntry {
+            kind: Some("Field".to_string()),
+            ..entry(
+                "rust-analyzer cargo moosedev 0.6.3 graph/Widget#size.",
+                "src/graph.rs",
+                false,
+                true,
+            )
+        };
+
+        let (kept, skipped_scope, skipped_tests) =
+            mint_candidates(&[declaration.clone(), field.clone()]);
+
+        assert_eq!(kept, vec![declaration]);
+        assert_eq!(skipped_scope, 1, "the field is a scope skip, not a test skip");
+        assert_eq!(skipped_tests, 0);
+        // Batch scope only: lazy anchoring must still reach it, exactly as it
+        // does for private items.
+        assert!(is_type_member(&field));
+        assert!(!has_mintable_definitions(&[field]));
     }
 
     #[test]

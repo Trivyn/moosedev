@@ -9,8 +9,241 @@ export interface HealthResponse {
   llm_assist_level: string;
 }
 
+export type StoryStatus = 'draft' | 'published';
+export type StoryTrustState = 'generated' | StoryStatus;
+export type StoryAssistLevel = 0 | 1;
+export type StorySectionKind =
+  | 'orientation'
+  | 'evolution'
+  | 'current_state'
+  | 'implementation'
+  | 'implications';
+
+export interface StoryGenerateRequest {
+  prompt?: string;
+  component_iri?: string;
+  subject_iri?: string;
+  topic?: string;
+  recipe_id?: string;
+  fresh?: boolean;
+  include_checks?: boolean;
+  assist_level: StoryAssistLevel;
+}
+
+export type StoryRecipeSubject =
+  | { type: 'entity'; iri: string }
+  | { type: 'topic'; query: string };
+
+export interface StoryRecipeFocus {
+  include_record_iris: string[];
+  exclude_record_iris: string[];
+  include_code_symbols: string[];
+  exclude_code_symbols: string[];
+  emphasis: StorySectionKind[];
+}
+
+export interface StoryRecipe {
+  id: string;
+  title: string;
+  schema_version: 3;
+  subject: StoryRecipeSubject;
+  goal: string;
+  audience: 'reboarding';
+  focus: StoryRecipeFocus;
+  curator_context?: string;
+  status: StoryStatus;
+  curator: string;
+  updated_at?: string | null;
+}
+
+export interface StorySummary {
+  id: string;
+  title: string;
+  subject: StoryRecipeSubject;
+  subject_label: string;
+  subject_kind: string;
+  goal: string;
+  audience: 'reboarding';
+  status: StoryStatus;
+  curator: string;
+  updated_at?: string | null;
+  drifted?: boolean;
+}
+
+export interface StoryListResponse {
+  stories: StorySummary[];
+}
+
+export interface StoryRecipeResponse {
+  recipe: StoryRecipe;
+}
+
+export interface StorySubjectCandidate {
+  iri: string;
+  kind: string;
+  label: string;
+  description?: string | null;
+  /** The graph records nothing about this subject beyond its own existence. */
+  no_recorded_knowledge?: boolean;
+}
+
+export interface StorySubjectListResponse {
+  subjects: StorySubjectCandidate[];
+}
+
+export interface StoryEvidenceRelation {
+  predicate: string;
+  label: string;
+  direction: 'outgoing' | 'incoming';
+  target_iri: string;
+  target_label: string;
+  target_kind: string;
+}
+
+export interface StoryLiteralProperty {
+  predicate: string;
+  label: string;
+  value: string;
+}
+
+export interface StoryEvidenceDetail {
+  iri: string;
+  title: string;
+  kind: string;
+  status: string;
+  description?: string | null;
+  timestamp?: string | null;
+  author?: string | null;
+  suppressed: boolean;
+  properties: StoryLiteralProperty[];
+  relations: StoryEvidenceRelation[];
+}
+
+export interface StoryCodeAnchor {
+  symbol: string;
+  label: string;
+  entity_iri?: string | null;
+  path?: string | null;
+  line?: number | null;
+}
+
+export interface StoryParagraph {
+  text: string;
+  citation_iris: string[];
+}
+
+export interface StoryNarrativeSection {
+  id: string;
+  title: string;
+  kind: StorySectionKind;
+  paragraphs: StoryParagraph[];
+}
+
+export interface StoryTimelineEvent {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  timestamp?: string | null;
+  evidence_iri: string;
+  relation?: string | null;
+  predecessor_iris: string[];
+  successor_iris: string[];
+  rationale_iris: string[];
+}
+
+export interface StoryCoverage {
+  entity_count: number;
+  current_count: number;
+  historical_count: number;
+  proposed_count: number;
+  code_anchor_count: number;
+  dossier_bytes: number;
+  subject_families: string[];
+  outline_sections: StorySectionKind[];
+  truncated: boolean;
+}
+
+export interface StoryGap {
+  id: string;
+  title: string;
+  detail: string;
+  section_kind?: StorySectionKind | null;
+}
+
+export interface StoryCheckOption {
+  id: string;
+  label: string;
+}
+
+export interface StoryCheck {
+  id: string;
+  question: string;
+  options: StoryCheckOption[];
+}
+
+export interface StoryRun {
+  schema_version: 3;
+  recipe_id?: string | null;
+  trust_state: StoryTrustState;
+  narration_mode: 'symbolic' | 'llm';
+  narration_strategy: 'symbolic' | 'single_pass';
+  narration_outcome:
+    | 'not_requested'
+    | 'succeeded'
+    | 'unconfigured'
+    | 'ineligible'
+    | 'timeout'
+    | 'provider_error'
+    | 'invalid_response';
+  narration_failure_reason?:
+    | 'packet_too_large'
+    | 'invalid_json'
+    | 'schema_mismatch'
+    | 'citation_mismatch'
+    | 'structured_output_unsupported'
+    | null;
+  narration_coverage?: {
+    eligible_entities: number;
+    included_entities: number;
+    source_groups: number;
+    truncated: boolean;
+  } | null;
+  title: string;
+  subject:
+    | { type: 'entity'; iri: string; kind: string; label: string }
+    | { type: 'topic'; query: string; label: string };
+  goal: string;
+  curator_context?: string | null;
+  brief: StoryParagraph;
+  narrative: StoryNarrativeSection[];
+  timeline: StoryTimelineEvent[];
+  evidence: StoryEvidenceDetail[];
+  code_anchors: StoryCodeAnchor[];
+  coverage: StoryCoverage;
+  gaps: StoryGap[];
+  checks: StoryCheck[];
+}
+
+export type StoryGenerateResponse =
+  | { outcome: 'story'; story: StoryRun }
+  | {
+      outcome: 'ambiguous';
+      prompt: string;
+      recipe_id?: string | null;
+      candidates: StorySubjectCandidate[];
+    };
+
+export interface StoryCheckGradeResponse {
+  correct: boolean;
+  feedback: string;
+  revisit_section_id?: string | null;
+  evidence_iris: string[];
+}
+
 export interface ComponentCoverage {
   iri: string | null;
+  story_component_iri: string | null;
   name: string;
   numerator: number;
   denominator: number;
@@ -222,8 +455,46 @@ export interface RecordDetailResponse {
   status: string | null;
   timestamp: string | null;
   author: string | null;
+  story_component_iri: string | null;
+  /** Present only for CodeEntity records. A substrate projection, not a graph claim. */
+  code: RecordCodeDetail | null;
   outgoing: RecordOutgoingEdge[];
   incoming: RecordIncomingEdge[];
+}
+
+/** A 1-based, UTF-8-byte source span. */
+export interface SourceSpan {
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+}
+
+export interface RecordCodeDetail {
+  symbol: string | null;
+  name: string | null;
+  entity_kind: string | null;
+  logical_path: string | null;
+  defined_in_path: string | null;
+  signature: string | null;
+  source_path: string | null;
+  definition: SourceSpan | null;
+  source_available: boolean;
+  source_unavailable_reason: string | null;
+  substrate_stale: boolean;
+}
+
+export type SourceScope = 'context' | 'full';
+
+export interface RecordSourceResponse {
+  path: string;
+  scope: SourceScope;
+  start_line: number;
+  end_line: number;
+  total_lines: number;
+  truncated: boolean;
+  definition: SourceSpan | null;
+  text: string;
 }
 
 export interface ChatMessage {

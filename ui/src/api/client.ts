@@ -16,8 +16,17 @@ import {
   ProposalListResponse,
   QueryResponse,
   RecordDetailResponse,
+  RecordSourceResponse,
   RequirementDetailResponse,
   RequirementListResponse,
+  SourceScope,
+  StoryCheckGradeResponse,
+  StoryGenerateRequest,
+  StoryGenerateResponse,
+  StoryListResponse,
+  StoryRecipe,
+  StoryRecipeResponse,
+  StorySubjectListResponse,
   WhyCoverageResponse,
 } from './types';
 
@@ -75,6 +84,10 @@ export const api = {
     request<ConstraintDetailResponse>(`/constraints/${encodeURIComponent(num)}`),
   downloadConstraintArchive: () => download('/constraints/archive.zip'),
   record: (uuid: string) => request<RecordDetailResponse>(`/records/${encodeURIComponent(uuid)}`),
+  recordSource: (uuid: string, scope: SourceScope = 'context') =>
+    request<RecordSourceResponse>(
+      `/records/${encodeURIComponent(uuid)}/source?scope=${encodeURIComponent(scope)}`,
+    ),
   chat: (payload: {
     session_id?: string;
     messages: ChatMessage[];
@@ -112,6 +125,37 @@ export const api = {
       body: text,
     }),
   debt: () => request<WhyCoverageResponse>('/debt'),
+  listStories: () => request<StoryListResponse>('/stories'),
+  listStorySubjects: (query?: string, limit = 20) => {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (query?.trim()) search.set('q', query.trim());
+    return request<StorySubjectListResponse>(`/stories/actions/subjects?${search}`);
+  },
+  getStory: (id: string) =>
+    request<StoryRecipeResponse>(`/stories/${encodeURIComponent(id)}`),
+  generateStory: (payload: StoryGenerateRequest) =>
+    request<StoryGenerateResponse>('/stories/actions/generate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  saveStory: (recipe: StoryRecipe) =>
+    request<StoryRecipeResponse>(`/stories/${encodeURIComponent(recipe.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(recipe),
+    }),
+  publishStory: (id: string, updatedAt: string) =>
+    request<StoryRecipeResponse>(`/stories/${encodeURIComponent(id)}/publish`, {
+      method: 'POST',
+      body: JSON.stringify({ updated_at: updatedAt }),
+    }),
+  gradeStoryCheck: (payload: {
+    check_id: string;
+    selected_option_ids: string[];
+  }) =>
+    request<StoryCheckGradeResponse>('/stories/checks/grade', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   listProposals: (status?: string) =>
     request<ProposalListResponse>(
       `/proposals${status ? `?status=${encodeURIComponent(status)}` : ''}`,

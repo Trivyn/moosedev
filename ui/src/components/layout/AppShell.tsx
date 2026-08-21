@@ -11,6 +11,7 @@ export type PageKey =
   | 'requirements'
   | 'lessons'
   | 'constraints'
+  | 'stories'
   | 'debt'
   | 'ratifications'
   | 'sparql'

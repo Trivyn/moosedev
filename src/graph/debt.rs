@@ -2,17 +2,18 @@
 //!
 //! Per `SystemComponent`, the fraction of its public code surface that carries
 //! at least one linked rationale record. The "surface" is the substrate's
-//! public, non-module, non-test definitions ([`is_debt_surface`]) mapped to a
-//! component by path ([`best_component_for_path`]); "documented" reuses the same
-//! [`direct_records_for_entity`] oracle the dossier and hover use, so the metric
-//! counts exactly what a human sees on hover. Proposed links carry no real edge,
-//! so they never count — the number only moves on ratification.
+//! public, non-module, non-test, non-member definitions ([`is_debt_surface`])
+//! mapped to a component by path ([`best_component_for_path`]); "documented"
+//! reuses the same [`direct_records_for_entity`] oracle the dossier and hover
+//! use, so the metric counts exactly what a human sees on hover. Proposed links
+//! carry no real edge, so they never count — the number only moves on
+//! ratification.
 
 use std::collections::BTreeMap;
 
 use crate::code::substrate::DefinitionEntry;
 
-use super::code_entities::{entities_by_symbol, is_test_path, CodeTerms};
+use super::code_entities::{entities_by_symbol, is_test_path, is_type_member, CodeTerms};
 use super::components::{best_component_for_path, load_components};
 use super::dossier::direct_records_for_entity;
 use super::state::AppState;
@@ -52,11 +53,21 @@ pub struct WhyCoverage {
     pub unmapped: usize,
 }
 
-/// A public, non-module, non-test definition — the debt surface a human counts
-/// as "the public API of this component". Shared verbatim with the LSP hotspot
-/// lens so the metric and the in-editor flag never disagree.
+/// A public, non-module, non-test definition that is not a member of another
+/// declaration — the debt surface a human counts as "the public API of this
+/// component". Shared verbatim with the LSP hotspot lens so the metric and the
+/// in-editor flag never disagree.
+///
+/// Fields are excluded for the same reason batch minting skips them
+/// ([`is_type_member`]): charging a struct's fields to the denominator counts
+/// documentation nobody will ever write, since a field's rationale belongs to
+/// its type. Keeping this in step with the mint scope also keeps the metric
+/// honest — every definition it counts is one an entity exists for.
 pub(crate) fn is_debt_surface(entry: &DefinitionEntry) -> bool {
-    entry.is_public && !entry.is_module && !is_test_path(&entry.file)
+    entry.is_public
+        && !entry.is_module
+        && !is_test_path(&entry.file)
+        && !is_type_member(entry)
 }
 
 fn component_key(iri: Option<&String>, name: &str) -> String {
@@ -194,6 +205,14 @@ mod tests {
             !is_debt_surface(&entry("src/foo/tests/a.rs", true, false)),
             "test path segment excluded"
         );
+        // A pub field passes the visibility gate but is a member of its type,
+        // and its rationale attaches there. Counting it would charge the
+        // denominator for documentation nobody writes.
+        let field = DefinitionEntry {
+            kind: Some("Field".to_string()),
+            ..entry("src/foo/a.rs", true, false)
+        };
+        assert!(!is_debt_surface(&field), "type member excluded");
     }
 
     #[test]

@@ -85,6 +85,68 @@ pub fn load_components(state: &AppState) -> anyhow::Result<Vec<ComponentEntry>> 
     Ok(out)
 }
 
+/// Resolve a human component query against a caller-selected component set.
+///
+/// Exact IRI and case-insensitive label matches win. Otherwise query words are
+/// scored against labels and all top-scoring matches are returned so callers
+/// can surface ambiguity instead of guessing. Keeping this alongside component
+/// loading prevents UI projections from inventing divergent matching rules.
+pub fn resolve_component_query<'a>(
+    components: &'a [ComponentEntry],
+    query: &str,
+) -> Vec<&'a ComponentEntry> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    if let Some(component) = components
+        .iter()
+        .find(|entry| entry.iri.as_deref() == Some(query))
+    {
+        return vec![component];
+    }
+    // IRI-shaped input is an identity lookup, never fuzzy prose. A typo in an
+    // IRI must not silently select a similarly named component.
+    if NamedNode::new(query).is_ok() {
+        return Vec::new();
+    }
+    let needle = query.to_lowercase();
+    let exact = components
+        .iter()
+        .filter(|entry| entry.name.to_lowercase() == needle)
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return exact;
+    }
+    let words = needle
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 2)
+        .collect::<Vec<_>>();
+    let mut scored = components
+        .iter()
+        .filter_map(|component| {
+            let name = component.name.to_lowercase();
+            let score = words.iter().filter(|word| name.contains(**word)).count()
+                + usize::from(name.contains(&needle));
+            (score > 0).then_some((score, component))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then(left.name.cmp(&right.name))
+            .then(left.iri.cmp(&right.iri))
+    });
+    let Some(best_score) = scored.first().map(|entry| entry.0) else {
+        return Vec::new();
+    };
+    scored
+        .into_iter()
+        .filter(|(score, _)| *score == best_score)
+        .map(|(_, component)| component)
+        .collect()
+}
+
 /// Return the most specific component that covers `path`.
 ///
 /// `coversPath` values ending in `/` are directory prefixes. Values without a
@@ -354,5 +416,27 @@ mod tests {
     fn miss_returns_none() {
         let components = vec![component("graph", &["src/graph/"])];
         assert!(best_component_for_path("../moose/src/core.rs", &components).is_none());
+    }
+
+    #[test]
+    fn component_query_prefers_exact_identity_and_surfaces_shared_prefix_ambiguity() {
+        let components = vec![
+            component("Graph API", &["src/api/"]),
+            component("Graph Store", &["src/graph/"]),
+        ];
+        let exact = resolve_component_query(&components, "urn:Graph API");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].name, "Graph API");
+
+        let label = resolve_component_query(&components, "graph store");
+        assert_eq!(label.len(), 1);
+        assert_eq!(label[0].name, "Graph Store");
+
+        let ambiguous = resolve_component_query(&components, "graph");
+        assert_eq!(ambiguous.len(), 2);
+        assert_eq!(ambiguous[0].name, "Graph API");
+        assert_eq!(ambiguous[1].name, "Graph Store");
+
+        assert!(resolve_component_query(&components, "urn:Graph-Stor").is_empty());
     }
 }

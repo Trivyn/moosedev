@@ -182,8 +182,79 @@ pub(crate) fn direct_records_for_entity(
     Ok(direct_records)
 }
 
+/// Which of `code_iris` have at least one dossier-visible record linked to them.
+///
+/// The bulk form of [`direct_records_for_entity`], for callers that must ask the
+/// question of a whole catalog at once rather than one entity at a time. It
+/// shares the same predicate pairs and the same lifecycle policy, so a browse
+/// surface cannot promise knowledge that hover would then decline to show —
+/// the reuse `debt::why_coverage` already relies on for the same reason.
+///
+/// Judgments are deliberately NOT counted here, unlike [`build_dossier`]'s
+/// silence-rule amendment: a ratified role is a reason for hover to speak, but
+/// it is not a record any reading surface can render yet.
+///
+/// One predicate-bound scan per pair and direction, so the cost tracks the
+/// number of links rather than the size of the catalog.
+pub(crate) fn code_entities_with_records(
+    state: &AppState,
+    code_iris: &BTreeSet<String>,
+) -> anyhow::Result<BTreeSet<String>> {
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let pairs = LinkPairs::resolve(state)?;
+    let mut linked = BTreeSet::new();
+    for pair in &pairs.all {
+        for (predicate_iri, entity_is_subject) in [
+            (
+                &pair.canonical_iri,
+                matches!(pair.direction, CanonicalDirection::EntityToRecord),
+            ),
+            (
+                &pair.inverse_iri,
+                matches!(pair.direction, CanonicalDirection::RecordToEntity),
+            ),
+        ] {
+            let predicate = NamedNodeRef::new(predicate_iri)?;
+            for quad in state.store.quads_for_pattern(
+                None,
+                Some(predicate),
+                None,
+                Some(GraphNameRef::NamedNode(graph)),
+            ) {
+                let quad = quad?;
+                let (oxigraph::model::NamedOrBlankNode::NamedNode(subject), Term::NamedNode(object)) =
+                    (quad.subject, quad.object)
+                else {
+                    continue;
+                };
+                let (entity, record) = if entity_is_subject {
+                    (subject.as_str(), object.as_str())
+                } else {
+                    (object.as_str(), subject.as_str())
+                };
+                if code_iris.contains(entity)
+                    && summarize_record(state, record, pair.canonical_local).is_some()
+                {
+                    linked.insert(entity.to_string());
+                }
+            }
+        }
+    }
+    Ok(linked)
+}
+
 /// Render a stable Markdown view suitable for MCP and future hover surfaces.
 pub fn render_markdown(dossier: &Dossier) -> String {
+    render_dossier_markdown(dossier, None)
+}
+
+/// Same view with an optional Story deep link placed directly under the
+/// entity's identity block, where a reader looks first.
+///
+/// The link is a parameter rather than a `Dossier` field so it stays a
+/// presentation concern of the surface that has a live workbench address; the
+/// dossier itself remains a pure read model.
+pub fn render_dossier_markdown(dossier: &Dossier, story_url: Option<&str>) -> String {
     let marker = if dossier.syntactic_anchor {
         " [syntactic anchor]"
     } else {
@@ -205,6 +276,9 @@ pub fn render_markdown(dossier: &Dossier) -> String {
     }
     if let Some((_, label)) = &dossier.realizes {
         out.push_str(&format!("Realizes component: {label}\n"));
+    }
+    if let Some(url) = story_url {
+        out.push_str(&format!("\n[Tell me the Story]({url})\n"));
     }
 
     if !dossier.judgments.is_empty() {
@@ -578,7 +652,7 @@ pub(crate) fn workbench_record_url(
     };
     Some(format!(
         "http://{addr}/#/{route}/{}",
-        local_name(record_iri)
+        encode_path_segment(addressable_local_name(record_iri)?)
     ))
 }
 
@@ -587,6 +661,48 @@ pub(crate) fn workbench_record_url(
 /// links need no dedicated route.
 pub(crate) fn workbench_entity_url(state: &AppState, entity_iri: &str) -> Option<String> {
     workbench_record_url(state, entity_iri, "CodeEntity")
+}
+
+/// Workbench deep link that tells the Story of one code entity — the exact
+/// entity, not its containing component. Same liveness rule as
+/// [`workbench_record_url`]: absent whenever this daemon run is not serving
+/// HTTP, so a hover never offers a dead port.
+pub(crate) fn workbench_story_url(state: &AppState, entity_iri: &str) -> Option<String> {
+    let addr = state.http_addr()?;
+    Some(format!(
+        "http://{addr}/#/stories/entity/{}",
+        encode_path_segment(addressable_local_name(entity_iri)?)
+    ))
+}
+
+/// An IRI's final segment, but only when a workbench route can actually resolve
+/// it. `record_iri_for_uuid` matches subjects ending in `/{uuid}`, so a
+/// fragment-addressed IRI like `https://example.test/records#decision` — which
+/// `local_name` happily reduces to `decision` — would advertise a link
+/// resolving to nothing, or to an unrelated record ending in `/decision`.
+/// Silence beats a link that lies.
+fn addressable_local_name(iri: &str) -> Option<&str> {
+    let slash = iri.rfind('/')?;
+    if iri.rfind('#').is_some_and(|hash| hash > slash) {
+        return None;
+    }
+    let name = local_name(iri);
+    (!name.is_empty()).then_some(name)
+}
+
+/// Percent-encode one URL path segment. Minted local names are UUIDs, for
+/// which this is a no-op; it exists so a hand-authored or legacy IRI cannot
+/// inject path or query structure into a link a user is about to open.
+fn encode_path_segment(segment: &str) -> String {
+    segment
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 /// Keep dossier output stable and useful: constraints first, then decisions,
@@ -607,5 +723,27 @@ fn kind_rank(kind: &str) -> u8 {
         "ArchitecturalDecision" => 1,
         "Lesson" => 2,
         _ => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_path_segment;
+
+    #[test]
+    fn path_segments_are_percent_encoded() {
+        // The ordinary case: a minted UUID passes through untouched, so
+        // existing workbench links are byte-identical.
+        let uuid = "74af589c-b13f-4224-99fd-4f85641daea7";
+        assert_eq!(encode_path_segment(uuid), uuid);
+
+        // A hand-authored or legacy local name cannot inject path or query
+        // structure into a link a user is about to open in a browser.
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("a?b#c"), "a%3Fb%23c");
+        assert_eq!(encode_path_segment("a b"), "a%20b");
+        assert_eq!(encode_path_segment("naïve"), "na%C3%AFve");
+        // Unreserved characters stay readable.
+        assert_eq!(encode_path_segment("A-z_0.9~"), "A-z_0.9~");
     }
 }

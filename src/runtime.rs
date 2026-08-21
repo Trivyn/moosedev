@@ -75,7 +75,7 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
         "MOOSEDev: bootstrapping state (data dir: {})…",
         data_dir.display()
     );
-    let llm_cfg = LlmConfig::from_env();
+    let llm_cfg = LlmConfig::from_env()?;
     let llm_base_url = llm_cfg.base_url.clone();
     let llm_configured = llm_cfg.configured;
     let mut state = AppState::bootstrap_with_llm_config(data_dir, ontology_dir, llm_cfg)?;
@@ -84,8 +84,10 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
     state.load_substrate(&crate::project::project_root());
     if llm_configured {
         tracing::info!(
-            "MOOSEDev: LLM assistance enabled at {llm_base_url} / level {:?}",
-            state.engine_config.llm_assist_level
+            "MOOSEDev: LLM assistance enabled at {llm_base_url} / level {:?} / context {} tokens / Story prompt budget {} tokens",
+            state.engine_config.llm_assist_level,
+            state.llm_context_window_tokens,
+            crate::stories::narration_prompt_token_budget(state.llm_context_window_tokens),
         );
     } else {
         tracing::info!("MOOSEDev: LLM assistance disabled; pinned to PureSymbolic");

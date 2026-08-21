@@ -1,6 +1,6 @@
 [package]
 name = "moosedev"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.89"
 description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
@@ -34,6 +34,10 @@ lsp-types = "0.97"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "signal", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Repair common JSON-like output from local LLMs before strict Story schema
+# validation. MOOSE uses the same crate internally, but does not expose its
+# crate-private parsing helper across the engine boundary.
+jsonrepair = "0.1"
 anyhow = "1"
 diff = "0.1"
 tracing = "0.1"

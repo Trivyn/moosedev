@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use super::file_name;
 use super::{FallbackSpec, LanguageSpec, ProducerHooks};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -32,7 +33,15 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         declaration_name: Some(declaration_name),
     }),
     zed_languages: &["Rust"],
+    is_test_path: Some(is_test_path),
 };
+
+/// A `mod tests;` broken out into its own file. The inline `#[cfg(test)] mod
+/// tests` form — far more common — is invisible to any path check; see the
+/// known limit on [`lang::is_test_path`].
+fn is_test_path(path: &str) -> bool {
+    file_name(path) == "tests.rs"
+}
 
 fn detect(repo_root: &Path) -> Option<ProducerTarget> {
     repo_root

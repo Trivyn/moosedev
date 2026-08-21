@@ -36,6 +36,14 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+struct CleanupDir(std::path::PathBuf);
+
+impl Drop for CleanupDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn test_server(state: AppState) -> TestServer {
     TestServer::new(build_routes(Arc::new(state))).expect("build test server")
 }
@@ -46,6 +54,8 @@ fn unconfigured_llm() -> LlmConfig {
         api_key: "test".to_string(),
         model: "fake-model".to_string(),
         configured: false,
+        context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
+        structured_output: moosedev::llm::StructuredOutputMode::Auto,
     }
 }
 
@@ -143,7 +153,20 @@ async fn records_detail_returns_record_metadata_and_edges() {
     let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
     let decision = record_api_decision(&state, "Record detail decision");
     let lesson = record_api_lesson(&state, "Record detail lesson");
+    state
+        .store
+        .insert(&oxigraph::model::Quad::new(
+            oxigraph::model::NamedNode::new(&lesson).unwrap(),
+            oxigraph::model::NamedNode::new(moose::RDF_TYPE).unwrap(),
+            oxigraph::model::NamedNode::new(state.resolve_class("SystemComponent").unwrap())
+                .unwrap(),
+            oxigraph::model::GraphName::NamedNode(
+                oxigraph::model::NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap(),
+            ),
+        ))
+        .unwrap();
     graph::relate(&state, &decision, "yieldsLesson", &lesson).expect("link outgoing lesson");
+    graph::relate(&state, &decision, "concerns", &lesson).expect("link Story component");
     graph::relate(&state, &lesson, "learnedFrom", &decision).expect("link incoming lesson");
     let uuid = decision.rsplit('/').next().expect("record uuid");
     let server = test_server(state);
@@ -159,10 +182,18 @@ async fn records_detail_returns_record_metadata_and_edges() {
         body["description"],
         "Decision description for Record detail decision"
     );
-    assert_eq!(body["outgoing"][0]["predicate"], "yieldsLesson");
-    assert_eq!(body["outgoing"][0]["target_iri"], lesson);
+    assert_eq!(body["story_component_iri"], lesson);
+    let outgoing = body["outgoing"].as_array().expect("outgoing array");
+    let yields = outgoing
+        .iter()
+        .find(|edge| edge["predicate"] == "yieldsLesson")
+        .expect("yieldsLesson edge");
+    assert_eq!(yields["target_iri"], lesson);
+    assert_eq!(yields["target_kind"], "SystemComponent");
+    assert!(yields.get("target_status").is_none());
     assert_eq!(body["incoming"][0]["predicate"], "learnedFrom");
     assert_eq!(body["incoming"][0]["source_iri"], lesson);
+    assert!(body["incoming"][0].get("source_status").is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -249,6 +280,553 @@ async fn health_reports_project_root_for_conventional_data_dir() {
     );
 
     let _ = std::fs::remove_dir_all(&project);
+}
+
+#[tokio::test]
+async fn health_uses_configured_repository_root_as_canonical_identity() {
+    let project = temp_dir("health-configured-project-root");
+    let data_dir = temp_dir("health-configured-data");
+    std::fs::create_dir_all(&project).unwrap();
+    let _project_cleanup = CleanupDir(project.clone());
+    let _data_cleanup = CleanupDir(data_dir.clone());
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap app state");
+    state.load_substrate(&project);
+    let server = test_server(state);
+
+    let body = server.get("/api/v1/health").await.json::<Value>();
+    assert_eq!(
+        body["project_root"],
+        std::fs::canonicalize(&project)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+}
+
+fn record_story_component(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("SystemComponent").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "SystemComponent".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+            ],
+        },
+        "story-test",
+        Utc::now(),
+    )
+    .expect("record Story component")
+}
+
+fn project_quads(state: &AppState) -> std::collections::BTreeSet<String> {
+    state
+        .store
+        .quads_for_pattern(
+            None,
+            None,
+            None,
+            Some(oxigraph::model::GraphNameRef::NamedNode(
+                oxigraph::model::NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap(),
+            )),
+        )
+        .flatten()
+        .map(|quad| quad.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
+    let project = temp_dir("stories");
+    let _cleanup = CleanupDir(project.clone());
+    let data_dir = project.join(".moosedev");
+    let state = Arc::new(
+        AppState::bootstrap_with_llm_config(&data_dir, &ontology_dir(), unconfigured_llm())
+            .expect("bootstrap Story state"),
+    );
+    let graph_component = record_story_component(&state, "Graph Store");
+    let api_component = record_story_component(&state, "Graph API");
+    let requirement = record_api_requirement(&state, "Preserve durable project knowledge");
+    graph::relate(&state, &graph_component, "isConcernedBy", &requirement)
+        .expect("link inverse Story evidence");
+    let distractor = record_api_requirement(&state, "Zeta cross-linked API knowledge");
+    graph::relate(&state, &distractor, "concerns", &api_component).expect("link Story distractor");
+    graph::relate(&state, &distractor, "concerns", &graph_component)
+        .expect("also link overlapping record to target");
+    let safe_distractor = record_api_requirement(&state, "Keep API clients thin");
+    graph::relate(&state, &safe_distractor, "concerns", &api_component)
+        .expect("link safe Story distractor");
+    let before_generate = project_quads(&state);
+    let server = TestServer::new(build_routes(state.clone())).expect("build Story test server");
+
+    let subjects = server.get("/api/v1/stories/actions/subjects").await;
+    subjects.assert_status_ok();
+    let subject_body = subjects.json::<Value>();
+    let subject_rows = subject_body["subjects"].as_array().unwrap();
+    assert!(subject_rows.len() >= 5);
+    assert_eq!(subject_rows[0]["label"], "Graph API");
+    assert_eq!(subject_rows[1]["label"], "Graph Store");
+    assert!(subject_rows
+        .iter()
+        .any(|subject| subject["iri"] == graph_component));
+    assert!(subject_rows
+        .iter()
+        .any(|subject| subject["iri"] == api_component));
+    assert!(subject_rows
+        .iter()
+        .any(|subject| subject["iri"] == requirement));
+
+    let limited_subjects = server
+        .get("/api/v1/stories/actions/subjects?q=Graph&limit=1")
+        .await;
+    limited_subjects.assert_status_ok();
+    assert_eq!(
+        limited_subjects.json::<Value>()["subjects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let searched_subjects = server
+        .get("/api/v1/stories/actions/subjects?q=durable%20project&limit=12")
+        .await;
+    searched_subjects.assert_status_ok();
+    assert!(searched_subjects.json::<Value>()["subjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|subject| subject["iri"] == requirement && subject["kind"] == "Requirement"));
+    assert_eq!(project_quads(&state), before_generate);
+
+    let topic_story = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"topic":"durable project knowledge", "assist_level":0}))
+        .await;
+    topic_story.assert_status_ok();
+    let topic_body = topic_story.json::<Value>();
+    assert_eq!(topic_body["story"]["subject"]["type"], "topic");
+    assert!(topic_body["story"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence["iri"] == requirement));
+    assert_eq!(project_quads(&state), before_generate);
+
+    server
+        .get("/api/v1/stories/bad!id")
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/bad!id/publish")
+        .json(&json!({"updated_at":"stale"}))
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/does-not-exist/publish")
+        .json(&json!({"updated_at":"missing"}))
+        .await
+        .assert_status_not_found();
+    server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"recipe_id":"bad!id", "assist_level":0}))
+        .await
+        .assert_status_bad_request();
+
+    let ambiguous = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"prompt":"graph", "assist_level":0}))
+        .await;
+    ambiguous.assert_status_ok();
+    let ambiguous_body = ambiguous.json::<Value>();
+    assert_eq!(ambiguous_body["outcome"], "ambiguous");
+    assert_eq!(ambiguous_body["candidates"].as_array().unwrap().len(), 2);
+
+    let generated = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"component_iri":graph_component, "assist_level":0}))
+        .await;
+    generated.assert_status_ok();
+    let generated_body = generated.json::<Value>();
+    assert_eq!(generated_body["outcome"], "story");
+    assert_eq!(generated_body["story"]["narration_mode"], "symbolic");
+    assert_eq!(generated_body["story"]["schema_version"], 3);
+    assert!(!generated_body["story"]["narrative"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(project_quads(&state), before_generate);
+
+    let presentation_only = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "component_iri":graph_component,
+            "assist_level":0,
+            "include_checks":false
+        }))
+        .await;
+    presentation_only.assert_status_ok();
+    let presentation_body = presentation_only.json::<Value>();
+    assert!(presentation_body["story"]["checks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        presentation_body["story"]["gaps"],
+        generated_body["story"]["gaps"]
+    );
+
+    let check = &generated_body["story"]["checks"][0];
+    assert!(uuid::Uuid::parse_str(check["id"].as_str().unwrap()).is_ok());
+    assert!(check["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|option| uuid::Uuid::parse_str(option["id"].as_str().unwrap()).is_ok()));
+    let correct_option = check["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["label"] == "Preserve durable project knowledge")
+        .unwrap();
+    let grade = server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({
+            "check_id": check["id"],
+            "selected_option_ids": [correct_option["id"].as_str().unwrap()]
+        }))
+        .await;
+    grade.assert_status_ok();
+    assert_eq!(grade.json::<Value>()["correct"], true);
+    let wrong_option = check["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["id"] != correct_option["id"])
+        .unwrap();
+    let wrong_grade = server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({
+            "check_id": check["id"],
+            "selected_option_ids": [wrong_option["id"].as_str().unwrap()]
+        }))
+        .await;
+    wrong_grade.assert_status_ok();
+    let wrong_grade_body = wrong_grade.json::<Value>();
+    assert_eq!(wrong_grade_body["correct"], false);
+    assert_eq!(wrong_grade_body["revisit_section_id"], "orientation");
+    assert_eq!(wrong_grade_body["evidence_iris"], json!([requirement]));
+
+    server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({"check_id": check["id"], "selected_option_ids": [uuid::Uuid::new_v4().to_string()]}))
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({"check_id": "not-a-handle", "selected_option_ids": []}))
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/api/v1/stories/checks/grade")
+        .json(&json!({"check_id": uuid::Uuid::new_v4().to_string(), "selected_option_ids": []}))
+        .await
+        .assert_status_not_found();
+
+    server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"component_iri":graph_component, "assist_level":2}))
+        .await
+        .assert_status_bad_request();
+
+    let draft = json!({
+        "id":"graph-store",
+        "title":"The Graph Store",
+        "schema_version":3,
+        "subject":{"type":"entity", "iri":graph_component},
+        "goal":"Understand durable storage",
+        "audience":"reboarding",
+        "focus":{
+            "include_record_iris":["https://example.test/missing-record"],
+            "exclude_record_iris":[], "include_code_symbols":[],
+            "exclude_code_symbols":[], "emphasis":["orientation"]
+        },
+        "status":"draft",
+        "curator":"maintainer"
+    });
+    let put = server.put("/api/v1/stories/graph-store").json(&draft).await;
+    put.assert_status_ok();
+    let put_body = put.json::<Value>();
+    assert_eq!(put_body["recipe"]["id"], "graph-store");
+    assert_eq!(put_body["recipe"]["schema_version"], 3);
+    assert_eq!(put_body["recipe"]["subject"]["type"], "entity");
+    assert!(put_body["recipe"].get("subject_component_iri").is_none());
+
+    // Action routes live below an extra segment, so ordinary recipe IDs such
+    // as `generate` remain addressable by every resource method.
+    let mut generate_recipe = draft.clone();
+    generate_recipe["id"] = json!("generate");
+    generate_recipe["title"] = json!("ZZ Generate recipe");
+    server
+        .put("/api/v1/stories/generate")
+        .json(&generate_recipe)
+        .await
+        .assert_status_ok();
+    let generated_recipe = server.get("/api/v1/stories/generate").await;
+    generated_recipe.assert_status_ok();
+    assert_eq!(generated_recipe.json::<Value>()["recipe"]["id"], "generate");
+
+    let recipe_ambiguity = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "recipe_id":"graph-store",
+            "component_iri":"graph",
+            "assist_level":0
+        }))
+        .await;
+    recipe_ambiguity.assert_status_bad_request();
+
+    let get = server.get("/api/v1/stories/graph-store").await;
+    get.assert_status_ok();
+    assert_eq!(get.json::<Value>()["recipe"]["status"], "draft");
+    let list = server.get("/api/v1/stories").await;
+    list.assert_status_ok();
+    let list_body = list.json::<Value>();
+    assert_eq!(list_body["stories"][0]["subject_label"], "Graph Store");
+    assert_eq!(list_body["stories"][0]["drifted"], true);
+
+    let invalid_publish = server
+        .post("/api/v1/stories/graph-store/publish")
+        .json(&json!({"updated_at":put_body["recipe"]["updated_at"]}))
+        .await;
+    invalid_publish.assert_status_bad_request();
+
+    let mut publishable = draft;
+    publishable["updated_at"] = put_body["recipe"]["updated_at"].clone();
+    publishable["focus"]["include_record_iris"] = json!([requirement]);
+    publishable["focus"]["emphasis"] = json!(["orientation", "current_state"]);
+    let updated = server
+        .put("/api/v1/stories/graph-store")
+        .json(&publishable)
+        .await;
+    updated.assert_status_ok();
+    let updated_body = updated.json::<Value>();
+    let stale_put = server
+        .put("/api/v1/stories/graph-store")
+        .json(&publishable)
+        .await;
+    assert_eq!(stale_put.status_code(), axum::http::StatusCode::CONFLICT);
+
+    let stale_publish = server
+        .post("/api/v1/stories/graph-store/publish")
+        .json(&json!({"updated_at":put_body["recipe"]["updated_at"]}))
+        .await;
+    assert_eq!(
+        stale_publish.status_code(),
+        axum::http::StatusCode::CONFLICT
+    );
+    let published = server
+        .post("/api/v1/stories/graph-store/publish")
+        .json(&json!({"updated_at":updated_body["recipe"]["updated_at"]}))
+        .await;
+    published.assert_status_ok();
+    assert_eq!(published.json::<Value>()["recipe"]["status"], "published");
+
+    let preferred = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"component_iri":graph_component, "assist_level":0}))
+        .await;
+    preferred.assert_status_ok();
+    let preferred_body = preferred.json::<Value>();
+    assert_eq!(preferred_body["story"]["trust_state"], "published");
+    assert_eq!(preferred_body["story"]["recipe_id"], "graph-store");
+
+    let replayed = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "recipe_id":"graph-store",
+            "component_iri":api_component,
+            "assist_level":0
+        }))
+        .await;
+    replayed.assert_status_bad_request();
+
+    let fresh = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({
+            "component_iri":graph_component,
+            "fresh":true,
+            "assist_level":0
+        }))
+        .await;
+    fresh.assert_status_ok();
+    let fresh_body = fresh.json::<Value>();
+    assert_eq!(fresh_body["story"]["trust_state"], "generated");
+    assert!(fresh_body["story"].get("recipe_id").is_none());
+
+    let drifted = json!({
+        "id":"drifted",
+        "title":"Drifted Story",
+        "schema_version":3,
+        "subject":{"type":"entity", "iri":"https://example.test/missing-component"},
+        "goal":"Repair a stale route",
+        "audience":"reboarding",
+        "focus":{"include_record_iris":["https://example.test/missing-record"],
+            "exclude_record_iris":[], "include_code_symbols":[], "exclude_code_symbols":[],
+            "emphasis":[]},
+        "status":"draft",
+        "curator":"maintainer"
+    });
+    server
+        .put("/api/v1/stories/drifted")
+        .json(&drifted)
+        .await
+        .assert_status_ok();
+    let drifted_run = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"recipe_id":"drifted", "assist_level":0}))
+        .await;
+    drifted_run.assert_status_ok();
+    let drifted_body = drifted_run.json::<Value>();
+    assert_eq!(
+        drifted_body["story"]["subject"]["iri"],
+        "https://example.test/missing-component"
+    );
+    assert_eq!(
+        drifted_body["story"]["subject"]["label"],
+        "https://example.test/missing-component"
+    );
+    assert!(drifted_body["story"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["id"] == "subject-drift"));
+
+    let ungrounded = json!({
+        "id":"ungrounded",
+        "title":"Ungrounded draft",
+        "schema_version":3,
+        "subject":{"type":"entity", "iri":graph_component},
+        "goal":"Surface curator drift",
+        "audience":"reboarding",
+        "focus":{"include_record_iris":[safe_distractor], "exclude_record_iris":[],
+            "include_code_symbols":[], "exclude_code_symbols":[], "emphasis":[]},
+        "status":"draft",
+        "curator":"maintainer"
+    });
+    let ungrounded_put = server
+        .put("/api/v1/stories/ungrounded")
+        .json(&ungrounded)
+        .await;
+    ungrounded_put.assert_status_ok();
+    let mut ungrounded_published = ungrounded.clone();
+    ungrounded_published["updated_at"] =
+        ungrounded_put.json::<Value>()["recipe"]["updated_at"].clone();
+    ungrounded_published["status"] = json!("published");
+    server
+        .put("/api/v1/stories/ungrounded")
+        .json(&ungrounded_published)
+        .await
+        .assert_status_bad_request();
+    let ungrounded_run = server
+        .post("/api/v1/stories/actions/generate")
+        .json(&json!({"recipe_id":"ungrounded", "assist_level":0}))
+        .await;
+    ungrounded_run.assert_status_ok();
+    let ungrounded_body = ungrounded_run.json::<Value>();
+    assert!(ungrounded_body["story"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["iri"] != safe_distractor));
+    assert!(ungrounded_body["story"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("outside-focus-record-")));
+    assert_eq!(
+        project_quads(&state),
+        before_generate,
+        "Story reads, recipe lifecycle, and grading must not mutate the project graph"
+    );
+}
+
+#[tokio::test]
+async fn story_recipe_io_failures_are_server_errors() {
+    let project = temp_dir("story-io-error");
+    let _cleanup = CleanupDir(project.clone());
+    let data_dir = project.join(".moosedev");
+    let state = Arc::new(
+        AppState::bootstrap_with_llm_config(&data_dir, &ontology_dir(), unconfigured_llm())
+            .expect("bootstrap Story I/O state"),
+    );
+    std::fs::write(project.join("stories"), "not a directory")
+        .expect("block the Story repository directory");
+    let server = TestServer::new(build_routes(state)).expect("build Story I/O test server");
+    let response = server
+        .put("/api/v1/stories/io-failure")
+        .json(&json!({
+            "id":"io-failure",
+            "title":"I/O failure",
+            "subject_component_iri":"https://example.test/component",
+            "goal":"Exercise error mapping",
+            "audience":"reboarding",
+            "beats":[],
+            "status":"draft",
+            "curator":"tester"
+        }))
+        .await;
+    response.assert_status_internal_server_error();
+}
+
+#[tokio::test]
+async fn corrupt_story_is_excluded_from_list_and_get_is_server_error() {
+    let project = temp_dir("story-corrupt");
+    let _cleanup = CleanupDir(project.clone());
+    let data_dir = project.join(".moosedev");
+    let state = Arc::new(
+        AppState::bootstrap_with_llm_config(&data_dir, &ontology_dir(), unconfigured_llm())
+            .expect("bootstrap corrupt Story state"),
+    );
+    std::fs::create_dir_all(project.join("stories")).unwrap();
+    std::fs::write(project.join("stories/corrupt.json"), "{bad json").unwrap();
+    let server = TestServer::new(build_routes(state)).expect("build Story test server");
+
+    let list = server.get("/api/v1/stories").await;
+    list.assert_status_ok();
+    assert!(list.json::<Value>()["stories"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    server
+        .get("/api/v1/stories/corrupt")
+        .await
+        .assert_status_internal_server_error();
+    server
+        .post("/api/v1/stories/corrupt/publish")
+        .json(&json!({"updated_at":"corrupt"}))
+        .await
+        .assert_status_internal_server_error();
+    server
+        .put("/api/v1/stories/corrupt")
+        .json(&json!({
+            "id":"corrupt",
+            "title":"Replacement",
+            "subject_component_iri":"https://example.test/component",
+            "goal":"Replace corrupt storage",
+            "audience":"reboarding",
+            "beats":[],
+            "status":"draft",
+            "curator":"tester",
+            "updated_at":"corrupt"
+        }))
+        .await
+        .assert_status_internal_server_error();
 }
 
 #[tokio::test]
@@ -981,6 +1559,7 @@ async fn debt_and_proposals_endpoints() {
         .expect("foo component");
     assert_eq!(row["denominator"], 1);
     assert_eq!(row["numerator"], 0);
+    assert_eq!(row["status"], "accepted");
 
     // Inbox lists the pending proposal.
     let list = server.get("/api/v1/proposals?status=proposed").await;
@@ -1199,4 +1778,388 @@ async fn automatic_capture_reports_journal_write_failure() {
     assert!(response.text().contains("failed to journal capture"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// CodeEntity workbench: record detail + trusted source reads.
+//
+// Every assertion here is about a PROJECTION of the substrate. The graph is
+// never written by these routes, which the quad snapshot in the first test
+// pins explicitly.
+// ---------------------------------------------------------------------------
+
+const RUNTIME_SYMBOL: &str = "rust-analyzer cargo testpkg 0.1.0 runtime/build_server().";
+/// Minted entities carry the version-normalized identity (Constraint 00b3986e).
+const RUNTIME_SYMBOL_NORM: &str = "rust-analyzer cargo testpkg . runtime/build_server().";
+/// 0-based line of `pub fn build_server()` in the fixture file.
+const RUNTIME_DEF_LINE: usize = 30;
+const RUNTIME_FILE_LINES: usize = 60;
+
+fn runtime_source() -> String {
+    (0..RUNTIME_FILE_LINES)
+        .map(|line| match line {
+            RUNTIME_DEF_LINE => "pub fn build_server() {}".to_string(),
+            // A multi-byte line inside the context window: byte columns and
+            // whole-line clipping must both survive it.
+            25 => "// naïve — filler line 25 ✅".to_string(),
+            other => format!("// filler line {other}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn runtime_index() -> Index {
+    let mut index = Index::new();
+    let mut document = code_doc("src/runtime.rs");
+    let mut info = SymbolInformation::new();
+    info.symbol = RUNTIME_SYMBOL.to_string();
+    info.display_name = "build_server".to_string();
+    info.kind = EnumOrUnknown::new(symbol_information::Kind::Function);
+    let mut signature = Signature::new();
+    signature.text = "pub fn build_server()".to_string();
+    info.signature_documentation = MessageField::some(signature);
+    document.symbols.push(info);
+    let mut occurrence = Occurrence::new();
+    occurrence.symbol = RUNTIME_SYMBOL.to_string();
+    occurrence.range = vec![RUNTIME_DEF_LINE as i32, 7, 19];
+    occurrence.symbol_roles = 1;
+    occurrence.enclosing_range = vec![RUNTIME_DEF_LINE as i32, 0, RUNTIME_DEF_LINE as i32, 24];
+    document.occurrences.push(occurrence);
+    index.documents.push(document);
+    index
+}
+
+/// A substrate over `src/runtime.rs`.
+///
+/// `trusted` decides whether the producer run started AFTER the file was
+/// written. Untrusted is the everyday case of a working tree edited since the
+/// last index — same bytes on disk, no longer provably the indexed ones.
+fn runtime_substrate(repo_root: &std::path::Path, source: &str, trusted: bool) -> Substrate {
+    std::fs::create_dir_all(repo_root.join("src")).expect("create src");
+    std::fs::write(repo_root.join("src/runtime.rs"), source).expect("write source");
+
+    let mut meta = SubstrateMeta::single("rust-analyzer", "c0", Utc::now(), 1, 1);
+    let skew = chrono::Duration::seconds(30);
+    meta.indexed_started_at = Some(if trusted {
+        Utc::now() + skew
+    } else {
+        Utc::now() - skew
+    });
+    Substrate::from_index_rooted(runtime_index(), meta, false, repo_root).expect("substrate")
+}
+
+fn trusted_runtime_substrate(repo_root: &std::path::Path) -> Substrate {
+    runtime_substrate(repo_root, &runtime_source(), true)
+}
+
+/// Mint the CodeEntity for the fixture symbol and return its UUID.
+fn mint_runtime_entity(state: &AppState) -> String {
+    let record = record_api_decision(state, "runtime builder decision");
+    let outcome = graph::link_code(
+        state,
+        &record,
+        "concerns",
+        &graph::CodeSelector::Symbol(RUNTIME_SYMBOL.to_string()),
+        "tester",
+    )
+    .expect("mint code entity");
+    outcome
+        .entity_iri
+        .rsplit('/')
+        .next()
+        .expect("entity uuid")
+        .to_string()
+}
+
+#[tokio::test]
+async fn code_entity_detail_and_source_project_the_current_substrate() {
+    let project = temp_dir("code-source");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state = Arc::new(
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap"),
+    );
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let adr_uuid = record_api_decision(&state, "plain decision")
+        .rsplit('/')
+        .next()
+        .expect("adr uuid")
+        .to_string();
+    let before = project_quads(&state);
+    let server = TestServer::new(build_routes(state.clone())).expect("build code test server");
+
+    let detail = server.get(&format!("/api/v1/records/{uuid}")).await;
+    detail.assert_status_ok();
+    let code = detail.json::<Value>()["code"].clone();
+    assert_eq!(code["symbol"], RUNTIME_SYMBOL_NORM);
+    assert_eq!(code["name"], "build_server");
+    assert_eq!(code["entity_kind"], "Function");
+    assert_eq!(code["defined_in_path"], "src/runtime.rs");
+    assert_eq!(code["source_path"], "src/runtime.rs");
+    assert_eq!(code["signature"], "pub fn build_server()");
+    assert_eq!(code["source_available"], true);
+    assert!(code["source_unavailable_reason"].is_null());
+    assert_eq!(code["substrate_stale"], false);
+    // Public coordinates are 1-based on both axes.
+    assert_eq!(
+        code["definition"]["start_line"],
+        RUNTIME_DEF_LINE as u64 + 1
+    );
+    assert_eq!(code["definition"]["start_col"], 8);
+    assert_eq!(code["definition"]["end_col"], 20);
+
+    // context = the definition plus 12 lines of padding on each side.
+    let context = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    context.assert_status_ok();
+    let context = context.json::<Value>();
+    assert_eq!(context["scope"], "context");
+    assert_eq!(context["path"], "src/runtime.rs");
+    assert_eq!(context["start_line"], RUNTIME_DEF_LINE as u64 - 11);
+    assert_eq!(context["end_line"], RUNTIME_DEF_LINE as u64 + 13);
+    assert_eq!(context["total_lines"], RUNTIME_FILE_LINES as u64);
+    assert_eq!(context["truncated"], false);
+    assert_eq!(
+        context["definition"]["start_line"],
+        RUNTIME_DEF_LINE as u64 + 1
+    );
+    let text = context["text"].as_str().expect("text");
+    assert_eq!(text.lines().count(), 25);
+    assert!(text.starts_with("// filler line 18\n"), "{text}");
+    assert!(text.contains("pub fn build_server() {}"), "{text}");
+    assert!(text.ends_with("// filler line 42"), "{text}");
+    // Multi-byte source survives the window intact.
+    assert!(text.contains("// naïve — filler line 25 ✅"), "{text}");
+
+    // full = the whole indexed file.
+    let full = server
+        .get(&format!("/api/v1/records/{uuid}/source?scope=full"))
+        .await;
+    full.assert_status_ok();
+    let full = full.json::<Value>();
+    assert_eq!(full["scope"], "full");
+    assert_eq!(full["start_line"], 1);
+    assert_eq!(full["end_line"], RUNTIME_FILE_LINES as u64);
+    assert_eq!(full["truncated"], false);
+    assert_eq!(
+        full["text"].as_str().expect("text").lines().count(),
+        RUNTIME_FILE_LINES
+    );
+
+    // An ordinary record has no code block and no source.
+    let adr = server.get(&format!("/api/v1/records/{adr_uuid}")).await;
+    adr.assert_status_ok();
+    assert!(adr.json::<Value>()["code"].is_null());
+    server
+        .get(&format!("/api/v1/records/{adr_uuid}/source"))
+        .await
+        .assert_status_bad_request();
+
+    // Reading source never writes the graph.
+    assert_eq!(before, project_quads(&state));
+}
+
+#[tokio::test]
+async fn source_is_withheld_when_the_indexed_baseline_cannot_be_trusted() {
+    let project = temp_dir("code-source-stale");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    let substrate = runtime_substrate(&repo_root, &runtime_source(), false);
+    state.set_substrate(Arc::new(substrate));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let detail = server.get(&format!("/api/v1/records/{uuid}")).await;
+    detail.assert_status_ok();
+    let code = detail.json::<Value>()["code"].clone();
+    assert_eq!(code["source_available"], false);
+    let reason = code["source_unavailable_reason"]
+        .as_str()
+        .expect("reason")
+        .to_string();
+    assert!(reason.contains("moosedev index"), "{reason}");
+    assert!(reason.contains("src/runtime.rs"), "{reason}");
+    // Location metadata still answers "where does this live".
+    assert_eq!(
+        code["definition"]["start_line"],
+        RUNTIME_DEF_LINE as u64 + 1
+    );
+    assert_eq!(code["source_path"], "src/runtime.rs");
+
+    let source = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    source.assert_status_service_unavailable();
+    assert!(source.text().contains("moosedev index"));
+}
+
+#[tokio::test]
+async fn source_route_refuses_cross_origin_browser_reads() {
+    let project = temp_dir("code-source-origin");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+    let path = format!("/api/v1/records/{uuid}/source");
+
+    // A local non-browser caller sends no Origin.
+    server.get(&path).await.assert_status_ok();
+
+    // A page on another origin does, and must not be able to read the tree.
+    let denied = server
+        .get(&path)
+        .add_header("origin", "http://evil.example")
+        .await;
+    denied.assert_status_forbidden();
+    assert!(denied.text().contains("cross-origin"));
+    assert!(!denied.text().contains("build_server"));
+
+    // Opaque origins are refused for the same reason.
+    server
+        .get(&path)
+        .add_header("origin", "null")
+        .await
+        .assert_status_forbidden();
+
+    // The WebUI is same-origin with the daemon, so it is served.
+    server
+        .get(&path)
+        .add_header("host", "127.0.0.1:7474")
+        .add_header("origin", "http://127.0.0.1:7474")
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn source_route_validates_scope_and_record_identity() {
+    let project = temp_dir("code-source-args");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let bad_scope = server
+        .get(&format!("/api/v1/records/{uuid}/source?scope=everything"))
+        .await;
+    bad_scope.assert_status_bad_request();
+    assert!(bad_scope.text().contains("context"));
+
+    server
+        .get("/api/v1/records/does-not-exist/source")
+        .await
+        .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn full_source_is_capped_and_says_so() {
+    let project = temp_dir("code-source-cap");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    // Comfortably past the 20,000-line ceiling on `scope=full`.
+    let huge = (0..20_500)
+        .map(|line| {
+            if line == RUNTIME_DEF_LINE {
+                "pub fn build_server() {}".to_string()
+            } else {
+                format!("// filler line {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    state.set_substrate(Arc::new(runtime_substrate(&repo_root, &huge, true)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let full = server
+        .get(&format!("/api/v1/records/{uuid}/source?scope=full"))
+        .await;
+    full.assert_status_ok();
+    let full = full.json::<Value>();
+    assert_eq!(full["truncated"], true);
+    assert_eq!(full["start_line"], 1);
+    // The reported range matches the text exactly, so a client never numbers
+    // lines it was not given.
+    assert_eq!(full["end_line"], 20_000);
+    assert_eq!(full["total_lines"], 20_500);
+    assert_eq!(full["text"].as_str().expect("text").lines().count(), 20_000);
+
+    // The bounded context view is unaffected by the file's size.
+    let context = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    context.assert_status_ok();
+    let context = context.json::<Value>();
+    assert_eq!(context["truncated"], false);
+    assert_eq!(context["text"].as_str().expect("text").lines().count(), 25);
+}
+
+#[tokio::test]
+async fn a_head_stale_index_still_serves_a_provably_unchanged_file_and_says_it_is_behind() {
+    let project = temp_dir("code-source-head-stale");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    // HEAD has moved on since indexing, but THIS file provably has not: its
+    // bytes are the ones the producer saw, so its line numbers are still true.
+    // Serving with `substrate_stale: true` is the contract — withholding here
+    // would blind the workbench every time any unrelated file changed, and
+    // serving silently would hide that the wider index is behind.
+    let mut meta = SubstrateMeta::single("rust-analyzer", "not-the-current-head", Utc::now(), 1, 1);
+    meta.indexed_started_at = Some(Utc::now() + chrono::Duration::seconds(30));
+    std::fs::create_dir_all(repo_root.join("src")).expect("create src");
+    std::fs::write(repo_root.join("src/runtime.rs"), runtime_source()).expect("write source");
+    let substrate =
+        Substrate::from_index_rooted(runtime_index(), meta, true, &repo_root).expect("substrate");
+    assert!(substrate.is_stale(), "fixture must be HEAD-stale");
+    state.set_substrate(Arc::new(substrate));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+
+    let detail = server.get(&format!("/api/v1/records/{uuid}")).await;
+    detail.assert_status_ok();
+    let code = detail.json::<Value>()["code"].clone();
+    assert_eq!(code["substrate_stale"], true);
+    assert_eq!(code["source_available"], true);
+
+    let source = server.get(&format!("/api/v1/records/{uuid}/source")).await;
+    source.assert_status_ok();
+    let text = source.json::<Value>()["text"].as_str().unwrap().to_string();
+    assert!(text.contains("pub fn build_server() {}"), "{text}");
+}
+
+#[tokio::test]
+async fn source_route_refuses_a_dns_rebinding_authority() {
+    let project = temp_dir("code-source-rebind");
+    let _cleanup = CleanupDir(project.clone());
+    let repo_root = project.join("repo");
+    let state =
+        AppState::bootstrap(&project.join(".moosedev"), &ontology_dir()).expect("bootstrap");
+    state.set_substrate(Arc::new(trusted_runtime_substrate(&repo_root)));
+    let uuid = mint_runtime_entity(&state);
+    let server = test_server(state);
+    let path = format!("/api/v1/records/{uuid}/source");
+
+    // Origin and Host agree — and both are the attacker's, which is exactly
+    // what a rebound hostname produces. Origin/Host equality alone would pass.
+    let rebound = server
+        .get(&path)
+        .add_header("host", "rebind.example:7474")
+        .add_header("origin", "http://rebind.example:7474")
+        .await;
+    rebound.assert_status_forbidden();
+    assert!(!rebound.text().contains("build_server"));
+
+    // Same page without an Origin header is refused on the authority alone.
+    server
+        .get(&path)
+        .add_header("host", "rebind.example:7474")
+        .await
+        .assert_status_forbidden();
 }
