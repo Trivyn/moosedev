@@ -131,8 +131,11 @@ async fn connect_respects_no_autospawn() {
     let socket = runtime::socket_path_for(&data_dir);
     let pidfile = runtime::pidfile_path_for(&data_dir);
 
+    // This test shares the harness with two real-backend startup tests. Those
+    // cold starts can briefly starve this child on loaded release builders, so
+    // keep the timeout as a deadlock backstop rather than a latency assertion.
     let output = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         tokio::process::Command::new(binary())
             .arg("--connect")
             .env("MOOSEDEV_DATA_DIR", &data_dir)

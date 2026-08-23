@@ -64,10 +64,7 @@ pub struct WhyCoverage {
 /// its type. Keeping this in step with the mint scope also keeps the metric
 /// honest — every definition it counts is one an entity exists for.
 pub(crate) fn is_debt_surface(entry: &DefinitionEntry) -> bool {
-    entry.is_public
-        && !entry.is_module
-        && !is_test_path(&entry.file)
-        && !is_type_member(entry)
+    entry.is_public && !entry.is_module && !is_test_path(&entry.file) && !is_type_member(entry)
 }
 
 fn component_key(iri: Option<&String>, name: &str) -> String {

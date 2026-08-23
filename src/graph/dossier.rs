@@ -222,8 +222,10 @@ pub(crate) fn code_entities_with_records(
                 Some(GraphNameRef::NamedNode(graph)),
             ) {
                 let quad = quad?;
-                let (oxigraph::model::NamedOrBlankNode::NamedNode(subject), Term::NamedNode(object)) =
-                    (quad.subject, quad.object)
+                let (
+                    oxigraph::model::NamedOrBlankNode::NamedNode(subject),
+                    Term::NamedNode(object),
+                ) = (quad.subject, quad.object)
                 else {
                     continue;
                 };

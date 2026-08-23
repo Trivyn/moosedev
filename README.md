@@ -14,12 +14,12 @@
 
 ## What is MOOSEDev?
 
-MOOSEDev is a local project-memory daemon that gives coding agents and humans a reliable, **structured, queryable, long-term understanding** of a software project. Agents reach it through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), editors through a knowledge-focused LSP, and humans through the a web interface.
+MOOSEDev is a local project-memory daemon that gives coding agents and humans a reliable, **structured, queryable, long-term understanding** of a software project. Agents reach it through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), editors through a knowledge-focused LSP, and humans through the web interface.
 
-Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable ontology-grounded 
+Its purpose is to combat **comprehension debt**: the gradual loss of shared understanding of *why* a codebase is shaped the way it is. Instead of stuffing ever more history into an LLM's context window, MOOSEDev maintains a typed, auditable ontology-grounded
 **project knowledge graph**: architectural decisions, lessons, constraints, anti-patterns that an agent can record into and reason over symbolically.
 
-MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed. 
+MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed.
 
 ## Why it's different
 
@@ -117,7 +117,7 @@ Each downloads a binary bundled with its `ontologies/`, `skills/`, and `template
 
 ### Build from source
 
-Requires Rust 1.89 or newer and a checkout of the MOOSE engine at `../moose` (MOOSEDev depends on it via a path dependency, and on its patched `oxigraph` fork).
+Requires Rust 1.89 or newer and a checkout of the MOOSE engine at `../moose` (MOOSEDev depends on it via a path dependency, and on its patched `oxigraph` fork). Release v0.10.0 is built against MOOSE commit `e062d272a3b34ad1abe160e8a5830b48c87f0234` (`v0.9.1`).
 
 ```sh
 git clone https://github.com/Trivyn/moosedev.git
@@ -132,10 +132,10 @@ The human-facing web UI is embedded in the Rust binary by default, so generated 
 
 ```sh
 cd ui
-npm install
+npm ci
 npm run build
 cd ..
-cargo build --release
+cargo build --release --locked
 ```
 
 `ui/dist/` is generated output from Vite and is intentionally not tracked in Git.
@@ -143,7 +143,7 @@ cargo build --release
 For a backend-only build that does not require `ui/dist/`, use the explicit headless feature:
 
 ```sh
-cargo build --release --no-default-features --features headless
+cargo build --release --locked --no-default-features --features headless
 ```
 
 ### Run as an MCP server
@@ -393,7 +393,7 @@ Contributions to the open parts of MOOSEDev are welcome. Deep changes to MOOSE b
 
 ## How this was built
 
-MOOSEDev has been written iteratively with AI coding agents under human architectural direction and review. 
+MOOSEDev has been written iteratively with AI coding agents under human architectural direction and review.
 
 ## License
 

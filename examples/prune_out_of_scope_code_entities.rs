@@ -149,7 +149,11 @@ fn main() -> anyhow::Result<()> {
         txn.remove(quad.as_ref());
     }
     txn.commit()?;
-    println!("removed {} quad(s) across {} entities", quads.len(), doomed.len());
+    println!(
+        "removed {} quad(s) across {} entities",
+        quads.len(),
+        doomed.len()
+    );
 
     state.mark_inferred_stale();
     state.ensure_enriched();
@@ -332,10 +336,14 @@ fn removable_quads(state: &AppState, doomed: &[String]) -> anyhow::Result<Vec<Qu
 }
 
 fn report(candidates: &[Candidate], verbose: bool) {
-    let (prunable, retained): (Vec<_>, Vec<_>) =
-        candidates.iter().partition(|candidate| candidate.prunable());
+    let (prunable, retained): (Vec<_>, Vec<_>) = candidates
+        .iter()
+        .partition(|candidate| candidate.prunable());
 
-    println!("\nPRUNE — out of scope, unannotated, unreferenced: {}", prunable.len());
+    println!(
+        "\nPRUNE — out of scope, unannotated, unreferenced: {}",
+        prunable.len()
+    );
     let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
     for candidate in &prunable {
         *per_file
@@ -357,7 +365,10 @@ fn report(candidates: &[Candidate], verbose: bool) {
         .iter()
         .filter(|candidate| !candidate.extra_predicates.is_empty())
         .collect::<Vec<_>>();
-    println!("\nRETAINED — something is asserted about them: {}", annotated.len());
+    println!(
+        "\nRETAINED — something is asserted about them: {}",
+        annotated.len()
+    );
     for candidate in &annotated {
         println!(
             "  {} ({})\n    extra: {}",

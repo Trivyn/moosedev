@@ -185,7 +185,9 @@ mod tests {
     fn top_level_declaration_requires_namespace_ancestors() {
         // A declaration suffix is necessary but not sufficient: a member of a
         // declared type is addressable only through its parent.
-        assert!(!is_top_level_declaration(&format!("{PKG} ns/Thing#member.")));
+        assert!(!is_top_level_declaration(&format!(
+            "{PKG} ns/Thing#member."
+        )));
         assert!(!is_top_level_declaration(&format!(
             "{PKG} ns/Outer#Inner#deep."
         )));

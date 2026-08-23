@@ -61,6 +61,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Trivyn/moose
+          ref: e062d272a3b34ad1abe160e8a5830b48c87f0234 # v0.9.1
           path: moose
           ssh-key: ${{ secrets.MOOSE_DEPLOY_KEY }}
 
@@ -110,7 +111,7 @@ jobs:
       - name: Build web UI (embedded-frontend)
         working-directory: moosedev/ui
         run: |
-          npm install
+          npm ci
           npm run build
 
       - name: Build release binary
@@ -177,6 +178,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout MOOSEDev
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -186,6 +190,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
+          body_path: docs/releases/${{ github.ref_name }}.md
           generate_release_notes: true
           fail_on_unmatched_files: true
 

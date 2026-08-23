@@ -805,7 +805,10 @@ mod tests {
             mint_candidates(&[declaration.clone(), field.clone()]);
 
         assert_eq!(kept, vec![declaration]);
-        assert_eq!(skipped_scope, 1, "the field is a scope skip, not a test skip");
+        assert_eq!(
+            skipped_scope, 1,
+            "the field is a scope skip, not a test skip"
+        );
         assert_eq!(skipped_tests, 0);
         // Batch scope only: lazy anchoring must still reach it, exactly as it
         // does for private items.

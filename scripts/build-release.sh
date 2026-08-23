@@ -21,13 +21,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 echo "==> Building web UI into ui/dist …"
-if [ ! -d ui/node_modules ]; then
-  echo "    ui/node_modules missing — installing UI dependencies first …"
-  npm --prefix ui install
-fi
+npm --prefix ui ci
 npm --prefix ui run build
 
 echo "==> Building release binary with the default embedded frontend …"
-cargo build --release
+cargo build --release --locked
 
 echo "==> Done: ./target/release/moosedev (web UI embedded)."
