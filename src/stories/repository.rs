@@ -11,7 +11,9 @@ use oxigraph::model::NamedNode;
 
 use super::model::{validate_topic, StoryFocus, StoryRecipe, StoryRecipeSubject, StoryStatus};
 
+/// Keeps each curator include/exclude list from becoming an unbounded traversal input.
 pub(super) const MAX_FOCUS_REFS: usize = 128;
+/// Current recipe and run contract; older recipes remain readable and migrate on save.
 pub(super) const STORY_SCHEMA_VERSION: u8 = 3;
 
 /// File-backed recipe repository. Claims stay in the KG; recipes contain only

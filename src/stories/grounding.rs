@@ -16,10 +16,13 @@ use super::model::{
     StoryTimelineEvent,
 };
 
+/// Bounds the public dossier and its downstream per-entity projections.
 pub(super) const MAX_STORY_ENTITIES: usize = 512;
-// Discover beyond the output cap so deep curator-selected evidence can reserve
-// a slot without turning an unrelated include into a new traversal root.
+/// Looks past the output cap so deep curator-selected evidence can reserve a
+/// slot without turning an unrelated inclusion into a new traversal root.
 const MAX_STORY_DISCOVERY_ENTITIES: usize = MAX_STORY_ENTITIES * 8;
+/// Complements the entity cap for unusually large records; either bound makes
+/// the resulting Story explicitly report incomplete coverage.
 const MAX_STORY_DOSSIER_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) fn topic_records(state: &AppState, query: &str) -> anyhow::Result<Vec<RecordData>> {

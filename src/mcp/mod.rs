@@ -449,7 +449,7 @@ pub struct RecordDecisionArgs {
     pub consequences: Option<Vec<String>>,
 }
 
-/// One inline relation for `record_important_decision`: an object property plus its
+/// One inline relation for a capture or supersession: an object property plus its
 /// target typed node (by IRI or exact label/title).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[schemars(inline)]
@@ -503,6 +503,10 @@ pub struct SupersedeArgs {
     pub timestamp: Option<String>,
     /// Optional author to attribute the replacement to (defaults to the MCP client name).
     pub author: Option<String>,
+    /// Optional semantic relations to assert from the replacement. Relations are
+    /// validated and written atomically with the supersession; relations on the
+    /// superseded record are never inherited automatically.
+    pub relations: Option<Vec<RelationArg>>,
 }
 
 /// Arguments for the `retract_decision` tool.
@@ -1049,7 +1053,7 @@ impl MooseDevServer {
 
     /// Record a new decision that supersedes an existing one, preserving history.
     #[tool(
-        description = "Replace an existing typed knowledge record when prior knowledge has changed. Atomically creates a replacement of the same class, captures the required rationale as a typed Rationale, links the history in both directions, and marks the old record superseded without deleting it. Use `retract_decision` when there is no successor, and `record_important_decision` only for genuinely new knowledge. Writes the graph and returns the old, new, and rationale IRIs; run `validate_against_architecture` afterward.",
+        description = "Replace an existing typed knowledge record when prior knowledge has changed. Atomically creates a replacement of the same class, captures the required rationale as a typed Rationale, links the history in both directions, and marks the old record superseded without deleting it. Non-lifecycle semantic relations are NEVER inherited: pass `relations` to reassert selected links atomically on the replacement. The reply reports explicitly applied links and prior semantic outgoing links not carried, as call-ready `{predicate,target}` pairs. Use `retract_decision` when there is no successor, and `record_important_decision` only for genuinely new knowledge. Writes the graph and returns the old, new, and rationale IRIs; run `validate_against_architecture` afterward.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1104,10 +1108,26 @@ impl MooseDevServer {
             },
             rationale,
         };
-        match graph::supersede_decision(&self.state, &input, &agent, now) {
+        let relations: Vec<(String, String)> = args
+            .relations
+            .unwrap_or_default()
+            .into_iter()
+            .map(|relation| (relation.predicate, relation.target))
+            .collect();
+        match graph::supersede_decision_with_relation_args(
+            &self.state,
+            &input,
+            &relations,
+            &agent,
+            now,
+        ) {
             Ok(out) => {
+                // Publish graph staleness/export/memo invalidation before any
+                // awaited best-effort indexing work opens a concurrent-read gap.
+                self.state.note_project_write();
+                let lifecycle = &out.lifecycle;
                 // Provenance both minted records (best-effort, never fails the write).
-                for iri in [&out.new_iri, &out.rationale_iri] {
+                for iri in [&lifecycle.new_iri, &lifecycle.rationale_iri] {
                     if let Err(e) =
                         provenance::record_provenance_at(&self.state.store, iri, &agent, now)
                     {
@@ -1121,10 +1141,33 @@ impl MooseDevServer {
                         tracing::warn!("dense index failed for {iri}: {e}");
                     }
                 }
-                self.state.note_project_write();
+                let linked = if out.applied_edges.is_empty() {
+                    "none".to_string()
+                } else {
+                    out.applied_edges
+                        .iter()
+                        .map(|edge| format!("{} → {}", edge.predicate_local, edge.object_iri))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let not_carried = if out.not_carried_edges.is_empty() {
+                    "none".to_string()
+                } else {
+                    let pairs: Vec<serde_json::Value> = out
+                        .not_carried_edges
+                        .iter()
+                        .map(|edge| {
+                            serde_json::json!({
+                                "predicate": edge.predicate_local,
+                                "target": edge.object_iri,
+                            })
+                        })
+                        .collect();
+                    serde_json::to_string(&pairs).expect("relation repair pairs serialize")
+                };
                 Ok(tool_ok(format!(
-                    "Superseded {} → {} (rationale {}){title_note}",
-                    out.superseded_iri, out.new_iri, out.rationale_iri
+                    "Superseded {} → {} (rationale {}){title_note}\nLinked: {linked}\nNot carried: {not_carried}",
+                    lifecycle.superseded_iri, lifecycle.new_iri, lifecycle.rationale_iri
                 )))
             }
             Err(e) => Ok(tool_error(format!("failed to supersede: {e}"))),
@@ -2450,7 +2493,11 @@ mod tests {
         assert!(
             description(&catalog, "capture_decision_point").contains("record_important_decision")
         );
-        assert!(description(&catalog, "supersede_decision").contains("retract_decision"));
+        let supersede_description = description(&catalog, "supersede_decision");
+        assert!(supersede_description.contains("retract_decision"));
+        assert!(supersede_description.contains("NEVER inherited"));
+        assert!(supersede_description.contains("{predicate,target}"));
+        assert!(supersede_description.contains("not carried"));
         assert!(description(&catalog, "get_entity_dossier").contains("before editing"));
         assert!(description(&catalog, "suggest_links").contains("not proven facts"));
         assert!(description(&catalog, "suggest_mappings").contains("Compatibility alias"));
@@ -2511,6 +2558,33 @@ mod tests {
         );
         assert_eq!(relation_items["properties"]["predicate"]["type"], "string");
         assert_eq!(relation_items["properties"]["target"]["type"], "string");
+
+        let supersede = schema(tool(&catalog, "supersede_decision"));
+        assert!(
+            !supersede["required"]
+                .as_array()
+                .expect("supersede required fields")
+                .iter()
+                .any(|field| field == "relations"),
+            "supersede relations must remain optional"
+        );
+        let supersede_relation_items = &supersede["properties"]["relations"]["items"];
+        assert!(
+            supersede_relation_items.get("$ref").is_none(),
+            "supersede relations must be inline"
+        );
+        assert_eq!(
+            supersede_relation_items["required"],
+            serde_json::json!(["predicate", "target"])
+        );
+        assert_eq!(
+            supersede_relation_items["properties"]["predicate"]["type"],
+            "string"
+        );
+        assert_eq!(
+            supersede_relation_items["properties"]["target"]["type"],
+            "string"
+        );
 
         let query = schema(tool(&catalog, "query"));
         assert!(query["properties"]["question"]["description"]

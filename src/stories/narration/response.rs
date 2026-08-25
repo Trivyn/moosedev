@@ -3,7 +3,9 @@ use super::{NarrationFailure, NarrationFailureReason};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Rejects oversized provider output before JSON repair and parsing spend more work on it.
 const MAX_LLM_RESPONSE_BYTES: usize = 256 * 1024;
+/// Prevents one generated paragraph from dominating an otherwise valid Story response.
 const MAX_NARRATED_PARAGRAPH_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]

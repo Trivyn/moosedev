@@ -49,6 +49,7 @@ pub fn mint_instance_iri(class_local: &str) -> String {
 
 /// `rdfs:subClassOf` — class-subsumption predicate (moose's const set omits it).
 pub(crate) const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+pub(crate) const OWL_INVERSE_OF: &str = "http://www.w3.org/2002/07/owl#inverseOf";
 pub(crate) const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 pub(crate) const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 pub(crate) const SH_TARGET_CLASS: &str = "http://www.w3.org/ns/shacl#targetClass";

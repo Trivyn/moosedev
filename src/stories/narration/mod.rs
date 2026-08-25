@@ -26,9 +26,10 @@ use moose::types::{LlmAssistLevel, LlmParams};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Falls back to the complete symbolic article instead of waiting indefinitely on a provider.
 const NARRATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// A coalesced follower waits a little beyond its leader's own ceiling, never
-/// indefinitely.
+/// indefinitely, leaving time for the leader to publish its result.
 const FOLLOWER_TIMEOUT: Duration = Duration::from_secs(75);
 
 #[derive(Clone)]

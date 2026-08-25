@@ -547,31 +547,38 @@ impl AppState {
     /// failure is logged and leaves the flag set (retried next read) rather than failing
     /// the read. Serialized by `enrich_lock` so concurrent reads enrich at most once.
     pub fn ensure_enriched(&self) {
+        if let Err(e) = self.try_ensure_enriched() {
+            tracing::warn!("enrich failed (serving possibly-stale edges): {e}");
+        }
+    }
+
+    /// Fallible enrichment boundary for writes whose correctness depends on a
+    /// complete inverse-edge snapshot. Unlike [`Self::ensure_enriched`], this
+    /// surfaces failure so the authoritative mutation can abort first.
+    pub(crate) fn try_ensure_enriched(&self) -> anyhow::Result<()> {
         use std::sync::atomic::Ordering;
         if !self.inferred_stale.load(Ordering::Acquire) {
-            return; // fast path — nothing changed since the last enrichment
+            return Ok(()); // fast path — nothing changed since the last enrichment
         }
         let _guard = self
             .enrich_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !self.inferred_stale.load(Ordering::Acquire) {
-            return; // another reader enriched while we waited on the lock
+            return Ok(()); // another reader enriched while we waited on the lock
         }
-        match crate::reasoning::enrich_now(
+        let n = crate::reasoning::enrich_now(
             &self.store,
             PROJECT_KG_GRAPH_IRI,
             &[
                 ontology::SE_DOMAIN_GRAPH_IRI,
                 ontology::ARCH_DOMAIN_GRAPH_IRI,
+                ontology::CODE_DOMAIN_GRAPH_IRI,
             ],
-        ) {
-            Ok(n) => {
-                self.inferred_stale.store(false, Ordering::Release);
-                tracing::debug!("enrich: materialized {n} inferred edge(s)");
-            }
-            Err(e) => tracing::warn!("enrich failed (serving possibly-stale edges): {e}"),
-        }
+        )?;
+        self.inferred_stale.store(false, Ordering::Release);
+        tracing::debug!("enrich: materialized {n} inferred edge(s)");
+        Ok(())
     }
 
     /// Enable MOOSE's real multi-turn chat layer for host surfaces that need it

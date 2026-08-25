@@ -13,7 +13,7 @@ use super::context::PRIORITY_EDGES;
 use super::state::AppState;
 use super::util::{
     any_subclass_of, class_list, iri_value, is_subclass_of, local_name, run_sparql, unique_classes,
-    RDF_FIRST, RDF_REST, SH_CLASS, SH_OR, SH_PATH, SH_PROPERTY, SH_TARGET_CLASS,
+    OWL_INVERSE_OF, RDF_FIRST, RDF_REST, SH_CLASS, SH_OR, SH_PATH, SH_PROPERTY, SH_TARGET_CLASS,
 };
 
 #[derive(Debug, Clone)]
@@ -182,7 +182,7 @@ WHERE {{
     let Ok(QueryResults::Solutions(solutions)) = run_sparql(store, &sparql) else {
         return RelationCatalogue::default();
     };
-    let entries = solutions
+    let base_entries: Vec<CatalogEntry> = solutions
         .flatten()
         .filter_map(|solution| {
             let predicate_iri = iri_value(solution.get("predicate"))?;
@@ -195,6 +195,68 @@ WHERE {{
             })
         })
         .collect();
+
+    // SHACL generally declares the authored/forward direction only. Extend the
+    // same symbolic legality table from OWL inverse axioms so materialized inverse
+    // edges (e.g. Requirement --isSatisfiedBy--> CodeEntity) are also valid,
+    // replayable relation arguments. No domain/range rule is invented: each
+    // inverse entry reverses one shaped forward constraint.
+    let inverse_sparql = format!(
+        r#"
+SELECT DISTINCT ?property ?inverse
+WHERE {{
+  VALUES ?ontologyGraph {{ <{}> <{}> <{}> }}
+  GRAPH ?ontologyGraph {{
+    {{ ?property <{}> ?inverse }}
+    UNION
+    {{ ?inverse <{}> ?property }}
+  }}
+}}"#,
+        ontology::SE_DOMAIN_GRAPH_IRI,
+        ontology::ARCH_DOMAIN_GRAPH_IRI,
+        ontology::CODE_DOMAIN_GRAPH_IRI,
+        OWL_INVERSE_OF,
+        OWL_INVERSE_OF,
+    );
+    let inverse_pairs = match run_sparql(store, &inverse_sparql) {
+        Ok(QueryResults::Solutions(solutions)) => solutions
+            .flatten()
+            .filter_map(|solution| {
+                Some((
+                    iri_value(solution.get("property"))?,
+                    iri_value(solution.get("inverse"))?,
+                ))
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+
+    let mut entries = base_entries.clone();
+    for entry in &base_entries {
+        for (_, inverse_iri) in inverse_pairs
+            .iter()
+            .filter(|(property_iri, _)| property_iri == &entry.predicate_iri)
+        {
+            entries.push(CatalogEntry {
+                predicate_iri: inverse_iri.clone(),
+                predicate_local: local_name(inverse_iri).to_string(),
+                subject_class: entry.object_class.clone(),
+                object_class: entry.subject_class.clone(),
+            });
+        }
+    }
+    entries.sort_by(|left, right| {
+        (&left.predicate_iri, &left.subject_class, &left.object_class).cmp(&(
+            &right.predicate_iri,
+            &right.subject_class,
+            &right.object_class,
+        ))
+    });
+    entries.dedup_by(|left, right| {
+        left.predicate_iri == right.predicate_iri
+            && left.subject_class == right.subject_class
+            && left.object_class == right.object_class
+    });
     RelationCatalogue { entries }
 }
 
@@ -427,10 +489,10 @@ mod tests {
         let cat = build_relation_catalogue(&store);
 
         let code_entity = code_cls("CodeEntity");
-        for (target, local) in [
-            (cls("SystemComponent"), "realizes"),
-            (cls("Requirement"), "satisfies"),
-            (cls("Pattern"), "embodies"),
+        for (target, local, inverse_local) in [
+            (cls("SystemComponent"), "realizes", "isRealizedBy"),
+            (cls("Requirement"), "satisfies", "isSatisfiedBy"),
+            (cls("Pattern"), "embodies", "isEmbodiedBy"),
         ] {
             let legal = cat.legal_predicates(&store, &code_entity, &target);
             let predicate_iri = code_pred(local);
@@ -445,6 +507,21 @@ mod tests {
             assert!(
                 !cat.constraints_for_predicate(&predicate_iri).is_empty(),
                 "catalogue must include SHACL constraints for code:{local}"
+            );
+            let inverse_legal = cat.legal_predicates(&store, &target, &code_entity);
+            let inverse_iri = code_pred(inverse_local);
+            assert!(
+                inverse_legal.iter().any(|edge| {
+                    edge.predicate_local == inverse_local
+                        && edge.predicate_iri == inverse_iri
+                        && edge.direction == EdgeDirection::Forward
+                }),
+                "expected {target} --{inverse_local}--> CodeEntity; got {inverse_legal:?}"
+            );
+            assert_eq!(
+                cat.expected_object_classes(&inverse_iri),
+                vec![code_entity.clone()],
+                "inverse predicate must be replayable by inline relation capture"
             );
         }
 

@@ -19,6 +19,7 @@ use super::repository::{StorySubjectInvalid, STORY_SCHEMA_VERSION};
 use super::resolution::StoryResolutionIndex;
 use crate::graph::{first_literal, in_working_set, AppState};
 
+/// Prevents one beat from expanding beyond the dossier's proven evidence ceiling.
 const MAX_ANCHORS_PER_BEAT: usize = MAX_STORY_ENTITIES;
 
 pub fn generate_consistent_story(

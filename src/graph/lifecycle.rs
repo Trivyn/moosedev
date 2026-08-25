@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad};
 
 use super::capture::{
-    capture_instance_quads, require_information_record, CaptureStamp, RecordInput,
+    capture_instance_quads, plan_relation_args, require_information_record, AppliedEdge,
+    CaptureStamp, RecordInput,
 };
 use super::context::first_literal;
 use super::relations::validate_relation_endpoints;
@@ -42,10 +43,26 @@ pub struct SupersedeInput {
 }
 
 /// IRIs minted/affected by a supersede.
+#[derive(Debug, Clone)]
 pub struct SupersedeOutcome {
     pub new_iri: String,
     pub rationale_iri: String,
     pub superseded_iri: String,
+}
+
+/// A supersede plus the caller-authored replacement relations and the prior
+/// semantic relations that remain attached only to the retired record.
+#[derive(Debug, Clone)]
+pub struct SupersedeWithRelationsOutcome {
+    pub lifecycle: SupersedeOutcome,
+    pub applied_edges: Vec<AppliedEdge>,
+    pub not_carried_edges: Vec<AppliedEdge>,
+}
+
+#[derive(Clone, Copy)]
+enum SemanticRelationReport {
+    Disabled,
+    IncludeOmissions,
 }
 
 /// Record a new knowledge item that supersedes an existing one, capture *why* it
@@ -63,6 +80,55 @@ pub fn supersede_decision(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<SupersedeOutcome> {
+    Ok(supersede_decision_inner(
+        state,
+        input,
+        &[],
+        SemanticRelationReport::Disabled,
+        author,
+        when,
+    )?
+    .lifecycle)
+}
+
+/// Relation-aware form of [`supersede_decision`]. Caller-supplied relations are
+/// resolved and validated before the lifecycle transaction, then asserted on the
+/// replacement in that same transaction. No relation is inherited implicitly.
+///
+/// The outcome reports semantic outgoing relations found on the superseded
+/// record but not explicitly reasserted. The snapshot includes current GROWL
+/// inverse materialization and excludes lifecycle/rationale bookkeeping.
+pub fn supersede_decision_with_relation_args(
+    state: &AppState,
+    input: &SupersedeInput,
+    relations: &[(String, String)],
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<SupersedeWithRelationsOutcome> {
+    supersede_decision_inner(
+        state,
+        input,
+        relations,
+        SemanticRelationReport::IncludeOmissions,
+        author,
+        when,
+    )
+}
+
+fn supersede_decision_inner(
+    state: &AppState,
+    input: &SupersedeInput,
+    relations: &[(String, String)],
+    relation_report: SemanticRelationReport,
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<SupersedeWithRelationsOutcome> {
+    if matches!(relation_report, SemanticRelationReport::IncludeOmissions) {
+        // The review list must include useful inverse relations. Refresh the
+        // closure before reading the old record; the post-write hook marks it
+        // stale again. Legacy callers deliberately skip this whole-graph read.
+        state.try_ensure_enriched()?;
+    }
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
 
     // Precondition: the superseded subject must be a recorded knowledge item — an
@@ -78,11 +144,35 @@ pub fn supersede_decision(
         .map_err(|e| anyhow::anyhow!("cannot supersede {}: {e}", input.superseded_iri))?;
     let superseded_local = local_name(&superseded_class).to_string();
 
+    // Inline relation validation needs the replacement's real, inherited class,
+    // not the ignored placeholders carried by SupersedeInput::new.
+    let effective_new = RecordInput {
+        class_iri: superseded_class.clone(),
+        class_local: superseded_local.clone(),
+        properties: input.new.properties.clone(),
+    };
+    reject_managed_relation_args(state, relations)?;
+    let (planned_edges, applied_edges) = plan_relation_args(state, &effective_new, relations)?;
+
     // Resolve relation + class IRIs from the loaded ontology (by local name).
     let supersedes_pred = state.resolve_object_property("supersedes")?;
     let is_superseded_by_pred = state.resolve_object_property("isSupersededBy")?;
     let has_rationale_pred = state.resolve_object_property("hasRationale")?;
     let rationale_class = state.resolve_class("Rationale")?;
+
+    let not_carried_edges = match relation_report {
+        SemanticRelationReport::Disabled => Vec::new(),
+        SemanticRelationReport::IncludeOmissions => {
+            let mut edges = semantic_outgoing_edges(state, &old_subject);
+            edges.retain(|old| {
+                !applied_edges.iter().any(|applied| {
+                    old.predicate_local == applied.predicate_local
+                        && old.object_iri == applied.object_iri
+                })
+            });
+            edges
+        }
+    };
 
     let new_iri = mint_instance_iri(&superseded_local);
     let rationale_iri = mint_instance_iri("Rationale");
@@ -122,10 +212,15 @@ pub fn supersede_decision(
 
     // The new decision: caller literals + edges to the rationale and the old one.
     // (The caller may still override status via `new.properties`.)
-    let new_edges = vec![
+    let mut new_edges = planned_edges;
+    for edge in [
         (has_rationale_pred, rationale_iri.clone()),
         (supersedes_pred, input.superseded_iri.clone()),
-    ];
+    ] {
+        if !new_edges.contains(&edge) {
+            new_edges.push(edge);
+        }
+    }
     let new_quads = capture_instance_quads(
         &state.store,
         &new_iri,
@@ -180,12 +275,102 @@ pub fn supersede_decision(
     txn.commit()
         .map_err(|e| anyhow::anyhow!("supersede commit: {e}"))?;
     state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+    // The transaction changed the evidence from which GROWL derives inverses.
+    // Mark it stale at the commit boundary, before any caller can await or do
+    // follow-up work; the MCP post-write hook handles export/memo bookkeeping.
+    state.mark_inferred_stale();
 
-    Ok(SupersedeOutcome {
-        new_iri,
-        rationale_iri,
-        superseded_iri: input.superseded_iri.clone(),
+    Ok(SupersedeWithRelationsOutcome {
+        lifecycle: SupersedeOutcome {
+            new_iri,
+            rationale_iri,
+            superseded_iri: input.superseded_iri.clone(),
+        },
+        applied_edges,
+        not_carried_edges,
     })
+}
+
+fn reject_managed_relation_args(
+    state: &AppState,
+    relations: &[(String, String)],
+) -> anyhow::Result<()> {
+    let managed = [
+        "supersedes",
+        "isSupersededBy",
+        "hasRationale",
+        "isRationaleFor",
+    ]
+    .into_iter()
+    .map(|local| state.resolve_object_property(local))
+    .collect::<anyhow::Result<Vec<_>>>()?;
+
+    for (predicate_local, _) in relations {
+        if state
+            .resolve_object_property(predicate_local)
+            .is_ok_and(|predicate_iri| managed.contains(&predicate_iri))
+        {
+            anyhow::bail!(
+                "relationship {predicate_local:?} is managed by supersede_decision and cannot be supplied in `relations`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Current semantic object-property edges asserted or inferred from `subject`.
+/// Architecture/code vocabularies define the reportable domain surface; this
+/// avoids leaking generic alignment superproperties into repair suggestions.
+fn semantic_outgoing_edges(state: &AppState, subject: &NamedNode) -> Vec<AppliedEdge> {
+    const LIFECYCLE_RELATIONS: &[&str] = &[
+        "supersedes",
+        "isSupersededBy",
+        "hasRationale",
+        "isRationaleFor",
+    ];
+
+    let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut edges = state
+        .store
+        .quads_for_pattern(
+            Some(subject.as_ref().into()),
+            None,
+            None,
+            Some(GraphNameRef::NamedNode(project_graph)),
+        )
+        .flatten()
+        .filter_map(|quad| {
+            let object = match quad.object {
+                oxigraph::model::Term::NamedNode(object) => object,
+                _ => return None,
+            };
+            let predicate_iri = quad.predicate.as_str();
+            let is_domain_relation = state
+                .arch_vocab
+                .object_properties
+                .iter()
+                .chain(state.code_vocab.object_properties.iter())
+                .any(|property| property.iri == predicate_iri);
+            if !is_domain_relation {
+                return None;
+            }
+            let predicate_local = local_name(predicate_iri).to_string();
+            if LIFECYCLE_RELATIONS.contains(&predicate_local.as_str()) {
+                return None;
+            }
+            Some(AppliedEdge {
+                predicate_local,
+                object_iri: object.as_str().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        (&left.predicate_local, &left.object_iri).cmp(&(&right.predicate_local, &right.object_iri))
+    });
+    edges.dedup_by(|left, right| {
+        left.predicate_local == right.predicate_local && left.object_iri == right.object_iri
+    });
+    edges
 }
 
 /// IRIs affected by a retract: the record withdrawn and the `Rationale` minted.

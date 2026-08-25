@@ -9,11 +9,17 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Caps prompt cost and latency even when the configured model has a larger context window.
 const MAX_NARRATION_PROMPT_TOKENS: usize = 32_768;
+/// Uses a conservative byte heuristic so prompt selection errs toward staying under budget.
 const ESTIMATED_BYTES_PER_TOKEN: usize = 3;
+/// Keeps the provenance schema and the model's all-sources citation obligation tractable.
 const MAX_SOURCE_GROUPS: usize = 12;
+/// Retains a compact early/middle/latest chronological spine before incidental evidence.
 const MAX_CHRONOLOGY_MILESTONES: usize = 10;
+/// Leaves room in each chronology sample for endpoints and even coverage after transitions.
 const MAX_SUPERSESSION_MILESTONES: usize = 4;
+/// Bump when prompt or response semantics change so stale cached prose cannot cross contracts.
 const NARRATION_CONTRACT_VERSION: u8 = 1;
 
 /// Reserve most of the model context for its response and provider overhead;
