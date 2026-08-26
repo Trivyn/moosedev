@@ -119,8 +119,8 @@ pub struct AppliedEdge {
     pub object_iri: String,
 }
 
-type PlannedObjectProps = Vec<(String, String)>;
-type PlannedEdges = Vec<AppliedEdge>;
+pub(crate) type PlannedObjectProps = Vec<(String, String)>;
+pub(crate) type PlannedEdges = Vec<AppliedEdge>;
 
 /// Result of a capture that may also assert inline relations.
 #[derive(Debug, Clone)]
@@ -148,7 +148,7 @@ pub fn record_instance_with_relation_args(
     Ok(RecordOutcome { iri, applied_edges })
 }
 
-fn plan_relation_args(
+pub(crate) fn plan_relation_args(
     state: &AppState,
     input: &RecordInput,
     relations: &[(String, String)],

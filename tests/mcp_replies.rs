@@ -107,6 +107,17 @@ fn response_text(result: &CallToolResult) -> &str {
         .expect("text tool response")
 }
 
+fn recorded_iri(result: &CallToolResult) -> String {
+    response_text(result)
+        .split_once(" → ")
+        .expect("record reply contains arrow")
+        .1
+        .split_whitespace()
+        .next()
+        .expect("record reply contains IRI")
+        .to_string()
+}
+
 #[tokio::test]
 async fn dossier_and_link_code_distinguish_substrate_coverage() {
     let data_dir = fresh_data_dir("indexed");
@@ -261,6 +272,134 @@ async fn evaluate_policy_tool_returns_verdict_json() {
         assert_eq!(bypass.is_error, Some(true));
         assert!(response_text(&bypass).contains("ratification-only"));
     }
+
+    backend.abort();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn supersede_reasserts_selected_relations_and_reports_the_rest() {
+    let data_dir = fresh_data_dir("supersede-relations");
+    let socket = runtime::socket_path_for(&data_dir);
+    let backend = spawn_backend(build_server(&data_dir, false), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+
+    let retained_requirement = call_raw(
+        &client,
+        "record_important_decision",
+        json!({
+            "kind": "Requirement",
+            "title": "Retained supersession test requirement",
+            "description": "The replacement still satisfies this requirement."
+        }),
+    )
+    .await;
+    assert_ne!(retained_requirement.is_error, Some(true));
+    let retained_iri = recorded_iri(&retained_requirement);
+
+    let omitted_requirement = call_raw(
+        &client,
+        "record_important_decision",
+        json!({
+            "kind": "Requirement",
+            "title": "Omitted supersession test requirement",
+            "description": "The replacement deliberately does not reassert this requirement."
+        }),
+    )
+    .await;
+    assert_ne!(omitted_requirement.is_error, Some(true));
+    let omitted_iri = recorded_iri(&omitted_requirement);
+
+    let original = call_raw(
+        &client,
+        "record_important_decision",
+        json!({
+            "title": "Original supersession relation test decision",
+            "description": "An original decision with two semantic links.",
+            "relations": [
+                {"predicate": "isMotivatedBy", "target": retained_iri},
+                {"predicate": "isMotivatedBy", "target": omitted_iri}
+            ]
+        }),
+    )
+    .await;
+    assert_ne!(original.is_error, Some(true));
+    let original_iri = recorded_iri(&original);
+
+    let replacement = call_raw(
+        &client,
+        "supersede_decision",
+        json!({
+            "superseded_iri": original_iri,
+            "title": "Replacement supersession relation test decision",
+            "description": "A replacement that explicitly reasserts only one link.",
+            "rationale": "The second requirement no longer applies.",
+            "relations": [
+                {"predicate": "isMotivatedBy", "target": retained_iri}
+            ]
+        }),
+    )
+    .await;
+    assert_ne!(replacement.is_error, Some(true));
+    let text = response_text(&replacement);
+    assert!(
+        text.starts_with(&format!("Superseded {original_iri} → ")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Linked: isMotivatedBy → {retained_iri}")),
+        "{text}"
+    );
+    assert!(text.contains("Not carried:"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "{{\"predicate\":\"isMotivatedBy\",\"target\":\"{omitted_iri}\"}}"
+        )),
+        "{text}"
+    );
+
+    let constraint = call_raw(
+        &client,
+        "record_important_decision",
+        json!({
+            "kind": "Constraint",
+            "title": "Original ratified supersession constraint",
+            "description": "The original constraint stays authoritative during review."
+        }),
+    )
+    .await;
+    assert_ne!(constraint.is_error, Some(true));
+    let constraint_iri = recorded_iri(&constraint);
+    let proposed = call_raw(
+        &client,
+        "supersede_decision",
+        json!({
+            "superseded_iri": constraint_iri,
+            "title": "Replacement ratified supersession constraint",
+            "description": "The replacement applies only after ratification.",
+            "rationale": "The implementation scope changed.",
+            "reason": "scope-narrowed",
+            "relations": [
+                {"predicate": "constrains", "target": original_iri}
+            ]
+        }),
+    )
+    .await;
+    assert_ne!(proposed.is_error, Some(true));
+    let proposed_text = response_text(&proposed);
+    assert!(
+        proposed_text.starts_with("Proposed supersession"),
+        "{proposed_text}"
+    );
+    assert!(
+        proposed_text.contains(&format!("Linked: constrains → {original_iri}")),
+        "{proposed_text}"
+    );
+    assert!(
+        proposed_text.contains("Reason: scope-narrowed"),
+        "{proposed_text}"
+    );
 
     backend.abort();
     let _ = std::fs::remove_dir_all(&data_dir);

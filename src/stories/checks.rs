@@ -17,9 +17,13 @@ use super::model::{
 };
 use super::resolution::StoryResolutionIndex;
 
+/// Bounds live answer-key state; issuing beyond this capacity evicts the oldest grant.
 pub(super) const MAX_CHECK_GRANTS: usize = 1_024;
+/// Preserves useful expired-versus-unknown errors without retaining tombstones forever.
 const MAX_RETIRED_CHECK_HANDLES: usize = 1_024;
+/// Allows one correct answer and at most two nontrivial distractors.
 pub(super) const MAX_CHECK_OPTIONS: usize = 3;
+/// Gives a reader time to finish a Story while keeping opaque answer keys short-lived.
 pub(super) const CHECK_TTL: Duration = Duration::from_secs(30 * 60);
 
 pub(super) fn prepare_record_kind_checks(

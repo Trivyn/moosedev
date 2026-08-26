@@ -14,6 +14,9 @@ use crate::stories::{
     StorySummary,
 };
 
+/// Keeps the default subject list compact; callers can override it with `limit`.
+const DEFAULT_SUBJECT_LIMIT: usize = 20;
+
 #[derive(Debug, Serialize)]
 pub struct StoryListResponse {
     pub stories: Vec<StorySummary>,
@@ -58,9 +61,10 @@ pub struct StorySubjectQuery {
 }
 
 fn default_subject_limit() -> usize {
-    20
+    DEFAULT_SUBJECT_LIMIT
 }
 
+/// Stories include comprehension checks unless a presentation-only caller opts out.
 fn default_include_checks() -> bool {
     true
 }

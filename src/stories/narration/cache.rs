@@ -3,6 +3,7 @@ use super::{NarrationFailure, NarrationValue};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+/// Bounds completed presentation-only prose in memory; active flights are tracked separately.
 const NARRATION_CACHE_CAPACITY: usize = 64;
 
 /// Successful narration is disposable presentation state. The key includes the

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+/// Keeps a topic a focused selector rather than an arbitrary pasted document.
 const MAX_TOPIC_CHARS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

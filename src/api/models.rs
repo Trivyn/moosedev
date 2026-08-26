@@ -217,6 +217,11 @@ pub struct ProposalDto {
     pub target_display: String,
     pub evidence: Option<String>,
     pub status: String,
+    pub predecessor_iri: Option<String>,
+    pub predecessor_title: Option<String>,
+    pub supersession_reason: Option<String>,
+    pub claim_diff: Option<String>,
+    pub diff_truncated: bool,
 }
 
 #[derive(Serialize)]

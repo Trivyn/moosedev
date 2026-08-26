@@ -176,6 +176,9 @@ fn constraint_set_renders_supersession_links() {
         Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap(),
     )
     .expect("supersede constraint");
+    assert_eq!(replacement.status, "proposed");
+    graph::accept_proposal(&state, &replacement.new_iri, "test-ratifier")
+        .expect("ratify replacement constraint");
 
     let set = generate_constraint_set(&state, ConstraintGenerationOptions::default())
         .expect("generate constraints");

@@ -24,29 +24,38 @@ pub async fn list_proposals(
     let items = graph::list_proposals(&state, query.status.as_deref())?;
     let proposals = items
         .into_iter()
-        .map(|p| ProposalDto {
-            id: local_name(&p.iri).to_string(),
-            iri: p.iri,
-            kind: match p.kind {
-                graph::ProposalKind::Link => "link".to_string(),
-                graph::ProposalKind::Record => "record".to_string(),
-                graph::ProposalKind::Judgment => "judgment".to_string(),
-            },
-            label: p.label,
-            subject_iri: p.subject_iri,
-            predicate: p.predicate_local,
-            target_symbol: p.target_symbol,
-            target_path: p.target_path,
-            record_class: p.record_class,
-            target_iri: p.target_iri,
-            confidence: p.confidence,
-            escalation: p.escalation,
-            subject_name: p.subject_name,
-            subject_description: p.subject_description,
-            subject_path: p.subject_path,
-            target_display: p.target_display,
-            evidence: p.evidence,
-            status: p.status,
+        .map(|p| {
+            let claim_diff = p.claim_diff.as_ref().map(|diff| diff.text.clone());
+            let diff_truncated = p.claim_diff.as_ref().is_some_and(|diff| diff.truncated);
+            ProposalDto {
+                id: local_name(&p.iri).to_string(),
+                iri: p.iri,
+                kind: match p.kind {
+                    graph::ProposalKind::Link => "link".to_string(),
+                    graph::ProposalKind::Record => "record".to_string(),
+                    graph::ProposalKind::Judgment => "judgment".to_string(),
+                },
+                label: p.label,
+                subject_iri: p.subject_iri,
+                predicate: p.predicate_local,
+                target_symbol: p.target_symbol,
+                target_path: p.target_path,
+                record_class: p.record_class,
+                target_iri: p.target_iri,
+                confidence: p.confidence,
+                escalation: p.escalation,
+                subject_name: p.subject_name,
+                subject_description: p.subject_description,
+                subject_path: p.subject_path,
+                target_display: p.target_display,
+                evidence: p.evidence,
+                status: p.status,
+                predecessor_iri: p.predecessor_iri,
+                predecessor_title: p.predecessor_title,
+                supersession_reason: p.supersession_reason,
+                claim_diff,
+                diff_truncated,
+            }
         })
         .collect();
     Ok(Json(ProposalListResponse { proposals }))

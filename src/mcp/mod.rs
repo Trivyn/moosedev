@@ -23,7 +23,7 @@ use crate::graph::{self, AppState, RecordInput, SupersedeInput};
 use crate::provenance;
 use crate::{sparql, validation};
 
-const SERVER_INSTRUCTIONS: &str = "MOOSEDev is durable, authoritative structured project memory. Before non-trivial work, call `get_relevant_context` with no `topic` for a broad current inventory; set `limit` up to 100, or use `sparql` when completeness matters. Use `get_relevant_context` for fast hybrid recall, `query` for one focused relationship question, and `sparql` for exact or exhaustive structural reads. Before editing a specific function, type, or module, call `get_entity_dossier`; an empty dossier does not replace project recall. Run `align_concepts` before introducing a new knowledge term. When you capture a decision, LINK it: assert `isMotivatedBy` to the Requirement or Constraint that drove it, and `concerns` to the SystemComponent it touches — an unlinked record is findable only by lexical luck. After capturing a record, report its kind, title, and IRI. Correct existing knowledge with `supersede_decision` or `retract_decision` instead of duplicating it, and run `validate_against_architecture` after any graph write.";
+const SERVER_INSTRUCTIONS: &str = "MOOSEDev is durable, authoritative structured project memory. Before non-trivial work, call `get_relevant_context` with no `topic` for a broad current inventory; set `limit` up to 100, or use `sparql` when completeness matters. Use `get_relevant_context` for fast hybrid recall, `query` for one focused relationship question, and `sparql` for exact or exhaustive structural reads. Before editing a specific function, type, or module, call `get_entity_dossier`; an empty dossier does not replace project recall. Run `align_concepts` before introducing a new knowledge term. When you capture a decision, LINK it: assert `isMotivatedBy` to the Requirement or Constraint that drove it, and `concerns` to the SystemComponent it touches — an unlinked record is findable only by lexical luck. After capturing a record, report its kind, title, and IRI. Correct existing knowledge with `supersede_decision` or `retract_decision` instead of duplicating it. If code diverges from a ratified record and you cannot cite a recorded decision that chose the code's behavior, treat the record as correct and the code as defective. Run `validate_against_architecture` after any graph write.";
 
 /// Tool result helpers — the `vec![Content::text(..)]` wrapping repeats across
 /// every handler, so name it once.
@@ -449,7 +449,7 @@ pub struct RecordDecisionArgs {
     pub consequences: Option<Vec<String>>,
 }
 
-/// One inline relation for `record_important_decision`: an object property plus its
+/// One inline relation for a capture or supersession: an object property plus its
 /// target typed node (by IRI or exact label/title).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[schemars(inline)]
@@ -486,14 +486,17 @@ pub struct GetRelevantContextArgs {
 /// Arguments for the `supersede_decision` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SupersedeArgs {
-    /// IRI of the existing typed knowledge record being replaced; it will be
-    /// marked "superseded" but preserved as history.
+    /// IRI of the existing typed knowledge record being replaced. It is marked
+    /// "superseded" immediately for ordinary records, or when a proposed
+    /// Constraint/AntiPattern replacement is accepted, and remains as history.
     pub superseded_iri: String,
     /// Short human-readable title for the new (replacement) decision — a NAME/handle (≤~80 chars),
     /// NOT the claim (put the claim at the start of `description`).
     pub title: String,
     /// Why the decision changed — captured as a linked Rationale node. Required.
     pub rationale: String,
+    /// Optional audit category for why the replacement is being proposed.
+    pub reason: Option<SupersessionReasonArg>,
     /// Optional longer description / body for the new decision.
     pub description: Option<String>,
     /// Ignored: the replacement always inherits the superseded item's class
@@ -503,6 +506,29 @@ pub struct SupersedeArgs {
     pub timestamp: Option<String>,
     /// Optional author to attribute the replacement to (defaults to the MCP client name).
     pub author: Option<String>,
+    /// Optional semantic relations to assert from the replacement. Old
+    /// relations are never inherited.
+    pub relations: Option<Vec<RelationArg>>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SupersessionReasonArg {
+    LaterDecision,
+    RecordWasInaccurate,
+    CodeDiverged,
+    ScopeNarrowed,
+}
+
+impl From<SupersessionReasonArg> for graph::SupersessionReason {
+    fn from(value: SupersessionReasonArg) -> Self {
+        match value {
+            SupersessionReasonArg::LaterDecision => Self::LaterDecision,
+            SupersessionReasonArg::RecordWasInaccurate => Self::RecordWasInaccurate,
+            SupersessionReasonArg::CodeDiverged => Self::CodeDiverged,
+            SupersessionReasonArg::ScopeNarrowed => Self::ScopeNarrowed,
+        }
+    }
 }
 
 /// Arguments for the `retract_decision` tool.
@@ -1049,7 +1075,7 @@ impl MooseDevServer {
 
     /// Record a new decision that supersedes an existing one, preserving history.
     #[tool(
-        description = "Replace an existing typed knowledge record when prior knowledge has changed. Atomically creates a replacement of the same class, captures the required rationale as a typed Rationale, links the history in both directions, and marks the old record superseded without deleting it. Use `retract_decision` when there is no successor, and `record_important_decision` only for genuinely new knowledge. Writes the graph and returns the old, new, and rationale IRIs; run `validate_against_architecture` afterward.",
+        description = "Replace an existing typed knowledge record when prior knowledge has changed. Constraint and AntiPattern replacements default to proposed: the old record remains authoritative until the proposal is accepted in Ratifications. Other classes remain immediate. Pass `relations` to reassert selected links; old relations are NEVER inherited automatically. If code diverges from a ratified record and no recorded decision authorizes the divergence, treat the record as correct and the code as defective. The optional reason is audit context, never a gate. The reply reports status, a bounded claim diff, explicitly selected links, and prior semantic links not carried as call-ready `{predicate,target}` pairs. Use retract_decision when there is no successor.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1104,10 +1130,27 @@ impl MooseDevServer {
             },
             rationale,
         };
-        match graph::supersede_decision(&self.state, &input, &agent, now) {
+        let relations: Vec<(String, String)> = args
+            .relations
+            .unwrap_or_default()
+            .into_iter()
+            .map(|relation| (relation.predicate, relation.target))
+            .collect();
+        match graph::supersede_decision_with_options(
+            &self.state,
+            &input,
+            &relations,
+            args.reason.map(Into::into),
+            &agent,
+            now,
+        ) {
             Ok(out) => {
+                // Publish graph staleness/export/memo invalidation before any
+                // awaited best-effort indexing work opens a concurrent-read gap.
+                self.state.note_project_write();
+                let lifecycle = &out.lifecycle;
                 // Provenance both minted records (best-effort, never fails the write).
-                for iri in [&out.new_iri, &out.rationale_iri] {
+                for iri in [&lifecycle.new_iri, &lifecycle.rationale_iri] {
                     if let Err(e) =
                         provenance::record_provenance_at(&self.state.store, iri, &agent, now)
                     {
@@ -1121,10 +1164,43 @@ impl MooseDevServer {
                         tracing::warn!("dense index failed for {iri}: {e}");
                     }
                 }
-                self.state.note_project_write();
+                let linked = if out.applied_edges.is_empty() {
+                    "none".to_string()
+                } else {
+                    out.applied_edges
+                        .iter()
+                        .map(|edge| format!("{} → {}", edge.predicate_local, edge.object_iri))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let not_carried = if out.not_carried_edges.is_empty() {
+                    "none".to_string()
+                } else {
+                    let pairs: Vec<serde_json::Value> = out
+                        .not_carried_edges
+                        .iter()
+                        .map(|edge| {
+                            serde_json::json!({
+                                "predicate": edge.predicate_local,
+                                "target": edge.object_iri,
+                            })
+                        })
+                        .collect();
+                    serde_json::to_string(&pairs).expect("relation repair pairs serialize")
+                };
+                let action = if lifecycle.status.eq_ignore_ascii_case("proposed") {
+                    "Proposed supersession"
+                } else {
+                    "Superseded"
+                };
                 Ok(tool_ok(format!(
-                    "Superseded {} → {} (rationale {}){title_note}",
-                    out.superseded_iri, out.new_iri, out.rationale_iri
+                    "{action} {} → {} (rationale {}; status {}){title_note}\nReason: {}\nDiff:\n{}\nLinked: {linked}\nNot carried: {not_carried}",
+                    lifecycle.superseded_iri,
+                    lifecycle.new_iri,
+                    lifecycle.rationale_iri,
+                    lifecycle.status,
+                    lifecycle.reason.as_deref().unwrap_or("unspecified"),
+                    lifecycle.diff.text,
                 )))
             }
             Err(e) => Ok(tool_error(format!("failed to supersede: {e}"))),
@@ -1575,7 +1651,7 @@ impl MooseDevServer {
 
     /// Ask a natural-language question over the project knowledge graph.
     #[tool(
-        description = "Answer one short, focused natural-language question by planning walks across relationships in the project knowledge graph and synthesizing the resulting records. Use this when `get_relevant_context` recall is insufficient and the answer needs relationship reasoning; use `sparql` instead for exact, bulk, or deterministic structural reads. Read-only; returns a synthesized answer, confidence, and an auditable symbolic reasoning trace.",
+        description = "Answer one short, focused natural-language question by planning walks across relationships in the authoritative project knowledge graph and synthesizing the resulting records. Proposed and rejected records, including incident inverse links, are excluded; superseded and deprecated records remain available for evolution questions. Use this when `get_relevant_context` recall is insufficient and the answer needs relationship reasoning; use `sparql` instead for exact, bulk, deterministic, or all-lifecycle audit reads. Read-only; returns a synthesized answer, confidence, and an auditable symbolic reasoning trace.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2450,7 +2526,11 @@ mod tests {
         assert!(
             description(&catalog, "capture_decision_point").contains("record_important_decision")
         );
-        assert!(description(&catalog, "supersede_decision").contains("retract_decision"));
+        let supersede_description = description(&catalog, "supersede_decision");
+        assert!(supersede_description.contains("retract_decision"));
+        assert!(supersede_description.contains("NEVER inherited"));
+        assert!(supersede_description.contains("{predicate,target}"));
+        assert!(supersede_description.contains("not carried"));
         assert!(description(&catalog, "get_entity_dossier").contains("before editing"));
         assert!(description(&catalog, "suggest_links").contains("not proven facts"));
         assert!(description(&catalog, "suggest_mappings").contains("Compatibility alias"));
@@ -2511,6 +2591,42 @@ mod tests {
         );
         assert_eq!(relation_items["properties"]["predicate"]["type"], "string");
         assert_eq!(relation_items["properties"]["target"]["type"], "string");
+
+        let supersede = schema(tool(&catalog, "supersede_decision"));
+        assert_eq!(
+            supersede["$defs"]["SupersessionReasonArg"]["enum"],
+            serde_json::json!([
+                "later-decision",
+                "record-was-inaccurate",
+                "code-diverged",
+                "scope-narrowed"
+            ])
+        );
+        assert!(
+            !supersede["required"]
+                .as_array()
+                .expect("supersede required fields")
+                .iter()
+                .any(|field| field == "relations"),
+            "supersede relations must remain optional"
+        );
+        let supersede_relation_items = &supersede["properties"]["relations"]["items"];
+        assert!(
+            supersede_relation_items.get("$ref").is_none(),
+            "supersede relations must be inline"
+        );
+        assert_eq!(
+            supersede_relation_items["required"],
+            serde_json::json!(["predicate", "target"])
+        );
+        assert_eq!(
+            supersede_relation_items["properties"]["predicate"]["type"],
+            "string"
+        );
+        assert_eq!(
+            supersede_relation_items["properties"]["target"]["type"],
+            "string"
+        );
 
         let query = schema(tool(&catalog, "query"));
         assert!(query["properties"]["question"]["description"]

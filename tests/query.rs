@@ -4,6 +4,7 @@
 //! test hermetic — it never reaches out to an LLM endpoint.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -13,6 +14,18 @@ use moosedev::graph::{self, AppState, RecordInput};
 use moosedev::llm::LlmConfig;
 
 struct MetaIntentLlm;
+
+struct RecordingListLlm {
+    prompts: Mutex<Vec<String>>,
+}
+
+impl RecordingListLlm {
+    fn new() -> Self {
+        Self {
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+}
 
 #[async_trait]
 impl LlmClient for MetaIntentLlm {
@@ -32,6 +45,27 @@ impl LlmClient for MetaIntentLlm {
             );
         }
 
+        Ok(r#"{"summary":"synthetic answer","relevant_iris":[],"confidence":"high","unanswered_aspects":[]}"#.to_string())
+    }
+}
+
+#[async_trait]
+impl LlmClient for RecordingListLlm {
+    async fn chat_completion(
+        &self,
+        _model: &str,
+        prompt: &str,
+        _params: Option<&LlmParams>,
+    ) -> Result<String, EngineError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        if prompt.contains("Respond with ONLY a JSON object")
+            && prompt.contains("\"intent\"")
+            && prompt.contains("\"object\"")
+        {
+            return Ok(
+                r#"{"intent":"list","object":"system components","modifiers":[]}"#.to_string(),
+            );
+        }
         Ok(r#"{"summary":"synthetic answer","relevant_iris":[],"confidence":"high","unanswered_aspects":[]}"#.to_string())
     }
 }
@@ -143,6 +177,61 @@ async fn query_does_not_surface_schema_spec_internal_error_for_project_records()
         "schema-contract fallback should retry symbolically; trace:\n{}",
         result.trace
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn query_prompts_never_receive_proposed_or_rejected_incident_records() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-query-lifecycle-projection-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let mut state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+    state.engine_config.llm_assist_level = LlmAssistLevel::Sensor;
+
+    let record = |kind: &str, title: &str, status: &str| {
+        graph::record_instance(
+            &state,
+            &RecordInput {
+                class_iri: state.resolve_class(kind).unwrap(),
+                class_local: kind.to_string(),
+                properties: vec![
+                    (state.capture.title.clone(), title.to_string()),
+                    (state.capture.status.clone(), status.to_string()),
+                ],
+            },
+            "test-agent",
+            Utc::now(),
+        )
+        .unwrap()
+    };
+    let component = record("SystemComponent", "Lifecycle projection target", "accepted");
+    let proposed = record(
+        "ArchitecturalDecision",
+        "PROPOSED-SECRET-QUERY-TITLE",
+        "proposed",
+    );
+    let rejected = record(
+        "ArchitecturalDecision",
+        "REJECTED-SECRET-QUERY-TITLE",
+        "rejected",
+    );
+    graph::relate(&state, &proposed, "concerns", &component).unwrap();
+    graph::relate(&state, &rejected, "concerns", &component).unwrap();
+
+    let llm = RecordingListLlm::new();
+    graph::query_with_llm_client(&state, &llm, "fake-model", "List the system components")
+        .await
+        .expect("query should run");
+
+    let prompts = llm.prompts.lock().unwrap().join("\n");
+    assert!(!prompts.contains("PROPOSED-SECRET-QUERY-TITLE"));
+    assert!(!prompts.contains("REJECTED-SECRET-QUERY-TITLE"));
+    assert!(!prompts.contains(&proposed));
+    assert!(!prompts.contains(&rejected));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

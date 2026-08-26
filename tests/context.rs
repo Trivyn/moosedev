@@ -153,6 +153,71 @@ fn unratified_and_declined_records_never_reach_authoritative_recall() {
 }
 
 #[test]
+fn authoritative_recall_hides_inverse_links_to_proposed_and_rejected_records() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-context-hidden-inverse-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let component = record_with_status(
+        &state,
+        &state.resolve_class("SystemComponent").unwrap(),
+        "Lifecycle reader",
+        "accepted",
+    );
+    let decision_class = state.resolve_class("ArchitecturalDecision").unwrap();
+    let proposed = record_with_status(
+        &state,
+        &decision_class,
+        "Unratified lifecycle claim",
+        "proposed",
+    );
+    let rejected = record_with_status(
+        &state,
+        &decision_class,
+        "Declined lifecycle claim",
+        "rejected",
+    );
+    graph::relate(&state, &proposed, "concerns", &component).unwrap();
+    graph::relate(&state, &rejected, "concerns", &component).unwrap();
+    state.ensure_enriched();
+
+    let current = graph::relevant_context(&state, Some("Lifecycle reader"), 10, false)
+        .expect("authoritative recall");
+    let target = current
+        .iter()
+        .find(|item| item.iri == component)
+        .expect("accepted target remains visible");
+    assert!(
+        target
+            .properties
+            .iter()
+            .all(|property| property.value != proposed && property.value != rejected),
+        "incident inverse links must not reveal inbox-only records"
+    );
+
+    let history = graph::relevant_context(&state, Some("Lifecycle reader"), 10, true)
+        .expect("historical recall");
+    let target = history
+        .iter()
+        .find(|item| item.iri == component)
+        .expect("accepted target remains visible in history");
+    assert!(target
+        .properties
+        .iter()
+        .any(|property| property.value == proposed));
+    assert!(target
+        .properties
+        .iter()
+        .any(|property| property.value == rejected));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn relevant_context_limit_is_applied_after_lifecycle_filtering() {
     let dir =
         std::env::temp_dir().join(format!("moosedev-context-budget-ws-{}", std::process::id()));

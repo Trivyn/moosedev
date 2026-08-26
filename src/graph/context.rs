@@ -11,7 +11,7 @@ use oxigraph::store::Store;
 use super::capture::{
     asserted_project_types, class_label_mirror_property_iri, require_information_record,
 };
-use super::lifecycle::{in_working_set, is_retired};
+use super::lifecycle::{in_working_set, is_hidden_from_authoritative_reads, is_retired};
 use super::state::AppState;
 use super::util::{any_subclass_of, local_name};
 use super::PROJECT_KG_GRAPH_IRI;
@@ -187,7 +187,7 @@ pub fn relevant_context_snapshot(
                     .is_none_or(in_working_set)
         })
         .take(limit)
-        .map(|(iri, class_iri)| build_context_item(state, iri, class_iri))
+        .map(|(iri, class_iri)| build_context_item(state, iri, class_iri, include_history))
         .collect();
 
     // Bounded relational expansion (Constraint aa8b3fa3): for a focused topic, reach
@@ -239,7 +239,12 @@ pub fn relevant_context_snapshot(
                 if !seen.insert(neighbor_iri.clone()) {
                     continue; // ranked pool is deduped, but keep `seen` authoritative
                 }
-                let mut item = build_context_item(state, neighbor_iri.clone(), neighbor_class);
+                let mut item = build_context_item(
+                    state,
+                    neighbor_iri.clone(),
+                    neighbor_class,
+                    include_history,
+                );
                 if !include_history && item.is_historical() {
                     continue; // stay in the current working set
                 }
@@ -742,7 +747,14 @@ fn count_instances(store: &Store, class_iris: &[String]) -> usize {
 /// as `(local-name, target-IRI)` so the lifecycle chain is visible and walkable;
 /// the linked `Rationale`'s text (the *why*) is dereferenced inline, and a
 /// retired record also gets a `supersededBy` back-link to what replaced it.
-fn build_context_item(state: &AppState, iri: String, class_iri: String) -> ContextItem {
+/// Default recall omits links to proposed/rejected objects; `include_history`
+/// retains the complete audit view.
+fn build_context_item(
+    state: &AppState,
+    iri: String,
+    class_iri: String,
+    include_history: bool,
+) -> ContextItem {
     let store = &state.store;
     let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let mut label = String::new();
@@ -771,6 +783,13 @@ fn build_context_item(state: &AppState, iri: String, class_iri: String) -> Conte
                     properties.push(ContextProperty::literal(local_name(pred), lit.value()));
                 }
                 Term::NamedNode(obj) => {
+                    if !include_history
+                        && first_literal(store, obj.as_str(), &state.capture.status)
+                            .as_deref()
+                            .is_some_and(is_hidden_from_authoritative_reads)
+                    {
+                        continue;
+                    }
                     let pname = local_name(pred);
                     if pname == "hasRationale" {
                         rationale_iri = Some(obj.as_str().to_string());
