@@ -14,6 +14,9 @@ use super::state::AppState;
 use super::util::{local_name, mint_instance_iri};
 use super::PROJECT_KG_GRAPH_IRI;
 
+pub(crate) const SUPERSESSION_REASON_PREDICATE: &str =
+    "http://www.w3.org/2000/01/rdf-schema#comment";
+
 /// Lifecycle statuses retired from the current working set.
 pub const RETIRED_STATUSES: &[&str] = &["superseded", "deprecated"];
 
@@ -21,6 +24,96 @@ pub fn is_retired(status: &str) -> bool {
     RETIRED_STATUSES
         .iter()
         .any(|retired| status.eq_ignore_ascii_case(retired))
+}
+
+/// Whether a lifecycle status belongs only in the ratification inbox or audit
+/// trail, never in an authoritative read projection.
+pub(crate) fn is_hidden_from_authoritative_reads(status: &str) -> bool {
+    status.eq_ignore_ascii_case("proposed") || status.eq_ignore_ascii_case("rejected")
+}
+
+fn ensure_no_pending_supersession(state: &AppState, superseded_iri: &str) -> anyhow::Result<()> {
+    let successor = state.resolve_object_property("isSupersededBy")?;
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    for quad in state.store.quads_for_pattern(
+        Some(NamedNodeRef::new(superseded_iri)?.into()),
+        Some(NamedNodeRef::new(&successor)?),
+        None,
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        let quad = quad?;
+        let oxigraph::model::Term::NamedNode(replacement) = quad.object else {
+            continue;
+        };
+        if first_literal(&state.store, replacement.as_str(), &state.capture.status).as_deref()
+            == Some("proposed")
+        {
+            anyhow::bail!(
+                "{} already has a pending supersession; accept or reject it before proposing another",
+                superseded_iri
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn claim_diff(
+    state: &AppState,
+    old_subject: &NamedNode,
+    new_properties: &[(String, String)],
+) -> ClaimDiff {
+    const MAX_LINES: usize = 60;
+    const MAX_BYTES: usize = 8 * 1024;
+    const MARKER: &str = "… diff truncated …";
+
+    let old_iri = old_subject.as_str();
+    let old = first_literal(&state.store, old_iri, &state.capture.description)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| first_literal(&state.store, old_iri, &state.capture.title))
+        .unwrap_or_else(|| local_name(old_iri).to_string());
+    let new = new_properties
+        .iter()
+        .find(|(predicate, value)| {
+            predicate == &state.capture.description && !value.trim().is_empty()
+        })
+        .or_else(|| {
+            new_properties
+                .iter()
+                .find(|(predicate, _)| predicate == &state.capture.title)
+        })
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| "replacement".to_string());
+    let mut lines = diff::lines(&old, &new)
+        .into_iter()
+        .filter_map(|part| match part {
+            diff::Result::Left(line) => Some(format!("- {line}")),
+            diff::Result::Right(line) => Some(format!("+ {line}")),
+            diff::Result::Both(_, _) => None,
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push("  (no textual change)".to_string());
+    }
+
+    let mut truncated = lines.len() > MAX_LINES;
+    if truncated {
+        lines.truncate(MAX_LINES.saturating_sub(1));
+    }
+    let mut text = lines.join("\n");
+    let reserved = usize::from(truncated) * (MARKER.len() + 1);
+    if text.len() + reserved > MAX_BYTES {
+        let mut boundary = MAX_BYTES.saturating_sub(MARKER.len() + 1);
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        text.truncate(boundary);
+        truncated = true;
+    }
+    if truncated {
+        text.push('\n');
+        text.push_str(MARKER);
+    }
+    ClaimDiff { text, truncated }
 }
 
 /// Whether a lifecycle status admits a record into the authoritative working
@@ -48,6 +141,37 @@ pub struct SupersedeOutcome {
     pub new_iri: String,
     pub rationale_iri: String,
     pub superseded_iri: String,
+    /// Effective lifecycle status of the replacement.
+    pub status: String,
+    /// Optional controlled audit category persisted on the rationale.
+    pub reason: Option<String>,
+    /// Bounded old/new claim diff for review surfaces.
+    pub diff: ClaimDiff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimDiff {
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersessionReason {
+    LaterDecision,
+    RecordWasInaccurate,
+    CodeDiverged,
+    ScopeNarrowed,
+}
+
+impl SupersessionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LaterDecision => "later-decision",
+            Self::RecordWasInaccurate => "record-was-inaccurate",
+            Self::CodeDiverged => "code-diverged",
+            Self::ScopeNarrowed => "scope-narrowed",
+        }
+    }
 }
 
 /// A supersede plus the caller-authored replacement relations and the prior
@@ -65,15 +189,10 @@ enum SemanticRelationReport {
     IncludeOmissions,
 }
 
-/// Record a new knowledge item that supersedes an existing one, capture *why* it
-/// changed as a linked `Rationale`, and mark the old item `superseded` — preserving
-/// it as history (it is never deleted). The replacement is recorded with the SAME
-/// class as the superseded item (type-preserving), so the caller's `new.class_*`
-/// fields are ignored. Atomic: the new item, the `Rationale` node, the
-/// `supersedes`/`isSupersededBy`/`hasRationale` edges, and the old item's status
-/// change all commit in one transaction; the entity index is invalidated once
-/// on success. The superseded subject must already be an `InformationRecord`
-/// (or subclass) in the project graph — else this errors and writes nothing.
+/// Record a replacement and its rationale. Constraint and AntiPattern
+/// replacements default to `proposed`; their predecessor remains current until
+/// the replacement is ratified. Other kinds retain the immediate supersession
+/// behavior. The replacement always inherits the predecessor's class.
 pub fn supersede_decision(
     state: &AppState,
     input: &SupersedeInput,
@@ -84,6 +203,7 @@ pub fn supersede_decision(
         state,
         input,
         &[],
+        None,
         SemanticRelationReport::Disabled,
         author,
         when,
@@ -92,8 +212,8 @@ pub fn supersede_decision(
 }
 
 /// Relation-aware form of [`supersede_decision`]. Caller-supplied relations are
-/// resolved and validated before the lifecycle transaction, then asserted on the
-/// replacement in that same transaction. No relation is inherited implicitly.
+/// resolved and validated before the lifecycle transaction, then asserted on
+/// the replacement. No relation is inherited implicitly.
 ///
 /// The outcome reports semantic outgoing relations found on the superseded
 /// record but not explicitly reasserted. The snapshot includes current GROWL
@@ -109,6 +229,27 @@ pub fn supersede_decision_with_relation_args(
         state,
         input,
         relations,
+        None,
+        SemanticRelationReport::IncludeOmissions,
+        author,
+        when,
+    )
+}
+
+/// Relation-aware supersession with an optional controlled audit reason.
+pub fn supersede_decision_with_options(
+    state: &AppState,
+    input: &SupersedeInput,
+    relations: &[(String, String)],
+    reason: Option<SupersessionReason>,
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<SupersedeWithRelationsOutcome> {
+    supersede_decision_inner(
+        state,
+        input,
+        relations,
+        reason,
         SemanticRelationReport::IncludeOmissions,
         author,
         when,
@@ -119,6 +260,7 @@ fn supersede_decision_inner(
     state: &AppState,
     input: &SupersedeInput,
     relations: &[(String, String)],
+    reason: Option<SupersessionReason>,
     relation_report: SemanticRelationReport,
     author: &str,
     when: DateTime<Utc>,
@@ -188,18 +330,48 @@ fn supersede_decision_inner(
         .map(|(_, v)| v.as_str())
         .unwrap_or("decision");
     let rationale_title = format!("Rationale: {new_title}");
-    let rationale_literals = vec![
+    let mut rationale_literals = vec![
         (moose::RDFS_LABEL.to_string(), rationale_title.clone()),
         (state.capture.title.clone(), rationale_title),
         (state.capture.description.clone(), input.rationale.clone()),
     ];
-    // A superseding decision (and its rationale) is the now-current record, so
-    // default the lifecycle status to "accepted".
+    if let Some(reason) = reason {
+        rationale_literals.push((
+            SUPERSESSION_REASON_PREDICATE.to_string(),
+            reason.as_str().to_string(),
+        ));
+    }
+
+    let effective_status = input
+        .new
+        .properties
+        .iter()
+        .find(|(predicate, _)| predicate == &state.capture.status)
+        .map(|(_, value)| value.as_str())
+        .unwrap_or_else(|| match superseded_local.as_str() {
+            "Constraint" | "AntiPattern" => "proposed",
+            _ => "accepted",
+        });
+    let proposed = effective_status.eq_ignore_ascii_case("proposed");
+    let _proposal_guard = proposed.then(|| state.lock_proposal_writes()).transpose()?;
+    if proposed {
+        let predecessor_status =
+            first_literal(&state.store, &input.superseded_iri, &state.capture.status)
+                .unwrap_or_default();
+        anyhow::ensure!(
+            predecessor_status.is_empty() || in_working_set(&predecessor_status),
+            "cannot propose supersession of {}: predecessor is {}",
+            input.superseded_iri,
+            predecessor_status
+        );
+        ensure_no_pending_supersession(state, &input.superseded_iri)?;
+    }
+
     let stamp = CaptureStamp {
         capture: &state.capture,
         author,
         timestamp: &timestamp,
-        status: "accepted",
+        status: effective_status,
     };
     let rationale_quads = capture_instance_quads(
         &state.store,
@@ -210,8 +382,6 @@ fn supersede_decision_inner(
         &stamp,
     )?;
 
-    // The new decision: caller literals + edges to the rationale and the old one.
-    // (The caller may still override status via `new.properties`.)
     let mut new_edges = planned_edges;
     for edge in [
         (has_rationale_pred, rationale_iri.clone()),
@@ -259,18 +429,20 @@ fn supersede_decision_inner(
         GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?),
     );
 
-    // One atomic transaction: insert the new decision + rationale + the old's new
-    // status, and remove the old's prior status quads.
+    // One atomic transaction. A proposed supersession leaves the predecessor's
+    // status alone; acceptance performs that one deferred lifecycle transition.
     let mut txn = state
         .store
         .start_transaction()
         .map_err(|e| anyhow::anyhow!("supersede transaction: {e}"))?;
     txn.extend(rationale_quads.iter().map(Quad::as_ref));
     txn.extend(new_quads.iter().map(Quad::as_ref));
-    for quad in &old_status_quads {
-        txn.remove(quad.as_ref());
+    if !proposed {
+        for quad in &old_status_quads {
+            txn.remove(quad.as_ref());
+        }
+        txn.insert(superseded_status.as_ref());
     }
-    txn.insert(superseded_status.as_ref());
     txn.insert(successor_link.as_ref());
     txn.commit()
         .map_err(|e| anyhow::anyhow!("supersede commit: {e}"))?;
@@ -285,6 +457,9 @@ fn supersede_decision_inner(
             new_iri,
             rationale_iri,
             superseded_iri: input.superseded_iri.clone(),
+            status: effective_status.to_string(),
+            reason: reason.map(|value| value.as_str().to_string()),
+            diff: claim_diff(state, &old_subject, &input.new.properties),
         },
         applied_edges,
         not_carried_edges,

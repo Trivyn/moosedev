@@ -359,6 +359,48 @@ async fn supersede_reasserts_selected_relations_and_reports_the_rest() {
         "{text}"
     );
 
+    let constraint = call_raw(
+        &client,
+        "record_important_decision",
+        json!({
+            "kind": "Constraint",
+            "title": "Original ratified supersession constraint",
+            "description": "The original constraint stays authoritative during review."
+        }),
+    )
+    .await;
+    assert_ne!(constraint.is_error, Some(true));
+    let constraint_iri = recorded_iri(&constraint);
+    let proposed = call_raw(
+        &client,
+        "supersede_decision",
+        json!({
+            "superseded_iri": constraint_iri,
+            "title": "Replacement ratified supersession constraint",
+            "description": "The replacement applies only after ratification.",
+            "rationale": "The implementation scope changed.",
+            "reason": "scope-narrowed",
+            "relations": [
+                {"predicate": "constrains", "target": original_iri}
+            ]
+        }),
+    )
+    .await;
+    assert_ne!(proposed.is_error, Some(true));
+    let proposed_text = response_text(&proposed);
+    assert!(
+        proposed_text.starts_with("Proposed supersession"),
+        "{proposed_text}"
+    );
+    assert!(
+        proposed_text.contains(&format!("Linked: constrains → {original_iri}")),
+        "{proposed_text}"
+    );
+    assert!(
+        proposed_text.contains("Reason: scope-narrowed"),
+        "{proposed_text}"
+    );
+
     backend.abort();
     let _ = std::fs::remove_dir_all(&data_dir);
 }

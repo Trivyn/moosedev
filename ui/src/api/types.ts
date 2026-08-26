@@ -290,6 +290,13 @@ export interface Proposal {
   target_display: string;
   evidence: string | null;
   status: string;
+  /** Superseded record for a proposed high-stakes replacement. */
+  predecessor_iri: string | null;
+  predecessor_title: string | null;
+  supersession_reason: string | null;
+  /** Backend-owned, bounded old/new claim diff. */
+  claim_diff: string | null;
+  diff_truncated: boolean;
 }
 
 export interface ProposalListResponse {

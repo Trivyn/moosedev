@@ -10,7 +10,9 @@ use std::sync::{Arc, Barrier};
 
 use chrono::Utc;
 use moosedev::code::substrate::{Substrate, SubstrateMeta};
-use moosedev::graph::{self, AppState, DossierTarget, RecordInput, PROJECT_KG_GRAPH_IRI};
+use moosedev::graph::{
+    self, AppState, DossierTarget, RecordInput, SupersedeInput, PROJECT_KG_GRAPH_IRI,
+};
 use oxigraph::model::{GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
 use protobuf::{EnumOrUnknown, MessageField};
 use scip::types::{
@@ -110,6 +112,77 @@ fn insert_quad(state: &AppState, subject: &str, predicate: &str, object: Term) {
     let mut txn = state.store.start_transaction().unwrap();
     txn.insert(quad.as_ref());
     txn.commit().unwrap();
+}
+
+fn literal_value(state: &AppState, subject: &str, predicate: &str) -> Option<String> {
+    state
+        .store
+        .quads_for_pattern(
+            Some(NamedNodeRef::new(subject).unwrap().into()),
+            Some(NamedNodeRef::new(predicate).unwrap()),
+            None,
+            Some(GraphNameRef::NamedNode(
+                NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap(),
+            )),
+        )
+        .flatten()
+        .find_map(|quad| match quad.object {
+            Term::Literal(value) => Some(value.value().to_string()),
+            _ => None,
+        })
+}
+
+#[test]
+fn rejecting_supersession_cascades_to_its_pending_links_atomically() {
+    let f = setup("proposals-reject-supersession-cluster");
+    let replacement = graph::supersede_decision(
+        &f.state,
+        &SupersedeInput {
+            superseded_iri: f.constraint.clone(),
+            new: RecordInput {
+                class_iri: String::new(),
+                class_local: String::new(),
+                properties: vec![(
+                    f.state.capture.title.clone(),
+                    "must stay pure within explicit boundaries".into(),
+                )],
+            },
+            rationale: "The boundary is now explicit.".into(),
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("propose constraint supersession");
+    let link = graph::propose_link(
+        &f.state,
+        &replacement.new_iri,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "replacement applies here",
+        "tester",
+        Utc::now(),
+    )
+    .expect("propose dependent link");
+    assert_eq!(graph::pending_count(&f.state).unwrap(), 2);
+
+    graph::reject_proposal(&f.state, &replacement.new_iri, "ratifier")
+        .expect("reject complete supersession cluster");
+
+    for iri in [&replacement.new_iri, &replacement.rationale_iri, &link] {
+        assert_eq!(
+            literal_value(&f.state, iri, &f.state.capture.status).as_deref(),
+            Some("rejected"),
+            "{iri} should be rejected with its parent proposal"
+        );
+    }
+    assert_eq!(
+        literal_value(&f.state, &f.constraint, &f.state.capture.status).as_deref(),
+        Some("accepted"),
+        "the predecessor remains authoritative"
+    );
+    assert_eq!(graph::pending_count(&f.state).unwrap(), 0);
+    assert!(graph::accept_proposal(&f.state, &link, "ratifier").is_err());
 }
 
 struct Fixture {
@@ -790,10 +863,13 @@ fn rejected_records_can_never_become_documentation() {
             new: RecordInput {
                 class_iri: constraint_class,
                 class_local: "Constraint".to_string(),
-                properties: vec![(
-                    f.state.capture.title.clone(),
-                    "replacement constraint".to_string(),
-                )],
+                properties: vec![
+                    (
+                        f.state.capture.title.clone(),
+                        "replacement constraint".to_string(),
+                    ),
+                    (f.state.capture.status.clone(), "accepted".to_string()),
+                ],
             },
             rationale: "the constraint changed".to_string(),
         },

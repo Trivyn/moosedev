@@ -215,6 +215,39 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                     {proposal.evidence}
                   </Typography>
                 )}
+                {proposal.predecessor_iri && (
+                  <Box sx={{ mt: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Replaces{' '}
+                      <Box
+                        component="span"
+                        sx={{ color: 'primary.main', cursor: 'pointer' }}
+                        onClick={() => onNavigateRecord(proposal.predecessor_iri!)}
+                      >
+                        {proposal.predecessor_title ?? `record ${shortIri(proposal.predecessor_iri)}`}
+                      </Box>
+                      {proposal.supersession_reason
+                        ? ` · reason: ${proposal.supersession_reason}`
+                        : ''}
+                    </Typography>
+                    {proposal.claim_diff && (
+                      <Box
+                        component="pre"
+                        sx={{
+                          bgcolor: 'action.hover',
+                          borderRadius: 1,
+                          fontFamily: 'monospace',
+                          fontSize: '0.75rem',
+                          overflowX: 'auto',
+                          p: 1,
+                          whiteSpace: 'pre-wrap',
+                        }}
+                      >
+                        {proposal.claim_diff}
+                      </Box>
+                    )}
+                  </Box>
+                )}
                 <Typography variant="body2" sx={{ mt: 0.5 }}>
                   <Box
                     component="span"
