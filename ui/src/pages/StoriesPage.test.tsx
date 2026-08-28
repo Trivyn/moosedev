@@ -252,6 +252,15 @@ describe('Story v3 workbench', () => {
     expect(within(article).getByRole('heading', { name: 'Why it exists' })).toBeInTheDocument();
     expect(within(article).getByRole('heading', { name: 'How it evolved' })).toBeInTheDocument();
     expect(within(article).getByRole('heading', { name: 'Evolution over time' })).toBeInTheDocument();
+    const timeline = within(article).getByRole('list', { name: 'Project evolution timeline' });
+    expect(timeline.tagName).toBe('OL');
+    const timelineEvents = within(timeline).getAllByRole('listitem');
+    expect(timelineEvents).toHaveLength(2);
+    expect(timelineEvents[0]).toHaveTextContent('The earlier graph decision');
+    expect(timelineEvents[1]).toHaveTextContent('A historical transition');
+    expect(timeline.querySelector('time')).toHaveAttribute('datetime', '2025-01-02T03:04:05Z');
+    expect(within(timeline).getAllByLabelText('Kind: ArchitecturalDecision')).toHaveLength(2);
+    expect(within(timeline).getAllByLabelText('Status: superseded')).toHaveLength(2);
     expect(within(article).getByText(/Maintainer context \(non-authoritative\)/)).toBeInTheDocument();
     expect(within(article).getByText('src/graph/store.rs:0', { exact: false })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Knowledge gaps' })).not.toBe(article);
@@ -260,6 +269,8 @@ describe('Story v3 workbench', () => {
     expect(navigate).toHaveBeenCalledWith(requirementIri);
     fireEvent.click(within(article).getByRole('button', { name: 'The earlier graph decision' }));
     expect(navigate).toHaveBeenCalledWith(oldDecisionIri);
+    fireEvent.click(within(timeline).getByRole('button', { name: 'Superseded by: Queryable memory' }));
+    expect(navigate).toHaveBeenCalledWith(requirementIri);
     fireEvent.click(within(article).getByRole('button', { name: 'A historical transition' }));
     expect(navigate).toHaveBeenCalledWith(suppressedIri);
 
@@ -272,6 +283,19 @@ describe('Story v3 workbench', () => {
     expect(within(article).getAllByText('Current state').length).toBeGreaterThan(1);
     expect(within(article).queryByText('Excluded historical detail')).not.toBeInTheDocument();
     expect(within(article).getAllByText(/superseded/i).length).toBeGreaterThan(0);
+  });
+
+  it('omits the evolution timeline when there are no lifecycle events', async () => {
+    vi.mocked(api.generateStory).mockResolvedValue({
+      outcome: 'story',
+      story: { ...run, timeline: [] },
+    });
+    render(<StoriesPage onNavigateRecord={vi.fn()} />);
+    await chooseSubjectAndGenerate();
+
+    const article = screen.getByRole('article');
+    expect(within(article).queryByRole('heading', { name: 'Evolution over time' })).not.toBeInTheDocument();
+    expect(within(article).queryByRole('list', { name: 'Project evolution timeline' })).not.toBeInTheDocument();
   });
 
   it('accepts assisted paragraph regrouping while rejecting deterministic projection drift', () => {

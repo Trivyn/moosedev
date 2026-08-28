@@ -510,6 +510,19 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
     let constraint = record(&state, "Constraint", "Runtime builder hover constraint");
     link_public(&state, &decision, 4);
     link_public(&state, &constraint, 4);
+    let component_iri = graph::load_components(&state)?[0]
+        .iri
+        .clone()
+        .expect("runtime component IRI");
+    for (kind, title) in [
+        ("ArchitecturalDecision", "Component decision one"),
+        ("ArchitecturalDecision", "Component decision two"),
+        ("Constraint", "Component constraint"),
+        ("Lesson", "Component lesson"),
+    ] {
+        let component_record = record(&state, kind, title);
+        graph::relate(&state, &component_record, "concerns", &component_iri)?;
+    }
     let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
 
     let mut client = direct_client(&socket).await?;
@@ -526,8 +539,7 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
         },
     )?
     .expect("expected dossier");
-    // Hover is the dossier plus one entry point: the Story of THIS entity.
-    let story_url = format!(
+    let entity_story_url = format!(
         "http://127.0.0.1:7474/#/stories/entity/{}",
         expected_dossier
             .entity_iri
@@ -535,22 +547,57 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
             .next()
             .expect("entity uuid")
     );
-    let expected = graph::render_dossier_markdown(&expected_dossier, Some(&story_url));
+    // Indirect context links the Story of the exact component it summarizes.
+    let component_story_url = format!(
+        "http://127.0.0.1:7474/#/stories/entity/{}",
+        expected_dossier
+            .realizes
+            .as_ref()
+            .expect("realized component")
+            .0
+            .rsplit('/')
+            .next()
+            .expect("component uuid")
+    );
+    let expected = graph::render_dossier_markdown(
+        &expected_dossier,
+        Some(&entity_story_url),
+        Some(&component_story_url),
+    );
 
     assert_eq!(hover_markdown(&response), expected);
     assert!(hover_markdown(&response).contains("Runtime builder hover decision"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/adrs/"));
     assert!(hover_markdown(&response).contains("Runtime builder hover constraint"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/constraints/"));
-    // Near the top: after the identity block, before the records it summarizes.
     let markdown = hover_markdown(&response);
-    let story_offset = markdown
+    let entity_story_offset = markdown
         .find("[Tell me the Story](")
-        .expect("hover carries the Story link");
-    assert!(markdown.contains(&format!("[Tell me the Story]({story_url})")));
-    assert!(story_offset < markdown.find("**Records**").expect("records section"));
-    // The subject is the entity itself, not its realized component.
-    assert!(!markdown.contains("#/stories/entity/runtime"));
+        .expect("hover carries the entity Story link");
+    assert!(markdown.contains(&format!("[Tell me the Story]({entity_story_url})")));
+    assert!(entity_story_offset < markdown.find("**Direct records**").unwrap());
+    let story_offset = markdown
+        .find("[Tell me the component Story](")
+        .expect("hover carries the component Story link");
+    assert!(markdown.contains(&format!(
+        "[Tell me the component Story]({component_story_url})"
+    )));
+    assert!(
+        story_offset
+            > markdown
+                .find("**Direct records**")
+                .expect("records section")
+    );
+    assert!(markdown.contains("**Indirect component context**"));
+    assert!(markdown.contains(
+        "Total: 4 records that concern this component, not necessarily this code entity."
+    ));
+    assert!(markdown.contains("By kind: ArchitecturalDecision: 2; Constraint: 1; Lesson: 1"));
+    assert!(!markdown.contains("Component decision one"));
+    assert!(!markdown.contains("Component decision two"));
+    assert!(!markdown.contains("Component constraint"));
+    assert!(!markdown.contains("Component lesson"));
+    assert_ne!(entity_story_url, component_story_url);
 
     client.shutdown_and_exit().await?;
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -573,6 +620,12 @@ async fn hover_omits_the_story_link_without_a_serving_workbench() -> anyhow::Res
         "Runtime builder hover decision",
     );
     link_public(&state, &decision, 4);
+    let component_iri = graph::load_components(&state)?[0]
+        .iri
+        .clone()
+        .expect("runtime component IRI");
+    let component_record = record(&state, "Lesson", "Component-only hover lesson");
+    graph::relate(&state, &component_record, "concerns", &component_iri)?;
     let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
 
     let mut client = direct_client(&socket).await?;
@@ -587,6 +640,13 @@ async fn hover_omits_the_story_link_without_a_serving_workbench() -> anyhow::Res
         "{markdown}"
     );
     assert!(!markdown.contains("Tell me the Story"), "{markdown}");
+    assert!(
+        !markdown.contains("Tell me the component Story"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("**Indirect component context**"));
+    assert!(markdown.contains("By kind: Lesson: 1"));
+    assert!(!markdown.contains("Component-only hover lesson"));
     assert!(!markdown.contains("http://"), "{markdown}");
 
     client.shutdown_and_exit().await?;

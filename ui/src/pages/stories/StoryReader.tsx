@@ -106,6 +106,13 @@ interface StoryTimelineProps {
   onNavigateRecord: (iri: string) => void;
 }
 
+function timelineRelationLabel(relation?: string | null): string | null {
+  if (!relation) return null;
+  if (relation === 'is_superseded_by') return 'Superseded by a newer record';
+  if (relation === 'supersedes') return 'Supersedes an earlier record';
+  return relation;
+}
+
 function StoryTimeline({ timeline, evidenceByIri, onNavigateRecord }: StoryTimelineProps) {
   if (!timeline.length) return null;
   return (
@@ -114,59 +121,145 @@ function StoryTimeline({ timeline, evidenceByIri, onNavigateRecord }: StoryTimel
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
         Lifecycle events and supersessions are ordered from the project graph.
       </Typography>
-      <Stack component="ol" spacing={2} sx={{ pl: 2.5 }}>
+      <Box
+        component="ol"
+        aria-label="Project evolution timeline"
+        sx={{ listStyle: 'none', p: 0, m: 0 }}
+      >
         {timeline.map((event) => {
+          const transition = timelineRelationLabel(event.relation);
           const relations: Array<{ label: string; iris: string[] }> = [
             { label: 'Supersedes', iris: event.predecessor_iris },
             { label: 'Superseded by', iris: event.successor_iris },
             { label: 'Rationale', iris: event.rationale_iris },
           ];
           return (
-            <Box component="li" key={event.id} sx={{ pl: 1 }}>
-              <Button
-                variant="text"
-                onClick={() => onNavigateRecord(event.evidence_iri)}
-                sx={{ p: 0, textAlign: 'left', justifyContent: 'flex-start' }}
+            <Box
+              component="li"
+              key={event.id}
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1.75rem minmax(0, 1fr)', sm: '10rem 1.75rem minmax(0, 1fr)' },
+                gridTemplateRows: { xs: 'auto auto', sm: 'auto' },
+                pb: 3,
+                '&:last-of-type': { pb: 0 },
+                '&:not(:last-of-type) .story-timeline-marker::after': {
+                  content: '""',
+                  position: 'absolute',
+                  top: '1rem',
+                  bottom: '-1.5rem',
+                  left: 'calc(50% - 1px)',
+                  width: 2,
+                  bgcolor: 'divider',
+                },
+              }}
+            >
+              <Box
+                sx={{
+                  gridColumn: { xs: 2, sm: 1 },
+                  gridRow: 1,
+                  pr: { sm: 1.5 },
+                  textAlign: { sm: 'right' },
+                  minWidth: 0,
+                }}
               >
-                {event.title}
-              </Button>
-              <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ my: 0.5 }}>
-                <Chip size="small" label={event.kind} />
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color={isWorkingSetStatus(event.status) ? 'success' : 'warning'}
-                  label={event.status || 'unknown'}
-                />
-                <Chip size="small" variant="outlined" label={formatTimestamp(event.timestamp)} />
-              </Stack>
-              {event.relation ? <Typography variant="body2">{event.relation}</Typography> : null}
-              {relations.map(({ label, iris }) => iris.length ? (
-                <Stack
-                  key={label}
-                  direction="row"
-                  spacing={0.5}
-                  alignItems="baseline"
-                  useFlexGap
-                  flexWrap="wrap"
+                <Typography
+                  component="time"
+                  dateTime={event.timestamp || undefined}
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ overflowWrap: 'anywhere' }}
                 >
-                  <Typography variant="caption" color="text.secondary">{label}:</Typography>
-                  {iris.map((iri) => (
-                    <Button
-                      key={iri}
-                      size="small"
-                      onClick={() => onNavigateRecord(iri)}
-                      sx={{ minWidth: 0, p: 0 }}
-                    >
-                      {evidenceByIri.get(iri)?.title ?? iri}
-                    </Button>
-                  ))}
+                  {formatTimestamp(event.timestamp)}
+                </Typography>
+              </Box>
+              <Box
+                className="story-timeline-marker"
+                aria-hidden="true"
+                sx={{
+                  gridColumn: { xs: 1, sm: 2 },
+                  gridRow: { xs: '1 / span 2', sm: 1 },
+                  position: 'relative',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  pt: 0.5,
+                }}
+              >
+                <Box
+                  sx={{
+                    position: 'relative',
+                    zIndex: 1,
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    bgcolor: 'primary.main',
+                    border: 2,
+                    borderColor: 'background.paper',
+                    boxShadow: (theme) => `0 0 0 1px ${theme.palette.primary.main}`,
+                  }}
+                />
+              </Box>
+              <Box
+                sx={{
+                  gridColumn: { xs: 2, sm: 3 },
+                  gridRow: { xs: 2, sm: 1 },
+                  minWidth: 0,
+                  pt: { xs: 0.25, sm: 0 },
+                }}
+              >
+                <Typography component="h5" variant="subtitle1" sx={{ lineHeight: 1.35 }}>
+                  <Button
+                    variant="text"
+                    onClick={() => onNavigateRecord(event.evidence_iri)}
+                    sx={{ p: 0, textAlign: 'left', justifyContent: 'flex-start', font: 'inherit' }}
+                  >
+                    {event.title}
+                  </Button>
+                </Typography>
+                <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ my: 0.75 }}>
+                  <Chip size="small" aria-label={`Kind: ${event.kind}`} label={event.kind} />
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    color={isWorkingSetStatus(event.status) ? 'success' : 'warning'}
+                    aria-label={`Status: ${event.status || 'unknown'}`}
+                    label={event.status || 'unknown'}
+                  />
                 </Stack>
-              ) : null)}
+                {transition ? (
+                  <Typography variant="body2" sx={{ mb: 0.5 }}>{transition}</Typography>
+                ) : null}
+                {relations.map(({ label, iris }) => iris.length ? (
+                  <Stack
+                    key={label}
+                    direction="row"
+                    spacing={0.5}
+                    alignItems="baseline"
+                    useFlexGap
+                    flexWrap="wrap"
+                  >
+                    <Typography variant="caption" color="text.secondary">{label}:</Typography>
+                    {iris.map((iri) => {
+                      const targetTitle = evidenceByIri.get(iri)?.title ?? iri;
+                      return (
+                        <Button
+                          key={iri}
+                          size="small"
+                          aria-label={`${label}: ${targetTitle}`}
+                          onClick={() => onNavigateRecord(iri)}
+                          sx={{ minWidth: 0, p: 0, textAlign: 'left' }}
+                        >
+                          {targetTitle}
+                        </Button>
+                      );
+                    })}
+                  </Stack>
+                ) : null)}
+              </Box>
             </Box>
           );
         })}
-      </Stack>
+      </Box>
     </Box>
   );
 }
