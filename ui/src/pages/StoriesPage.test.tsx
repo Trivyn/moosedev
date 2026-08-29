@@ -285,6 +285,193 @@ describe('Story v3 workbench', () => {
     expect(within(article).getAllByText(/superseded/i).length).toBeGreaterThan(0);
   });
 
+  it('previews compact graph evidence before a citation navigates', async () => {
+    const related = [
+      { iri: 'https://moosedev.dev/kg/Alternative/preview', title: 'Keep plain title tooltips', kind: 'Alternative' },
+      { iri: 'https://moosedev.dev/kg/Consequence/preview-one', title: 'Readers stay in context', kind: 'Consequence' },
+      { iri: 'https://moosedev.dev/kg/Consequence/preview-two', title: 'No extra request is needed', kind: 'Consequence' },
+      { iri: 'https://moosedev.dev/kg/Rationale/preview-one', title: 'Destinations should be legible', kind: 'Rationale' },
+      { iri: 'https://moosedev.dev/kg/Rationale/preview-two', title: 'Evidence is already available', kind: 'Rationale' },
+    ];
+    const previewRun: StoryRun = {
+      ...run,
+      evidence: [
+        ...run.evidence.map((item) => item.iri === requirementIri ? {
+          ...item,
+          relations: [
+            ...item.relations,
+            ...related.map((target) => ({
+              predicate: 'previewRelation',
+              label: 'previewRelation',
+              direction: 'outgoing' as const,
+              target_iri: target.iri,
+              target_label: target.title,
+              target_kind: target.kind,
+            })),
+          ],
+        } : item),
+        ...related.map((item) => ({
+          ...item,
+          status: 'accepted',
+          description: `${item.title} in detail.`,
+          suppressed: false,
+          properties: [],
+          relations: [],
+        })),
+      ],
+    };
+    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: previewRun });
+    const navigate = vi.fn();
+    render(<StoriesPage onNavigateRecord={navigate} />);
+    await chooseSubjectAndGenerate();
+    await waitFor(() => expect(api.generateStory).toHaveBeenCalledTimes(2));
+
+    const citation = screen.getAllByRole('button', { name: 'Evidence 1: Queryable memory' })[0];
+    fireEvent.mouseOver(citation);
+    const tooltip = await screen.findByRole('tooltip');
+    const preview = within(tooltip);
+    expect(preview.getByText('Queryable memory')).toBeInTheDocument();
+    expect(preview.getByText('Requirement')).toBeInTheDocument();
+    expect(preview.getByText('accepted')).toBeInTheDocument();
+    expect(preview.getByText('Project memory must remain external and queryable.')).toBeInTheDocument();
+    expect(preview.getByText(/By James/)).toBeInTheDocument();
+    expect(preview.getByText('Keep plain title tooltips')).toBeInTheDocument();
+    expect(preview.getByText('Readers stay in context')).toBeInTheDocument();
+    expect(preview.getByText('No extra request is needed')).toBeInTheDocument();
+    expect(preview.getByText('Destinations should be legible')).toBeInTheDocument();
+    expect(preview.getByText('+1 more')).toBeInTheDocument();
+    expect(preview.queryByText('graph/store layer')).not.toBeInTheDocument();
+
+    fireEvent.click(citation);
+    expect(navigate).toHaveBeenCalledWith(requirementIri);
+    expect(api.generateStory).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the same preview for every evidence-backed Story record link', async () => {
+    const codeIri = 'https://moosedev.dev/kg/CodeEntity/store';
+    const previewRun: StoryRun = {
+      ...run,
+      evidence: [
+        ...run.evidence,
+        {
+          iri: componentIri,
+          title: 'graph/store layer',
+          kind: 'SystemComponent',
+          status: 'accepted',
+          description: 'Owns the durable graph implementation.',
+          suppressed: false,
+          properties: [],
+          relations: [],
+        },
+        {
+          iri: codeIri,
+          title: 'GraphStore code entity',
+          kind: 'CodeEntity',
+          status: 'accepted',
+          description: 'The indexed GraphStore definition.',
+          suppressed: false,
+          properties: [],
+          relations: [],
+        },
+      ],
+      code_anchors: [
+        ...run.code_anchors,
+        {
+          symbol: 'scip symbol unresolved',
+          label: 'UnresolvedAnchor',
+          entity_iri: 'https://moosedev.dev/kg/CodeEntity/unresolved',
+          path: 'src/graph/unresolved.rs',
+          line: 1,
+        },
+      ],
+    };
+    vi.mocked(api.generateStory).mockResolvedValue({ outcome: 'story', story: previewRun });
+    const navigate = vi.fn();
+    render(<StoriesPage onNavigateRecord={navigate} />);
+    await chooseSubjectAndGenerate();
+
+    const showPreview = async (trigger: HTMLElement, expectedTitle: string) => {
+      fireEvent.mouseOver(trigger);
+      const tooltip = await screen.findByRole('tooltip');
+      expect(within(tooltip).getByText(expectedTitle)).toBeInTheDocument();
+      fireEvent.mouseLeave(trigger);
+      await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
+    };
+    const article = screen.getByRole('article');
+    const timeline = within(article).getByRole('list', { name: 'Project evolution timeline' });
+
+    await showPreview(
+      within(timeline).getByRole('button', { name: 'The earlier graph decision' }),
+      'The earlier graph decision',
+    );
+    await showPreview(
+      within(timeline).getByRole('button', { name: 'Superseded by: Queryable memory' }),
+      'Queryable memory',
+    );
+    await showPreview(
+      within(article).getByRole('button', { name: /GraphStore · src\/graph\/store.rs:0/ }),
+      'GraphStore code entity',
+    );
+    await showPreview(
+      within(timeline).getByRole('button', { name: 'A historical transition' }),
+      'Excluded historical detail',
+    );
+
+    fireEvent.click(within(article).getByRole('button', { name: /Evidence appendix/ }));
+    const appendix = document.getElementById('story-evidence-content');
+    expect(appendix).not.toBeNull();
+    await showPreview(
+      within(appendix!).getByRole('button', { name: 'Queryable memory' }),
+      'Queryable memory',
+    );
+    await showPreview(
+      within(appendix!).getAllByRole('button', { name: 'graph/store layer' })[0],
+      'graph/store layer',
+    );
+
+    const unresolved = within(article).getByRole('button', {
+      name: /UnresolvedAnchor · src\/graph\/unresolved.rs:1/,
+    });
+    fireEvent.mouseOver(unresolved);
+    expect(unresolved).not.toHaveAttribute('aria-describedby');
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    fireEvent.click(unresolved);
+    expect(navigate).toHaveBeenCalledWith('https://moosedev.dev/kg/CodeEntity/unresolved');
+  });
+
+  it('previews on keyboard focus and touch long-press without accidental navigation', async () => {
+    const navigate = vi.fn();
+    render(<StoriesPage onNavigateRecord={navigate} />);
+    await chooseSubjectAndGenerate();
+    await waitFor(() => expect(api.generateStory).toHaveBeenCalledTimes(2));
+    const citation = screen.getAllByRole('button', { name: 'Evidence 1: Queryable memory' })[0];
+
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    citation.focus();
+    expect(await screen.findByRole('tooltip')).toBeInTheDocument();
+    expect(citation).toHaveAttribute('aria-describedby');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.touchStart(citation);
+      act(() => vi.advanceTimersByTime(701));
+      expect(screen.getByRole('tooltip')).toBeInTheDocument();
+      fireEvent.touchEnd(citation);
+      fireEvent.click(citation);
+      expect(navigate).not.toHaveBeenCalled();
+
+      fireEvent.touchStart(citation);
+      fireEvent.touchEnd(citation);
+      fireEvent.click(citation);
+      expect(navigate).toHaveBeenCalledWith(requirementIri);
+      act(() => vi.runOnlyPendingTimers());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('omits the evolution timeline when there are no lifecycle events', async () => {
     vi.mocked(api.generateStory).mockResolvedValue({
       outcome: 'story',
