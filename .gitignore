@@ -71,6 +71,13 @@ clients/vscode/*.vsix
 # output (seed-recall JSONs) is not.
 bench/seed_recall/
 
+# ── Embedding weights ─────────────────────────────────────────────────────
+# Release tarballs bundle models/snowflake-arctic-embed-s/ beside the binary
+# (packaged in CI from the MOOSE repo's git-lfs copy). A dev checkout can drop
+# the same tree here to run offline without MOOSEDEV_MODEL_DIR — 64MB of
+# weights that must never enter this repo's history.
+/models/
+
 # --- Python ------
 __pycache__/
 

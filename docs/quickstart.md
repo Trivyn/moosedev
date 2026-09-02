@@ -16,7 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/Trivyn/moosedev/main/scripts/instal
 brew install Trivyn/moosedev/moosedev
 ```
 
-Both download a self-contained binary — no build, no toolchain. Confirm it's on
+Both download a self-contained binary — no build, no toolchain, and no model
+download on first run (the embedding weights ship in the archive). Confirm it's on
 your PATH:
 
 ```sh

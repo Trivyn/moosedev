@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/Trivyn/moosedev/main/scripts/instal
 brew install Trivyn/moosedev/moosedev
 ```
 
-Each downloads a binary bundled with its `ontologies/`, `skills/`, and `templates/` — no toolchain needed. See **[docs/install.md](docs/install.md)** for platforms, checksums, upgrades, and the macOS signing note; binaries are also on [GitHub Releases](https://github.com/Trivyn/moosedev/releases).
+Each downloads a binary bundled with its `ontologies/`, `skills/`, `templates/`, and the Arctic-Embed-S embedding weights (`models/`) — no toolchain needed, and no model download on first run. See **[docs/install.md](docs/install.md)** for platforms, checksums, upgrades, and the macOS signing note; binaries are also on [GitHub Releases](https://github.com/Trivyn/moosedev/releases).
 
 ### Build from source
 
@@ -126,7 +126,11 @@ cd moosedev
 scripts/build-release.sh
 ```
 
-The default build bundles a CPU embedding backend (`candle-cpu`) and the Arctic-Embed-S model used by the alignment engine.
+The default build compiles in a CPU embedding backend (`candle-cpu`) targeting Arctic-Embed-S, the
+model the alignment engine and the dense retrieval seed use. The *weights* are not compiled in: MOOSE
+loads them from `models/snowflake-arctic-embed-s/` beside the binary, which release tarballs bundle.
+A source build has no such directory, so it falls back to downloading them from Hugging Face on first
+use — point `MOOSEDEV_MODEL_DIR` at a directory holding `models/` to use a local copy instead.
 
 The human-facing web UI is embedded in the Rust binary by default, so generated frontend assets must exist before a normal Cargo build:
 
@@ -354,6 +358,7 @@ or `requirements.txt`. The nearest `.env` wins, and the search never escapes pas
 - **Knowledge-LSP** (`MOOSEDEV_NO_LSP`): disable the daemon's editor endpoint when set to a truthy value.
 - **Code index producers** (`MOOSEDEV_SCIP_PRODUCER`, `MOOSEDEV_SCIP_TYPESCRIPT`, `MOOSEDEV_SCIP_PYTHON`): override the Rust, TypeScript, and Python SCIP producer commands used by `moosedev index`. Rust defaults to `rust-analyzer`; TypeScript defaults to `npx --yes @sourcegraph/scip-typescript`; Python defaults to `npx --yes @sourcegraph/scip-python` (needs Python 3.10+ on PATH; activate the project's virtual environment for cross-package references).
 - **Ontology directory** (`MOOSEDEV_ONTOLOGY_DIR`): where the shipped ontologies live. By default MOOSEDev looks for an `ontologies/` directory next to the running binary (the layout of the released tarball), then falls back to the crate's `ontologies/` for `cargo run`. Set this only to load ontologies from a custom location. *Keep the unpacked release bundle together so the binary can find its `ontologies/`.*
+- **Embedding weights** (`MOOSEDEV_MODEL_DIR`): a directory *containing* `models/`, holding the Arctic-Embed-S weights the alignment engine and dense retrieval seed use. By default MOOSEDev looks next to the running binary (the released tarball layout), so an installed build needs no configuration. Set this for a source build, or to share one local copy across checkouts; with no bundle anywhere the engine downloads the model from Hugging Face on first use.
 
 ## Project layout
 
