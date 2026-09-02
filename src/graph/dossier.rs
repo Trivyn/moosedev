@@ -247,16 +247,43 @@ pub(crate) fn code_entities_with_records(
 
 /// Render a stable Markdown view suitable for MCP and future hover surfaces.
 pub fn render_markdown(dossier: &Dossier) -> String {
-    render_dossier_markdown(dossier, None)
+    render_dossier_markdown_with_records(dossier, DossierRecordRendering::Exhaustive)
 }
 
-/// Same view with an optional Story deep link placed directly under the
-/// entity's identity block, where a reader looks first.
+/// Render the editor-hover view with optional Story deep links for the exact
+/// code entity and its realized component.
 ///
-/// The link is a parameter rather than a `Dossier` field so it stays a
-/// presentation concern of the surface that has a live workbench address; the
-/// dossier itself remains a pure read model.
-pub fn render_dossier_markdown(dossier: &Dossier, story_url: Option<&str>) -> String {
+/// Hover keeps every direct record, but summarizes the potentially unbounded
+/// component record list. The exhaustive MCP/policy view remains available
+/// through [`render_markdown`]. The link is a parameter rather than a
+/// [`Dossier`] field so liveness remains a concern of the serving surface.
+pub fn render_dossier_markdown(
+    dossier: &Dossier,
+    entity_story_url: Option<&str>,
+    component_story_url: Option<&str>,
+) -> String {
+    render_dossier_markdown_with_records(
+        dossier,
+        DossierRecordRendering::Hover {
+            entity_story_url,
+            component_story_url,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum DossierRecordRendering<'a> {
+    Exhaustive,
+    Hover {
+        entity_story_url: Option<&'a str>,
+        component_story_url: Option<&'a str>,
+    },
+}
+
+fn render_dossier_markdown_with_records(
+    dossier: &Dossier,
+    record_rendering: DossierRecordRendering<'_>,
+) -> String {
     let marker = if dossier.syntactic_anchor {
         " [syntactic anchor]"
     } else {
@@ -279,7 +306,11 @@ pub fn render_dossier_markdown(dossier: &Dossier, story_url: Option<&str>) -> St
     if let Some((_, label)) = &dossier.realizes {
         out.push_str(&format!("Realizes component: {label}\n"));
     }
-    if let Some(url) = story_url {
+    if let DossierRecordRendering::Hover {
+        entity_story_url: Some(url),
+        ..
+    } = record_rendering
+    {
         out.push_str(&format!("\n[Tell me the Story]({url})\n"));
     }
 
@@ -303,16 +334,34 @@ pub fn render_dossier_markdown(dossier: &Dossier, story_url: Option<&str>) -> St
     }
 
     if !dossier.direct_records.is_empty() {
-        out.push_str("\n**Records**\n");
+        let heading = match record_rendering {
+            DossierRecordRendering::Exhaustive => "Records",
+            DossierRecordRendering::Hover { .. } => "Direct records",
+        };
+        out.push_str(&format!("\n**{heading}**\n"));
         for record in &dossier.direct_records {
             render_record_line(&mut out, record);
         }
     }
     if let Some((_, label)) = &dossier.realizes {
         if !dossier.component_records.is_empty() {
-            out.push_str(&format!("\n**Via component {label}**\n"));
-            for record in &dossier.component_records {
-                render_record_line(&mut out, record);
+            match record_rendering {
+                DossierRecordRendering::Exhaustive => {
+                    out.push_str(&format!("\n**Via component {label}**\n"));
+                    for record in &dossier.component_records {
+                        render_record_line(&mut out, record);
+                    }
+                }
+                DossierRecordRendering::Hover {
+                    component_story_url,
+                    ..
+                } => {
+                    render_component_record_summary(
+                        &mut out,
+                        &dossier.component_records,
+                        component_story_url,
+                    );
+                }
             }
         }
     }
@@ -328,6 +377,42 @@ pub fn render_dossier_markdown(dossier: &Dossier, story_url: Option<&str>) -> St
         );
     }
     out
+}
+
+fn render_component_record_summary(
+    out: &mut String,
+    records: &[RecordSummary],
+    component_story_url: Option<&str>,
+) {
+    let mut by_kind = BTreeMap::<&str, usize>::new();
+    for record in records {
+        *by_kind.entry(&record.kind).or_default() += 1;
+    }
+    let counts = by_kind
+        .into_iter()
+        .map(|(kind, count)| format!("{kind}: {count}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let noun = if records.len() == 1 {
+        "record"
+    } else {
+        "records"
+    };
+    let verb = if records.len() == 1 {
+        "concerns"
+    } else {
+        "concern"
+    };
+
+    out.push_str("\n**Indirect component context**\n");
+    out.push_str(&format!(
+        "- Total: {} {noun} that {verb} this component, not necessarily this code entity.\n",
+        records.len()
+    ));
+    out.push_str(&format!("- By kind: {counts}\n"));
+    if let Some(url) = component_story_url {
+        out.push_str(&format!("- [Tell me the component Story]({url})\n"));
+    }
 }
 
 /// One judgment line: ratified plain with provenance, proposed visually
@@ -665,15 +750,14 @@ pub(crate) fn workbench_entity_url(state: &AppState, entity_iri: &str) -> Option
     workbench_record_url(state, entity_iri, "CodeEntity")
 }
 
-/// Workbench deep link that tells the Story of one code entity — the exact
-/// entity, not its containing component. Same liveness rule as
+/// Workbench deep link that tells the Story of one graph entity. Same liveness rule as
 /// [`workbench_record_url`]: absent whenever this daemon run is not serving
 /// HTTP, so a hover never offers a dead port.
-pub(crate) fn workbench_story_url(state: &AppState, entity_iri: &str) -> Option<String> {
+pub(crate) fn workbench_story_url(state: &AppState, subject_iri: &str) -> Option<String> {
     let addr = state.http_addr()?;
     Some(format!(
         "http://{addr}/#/stories/entity/{}",
-        encode_path_segment(addressable_local_name(entity_iri)?)
+        encode_path_segment(addressable_local_name(subject_iri)?)
     ))
 }
 

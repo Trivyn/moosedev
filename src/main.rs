@@ -776,11 +776,23 @@ async fn main() -> anyhow::Result<()> {
     // Logs MUST go to stderr — stdout carries the MCP JSON-RPC framing.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        // `moose=warn` is load-bearing, not decoration: a failed embedding-backbone
+        // load is reported on the `moose` target, and the whole retrieval stack
+        // degrades SOFTLY when it fails (runtime.rs). Filtering that target out is
+        // how a release shipped with no usable model and told no one.
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("moosedev=info,rmcp=warn")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("moosedev=info,moose=warn,rmcp=warn")
+            }),
         )
         .init();
+
+    // Hand MOOSE the bundled embedding weights the same way ontologies are handed
+    // over in graph::state — moosedev resolves its own install layout (symlinks
+    // included), MOOSE's search does not. Set before any mode builds state.
+    if let Some(dir) = model_root_dir() {
+        std::env::set_var("MOOSE_MODEL_DIR", dir);
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = parse_mode(&args)?;
@@ -1530,6 +1542,34 @@ fn skills_dir() -> Option<PathBuf> {
     crate_dir.is_dir().then_some(crate_dir)
 }
 
+/// Where the shipped embedding weights live — the directory that CONTAINS
+/// `models/<model>/`, not the model dir itself, so MOOSE picks the subdirectory
+/// matching whichever backbone it was compiled with.
+///
+/// Resolved like [`ontology_dir`]: `MOOSEDEV_MODEL_DIR` override, then the dir
+/// holding the running binary (the released tarball layout), then the crate root
+/// (a dev checkout that dropped `models/` in place). Returns `None` when no
+/// bundle is present, which leaves MOOSE free to fall back to its own lookup.
+fn model_root_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("MOOSEDEV_MODEL_DIR") {
+        let dir = PathBuf::from(dir);
+        return dir.is_dir().then_some(dir);
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        // Same symlink resolution as `ontology_dir` — and MOOSE's own model
+        // lookup has historically resolved against the LINK's directory on
+        // macOS, which is exactly what leaves a bundled model unfound.
+        .and_then(|exe| std::fs::canonicalize(exe).ok())
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .filter(|dir| dir.join("models").is_dir())
+    {
+        return Some(dir);
+    }
+    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    crate_dir.join("models").is_dir().then_some(crate_dir)
+}
+
 /// `moosedev skills` — print the resolved `skills/` dir and the workflow docs it
 /// holds, with absolute paths a user can hand straight to their coding agent.
 fn skills_mode() -> anyhow::Result<()> {
@@ -2106,6 +2146,47 @@ mod tests {
                 ontology_dir(),
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies")
             );
+        }
+    }
+
+    #[test]
+    fn model_root_dir_resolves_override_then_exe_relative_then_none() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let key = "MOOSEDEV_MODEL_DIR";
+
+        // 1. Explicit override wins — but only when it actually exists, so a
+        //    stale env var can't mask the bundled copy with a dead path.
+        let tmp = std::env::temp_dir();
+        std::env::set_var(key, &tmp);
+        assert_eq!(model_root_dir(), Some(tmp));
+        std::env::set_var(key, "/nope/not/a/dir");
+        assert_eq!(model_root_dir(), None);
+        std::env::remove_var(key);
+
+        // 2. With no override, the dir holding the binary is used when it has a
+        //    `models/` bundle. Note this returns the PARENT of `models/`: MOOSE
+        //    joins its own `models/<backbone>` subdir onto it.
+        let exe_dir = std::env::current_exe()
+            .expect("current_exe")
+            .canonicalize()
+            .expect("canonicalize exe")
+            .parent()
+            .expect("exe has parent")
+            .to_path_buf();
+        let marker = exe_dir.join("models");
+        let created = !marker.exists();
+        if created {
+            std::fs::create_dir(&marker).expect("create exe-relative models marker");
+        }
+        assert_eq!(model_root_dir(), Some(exe_dir));
+
+        // 3. With no bundle anywhere, resolve to nothing and let MOOSE decide
+        //    (its own lookup, then the Hugging Face hub).
+        if created {
+            std::fs::remove_dir(&marker).expect("remove marker");
+            let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let expected = crate_dir.join("models").is_dir().then_some(crate_dir);
+            assert_eq!(model_root_dir(), expected);
         }
     }
 

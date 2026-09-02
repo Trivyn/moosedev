@@ -2135,7 +2135,7 @@ fn timeline_orders_rfc3339_instants_and_puts_invalid_dates_last() {
         iri: iri.to_string(),
         title: iri.to_string(),
         kind: "ArchitecturalDecision".to_string(),
-        status: "accepted".to_string(),
+        status: "superseded".to_string(),
         suppressed: false,
         description: None,
         timestamp: timestamp.map(str::to_string),
@@ -2156,6 +2156,146 @@ fn timeline_orders_rfc3339_instants_and_puts_invalid_dates_last() {
             .collect::<Vec<_>>(),
         vec!["earlier", "later-offset", "invalid", "undated"]
     );
+}
+
+#[test]
+fn timeline_contains_only_lifecycle_history_and_supersession_participants() {
+    let detail = |iri: &str, kind: &str, status: &str| StoryEvidenceDetail {
+        iri: iri.to_string(),
+        title: iri.to_string(),
+        kind: kind.to_string(),
+        status: status.to_string(),
+        suppressed: false,
+        description: None,
+        timestamp: Some("2026-08-01T00:00:00Z".to_string()),
+        author: None,
+        properties: vec![],
+        relations: vec![],
+    };
+    let supersession =
+        |target: &str, label: &str, direction: StoryRelationDirection| StoryEvidenceRelation {
+            predicate: format!("https://example.test/{label}"),
+            label: label.to_string(),
+            direction,
+            target_iri: target.to_string(),
+            target_label: target.to_string(),
+            target_kind: "ArchitecturalDecision".to_string(),
+        };
+
+    let ordinary = detail("ordinary", "ArchitecturalDecision", "accepted");
+    let proposed = detail("proposed", "ArchitecturalDecision", "proposed");
+    let mut proposed_successor = detail("proposed-successor", "ArchitecturalDecision", "proposed");
+    proposed_successor.relations.push(supersession(
+        "retired",
+        "supersedes",
+        StoryRelationDirection::Outgoing,
+    ));
+    let retired = detail("retired", "ArchitecturalDecision", "superseded");
+    let deprecated = detail("deprecated", "Constraint", "deprecated");
+    let rejected = detail("rejected", "Alternative", "rejected");
+    let mut accepted_successor = detail("accepted-successor", "ArchitecturalDecision", "accepted");
+    accepted_successor.relations.push(supersession(
+        "retired",
+        "supersedes",
+        StoryRelationDirection::Outgoing,
+    ));
+    let mut accepted_predecessor =
+        detail("accepted-predecessor", "ArchitecturalDecision", "accepted");
+    accepted_predecessor.relations.push(supersession(
+        "accepted-successor",
+        "isSupersededBy",
+        StoryRelationDirection::Outgoing,
+    ));
+
+    let timeline = build_timeline(&[
+        ordinary,
+        proposed,
+        proposed_successor,
+        retired,
+        deprecated,
+        rejected,
+        accepted_successor,
+        accepted_predecessor,
+    ]);
+    let iris = timeline
+        .iter()
+        .map(|event| event.evidence_iri.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        iris,
+        BTreeSet::from([
+            "accepted-predecessor",
+            "accepted-successor",
+            "deprecated",
+            "rejected",
+            "retired",
+        ])
+    );
+}
+
+#[test]
+fn timeline_attaches_rationale_and_preserves_suppressed_history() {
+    let detail = |iri: &str, kind: &str, status: &str| StoryEvidenceDetail {
+        iri: iri.to_string(),
+        title: iri.to_string(),
+        kind: kind.to_string(),
+        status: status.to_string(),
+        suppressed: false,
+        description: None,
+        timestamp: None,
+        author: None,
+        properties: vec![],
+        relations: vec![],
+    };
+    let rationale_relation = |target: &str| StoryEvidenceRelation {
+        predicate: "https://example.test/hasRationale".to_string(),
+        label: "hasRationale".to_string(),
+        direction: StoryRelationDirection::Outgoing,
+        target_iri: target.to_string(),
+        target_label: target.to_string(),
+        target_kind: "Rationale".to_string(),
+    };
+    let supersession_relation = StoryEvidenceRelation {
+        predicate: "https://example.test/supersedes".to_string(),
+        label: "supersedes".to_string(),
+        direction: StoryRelationDirection::Outgoing,
+        target_iri: "retired".to_string(),
+        target_label: "retired".to_string(),
+        target_kind: "ArchitecturalDecision".to_string(),
+    };
+
+    let current_rationale = detail("current-rationale", "Rationale", "accepted");
+    let rejected_rationale = detail("rejected-rationale", "Rationale", "rejected");
+    let mut successor = detail("successor", "ArchitecturalDecision", "accepted");
+    successor.relations = vec![
+        supersession_relation,
+        rationale_relation("current-rationale"),
+        rationale_relation("rejected-rationale"),
+    ];
+    let mut retired = detail("retired", "ArchitecturalDecision", "superseded");
+    retired.suppressed = true;
+
+    let timeline = build_timeline(&[current_rationale, rejected_rationale, successor, retired]);
+    let event = |iri: &str| {
+        timeline
+            .iter()
+            .find(|event| event.evidence_iri == iri)
+            .unwrap_or_else(|| panic!("missing timeline event for {iri}"))
+    };
+
+    assert!(timeline
+        .iter()
+        .all(|event| event.evidence_iri != "current-rationale"));
+    assert_eq!(
+        event("successor").rationale_iris,
+        vec![
+            "current-rationale".to_string(),
+            "rejected-rationale".to_string()
+        ]
+    );
+    assert_eq!(event("successor").predecessor_iris, vec!["retired"]);
+    assert_eq!(event("rejected-rationale").status, "rejected");
+    assert_eq!(event("retired").status, "superseded");
 }
 
 #[test]

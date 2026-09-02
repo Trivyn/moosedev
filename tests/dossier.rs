@@ -434,7 +434,28 @@ fn component_records_are_secondary() {
         .component_records
         .iter()
         .any(|record| record.title == "Both places decision"));
-    assert!(graph::render_markdown(&dossier).contains("Via component"));
+    let exhaustive = graph::render_markdown(&dossier);
+    assert!(exhaustive.contains("Via component"));
+    assert!(exhaustive.contains("Component context decision"));
+
+    let hover = graph::render_dossier_markdown(
+        &dossier,
+        Some("http://127.0.0.1:7474/#/stories/entity/entity-id"),
+        Some("http://127.0.0.1:7474/#/stories/entity/component-id"),
+    );
+    assert!(hover.contains("**Direct records**"));
+    assert!(hover.contains("Direct entity decision"));
+    assert!(hover.contains("Both places decision"));
+    assert!(hover.contains("**Indirect component context**"));
+    assert!(hover.contains(
+        "Total: 1 record that concerns this component, not necessarily this code entity."
+    ));
+    assert!(hover.contains("By kind: ArchitecturalDecision: 1"));
+    assert!(hover.contains("[Tell me the Story](http://127.0.0.1:7474/#/stories/entity/entity-id)"));
+    assert!(hover.contains(
+        "[Tell me the component Story](http://127.0.0.1:7474/#/stories/entity/component-id)"
+    ));
+    assert!(!hover.contains("Component context decision"));
 }
 
 /// Deprecated records are hidden, while superseded directly linked records remain visible.

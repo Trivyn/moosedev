@@ -1,4 +1,11 @@
-import { useMemo } from 'react';
+import {
+  cloneElement,
+  type MouseEvent,
+  type ReactElement,
+  type TouchEvent,
+  useMemo,
+  useRef,
+} from 'react';
 import {
   Accordion,
   AccordionDetails,
@@ -13,6 +20,7 @@ import {
   Radio,
   RadioGroup,
   Stack,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
@@ -43,6 +51,152 @@ const trustColors: Record<StoryTrustState, 'default' | 'info' | 'success'> = {
 export function TrustBadge({ state }: { state: StoryTrustState }) {
   const label = `${state[0].toUpperCase()}${state.slice(1)} Story`;
   return <Chip size="small" color={trustColors[state]} label={label} />;
+}
+
+const previewRelationKinds = new Set(['Rationale', 'Consequence', 'Alternative']);
+const previewRelationLimit = 4;
+const touchClickSuppressionMs = 1_000;
+
+function previewRelations(item: StoryEvidenceDetail) {
+  const byTarget = new Map<string, StoryEvidenceDetail['relations'][number]>();
+  item.relations.forEach((relation) => {
+    if (previewRelationKinds.has(relation.target_kind) && !byTarget.has(relation.target_iri)) {
+      byTarget.set(relation.target_iri, relation);
+    }
+  });
+  return [...byTarget.values()].sort((left, right) => (
+    left.target_kind.localeCompare(right.target_kind)
+      || left.target_label.localeCompare(right.target_label)
+      || left.target_iri.localeCompare(right.target_iri)
+  ));
+}
+
+function EvidencePreviewCard({ item }: { item: StoryEvidenceDetail }) {
+  const relations = previewRelations(item);
+  const visibleRelations = relations.slice(0, previewRelationLimit);
+  const omittedRelations = relations.length - visibleRelations.length;
+  const attribution = [
+    item.author ? `By ${item.author}` : null,
+    item.timestamp ? formatTimestamp(item.timestamp) : null,
+  ].filter(Boolean).join(' · ');
+
+  return (
+    <Box sx={{ width: 420, maxWidth: 'calc(100vw - 32px)', p: 1.5 }}>
+      <Typography variant="subtitle2" sx={{ lineHeight: 1.35 }}>{item.title}</Typography>
+      <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ mt: 0.75 }}>
+        <Chip size="small" label={item.kind} />
+        <Chip
+          size="small"
+          variant="outlined"
+          color={isWorkingSetStatus(item.status) ? 'success' : 'warning'}
+          label={item.status || 'unknown'}
+        />
+      </Stack>
+      {item.description ? (
+        <Typography
+          variant="body2"
+          sx={{
+            mt: 1,
+            display: '-webkit-box',
+            WebkitBoxOrient: 'vertical',
+            WebkitLineClamp: 4,
+            overflow: 'hidden',
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {item.description}
+        </Typography>
+      ) : null}
+      {attribution ? (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+          {attribution}
+        </Typography>
+      ) : null}
+      {visibleRelations.length ? (
+        <Stack spacing={0.25} sx={{ mt: 1 }}>
+          {visibleRelations.map((relation) => (
+            <Typography
+              key={`${relation.target_kind}-${relation.target_iri}`}
+              variant="caption"
+              sx={{ overflowWrap: 'anywhere' }}
+            >
+              <Box component="span" color="text.secondary">{relation.target_kind}:</Box>{' '}
+              {relation.target_label}
+            </Typography>
+          ))}
+          {omittedRelations > 0 ? (
+            <Typography variant="caption" color="text.secondary">
+              +{omittedRelations} more
+            </Typography>
+          ) : null}
+        </Stack>
+      ) : null}
+    </Box>
+  );
+}
+
+type EvidencePreviewChildProps = {
+  onClick?: (event: MouseEvent) => void;
+  onTouchStart?: (event: TouchEvent) => void;
+};
+
+function EvidencePreview({ item, children }: {
+  item?: StoryEvidenceDetail;
+  children: ReactElement<EvidencePreviewChildProps>;
+}) {
+  const suppressClickUntil = useRef(0);
+  if (!item) return children;
+
+  const originalOnClick = children.props.onClick;
+  const originalOnTouchStart = children.props.onTouchStart;
+  const trigger = cloneElement(children, {
+    onClick: (event: MouseEvent) => {
+      if (Date.now() < suppressClickUntil.current) {
+        suppressClickUntil.current = 0;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      originalOnClick?.(event);
+    },
+    onTouchStart: (event: TouchEvent) => {
+      suppressClickUntil.current = 0;
+      originalOnTouchStart?.(event);
+    },
+  });
+
+  return (
+    <Tooltip
+      arrow
+      describeChild
+      disableInteractive
+      enterDelay={250}
+      enterTouchDelay={700}
+      leaveTouchDelay={1_500}
+      onOpen={(event) => {
+        if (event.type.startsWith('touch')) {
+          suppressClickUntil.current = Date.now() + touchClickSuppressionMs;
+        }
+      }}
+      title={<EvidencePreviewCard item={item} />}
+      slotProps={{
+        tooltip: {
+          sx: {
+            maxWidth: 'none',
+            p: 0,
+            bgcolor: 'background.paper',
+            color: 'text.primary',
+            border: 1,
+            borderColor: 'divider',
+            boxShadow: 6,
+          },
+        },
+        arrow: { sx: { color: 'background.paper' } },
+      }}
+    >
+      {trigger}
+    </Tooltip>
+  );
 }
 
 interface CitationLinksProps {
@@ -83,17 +237,17 @@ function CitationLinks({
     >
       {visibleCitations.map(({ iri, evidence, number }) => {
         return (
-          <Button
-            key={iri}
-            size="small"
-            variant="text"
-            aria-label={`Evidence ${number}: ${evidence.title}`}
-            title={`${evidence.kind}: ${evidence.title}`}
-            onClick={() => onNavigateRecord(iri)}
-            sx={{ minWidth: 0, p: 0.25, lineHeight: 1, verticalAlign: 'super' }}
-          >
-            [{number}]
-          </Button>
+          <EvidencePreview key={iri} item={evidence}>
+            <Button
+              size="small"
+              variant="text"
+              aria-label={`Evidence ${number}: ${evidence.title}`}
+              onClick={() => onNavigateRecord(iri)}
+              sx={{ minWidth: 0, p: 0.25, lineHeight: 1, verticalAlign: 'super' }}
+            >
+              [{number}]
+            </Button>
+          </EvidencePreview>
         );
       })}
     </Box>
@@ -106,6 +260,13 @@ interface StoryTimelineProps {
   onNavigateRecord: (iri: string) => void;
 }
 
+function timelineRelationLabel(relation?: string | null): string | null {
+  if (!relation) return null;
+  if (relation === 'is_superseded_by') return 'Superseded by a newer record';
+  if (relation === 'supersedes') return 'Supersedes an earlier record';
+  return relation;
+}
+
 function StoryTimeline({ timeline, evidenceByIri, onNavigateRecord }: StoryTimelineProps) {
   if (!timeline.length) return null;
   return (
@@ -114,65 +275,155 @@ function StoryTimeline({ timeline, evidenceByIri, onNavigateRecord }: StoryTimel
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
         Lifecycle events and supersessions are ordered from the project graph.
       </Typography>
-      <Stack component="ol" spacing={2} sx={{ pl: 2.5 }}>
+      <Box
+        component="ol"
+        aria-label="Project evolution timeline"
+        sx={{ listStyle: 'none', p: 0, m: 0 }}
+      >
         {timeline.map((event) => {
+          const transition = timelineRelationLabel(event.relation);
           const relations: Array<{ label: string; iris: string[] }> = [
             { label: 'Supersedes', iris: event.predecessor_iris },
             { label: 'Superseded by', iris: event.successor_iris },
             { label: 'Rationale', iris: event.rationale_iris },
           ];
           return (
-            <Box component="li" key={event.id} sx={{ pl: 1 }}>
-              <Button
-                variant="text"
-                onClick={() => onNavigateRecord(event.evidence_iri)}
-                sx={{ p: 0, textAlign: 'left', justifyContent: 'flex-start' }}
+            <Box
+              component="li"
+              key={event.id}
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1.75rem minmax(0, 1fr)', sm: '10rem 1.75rem minmax(0, 1fr)' },
+                gridTemplateRows: { xs: 'auto auto', sm: 'auto' },
+                pb: 3,
+                '&:last-of-type': { pb: 0 },
+                '&:not(:last-of-type) .story-timeline-marker::after': {
+                  content: '""',
+                  position: 'absolute',
+                  top: '1rem',
+                  bottom: '-1.5rem',
+                  left: 'calc(50% - 1px)',
+                  width: 2,
+                  bgcolor: 'divider',
+                },
+              }}
+            >
+              <Box
+                sx={{
+                  gridColumn: { xs: 2, sm: 1 },
+                  gridRow: 1,
+                  pr: { sm: 1.5 },
+                  textAlign: { sm: 'right' },
+                  minWidth: 0,
+                }}
               >
-                {event.title}
-              </Button>
-              <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ my: 0.5 }}>
-                <Chip size="small" label={event.kind} />
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color={isWorkingSetStatus(event.status) ? 'success' : 'warning'}
-                  label={event.status || 'unknown'}
-                />
-                <Chip size="small" variant="outlined" label={formatTimestamp(event.timestamp)} />
-              </Stack>
-              {event.relation ? <Typography variant="body2">{event.relation}</Typography> : null}
-              {relations.map(({ label, iris }) => iris.length ? (
-                <Stack
-                  key={label}
-                  direction="row"
-                  spacing={0.5}
-                  alignItems="baseline"
-                  useFlexGap
-                  flexWrap="wrap"
+                <Typography
+                  component="time"
+                  dateTime={event.timestamp || undefined}
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ overflowWrap: 'anywhere' }}
                 >
-                  <Typography variant="caption" color="text.secondary">{label}:</Typography>
-                  {iris.map((iri) => (
+                  {formatTimestamp(event.timestamp)}
+                </Typography>
+              </Box>
+              <Box
+                className="story-timeline-marker"
+                aria-hidden="true"
+                sx={{
+                  gridColumn: { xs: 1, sm: 2 },
+                  gridRow: { xs: '1 / span 2', sm: 1 },
+                  position: 'relative',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  pt: 0.5,
+                }}
+              >
+                <Box
+                  sx={{
+                    position: 'relative',
+                    zIndex: 1,
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    bgcolor: 'primary.main',
+                    border: 2,
+                    borderColor: 'background.paper',
+                    boxShadow: (theme) => `0 0 0 1px ${theme.palette.primary.main}`,
+                  }}
+                />
+              </Box>
+              <Box
+                sx={{
+                  gridColumn: { xs: 2, sm: 3 },
+                  gridRow: { xs: 2, sm: 1 },
+                  minWidth: 0,
+                  pt: { xs: 0.25, sm: 0 },
+                }}
+              >
+                <Typography component="h5" variant="subtitle1" sx={{ lineHeight: 1.35 }}>
+                  <EvidencePreview item={evidenceByIri.get(event.evidence_iri)}>
                     <Button
-                      key={iri}
-                      size="small"
-                      onClick={() => onNavigateRecord(iri)}
-                      sx={{ minWidth: 0, p: 0 }}
+                      variant="text"
+                      onClick={() => onNavigateRecord(event.evidence_iri)}
+                      sx={{ p: 0, textAlign: 'left', justifyContent: 'flex-start', font: 'inherit' }}
                     >
-                      {evidenceByIri.get(iri)?.title ?? iri}
+                      {event.title}
                     </Button>
-                  ))}
+                  </EvidencePreview>
+                </Typography>
+                <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ my: 0.75 }}>
+                  <Chip size="small" aria-label={`Kind: ${event.kind}`} label={event.kind} />
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    color={isWorkingSetStatus(event.status) ? 'success' : 'warning'}
+                    aria-label={`Status: ${event.status || 'unknown'}`}
+                    label={event.status || 'unknown'}
+                  />
                 </Stack>
-              ) : null)}
+                {transition ? (
+                  <Typography variant="body2" sx={{ mb: 0.5 }}>{transition}</Typography>
+                ) : null}
+                {relations.map(({ label, iris }) => iris.length ? (
+                  <Stack
+                    key={label}
+                    direction="row"
+                    spacing={0.5}
+                    alignItems="baseline"
+                    useFlexGap
+                    flexWrap="wrap"
+                  >
+                    <Typography variant="caption" color="text.secondary">{label}:</Typography>
+                    {iris.map((iri) => {
+                      const targetTitle = evidenceByIri.get(iri)?.title ?? iri;
+                      return (
+                        <EvidencePreview key={iri} item={evidenceByIri.get(iri)}>
+                          <Button
+                            size="small"
+                            aria-label={`${label}: ${targetTitle}`}
+                            onClick={() => onNavigateRecord(iri)}
+                            sx={{ minWidth: 0, p: 0, textAlign: 'left' }}
+                          >
+                            {targetTitle}
+                          </Button>
+                        </EvidencePreview>
+                      );
+                    })}
+                  </Stack>
+                ) : null)}
+              </Box>
             </Box>
           );
         })}
-      </Stack>
+      </Box>
     </Box>
   );
 }
 
-function CodeAnchors({ story, onNavigateRecord }: {
+function CodeAnchors({ story, evidenceByIri, onNavigateRecord }: {
   story: StoryRun;
+  evidenceByIri: Map<string, StoryEvidenceDetail>;
   onNavigateRecord: (iri: string) => void;
 }) {
   if (!story.code_anchors.length) return null;
@@ -181,21 +432,26 @@ function CodeAnchors({ story, onNavigateRecord }: {
       <Typography variant="h5" gutterBottom>Code anchors</Typography>
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
         {story.code_anchors.map((anchor) => (
-          <Chip
+          <EvidencePreview
             key={anchor.symbol}
-            clickable={Boolean(anchor.entity_iri)}
-            label={`${anchor.label}${anchor.path ? ` · ${anchor.path}${anchor.line != null ? `:${anchor.line}` : ''}` : ''}`}
-            onClick={() => anchor.entity_iri && onNavigateRecord(anchor.entity_iri)}
-          />
+            item={anchor.entity_iri ? evidenceByIri.get(anchor.entity_iri) : undefined}
+          >
+            <Chip
+              clickable={Boolean(anchor.entity_iri)}
+              label={`${anchor.label}${anchor.path ? ` · ${anchor.path}${anchor.line != null ? `:${anchor.line}` : ''}` : ''}`}
+              onClick={() => anchor.entity_iri && onNavigateRecord(anchor.entity_iri)}
+            />
+          </EvidencePreview>
         ))}
       </Stack>
     </Box>
   );
 }
 
-function EvidenceEntry({ item, number, onNavigateRecord }: {
+function EvidenceEntry({ item, number, evidenceByIri, onNavigateRecord }: {
   item: StoryEvidenceDetail;
   number: number;
+  evidenceByIri: Map<string, StoryEvidenceDetail>;
   onNavigateRecord: (iri: string) => void;
 }) {
   const summaryValues = [item.title, item.status, item.description, item.timestamp, item.author];
@@ -211,9 +467,11 @@ function EvidenceEntry({ item, number, onNavigateRecord }: {
     <Box>
       <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
         <Typography variant="subtitle2">[{number}]</Typography>
-        <Button variant="text" onClick={() => onNavigateRecord(item.iri)} sx={{ p: 0 }}>
-          {item.title}
-        </Button>
+        <EvidencePreview item={item}>
+          <Button variant="text" onClick={() => onNavigateRecord(item.iri)} sx={{ p: 0 }}>
+            {item.title}
+          </Button>
+        </EvidencePreview>
         <Chip size="small" label={item.kind} />
         <Chip
           size="small"
@@ -264,13 +522,15 @@ function EvidenceEntry({ item, number, onNavigateRecord }: {
               color="text.secondary"
             >
               {relation.direction === 'incoming' ? '←' : '→'} {relation.label}{' '}
-              <Button
-                size="small"
-                onClick={() => onNavigateRecord(relation.target_iri)}
-                sx={{ minWidth: 0, p: 0, verticalAlign: 'baseline' }}
-              >
-                {relation.target_label}
-              </Button>{' '}
+              <EvidencePreview item={evidenceByIri.get(relation.target_iri)}>
+                <Button
+                  size="small"
+                  onClick={() => onNavigateRecord(relation.target_iri)}
+                  sx={{ minWidth: 0, p: 0, verticalAlign: 'baseline' }}
+                >
+                  {relation.target_label}
+                </Button>
+              </EvidencePreview>{' '}
               ({relation.target_kind})
             </Typography>
           ))}
@@ -282,11 +542,17 @@ function EvidenceEntry({ item, number, onNavigateRecord }: {
 
 interface EvidenceAppendixProps {
   story: StoryRun;
+  evidenceByIri: Map<string, StoryEvidenceDetail>;
   citationNumber: Map<string, number>;
   onNavigateRecord: (iri: string) => void;
 }
 
-function EvidenceAppendix({ story, citationNumber, onNavigateRecord }: EvidenceAppendixProps) {
+function EvidenceAppendix({
+  story,
+  evidenceByIri,
+  citationNumber,
+  onNavigateRecord,
+}: EvidenceAppendixProps) {
   const evidenceGroups = useMemo(() => {
     const groups = new Map<string, Array<{ item: StoryEvidenceDetail; number: number }>>();
     story.evidence.filter((item) => !item.suppressed).forEach((item, index) => {
@@ -346,6 +612,7 @@ function EvidenceAppendix({ story, citationNumber, onNavigateRecord }: EvidenceA
                       key={item.iri}
                       item={item}
                       number={number}
+                      evidenceByIri={evidenceByIri}
                       onNavigateRecord={onNavigateRecord}
                     />
                   ))}
@@ -594,9 +861,14 @@ export default function StoryReader({
           evidenceByIri={evidenceByIri}
           onNavigateRecord={onNavigateRecord}
         />
-        <CodeAnchors story={story} onNavigateRecord={onNavigateRecord} />
+        <CodeAnchors
+          story={story}
+          evidenceByIri={evidenceByIri}
+          onNavigateRecord={onNavigateRecord}
+        />
         <EvidenceAppendix
           story={story}
+          evidenceByIri={evidenceByIri}
           citationNumber={citationNumber}
           onNavigateRecord={onNavigateRecord}
         />

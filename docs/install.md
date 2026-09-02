@@ -3,7 +3,9 @@
 MOOSEDev is distributed as a **pre-built binary**. The core MOOSE engine is
 closed-source, so building from source isn't an option for most users — but it
 also isn't needed: every release ships a self-contained binary bundled with its
-`ontologies/`, `skills/`, and `templates/`, resolved relative to the executable.
+`ontologies/`, `skills/`, `templates/`, and the Arctic-Embed-S embedding weights
+(`models/`), all resolved relative to the executable. Nothing is downloaded on
+first run and embeddings are computed locally, so MOOSEDev works fully offline.
 
 **Supported platforms:** macOS (Apple Silicon / arm64) and Linux (x86-64). Other
 targets aren't built yet; the installer errors clearly rather than installing the

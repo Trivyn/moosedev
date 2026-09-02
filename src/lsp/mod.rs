@@ -1785,15 +1785,22 @@ impl LspSession {
                 }
             };
 
-        // Reached only for an entity that already broke the silence rule, so
-        // the link rides existing knowledge rather than creating a new reason
-        // to interrupt. It is omitted when this daemon run is not serving the
-        // workbench, so hover never offers a dead port.
-        let story_url = crate::graph::workbench_story_url(&self.state, &dossier.entity_iri);
+        // Keep the existing exact-entity Story entry point. Component context
+        // is indirect and can be very large, so hover summarizes those records
+        // and links their separate graph subject only while this daemon serves
+        // a workbench.
+        let entity_story_url = crate::graph::workbench_story_url(&self.state, &dossier.entity_iri);
+        let component_story_url = dossier.realizes.as_ref().and_then(|(component_iri, _)| {
+            crate::graph::workbench_story_url(&self.state, component_iri)
+        });
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: render_dossier_markdown(&dossier, story_url.as_deref()),
+                value: render_dossier_markdown(
+                    &dossier,
+                    entity_story_url.as_deref(),
+                    component_story_url.as_deref(),
+                ),
             }),
             range: None,
         })

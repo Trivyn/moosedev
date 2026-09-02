@@ -61,9 +61,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Trivyn/moose
+          # RELEASE-CUT STEP: bump this to a MOOSE commit that INCLUDES the
+          # symlink-safe bundled-model lookup (canonicalized current_exe +
+          # MOOSE_MODEL_DIR). An older engine still resolves the model bundle
+          # against the symlink's directory, so a macOS install finds no model
+          # even though the tarball contains one. Keep README.md's
+          # "built against MOOSE commit" line in step with this.
           ref: e062d272a3b34ad1abe160e8a5830b48c87f0234 # v0.9.1
           path: moose
           ssh-key: ${{ secrets.MOOSE_DEPLOY_KEY }}
+          # The Arctic-Embed-S weights are git-lfs in that repo
+          # (models/**/*.safetensors). WITHOUT this the checkout yields a
+          # 133-byte pointer stub, which packages and ships as a "model" that
+          # candle then refuses to load. See the Package step's guard.
+          lfs: true
 
       - name: Resolve & verify version
         working-directory: moosedev
@@ -159,6 +170,31 @@ jobs:
           # fresh install can actually `--serve`, not just `--help`. (../moose is
           # the CI sibling checkout.)
           cp -R ../moose/ontologies/. "$DIST/ontologies/"
+          # MOOSE EMBEDDING WEIGHTS (Arctic-Embed-S, 384-dim) — REQUIRED for
+          # alignment and for the dense seed in get_relevant_context. Without
+          # them a fresh install silently downloads ~133MB from huggingface.co
+          # on first cold start, or degrades to lexical-only retrieval offline.
+          # MOOSE resolves `models/<backbone>/` relative to the binary.
+          mkdir -p "$DIST/models"
+          cp -R ../moose/models/snowflake-arctic-embed-s "$DIST/models/"
+
+          # Assert we shipped WEIGHTS, not an LFS pointer. A green build is not
+          # proof: a missing `lfs: true` above fails silently and produces a
+          # 133-byte text stub that only errors on the user's machine.
+          weights="$DIST/models/snowflake-arctic-embed-s/model.safetensors"
+          for f in config.json tokenizer.json model.safetensors; do
+            [ -f "$DIST/models/snowflake-arctic-embed-s/$f" ] || {
+              echo "::error::bundled model is missing $f"; exit 1; }
+          done
+          if head -c 40 "$weights" | grep -q 'git-lfs.github.com'; then
+            echo "::error::model.safetensors is a git-lfs pointer, not weights — is lfs:true set on the MOOSE checkout?"
+            exit 1
+          fi
+          size=$(wc -c < "$weights")
+          echo "bundled model.safetensors: $size bytes"
+          [ "$size" -gt 60000000 ] || {
+            echo "::error::model.safetensors is $size bytes, expected >60MB"; exit 1; }
+
           tar -czf "$DIST.tar.gz" "$DIST"
           shasum -a 256 "$DIST.tar.gz" > "$DIST.tar.gz.sha256"
 

@@ -633,7 +633,7 @@ fn story_entity_identity(state: &AppState, iri: &str) -> anyhow::Result<Option<(
 pub(super) fn build_timeline(evidence: &[StoryEvidenceDetail]) -> Vec<StoryTimelineEvent> {
     let mut events = evidence
         .iter()
-        .filter(|item| item.timestamp.is_some() || item.status != "unknown")
+        .filter(|item| timeline_evidence_is_eligible(item))
         .map(|item| {
             let mut predecessor_iris = Vec::new();
             let mut successor_iris = Vec::new();
@@ -689,6 +689,17 @@ pub(super) fn build_timeline(evidence: &[StoryEvidenceDetail]) -> Vec<StoryTimel
             .then(left.evidence_iri.cmp(&right.evidence_iri))
     });
     events
+}
+
+fn timeline_evidence_is_eligible(item: &StoryEvidenceDetail) -> bool {
+    if item.status.eq_ignore_ascii_case("proposed") {
+        return false;
+    }
+    !in_working_set(&item.status)
+        || item
+            .relations
+            .iter()
+            .any(|relation| matches!(relation.label.as_str(), "supersedes" | "isSupersededBy"))
 }
 
 fn timeline_instant(event: &StoryTimelineEvent) -> Option<i64> {
