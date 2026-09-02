@@ -117,7 +117,7 @@ Each downloads a binary bundled with its `ontologies/`, `skills/`, `templates/`,
 
 ### Build from source
 
-Requires Rust 1.89 or newer and a checkout of the MOOSE engine at `../moose` (MOOSEDev depends on it via a path dependency, and on its patched `oxigraph` fork). Release v0.11.0 is built against MOOSE commit `e062d272a3b34ad1abe160e8a5830b48c87f0234` (`v0.9.1`).
+Requires Rust 1.89 or newer and a checkout of the MOOSE engine at `../moose` (MOOSEDev depends on it via a path dependency, and on its patched `oxigraph` fork). Release v0.11.1 is built against MOOSE commit `2f88dd5e4cd9615b77f0fbdf43654437082e6e09` (`v0.9.2`).
 
 ```sh
 git clone https://github.com/Trivyn/moosedev.git
