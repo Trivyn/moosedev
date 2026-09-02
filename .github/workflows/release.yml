@@ -65,8 +65,8 @@ jobs:
           # symlink-safe bundled-model lookup (canonicalized current_exe +
           # MOOSE_MODEL_DIR). An older engine still resolves the model bundle
           # against the symlink's directory, so a macOS install finds no model
-          # even though the tarball contains one. Keep README.md's
-          # "built against MOOSE commit" line in step with this.
+          # even though the tarball contains one. Keep docs/install.md's
+          # pinned MOOSE revision in step with this.
           ref: 2f88dd5e4cd9615b77f0fbdf43654437082e6e09 # v0.9.2
           path: moose
           ssh-key: ${{ secrets.MOOSE_DEPLOY_KEY }}
