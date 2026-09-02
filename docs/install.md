@@ -1,8 +1,8 @@
 # Installing MOOSEDev
 
 MOOSEDev is distributed as a **pre-built binary**. The core MOOSE engine is
-closed-source, so building from source isn't an option for most users — but it
-also isn't needed: every release ships a self-contained binary bundled with its
+closed-source, so building from source isn't an option for most users. It also
+isn't needed: every release ships a self-contained binary bundled with its
 `ontologies/`, `skills/`, `templates/`, and the Arctic-Embed-S embedding weights
 (`models/`), all resolved relative to the executable. Nothing is downloaded on
 first run and embeddings are computed locally, so MOOSEDev works fully offline.
@@ -11,7 +11,7 @@ first run and embeddings are computed locally, so MOOSEDev works fully offline.
 targets aren't built yet; the installer errors clearly rather than installing the
 wrong artifact.
 
-## Option A — install script
+## Option A: install script
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Trivyn/moosedev/main/scripts/install.sh | sh
@@ -32,7 +32,7 @@ Environment overrides:
 If `BIN_DIR` isn't already on your `PATH`, the script tells you the line to add
 to your shell profile (e.g. `export PATH="$HOME/.local/bin:$PATH"`).
 
-## Option B — Homebrew
+## Option B: Homebrew
 
 ```sh
 brew install Trivyn/moosedev/moosedev
@@ -47,7 +47,7 @@ The binary is unsigned by Apple's Developer ID program and **not notarized**, ye
 neither install path triggers Gatekeeper's "unidentified developer" block:
 
 - Gatekeeper only quarantines files carrying the `com.apple.quarantine`
-  attribute, which browsers set but `curl` (and Homebrew's downloader) do not —
+  attribute, which browsers set but `curl` (and Homebrew's downloader) do not,
   so the downloaded binary isn't quarantined and runs directly.
 - On Apple Silicon the binary still needs *a* signature to execute at all; the
   Rust toolchain applies an **ad-hoc** signature during the native build, which
@@ -63,9 +63,44 @@ moosedev --help      # usage
 moosedev --status    # backend + web UI status for the current data dir
 ```
 
-Then configure a project with [`moosedev init`](quickstart.md) — the quickstart
+Then configure a project with [`moosedev init`](quickstart.md). The quickstart
 covers project setup and enabling the code layer + editor integration
 (`index`/`mint`, Knowledge-LSP clients).
+
+## Build from source
+
+Source builds require Rust 1.89 or newer, Node.js 20, and access to the private MOOSE engine.
+Check out MOOSE as a sibling at `../moose`; MOOSEDev uses it as a path dependency
+and shares its patched `oxigraph` fork. The release workflow currently pins MOOSE
+commit `2f88dd5e4cd9615b77f0fbdf43654437082e6e09` (`v0.9.2`). Use that revision to
+reproduce release builds.
+
+```sh
+git clone https://github.com/Trivyn/moosedev.git
+cd moosedev
+# Check out the private MOOSE repository at ../moose and use the pinned revision.
+scripts/build-release.sh
+```
+
+The script installs the UI dependencies, builds `ui/dist/`, and then runs
+`cargo build --release --locked`. The default `embedded-frontend` feature embeds
+the generated UI in the Rust binary. `ui/dist/` is generated and is not tracked
+in Git.
+
+For a backend-only build that does not need `ui/dist/`, select the headless
+feature explicitly:
+
+```sh
+cargo build --release --locked --no-default-features --features headless
+```
+
+Normal and headless builds use the CPU Arctic-Embed-S backend. Model weights are
+not compiled into the binary. Release bundles include them at
+`models/snowflake-arctic-embed-s/` beside the executable, so installed releases
+do not download a model on first use. A source build downloads the weights from
+Hugging Face when no bundle is available. To stay offline or share one copy
+across checkouts, set `MOOSEDEV_MODEL_DIR` to a directory that contains
+`models/snowflake-arctic-embed-s/`.
 
 ## Upgrade
 
@@ -108,4 +143,4 @@ Once the secret exists, the `homebrew` job in
 the formula (via `packaging/homebrew/render-formula.sh`) with each release's
 version and checksums and pushes it to the tap. Without the secret the job skips
 cleanly, so it never blocks a release. The formula text has a single source of
-truth — edit `render-formula.sh`, not the generated `moosedev.rb`.
+truth. Edit `render-formula.sh`, not the generated `moosedev.rb`.
