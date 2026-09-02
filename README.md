@@ -19,6 +19,8 @@ Its purpose is to fight **comprehension debt**, the gradual loss of shared under
 
 MOOSEDev is built on the **MOOSE** neurosymbolic engine. MOOSEDev itself is open source; the MOOSE engine is closed source.
 
+For a deeper account of the design and evaluation, see [*Ontology-Grounded Project Memory for Coding Agents*](https://arxiv.org/abs/2608.13662), accepted at NeSy 2026 in the Industry Track.
+
 ## Why use it?
 
 - **Knowledge has structure.** Decisions, constraints, lessons, and requirements are typed graph records, not undifferentiated text chunks.
