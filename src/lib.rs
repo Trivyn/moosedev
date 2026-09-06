@@ -15,6 +15,7 @@ pub mod constraints;
 pub mod export;
 pub mod graph;
 pub mod graph_import;
+pub mod harness;
 pub mod init;
 pub mod lessons;
 pub mod llm;

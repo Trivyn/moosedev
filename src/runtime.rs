@@ -354,6 +354,26 @@ pub fn spawn_detached_backend(
     data_dir: &Path,
 ) -> anyhow::Result<std::process::Child> {
     let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe: {e}"))?;
+    spawn_detached_backend_command(socket, data_dir, &exe, None)
+}
+
+/// Spawn the server executable from a separate client binary without recursively
+/// launching that client. The explicit project root also anchors daemon config.
+pub fn spawn_detached_backend_with_exe(
+    socket: &Path,
+    data_dir: &Path,
+    exe: &Path,
+    root: &Path,
+) -> anyhow::Result<std::process::Child> {
+    spawn_detached_backend_command(socket, data_dir, exe, Some(root))
+}
+
+fn spawn_detached_backend_command(
+    socket: &Path,
+    data_dir: &Path,
+    exe: &Path,
+    root: Option<&Path>,
+) -> anyhow::Result<std::process::Child> {
     std::fs::create_dir_all(data_dir)
         .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", data_dir.display()))?;
 
@@ -367,7 +387,11 @@ pub fn spawn_detached_backend(
         .try_clone()
         .map_err(|e| anyhow::anyhow!("clone backend log {}: {e}", log_path.display()))?;
 
-    let child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    if let Some(root) = root {
+        command.current_dir(root).env("MOOSEDEV_DATA_DIR", data_dir);
+    }
+    let child = command
         .arg("--serve")
         .arg(socket)
         .stdin(Stdio::null())

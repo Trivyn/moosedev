@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::api::handlers;
 use crate::graph::AppState;
@@ -59,6 +58,13 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         )
         .route("/stories/{id}/publish", post(handlers::publish_story))
         .route("/policy", post(handlers::evaluate_policy))
+        .route("/harness/context", post(crate::harness::daemon::context))
+        .route("/harness/capture", post(crate::harness::daemon::capture))
+        .route("/harness/review", post(crate::harness::daemon::review))
+        .route(
+            "/harness/checkpoint",
+            get(crate::harness::daemon::checkpoint),
+        )
         .route("/capture", post(handlers::capture_decision_point))
         .route("/proposals", get(handlers::list_proposals))
         .route("/proposals/{id}/accept", post(handlers::accept_proposal))
@@ -72,10 +78,6 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .nest("/api/v1", api)
         .fallback(handlers::static_files::serve_static)
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(super::security::cors_layer())
+        .layer(axum::middleware::from_fn(super::security::guard_request))
 }

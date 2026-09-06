@@ -67,6 +67,7 @@ pub async fn import_graph(
         None => ImportMode::default(),
     };
 
+    let _proposal_guard = state.lock_proposal_writes()?;
     let outcome = graph_import::import_graph(&state.store, scope, format, mode, &body)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     if outcome.project_changed() {

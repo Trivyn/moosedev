@@ -505,7 +505,7 @@ pub(crate) fn desired_name(entry: &DefinitionEntry) -> String {
 }
 
 /// Find the existing entity for one normalized SCIP symbol, if any.
-fn entity_for_symbol(
+pub(crate) fn entity_for_symbol(
     state: &AppState,
     terms: &CodeTerms,
     normalized_symbol: &str,

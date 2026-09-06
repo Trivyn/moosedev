@@ -5,6 +5,12 @@ edition = "2021"
 rust-version = "1.89"
 description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-term project memory, built on the MOOSE engine"
 license = "Apache-2.0"
+default-run = "moosedev"
+
+[[bin]]
+name = "moosedev-harness"
+path = "src/bin/moosedev-harness.rs"
+required-features = ["harness"]
 
 [dependencies]
 # The closed-source MOOSE engine, consumed as a path dependency.
@@ -60,6 +66,11 @@ uuid = { version = "1", features = ["v4"] }
 # OpenAI-compatible LLM client (the MOOSE "sensor"); local-first via env config.
 reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+unicode-width = { version = "0.2", optional = true }
+fs2 = { version = "0.4", optional = true }
+libc = { version = "0.2", optional = true }
 
 # Timestamps for PROV-O edit provenance.
 chrono = { version = "0.4", features = ["serde"] }
@@ -91,6 +102,7 @@ axum-test = "17"
 default = ["embedded-frontend"]
 embedded-frontend = ["dep:include_dir", "dep:mime_guess"]
 headless = []
+harness = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:fs2", "dep:libc", "tokio/process"]
 
 # Build the engine's embedding backbone (Arctic-Embed-S) on the Apple GPU via
 # candle's Metal backend. candle-cpu (declared on the `moose` dep above) stays the

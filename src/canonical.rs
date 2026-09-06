@@ -185,6 +185,13 @@ pub fn sync_on_startup(store: &Store, data_dir: &Path) -> anyhow::Result<Startup
 /// Best-effort by contract (mirrors the post-write provenance/dense-index
 /// steps): the caller warns on error and the next write retries.
 pub fn write_through(store: &Store, data_dir: &Path) -> anyhow::Result<()> {
+    // Serialize snapshot creation as well as publication. Serializing only
+    // rename would allow an older snapshot to overwrite a newer export, and
+    // the debounce timer can race an explicit harness durability checkpoint.
+    static EXPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = EXPORT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("canonical export lock poisoned"))?;
     let dump: GraphDump = export_canonical_project(store)?;
     let hash = sha256_hex(&dump.text);
     write_canonical(data_dir, &dump.text, &hash)
@@ -323,10 +330,13 @@ fn write_canonical(data_dir: &Path, text: &str, hash: &str) -> anyhow::Result<()
     let target = canonical_path(data_dir);
     let tmp = data_dir.join(format!("{CANONICAL_FILE_NAME}.tmp"));
     std::fs::write(&tmp, text).map_err(|e| anyhow::anyhow!("write {}: {e}", tmp.display()))?;
+    std::fs::File::open(&tmp)?.sync_all()?;
     std::fs::rename(&tmp, &target)
         .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), target.display()))?;
     std::fs::write(stamp_path(data_dir), hash)
         .map_err(|e| anyhow::anyhow!("write {}: {e}", stamp_path(data_dir).display()))?;
+    std::fs::File::open(stamp_path(data_dir))?.sync_all()?;
+    std::fs::File::open(data_dir)?.sync_all()?;
     Ok(())
 }
 
@@ -443,6 +453,33 @@ mod tests {
         std::fs::read_to_string(canonical_path(data_dir)).unwrap_or_default()
     }
 
+    #[test]
+    fn concurrent_exports_publish_complete_matching_text_and_stamp() {
+        let (store, data_dir) = throttle_fixture("concurrent");
+        let writers: Vec<_> = (0..8)
+            .map(|n| {
+                let store = store.clone();
+                let data_dir = data_dir.clone();
+                std::thread::spawn(move || {
+                    insert_record(&store, n);
+                    write_through(&store, &data_dir).unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let text = canonical_text(&data_dir);
+        for n in 0..8 {
+            assert!(text.contains(&format!("rec{n}")));
+        }
+        assert_eq!(
+            std::fs::read_to_string(stamp_path(&data_dir)).unwrap(),
+            sha256_hex(&text)
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     /// Without a tokio runtime there is nothing to defer on: every write —
     /// burst or not — falls back to the synchronous export.
     #[test]
@@ -474,6 +511,10 @@ mod tests {
         assert!(canonical_text(&data_dir).contains("rec1"));
 
         // Burst: no export until the very end.
+        // Establish an event inside the test window. The leading durable export
+        // can spend longer than 150ms waiting on fsync or another exporter;
+        // that latency is not evidence that these next writes form a burst.
+        *throttle.inner.last_write.lock().unwrap() = Some(Instant::now());
         insert_record(&store, 2);
         throttle.note_write(&store, &data_dir);
         insert_record(&store, 3);

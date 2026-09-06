@@ -142,9 +142,16 @@ MOOSEDev keeps the text graph synchronized after writes and uses it to hydrate a
 
 ## Documentation
 
+The optional [MOOSEDev harness](docs/harness.md) provides a full-screen coding
+conversation for a local model server such as LM Studio, with enforced memory
+reading, plan approval, and knowledge review. Build it with
+`cargo build --features harness --bins`, then launch `target/debug/moosedev-harness`.
+It uses the same shared daemon as existing integrations.
+
 - [Quickstart](docs/quickstart.md): installation, initialization, bootstrap, and first use
 - [Installation](docs/install.md): supported platforms, verification, upgrades, and source builds
 - [Reference](docs/reference.md): tools, commands, shared mode, graph operations, and configuration
+- [Standalone harness](docs/harness.md): interactive local-model coding agent and headless task commands
 - [Design of record](spec/MOOSEDev_design.md): architecture and implementation rationale
 - [Project instructions](AGENTS.md): design invariants and development practices
 

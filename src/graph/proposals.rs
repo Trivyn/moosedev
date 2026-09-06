@@ -9,7 +9,7 @@
 //!   status — never the real link edge. So a pending proposal is invisible to
 //!   dossiers and the why-coverage metric (which walk only the real link
 //!   predicates) until it is ratified. Accept materializes the real edge via
-//!   [`link_code`]; reject flips the status and never creates an edge. Both
+//!   [`link_code`](super::link_code::link_code); reject flips the status and never creates an edge. Both
 //!   preserve the node (and its evidence) as audit history.
 //! * **Record** — an ordinary `InformationRecord` subclass instance sitting at
 //!   lifecycle status `proposed` (e.g. from grounded capture). Its queue
@@ -34,7 +34,7 @@ use crate::code::substrate::symbols::normalize_symbol;
 
 use super::capture::require_information_record;
 use super::context::first_literal;
-use super::link_code::{link_code, CodeSelector, LinkCodeOutcome};
+use super::link_code::{CodeSelector, LinkCodeOutcome};
 use super::state::AppState;
 use super::util::{local_name, mint_instance_iri};
 use super::PROJECT_KG_GRAPH_IRI;
@@ -661,7 +661,7 @@ pub fn pending_count(state: &AppState) -> anyhow::Result<usize> {
 
 /// Accept a pending queue entry. For a `Link`, materialize the real edge, then
 /// flip to accepted — if the target symbol no longer resolves at HEAD,
-/// [`link_code`] errors and the proposal stays pending (an honest skip, not a
+/// [`link_code`](super::link_code::link_code) errors and the proposal stays pending (an honest skip, not a
 /// silent broken link). For a `Record`, ratify it in place (`proposed` →
 /// `accepted`); its queued links, if any, remain separate entries.
 pub fn accept_proposal(
@@ -670,6 +670,15 @@ pub fn accept_proposal(
     agent: &str,
 ) -> anyhow::Result<AcceptOutcome> {
     let _guard = state.lock_proposal_writes()?;
+    accept_proposal_unlocked(state, proposal_iri, agent)
+}
+
+/// Caller must hold `AppState::lock_proposal_writes` across validation and mutation.
+pub(crate) fn accept_proposal_unlocked(
+    state: &AppState,
+    proposal_iri: &str,
+    agent: &str,
+) -> anyhow::Result<AcceptOutcome> {
     let terms = ProposalTerms::resolve(state)?;
     match require_pending(state, proposal_iri, &terms)? {
         ProposalKind::Link => {
@@ -705,7 +714,7 @@ pub fn accept_proposal(
                 );
             }
 
-            let outcome = link_code(
+            let outcome = super::link_code::link_code_unlocked(
                 state,
                 &subject,
                 &predicate,
@@ -771,7 +780,7 @@ pub fn accept_proposal(
 
             // Shape-validated, idempotent; a wrong-range target fails here and
             // the judgment stays pending (honest skip).
-            super::lifecycle::relate(state, &entity_iri, &predicate_local, &target_iri)
+            super::lifecycle::relate_unlocked(state, &entity_iri, &predicate_local, &target_iri)
                 .with_context(|| format!("cannot accept judgment {proposal_iri}"))?;
 
             set_status(state, proposal_iri, ACCEPTED)?;
@@ -1051,6 +1060,15 @@ pub fn recategorize_judgment(
 /// would let a later accept resurrect the record into dossiers.
 pub fn reject_proposal(state: &AppState, proposal_iri: &str, agent: &str) -> anyhow::Result<()> {
     let _guard = state.lock_proposal_writes()?;
+    reject_proposal_unlocked(state, proposal_iri, agent)
+}
+
+/// Caller must hold `AppState::lock_proposal_writes` across validation and mutation.
+pub(crate) fn reject_proposal_unlocked(
+    state: &AppState,
+    proposal_iri: &str,
+    agent: &str,
+) -> anyhow::Result<()> {
     let terms = ProposalTerms::resolve(state)?;
     let kind = require_pending(state, proposal_iri, &terms)?;
     if kind == ProposalKind::Record {
@@ -1099,6 +1117,39 @@ pub fn reject_proposal(state: &AppState, proposal_iri: &str, agent: &str) -> any
     }
     set_status(state, proposal_iri, REJECTED)?;
     stamp_resolver(state, proposal_iri, agent);
+    state.note_project_write();
+    Ok(())
+}
+
+/// Reject a frozen capture journal without following mutable graph relations.
+/// Caller holds `AppState::lock_proposal_writes`; the explicit members are
+/// already the human-reviewed record/link/rationale identities. This preserves
+/// rejection as an escape when an external writer has malformed a proposal.
+pub(crate) fn reject_frozen_proposals_unlocked(
+    state: &AppState,
+    members: &[String],
+    agent: &str,
+) -> anyhow::Result<()> {
+    let mut replacements = Vec::new();
+    for iri in members {
+        match first_literal(&state.store, iri, &state.capture.status).as_deref() {
+            Some(REJECTED) => continue,
+            Some(PROPOSED) => replacements.push((iri, status_replacement(state, iri, REJECTED)?)),
+            _ => anyhow::bail!("proposal {iri} was resolved differently outside this operation"),
+        }
+    }
+    let mut transaction = state.store.start_transaction()?;
+    for (_, (old, replacement)) in &replacements {
+        for quad in old {
+            transaction.remove(quad.as_ref());
+        }
+        transaction.insert(replacement.as_ref());
+    }
+    transaction.commit()?;
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+    for (iri, _) in replacements {
+        stamp_resolver(state, iri, agent);
+    }
     state.note_project_write();
     Ok(())
 }

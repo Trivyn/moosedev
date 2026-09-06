@@ -10,7 +10,7 @@ use crate::code::substrate::Position;
 use super::capture::asserted_project_types;
 use super::code_entities::{desired_name, ensure_entity, CodeTerms};
 use super::components::load_components;
-use super::lifecycle::relate;
+use super::lifecycle::relate_unlocked;
 use super::relations::EdgeDirection;
 use super::state::AppState;
 
@@ -33,6 +33,18 @@ pub struct LinkCodeOutcome {
 }
 
 pub fn link_code(
+    state: &AppState,
+    record_iri: &str,
+    predicate_local: &str,
+    selector: &CodeSelector,
+    agent: &str,
+) -> anyhow::Result<LinkCodeOutcome> {
+    let _guard = state.lock_proposal_writes()?;
+    link_code_unlocked(state, record_iri, predicate_local, selector, agent)
+}
+
+/// Caller holds `AppState::lock_proposal_writes` across queue preflight and linking.
+pub(crate) fn link_code_unlocked(
     state: &AppState,
     record_iri: &str,
     predicate_local: &str,
@@ -95,10 +107,10 @@ pub fn link_code(
     let components = load_components(state)?;
     let entity = ensure_entity(state, &terms, &components, &entry, agent)?;
     let (subject_iri, object_iri) = if subject_is_record {
-        let out = relate(state, record_iri, predicate_local, &entity.iri)?;
+        let out = relate_unlocked(state, record_iri, predicate_local, &entity.iri)?;
         (out.subject_iri, out.object_iri)
     } else {
-        let out = relate(state, &entity.iri, predicate_local, record_iri)?;
+        let out = relate_unlocked(state, &entity.iri, predicate_local, record_iri)?;
         (out.subject_iri, out.object_iri)
     };
 
