@@ -880,6 +880,22 @@ pub async fn checkpoint(
     let _guard = OPERATIONS
         .lock()
         .map_err(|_| ApiError::internal("harness operation lock poisoned"))?;
+    // A legacy browser can issue an Origin-less GET without Fetch Metadata.
+    // Reading status must never enrich the graph or publish the canonical file.
+    Ok(Json(checkpoint_status(
+        &state,
+        query.operation_id.as_deref(),
+        false,
+    )?))
+}
+
+pub async fn publish_checkpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CheckpointQuery>,
+) -> Result<Json<CheckpointResponse>, ApiError> {
+    let _guard = OPERATIONS
+        .lock()
+        .map_err(|_| ApiError::internal("harness operation lock poisoned"))?;
     Ok(Json(checkpoint_snapshot(
         &state,
         query.operation_id.as_deref(),
@@ -889,6 +905,14 @@ pub async fn checkpoint(
 pub fn checkpoint_snapshot(
     state: &AppState,
     operation_id: Option<&str>,
+) -> anyhow::Result<CheckpointResponse> {
+    checkpoint_status(state, operation_id, true)
+}
+
+fn checkpoint_status(
+    state: &AppState,
+    operation_id: Option<&str>,
+    publish: bool,
 ) -> anyhow::Result<CheckpointResponse> {
     let generation = state.project_write_generation();
     let mut pending = BTreeSet::new();
@@ -915,9 +939,13 @@ pub fn checkpoint_snapshot(
             }
         }
     }
-    state.try_ensure_enriched()?;
+    if publish {
+        state.try_ensure_enriched()?;
+    }
     let report = crate::validation::validate_project(state)?;
-    durable_flush(state)?;
+    if publish {
+        durable_flush(state)?;
+    }
     let revision = accepted_revision(state)?;
     anyhow::ensure!(
         generation == state.project_write_generation(),
@@ -925,7 +953,8 @@ pub fn checkpoint_snapshot(
     );
     Ok(CheckpointResponse {
         conforms: report.conforms(),
-        durable: true,
+        // A GET reports current state, not evidence of successful publication.
+        durable: publish,
         revision,
         pending: pending.into_iter().collect(),
     })

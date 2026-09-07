@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use moosedev::harness::protocol::*;
 use moosedev::harness::runner::{CheckResult, Mode, Phase, Runner};
@@ -57,6 +57,8 @@ struct Script {
     requests: Vec<Value>,
     capture_requests: Vec<CaptureRequest>,
     fail_capture_once: bool,
+    fail_capture: bool,
+    fail_context: bool,
     reject_capture_once: bool,
     deny_edit: bool,
     revision: String,
@@ -64,6 +66,8 @@ struct Script {
     reviewed: Vec<String>,
     revision_on_accept: Option<String>,
     attest_review: bool,
+    reject_stale_review: bool,
+    fail_global_checkpoint_once: bool,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -92,37 +96,47 @@ async fn model(State(state): State<Shared>, Json(body): Json<Value>) -> (StatusC
 async fn context(
     State(state): State<Shared>,
     Json(request): Json<ContextRequest>,
-) -> Json<ContextResponse> {
+) -> (StatusCode, Json<ContextResponse>) {
     let mut script = state.lock().unwrap();
     script
         .requests
         .push(json!({"kind":"context","files":request.files}));
-    Json(ContextResponse {
-        project_root: script.root.to_string_lossy().into_owned(),
-        revision: script.revision.clone(),
-        context: script.context.clone().unwrap_or_else(|| {
-            "Constraint: Preserve the public behavior. Requirement: repair the implementation."
-                .into()
+    let status = if script.fail_context {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        Json(ContextResponse {
+            project_root: script.root.to_string_lossy().into_owned(),
+            revision: script.revision.clone(),
+            context: script.context.clone().unwrap_or_else(|| {
+                "Constraint: Preserve the public behavior. Requirement: repair the implementation."
+                    .into()
+            }),
+            files: request
+                .files
+                .iter()
+                .map(|file| FileContext {
+                    file: file.clone(),
+                    dossier: format!(
+                        "COMPLETE_DOSSIER_FOR_{file}: preserve this entity's contract."
+                    ),
+                    policy: if script.deny_edit {
+                        PolicyDecision::Gate {
+                            disposition: GateDisposition::Deny,
+                            reason: "fixture governing constraint".into(),
+                            records: vec![],
+                            entities: vec![],
+                        }
+                    } else {
+                        PolicyDecision::Allow
+                    },
+                })
+                .collect(),
         }),
-        files: request
-            .files
-            .iter()
-            .map(|file| FileContext {
-                file: file.clone(),
-                dossier: format!("COMPLETE_DOSSIER_FOR_{file}: preserve this entity's contract."),
-                policy: if script.deny_edit {
-                    PolicyDecision::Gate {
-                        disposition: GateDisposition::Deny,
-                        reason: "fixture governing constraint".into(),
-                        records: vec![],
-                        entities: vec![],
-                    }
-                } else {
-                    PolicyDecision::Allow
-                },
-            })
-            .collect(),
-    })
+    )
 }
 
 async fn capture(
@@ -140,7 +154,7 @@ async fn capture(
             Json(json!({"error":"component does not exist; capture was not persisted"})),
         );
     }
-    if std::mem::take(&mut script.fail_capture_once) {
+    if script.fail_capture || std::mem::take(&mut script.fail_capture_once) {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error":"simulated lost durable acknowledgment"})),
@@ -180,9 +194,19 @@ async fn review(
     State(state): State<Shared>,
     headers: HeaderMap,
     Json(request): Json<ReviewRequest>,
-) -> (HeaderMap, Json<CheckpointResponse>) {
+) -> (StatusCode, HeaderMap, Json<CheckpointResponse>) {
     let mut script = state.lock().unwrap();
     let base = script.revision.clone();
+    let expected = headers
+        .get("x-moosedev-expected-revision")
+        .and_then(|value| value.to_str().ok());
+    if script.reject_stale_review && expected.is_some_and(|revision| revision != base) {
+        return (
+            StatusCode::CONFLICT,
+            HeaderMap::new(),
+            Json(checked(&base, false, vec![request.operation_id])),
+        );
+    }
     if request.accept {
         if let Some(revision) = script.revision_on_accept.take() {
             script.revision = revision;
@@ -206,6 +230,7 @@ async fn review(
         );
     }
     (
+        StatusCode::OK,
         attestation,
         Json(checked(&script.revision, script.checkpoint_durable, vec![])),
     )
@@ -224,11 +249,14 @@ async fn checkpoint(
         .filter(|id| !script.reviewed.contains(id))
         .map(|id| vec![id.clone()])
         .unwrap_or_default();
-    Json(checked(
-        &script.revision,
-        script.checkpoint_durable,
-        pending,
-    ))
+    let durable = if !query.contains_key("operation_id")
+        && std::mem::take(&mut script.fail_global_checkpoint_once)
+    {
+        false
+    } else {
+        script.checkpoint_durable
+    };
+    Json(checked(&script.revision, durable, pending))
 }
 
 struct Fixture {
@@ -255,7 +283,7 @@ impl Fixture {
             .route("/api/v1/harness/context", post(context))
             .route("/api/v1/harness/capture", post(capture))
             .route("/api/v1/harness/review", post(review))
-            .route("/api/v1/harness/checkpoint", get(checkpoint))
+            .route("/api/v1/harness/checkpoint", post(checkpoint))
             .with_state(shared.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -550,10 +578,11 @@ async fn completed_verification_still_requires_final_human_review_and_durable_gr
     );
     fixture.shared.lock().unwrap().checkpoint_durable = false;
     assert!(runner.confirm_no_knowledge().await.is_err());
-    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert!(runner.confirm_no_knowledge().await.is_err());
     fixture.shared.lock().unwrap().checkpoint_durable = true;
     fixture.shared.lock().unwrap().revision = "accepted-v2".into();
-    runner.confirm_no_knowledge().await.unwrap();
+    runner.advance().await.unwrap();
     assert_eq!(
         runner.task.phase,
         Phase::AwaitingPlan,
@@ -1501,4 +1530,522 @@ async fn steering_during_read_only_capture_keeps_file_links_after_restart() {
         "new guidance needs its own subsequent capture assessment"
     );
     assert!(script.replies.is_empty());
+}
+
+#[tokio::test]
+async fn final_governing_review_does_not_block_remaining_reviews_with_stale_attestation() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    fixture.captured("Lesson", "Observed repair");
+    runner.advance().await.unwrap();
+    runner.task.phase = Phase::Verifying;
+    runner.task.check_results = vec![CheckResult {
+        command: "fixture-required-check".into(),
+        success: true,
+        output: "passed".into(),
+    }];
+    fixture.reply("harness_capture", json!({"reason":"Final review identified a governing contract.","proposals":[{
+        "kind":"Constraint","title":"Preserve the reviewed behavior","description":"Future work must preserve this observed contract.",
+        "evidence":["Repair code.txt"],"files":["code.txt"],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(runner.task.reviews.len(), 2);
+    let governing = runner.task.reviews[1].request.operation_id.clone();
+    let lesson = runner.task.reviews[0].request.operation_id.clone();
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.reject_stale_review = true;
+        script.revision_on_accept = Some("accepted-v2".into());
+    }
+    runner.review_operation(&governing, true).await.unwrap();
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert_eq!(runner.task.knowledge_revision, "accepted-v2");
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-v3".into());
+    runner.review_operation(&lesson, true).await.unwrap();
+    assert!(runner.task.reviews.is_empty());
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert!(
+        runner.task.check_results.is_empty(),
+        "governing changes invalidate prior verification"
+    );
+    let calls = fixture.model_calls();
+    assert!(runner.advance().await.is_err());
+    assert_eq!(
+        fixture.model_calls(),
+        calls,
+        "new work must wait for renewed plan approval"
+    );
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+}
+
+#[tokio::test]
+async fn failed_final_checkpoint_retries_without_claiming_a_no_knowledge_review() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let scratch = fixture
+        .root
+        .join(".moosedev/harness/scratch")
+        .join(&runner.task.id);
+    std::fs::create_dir_all(scratch.join("build")).unwrap();
+    std::fs::write(scratch.join("build/artifact"), "cached build").unwrap();
+    fixture.edit();
+    runner.advance().await.unwrap();
+    fixture.captured("Lesson", "Reviewed repair result");
+    runner.advance().await.unwrap();
+    runner.task.phase = Phase::Verifying;
+    runner.task.check_results = vec![CheckResult {
+        command: "fixture-required-check".into(),
+        success: true,
+        output: "passed".into(),
+    }];
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    let operation = runner.task.reviews[0].request.operation_id.clone();
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.revision_on_accept = Some("accepted-v2".into());
+        script.fail_global_checkpoint_once = true;
+    }
+    assert!(runner.review_operation(&operation, true).await.is_err());
+    assert!(runner.task.reviews.is_empty());
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["completion_pending"],
+        true
+    );
+    assert!(runner.confirm_no_knowledge().await.is_err());
+    let calls = fixture.model_calls();
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    runner.resume().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Complete);
+    assert!(
+        !scratch.exists(),
+        "completed tasks must release their source and build scratch"
+    );
+    assert_eq!(
+        fixture.model_calls(),
+        calls,
+        "retry only completion checks, not capture or generation"
+    );
+    assert!(!runner.task.events.iter().any(|event| event
+        .message
+        .contains("Human confirmed that no durable knowledge changed")));
+    assert_eq!(fixture.shared.lock().unwrap().reviewed, [operation]);
+}
+
+#[tokio::test]
+async fn cancellation_cleans_scratch_and_keeps_the_task_resumable() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let scratch = fixture
+        .root
+        .join(".moosedev/harness/scratch")
+        .join(&runner.task.id);
+    std::fs::create_dir_all(scratch.join("build")).unwrap();
+    std::fs::write(scratch.join("build/artifact"), "cached build").unwrap();
+    runner.cancel().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Cancelled);
+    assert!(!scratch.exists());
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    runner.resume().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.plan.is_some());
+}
+
+#[tokio::test]
+async fn malformed_capture_stops_after_bounded_attempts_across_reload_and_resume() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture
+        .interactive_objective("Explain the current project")
+        .await;
+    fixture.conversational(
+        json!({"action":"reply","message":"The project has a local coding harness."}),
+    );
+    // Each failed assessment may repair malformed JSON three times. Across
+    // advance/resume calls, the checkpoint itself must also have a finite budget.
+    for _ in 0..40 {
+        fixture.reply("harness_capture", json!("not an assessment object"));
+    }
+    for _ in 0..12 {
+        let _ = runner.advance().await;
+        if runner.task.phase == Phase::AwaitingInput {
+            break;
+        }
+        runner.resume().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let state = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(state["capture_due"], true);
+    assert_eq!(state["capture_cursor"], 0);
+    assert_eq!(state["capture_offset"], 0);
+    let capture_calls = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|request| request["schema"] == "harness_capture")
+        .count();
+    assert!(
+        (1..=9).contains(&capture_calls),
+        "capture attempts escaped their checkpoint budget: {capture_calls}"
+    );
+    let calls = fixture.model_calls();
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    for _ in 0..3 {
+        runner.resume().await.unwrap();
+        assert!(runner.advance().await.is_err());
+    }
+    assert_eq!(
+        fixture.model_calls(),
+        calls,
+        "resumption alone must not reset failed capture attempts"
+    );
+    fixture.shared.lock().unwrap().replies.clear();
+    runner
+        .submit_message("Retry capture using the observed evidence only.".into())
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        if serde_json::to_value(&runner.task).unwrap()["capture_due"] == false {
+            break;
+        }
+        fixture.no_capture();
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["capture_due"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn oversized_plan_summary_is_rejected_before_becoming_required_prompt_state() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"large summary ".repeat(10_000),"files":["code.txt"],"checks":["fixture-required-check"]}));
+    assert!(runner.advance().await.is_err());
+    assert!(runner.task.plan.is_none());
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert!(fixture
+        .shared
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|request| request["schema"] != "harness_capture"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n"
+    );
+}
+
+#[tokio::test]
+async fn extreme_configured_context_window_saturates_without_overflow() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive_objective("Hello").await;
+    let mut config = fixture.config();
+    config.context_window_tokens = usize::MAX;
+    runner.configure(config, None);
+    fixture.conversational(json!({"action":"reply","message":"Hello."}));
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let script = fixture.shared.lock().unwrap();
+    for request in script
+        .requests
+        .iter()
+        .filter(|request| request["kind"] == "model")
+    {
+        assert!(
+            request["body"]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= 100_000
+        );
+    }
+}
+
+#[tokio::test]
+async fn new_guidance_journals_the_discarded_policy_edit_without_applying_it() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(
+        json!({"action":"edit","file":"code.txt","before":"original\n","after":null}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPolicy);
+    assert!(runner.task.pending_edit.is_some());
+    let prior_events = runner.task.events.len();
+    runner
+        .submit_message("Keep the file and explain it instead.".into())
+        .await
+        .unwrap();
+    assert!(runner.task.pending_edit.is_none());
+    assert_eq!(runner.task.mode, Mode::Plan);
+    let id = runner.task.id.clone();
+    drop(runner);
+    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert!(
+        runner.task.events[prior_events..].iter().any(|event| {
+            let message = event.message.to_lowercase();
+            (message.contains("discard") || message.contains("invalidat"))
+                && message.contains("code.txt")
+                && message.contains("original")
+        }),
+        "the durable journal must retain the discarded exact edit and why it was invalidated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n"
+    );
+}
+
+#[tokio::test]
+async fn headless_no_change_capture_requests_one_confirmation_for_all_pages() {
+    let fixture = Fixture::new().await;
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Review code.txt".into(),
+    )
+    .await
+    .unwrap();
+    runner.configure(fixture.config(), None);
+    runner.task.events.push(moosedev::harness::runner::Event {
+        message: "Observed implementation detail\n".repeat(10_000),
+    });
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Review the observed file","files":["code.txt"],"checks":["fixture-required-check"]}));
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.phase,
+        Phase::Planning,
+        "partial no-change pages must not repeatedly stop for confirmation"
+    );
+    for _ in 0..12 {
+        if runner.task.phase == Phase::AwaitingReview {
+            break;
+        }
+        fixture.no_capture();
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["capture_due"],
+        false
+    );
+    runner.confirm_no_knowledge().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.confirm_no_knowledge().await.is_err());
+    assert_eq!(
+        runner
+            .task
+            .events
+            .iter()
+            .filter(|event| event
+                .message
+                .contains("Human confirmed that no durable knowledge changed"))
+            .count(),
+        1
+    );
+    assert!(fixture.shared.lock().unwrap().replies.is_empty());
+}
+
+#[tokio::test]
+async fn capture_refresh_outages_preserve_page_and_model_repair_budget() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture
+        .interactive_objective("Explain the existing implementation")
+        .await;
+    runner.task.events.push(moosedev::harness::runner::Event {
+        message: "Observed implementation behavior\n".repeat(10_000),
+    });
+    fixture
+        .conversational(json!({"action":"reply","message":"The existing behavior is preserved."}));
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    let before = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(before["capture_due"], true);
+    assert!(before["capture_offset"].as_u64().unwrap() > 0);
+    let calls = fixture.model_calls();
+    fixture.shared.lock().unwrap().fail_context = true;
+    for _ in 0..4 {
+        let error = runner.advance().await.unwrap_err();
+        assert!(format!("{error:#}").contains("503"));
+        assert_eq!(runner.task.phase, Phase::Planning);
+        let saved = serde_json::to_value(&runner.task).unwrap();
+        assert_eq!(saved["capture_repairs"], 0);
+        for field in [
+            "capture_cursor",
+            "capture_offset",
+            "capture_checkpoint_end",
+            "capture_files",
+        ] {
+            assert_eq!(saved[field], before[field], "outage changed {field}");
+        }
+    }
+    assert_eq!(fixture.model_calls(), calls);
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    fixture.shared.lock().unwrap().fail_context = false;
+    for _ in 0..12 {
+        if runner.task.phase == Phase::AwaitingInput {
+            break;
+        }
+        fixture.no_capture();
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["capture_due"],
+        false
+    );
+    assert!(
+        !runner
+            .task
+            .events
+            .iter()
+            .any(|event| event.message.starts_with("Human response:")),
+        "service recovery must not require invented human guidance"
+    );
+    assert!(fixture.shared.lock().unwrap().replies.is_empty());
+}
+
+#[tokio::test]
+async fn capture_ack_outages_retry_the_frozen_operation_without_model_repairs() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    fixture.captured("Lesson", "Keep the observed repair");
+    fixture.shared.lock().unwrap().fail_capture = true;
+    assert!(runner.advance().await.is_err());
+    let request = runner.task.capture_request.clone().unwrap();
+    let before = serde_json::to_value(&runner.task).unwrap();
+    let calls = fixture.model_calls();
+    for _ in 0..3 {
+        assert!(runner.advance().await.is_err());
+    }
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["capture_repairs"],
+        0
+    );
+    assert_eq!(fixture.model_calls(), calls);
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    let restored = serde_json::to_value(&runner.task).unwrap();
+    for field in [
+        "capture_cursor",
+        "capture_offset",
+        "capture_end",
+        "capture_end_offset",
+        "capture_checkpoint_end",
+    ] {
+        assert_eq!(restored[field], before[field]);
+    }
+    fixture.shared.lock().unwrap().fail_capture = false;
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert_eq!(
+        runner.task.reviews[0].request.operation_id,
+        request.operation_id
+    );
+    assert_eq!(fixture.model_calls(), calls);
+    let script = fixture.shared.lock().unwrap();
+    assert_eq!(script.capture_requests.len(), 5);
+    assert!(
+        script
+            .capture_requests
+            .iter()
+            .all(|sent| serde_json::to_value(sent).unwrap()
+                == serde_json::to_value(&request).unwrap())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_cleanup_failure_survives_reload_and_explicit_cancel_or_resume_retry() {
+    use fs2::FileExt;
+    for resume_directly in [false, true] {
+        let fixture = Fixture::new().await;
+        let mut runner = fixture.interactive().await;
+        let scratch = fixture
+            .root
+            .join(".moosedev/harness/scratch")
+            .join(&runner.task.id);
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("cache-data"), "owned task cache").unwrap();
+        let owner = std::fs::File::open(&scratch).unwrap();
+        owner.try_lock_exclusive().unwrap();
+        let error = runner.cancel().await.unwrap_err();
+        assert!(format!("{error:#}").contains("Cancellation took effect"));
+        assert_eq!(runner.task.phase, Phase::Cancelled);
+        assert!(runner.task.cleanup_pending);
+        assert!(runner
+            .task
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("scratch cleanup is pending"));
+        assert!(runner.mode_plan().await.is_err());
+        assert!(runner.request_review().is_err());
+        assert!(runner
+            .submit_message("Continue the work".into())
+            .await
+            .is_err());
+        assert_eq!(runner.task.phase, Phase::Cancelled);
+        let id = runner.task.id.clone();
+        drop(runner);
+        let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+        runner.configure(fixture.config(), None);
+        assert!(runner.task.cleanup_pending);
+        assert!(runner.resume().await.is_err());
+        assert_eq!(runner.task.phase, Phase::Cancelled);
+        assert!(scratch.join("cache-data").exists());
+        FileExt::unlock(&owner).unwrap();
+        drop(owner);
+        if resume_directly {
+            runner.resume().await.unwrap();
+            assert_eq!(runner.task.phase, Phase::Planning);
+        } else {
+            runner.cancel().await.unwrap();
+            assert_eq!(runner.task.phase, Phase::Cancelled);
+        }
+        assert!(!runner.task.cleanup_pending);
+        assert!(!scratch.exists());
+        assert!(runner.task.last_error.is_none());
+        assert!(!runner
+            .task
+            .events
+            .iter()
+            .any(|event| event.message.starts_with("Human response:")));
+        let mut legacy = serde_json::to_value(&runner.task).unwrap();
+        legacy.as_object_mut().unwrap().remove("cleanup_pending");
+        let legacy: moosedev::harness::runner::Task = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.cleanup_pending);
+    }
 }

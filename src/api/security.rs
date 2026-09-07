@@ -66,7 +66,7 @@ fn trusted(headers: &HeaderMap, uri: &Uri, allowed: &[String]) -> bool {
         }),
         None => {
             // Cross-site GETs (images/navigation/no-cors fetch) can omit Origin
-            // but still trigger handlers. This matters for checkpoint's flush.
+            // but still trigger handlers. Reject them even on read-only routes.
             !headers
                 .get("sec-fetch-site")
                 .is_some_and(|value| value != "same-origin" && value != "none")

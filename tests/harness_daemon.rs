@@ -507,6 +507,7 @@ async fn browser_requests_cannot_reach_review_import_or_checkpoint() {
     let server = TestServer::new(build_routes(state.clone())).unwrap();
     for path in [
         "/api/v1/harness/review",
+        "/api/v1/harness/checkpoint",
         "/api/v1/graph/import",
         "/api/v1/proposals/fake/accept",
         "/api/v1/capture",
@@ -549,6 +550,34 @@ async fn browser_requests_cannot_reach_review_import_or_checkpoint() {
         .add_header("origin", "http://127.0.0.1:7474")
         .await
         .assert_status_ok();
+}
+
+#[tokio::test]
+async fn checkpoint_get_is_read_only_without_browser_fetch_metadata() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let canonical = state.data_dir.join("kg.nq");
+    assert!(!canonical.exists());
+    let generation = state.project_write_generation();
+    let server = TestServer::new(build_routes(state.clone())).unwrap();
+
+    // Old browsers can omit both Origin and Sec-Fetch-Site on cross-site GETs.
+    let response = server
+        .get("/api/v1/harness/checkpoint")
+        .add_header("host", "127.0.0.1:7474")
+        .await;
+    response.assert_status_ok();
+    assert!(!response.json::<CheckpointResponse>().durable);
+    assert!(!canonical.exists());
+    assert_eq!(state.project_write_generation(), generation);
+
+    let response = server
+        .post("/api/v1/harness/checkpoint")
+        .add_header("host", "127.0.0.1:7474")
+        .await;
+    response.assert_status_ok();
+    assert!(response.json::<CheckpointResponse>().durable);
+    assert!(canonical.is_file());
 }
 
 #[test]

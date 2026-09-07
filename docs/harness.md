@@ -51,6 +51,9 @@ coding session; it does not reconfigure a shared daemon.
 and validated JSON fallback otherwise. `required` rejects providers without
 native structured output. Complete model actions are validated before execution;
 streamed partial text never authorizes an edit or command.
+Malformed capture assessments stop after three failed assessment attempts
+(each permits at most three JSON-generation attempts). Resuming does not reset
+that limit; new human guidance permits another attempt and preserves the evidence.
 
 ## Conversation and review
 
@@ -83,6 +86,15 @@ An accepted final proposal can retain verification only when the daemon proves
 that the task's non-governing review alone caused the revision change. Changes to
 requirements, constraints, lifecycle, or unrelated knowledge retain the approval
 gate.
+At final review, operations can be accepted in either order. Governing changes
+still require renewed plan approval before execution. If review succeeds but the
+final checkpoint fails, `/continue` retries completion without repeating capture
+or claiming that no knowledge changed.
+
+Daemon or model-server outages pause work without consuming the malformed-capture
+budget. Restore the connection, then use `/continue` (headless `step` or `run`) to
+retry. Pending capture evidence and any already-submitted operation ID remain
+in the journal; a connection failure does not require new model guidance.
 
 Commands run in a filtered, read-only copy of project source with separate
 writable scratch space. Use project-relative paths. The live project, unrelated
@@ -90,11 +102,49 @@ home files, protected configuration, symlinks and hardlinks are excluded;
 installed runtime/toolchain directories and specific package caches are trusted
 read-only inputs. Confinement uses `sandbox-exec` on macOS and requires `bubblewrap` on
 Linux (x86-64 or ARM64); unsupported platforms cannot execute commands. Commands
-have no network, a clean environment, bounded output, and a 120-second limit.
+have no network, a clean environment, and bounded output. The default command
+timeout is 900 seconds; human configuration `MOOSEDEV_COMMAND_TIMEOUT_SECONDS`
+can set it to 1–86400 seconds, including through the project's `.env`.
 Dependencies must be available in that view. Sibling path dependencies, including
 this repository's `../moose`, are not automatically exposed. Source snapshots
-fail explicitly above 64 MiB per file, 512 MiB total, or 100,000 entries. Source
+fail explicitly above 512 MiB total, 100,000 entries, or 64 directory levels. Source
 edits use a separately gated action; policy-gated edits require human approval.
+
+Source snapshots use a stable task path and preserve file timestamps; each command
+refreshes them from the live project. Build artifacts persist in a task-local
+cache across commands and normal journal reloads. On macOS each command receives
+a fresh backing directory, seeded with distinct file inodes using copy-on-write
+clones where supported. Harness-managed aliases keep Cargo's build and registry
+paths stable; sandbox writes are granted only to that command's backing paths.
+A detached process can outlive the command, but cannot write into a later
+command's backing through those aliases or its old file descriptors. Linux uses
+its PID namespace and retains the existing build directory. Failed cache copying
+falls back to a cold cache; ordinary copying on filesystems without clone support
+adds startup work and is bounded.
+
+After the command leader exits, output draining has a 500 ms grace period. If a
+child keeps a pipe open, the result retains captured output and reports an
+incomplete command instead of waiting for the full command timeout. That result
+does not pass a required check. macOS commands cannot set immutable file flags;
+cleanup repairs user-set flags only on safely identified owned entries.
+
+Temporary command homes and
+files are removed on success, failure, timeout, or interruption. Completion and
+cancellation remove the task's source and build scratch; cancelled tasks retain
+their journal and can resume with a cold cache. If cleanup fails, cancellation
+still takes effect and the task journal records `cleanup_pending` with the cause.
+Press Esc again (headless `cancel`) to retry cleanup while staying cancelled, or
+use `/continue` (headless `resume`) to retry cleanup before resuming work. Pending
+cleanup survives restart and cannot be bypassed by replanning. Managed scratch
+parents must be real directories. Scratch reuse and cleanup never follow
+filesystem aliases left by commands. Root-level `build`, `dist`, and
+`target` are excluded; nested source directories with those names are included.
+Directories with a valid [CACHEDIR.TAG](https://bford.info/cachedir/) are excluded
+at any depth from navigation and command snapshots. The marker must be an ordinary,
+unaliased file with the exact standard signature; invalid markers do not hide source.
+Sensitive names such as `.env`, `.git`, `.moosedev`, and credential directories
+remain excluded at every depth. Oversized source snapshots fail explicitly rather
+than silently omit input files.
 
 Conversation journals and task journals are local operational state under
 `.moosedev/harness`, separate from canonical `.moosedev/kg.nq`. They preserve
@@ -115,6 +165,9 @@ positions across interruption. Completing one page does not clear the remaining
 capture obligation. The Journal view displays a compact index; complete requests
 and observations remain in the task JSON. Unchanged checkpoints skip redundant
 file rewrites; changed checkpoints retain atomic publication and fsync.
+Plan summaries are limited to 4000 UTF-8 bytes. If required capture context leaves
+no room for evidence, increase the configured model window and retry: that
+checkpoint's file set is frozen and cannot be narrowed by replanning.
 
 The daemon rejects untrusted browser origins and non-address Host headers across
 all HTTP routes, including review and checkpoint. Native local clients and the
@@ -122,6 +175,9 @@ same-origin web UI remain supported. A separately hosted development UI needs
 its exact origin in the daemon's comma-separated `MOOSEDEV_ALLOWED_ORIGINS`
 environment variable (for example `http://localhost:5173`). This browser boundary
 does not authenticate other programs already running with the user's privileges.
+`GET /api/v1/harness/checkpoint` is read-only status and returns `durable: false`;
+clients use `POST` to validate and publish a durable checkpoint. This also keeps
+legacy browsers without Fetch Metadata from triggering writes through GET.
 
 ## Headless compatibility
 
@@ -139,7 +195,9 @@ moosedev-harness tui TASK_ID
 ```
 
 `step` advances once; `run` advances at most 32 steps and stops at human gates.
-Headless tasks retain individual capture checkpoints; opening a task in the TUI
+Headless tasks require one no-change confirmation per checkpoint, after all its
+evidence pages have been assessed. They retain individual proposal reviews;
+opening a task in the TUI
 enables conversational batching while preserving its outstanding obligations.
 `approve-policy`, `review ID reject`, `plan`, `cancel`, `resume`, and `answer ID TEXT`
 retain their task semantics. Headless `resume ID` resumes a task; interactive

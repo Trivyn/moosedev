@@ -335,13 +335,18 @@ impl Controller {
     async fn interrupt(&mut self) {
         self.auto = false;
         if let Some(runner) = &mut self.runner {
-            if matches!(runner.task.phase, Phase::Complete | Phase::Cancelled) {
+            if runner.task.phase == Phase::Complete
+                || (runner.task.phase == Phase::Cancelled && !runner.task.cleanup_pending)
+            {
                 return;
             }
-            if let Err(error) = runner.cancel().await {
+            let result = runner.cancel().await;
+            self.conversation.sync_task(&runner.task);
+            if let Err(error) = result {
                 self.fail(error);
                 return;
             }
+            let _ = self.save_conversation();
             self.status = "Interrupted. /continue resumes; follow-up text replans.".into();
         }
     }
@@ -403,6 +408,15 @@ impl Controller {
             "Ready. Describe the work, or ask about this project."
         }
         .into();
+        if self
+            .runner
+            .as_ref()
+            .is_some_and(|runner| runner.task.cleanup_pending)
+        {
+            self.status = "Cancelled; scratch cleanup is pending. Esc retries cleanup; /continue retries cleanup before resuming.".into();
+            self.conversation.push("system", self.status.clone());
+            self.save_conversation()?;
+        }
         self.save_conversation()?;
         Ok(())
     }

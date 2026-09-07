@@ -4,7 +4,7 @@ use moosedev::harness::{
     runner::{default_daemon_url, Runner},
     tui::{self, Action},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const HELP: &str = "MOOSEDev harness
 Usage: moosedev-harness [--project DIR] [--daemon URL] [--daemon-exe PATH] [COMMAND]
@@ -133,7 +133,7 @@ async fn run() -> Result<()> {
         .unwrap_or(&root)
         .to_path_buf();
     // Match the daemon's explicit environment configuration without changing cwd.
-    let _ = dotenvy::from_path(root.join(".env"));
+    load_dotenv_file(&root.join(".env"))?;
     if matches!(args.command.as_str(), "interactive" | "resume-session") {
         let resume = if args.command == "resume-session" {
             anyhow::ensure!(
@@ -196,9 +196,33 @@ async fn run() -> Result<()> {
     result
 }
 
+fn load_dotenv_file(path: &Path) -> Result<()> {
+    match dotenvy::from_path(path) {
+        Ok(()) => Ok(()),
+        Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("load dotenv {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotenv_is_optional_but_malformed_configuration_is_an_error() {
+        let root =
+            std::env::temp_dir().join(format!("moosedev-harness-dotenv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(".env");
+        load_dotenv_file(&path).unwrap();
+        std::fs::write(&path, "# Empty configuration is valid\n").unwrap();
+        load_dotenv_file(&path).unwrap();
+        std::fs::write(&path, "=malformed\n").unwrap();
+        let error = load_dotenv_file(&path).unwrap_err();
+        assert!(error.to_string().contains("load dotenv"));
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn human_commands_reject_ambiguous_arguments() {

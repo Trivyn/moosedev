@@ -63,7 +63,8 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .route("/harness/review", post(crate::harness::daemon::review))
         .route(
             "/harness/checkpoint",
-            get(crate::harness::daemon::checkpoint),
+            get(crate::harness::daemon::checkpoint)
+                .post(crate::harness::daemon::publish_checkpoint),
         )
         .route("/capture", post(handlers::capture_decision_point))
         .route("/proposals", get(handlers::list_proposals))

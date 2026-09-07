@@ -21,6 +21,7 @@ const MAX_STEPS: usize = 256;
 const MAX_FILES: usize = 100;
 const MAX_CONTEXT: usize = 100_000;
 const REPAIR_RESERVE: usize = 1024;
+const MAX_PLAN_SUMMARY: usize = 4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -135,6 +136,12 @@ pub struct Task {
     capture_cursor: usize,
     #[serde(default)]
     capture_repairs: usize,
+    /// Human capture review is resolved; retry only completion checks on failure.
+    #[serde(default)]
+    completion_pending: bool,
+    /// Cancellation is durable even when scratch cleanup must be retried.
+    #[serde(default)]
+    pub cleanup_pending: bool,
     /// Verbatim recent source for generation; historical evidence lives in events.
     source: BTreeMap<String, Option<String>>,
 }
@@ -159,6 +166,14 @@ struct HttpFailure {
     status: u16,
     message: String,
 }
+#[derive(Debug)]
+struct InvalidModelOutput;
+impl std::fmt::Display for InvalidModelOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("model output failed validation")
+    }
+}
+impl std::error::Error for InvalidModelOutput {}
 impl std::fmt::Display for HttpFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "daemon HTTP {}: {}", self.status, self.message)
@@ -216,7 +231,7 @@ fn evidence_page(
 ) -> Result<(Vec<String>, usize, usize)> {
     let mut evidence = vec![format!("User objective: {objective}")];
     anyhow::ensure!(serde_json::to_string(&evidence)?.len() + 256 <= budget,
-        "governing capture context leaves no evidence-page space; reduce the working set or increase the configured model window (capture remains pending)");
+        "governing capture context leaves no evidence-page space; increase the configured model window and retry (this checkpoint's file set is frozen; capture remains pending)");
     while index < end {
         let event = &events[index].message;
         anyhow::ensure!(
@@ -384,6 +399,8 @@ impl Runner {
             capture_operations: vec![],
             capture_cursor: 0,
             capture_repairs: 0,
+            completion_pending: false,
+            cleanup_pending: false,
             source: BTreeMap::new(),
         };
         let mut runner = Self {
@@ -542,7 +559,7 @@ impl Runner {
     async fn checkpoint(&self, operation: Option<&str>) -> Result<CheckpointResponse> {
         let mut request = self
             .http
-            .get(format!("{}/api/v1/harness/checkpoint", self.daemon));
+            .post(format!("{}/api/v1/harness/checkpoint", self.daemon));
         if let Some(id) = operation {
             request = request.query(&[("operation_id", id)]);
         }
@@ -564,6 +581,7 @@ impl Runner {
     ) -> Result<CheckpointResponse> {
         let expected = if accept
             && self.task.final_capture
+            && self.task.approved_revision.as_deref() == Some(&self.task.knowledge_revision)
             && request.proposals.iter().all(|p| {
                 !matches!(p.kind.as_str(), "Requirement" | "Constraint")
                     && p.supersedes.is_none()
@@ -615,6 +633,7 @@ impl Runner {
             // transition. An unproven or externally changed graph stays stale.
             self.task.approved_revision = Some(checkpoint.revision.clone());
         }
+        self.task.knowledge_revision = checkpoint.revision.clone();
         Ok(checkpoint)
     }
 
@@ -670,7 +689,7 @@ impl Runner {
             self.task.approved_revision = None;
             self.task.snapshots = sources;
             self.task.check_results.clear();
-            self.task.pending_edit = None;
+            self.discard_pending_edit("source or accepted knowledge changed")?;
             self.event("Source or accepted knowledge changed. Refreshed evidence; review and approve the plan again.");
             self.persist()?;
             return Ok(false);
@@ -691,6 +710,10 @@ impl Runner {
 
     async fn advance_inner(&mut self) -> Result<()> {
         anyhow::ensure!(
+            !self.task.cleanup_pending,
+            "cancelled task cleanup is pending; retry cancel or resume before continuing"
+        );
+        anyhow::ensure!(
             matches!(
                 self.task.phase,
                 Phase::Planning | Phase::Working | Phase::Verifying
@@ -703,6 +726,9 @@ impl Runner {
         }
         if self.task.capture_due || self.task.capture_request.is_some() {
             return self.capture().await;
+        }
+        if self.task.completion_pending {
+            return self.finish().await;
         }
         if self.task.mode == Mode::Auto && !self.fresh_approval().await? {
             return Ok(());
@@ -830,8 +856,11 @@ impl Runner {
                     "switch to Plan before changing the approved approach"
                 );
                 anyhow::ensure!(
-                    !summary.trim().is_empty() && !files.is_empty() && files.len() <= MAX_FILES,
-                    "plan requires a summary and 1..100 explicit file paths"
+                    !summary.trim().is_empty()
+                        && summary.len() <= MAX_PLAN_SUMMARY
+                        && !files.is_empty()
+                        && files.len() <= MAX_FILES,
+                    "plan requires a summary of at most 4000 bytes and 1..100 explicit file paths"
                 );
                 anyhow::ensure!(
                     !checks.is_empty()
@@ -1009,11 +1038,7 @@ impl Runner {
         );
         self.task.intent = Some(Intent::Command(command.to_string()));
         self.persist()?;
-        let scratch = self
-            .task
-            .root
-            .join(".moosedev/harness/scratch")
-            .join(&self.task.id);
+        let scratch = self.scratch_path();
         let result = executor::command_with_progress(
             self.workspace.root(),
             &scratch,
@@ -1032,6 +1057,13 @@ impl Runner {
             // as uncertain, never replay a command whose outcome was lost.
         }
         result
+    }
+
+    fn scratch_path(&self) -> PathBuf {
+        self.task
+            .root
+            .join(".moosedev/harness/scratch")
+            .join(&self.task.id)
     }
 
     async fn verify_next(&mut self) -> Result<()> {
@@ -1074,7 +1106,12 @@ impl Runner {
             .map(Ok)
             .unwrap_or_else(LlmConfig::from_env)?;
         Ok(MAX_CONTEXT
-            .min(config.context_window_tokens.saturating_sub(4096) * 3)
+            .min(
+                config
+                    .context_window_tokens
+                    .saturating_sub(4096)
+                    .saturating_mul(3),
+            )
             .saturating_sub(REPAIR_RESERVE))
     }
 
@@ -1114,6 +1151,34 @@ impl Runner {
     }
 
     async fn capture(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.task.capture_repairs < 3,
+            "capture failed three times; provide guidance before retrying"
+        );
+        let result = self.capture_inner().await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<InvalidModelOutput>())
+        {
+            self.task.capture_repairs += 1;
+            if self.task.capture_repairs >= 3 {
+                self.task.phase = Phase::AwaitingInput;
+                self.task.last_response = "Capture failed three times. Review the validation evidence and provide guidance before retrying; capture remains pending.".into();
+            }
+        } else if result.is_ok() {
+            self.task.capture_repairs = 0;
+        }
+        self.persist()?;
+        result.map_err(|error| {
+            if error.is::<InvalidModelOutput>() {
+                error
+            } else {
+                error.context("Capture remains pending. Retry with /continue (headless step/run) after fixing the reported service or storage problem.")
+            }
+        })
+    }
+
+    async fn capture_inner(&mut self) -> Result<()> {
         if self.task.capture_request.is_none() {
             let mut files = self
                 .task
@@ -1177,38 +1242,40 @@ impl Runner {
             let assessment: Assessment = self
                 .model_json(&prompt, "harness_capture", capture_schema())
                 .await?;
-            anyhow::ensure!(
-                !assessment.reason.trim().is_empty() && assessment.proposals.len() <= 20,
-                "capture review requires a reason and at most 20 proposals"
-            );
             let mut proposals = assessment.proposals;
-            for proposal in &mut proposals {
+            (|| -> Result<()> {
                 anyhow::ensure!(
-                    !proposal.evidence.is_empty()
-                        && proposal.evidence.iter().all(|quote| !quote.is_empty()
-                            && evidence.iter().any(|event| event.contains(quote))),
-                    "capture evidence must quote actual task events"
+                    !assessment.reason.trim().is_empty() && proposals.len() <= 20,
+                    "capture review requires a reason and at most 20 proposals"
                 );
-                anyhow::ensure!(
-                    proposal.files.iter().all(|f| files.contains(f)),
-                    "capture linked an unobserved file"
-                );
-                // Bind evidence to the durable task journal, independently of generated metadata.
-                proposal
-                    .evidence
-                    .push(format!("Task {}: {}", self.task.id, self.task.objective));
-            }
+                for proposal in &mut proposals {
+                    anyhow::ensure!(
+                        !proposal.evidence.is_empty()
+                            && proposal.evidence.iter().all(|quote| !quote.is_empty()
+                                && evidence.iter().any(|event| event.contains(quote))),
+                        "capture evidence must quote actual task events"
+                    );
+                    anyhow::ensure!(
+                        proposal.files.iter().all(|f| files.contains(f)),
+                        "capture linked an unobserved file"
+                    );
+                    // Bind evidence to the durable task journal, independently of generated metadata.
+                    proposal
+                        .evidence
+                        .push(format!("Task {}: {}", self.task.id, self.task.objective));
+                }
+                Ok(())
+            })()
+            .context(InvalidModelOutput)?;
             self.task.capture_reason = Some(assessment.reason.clone());
             self.task.capture_end = Some(page_end);
             self.task.capture_end_offset = page_offset;
             self.event(format!("Capture assessment: {}", assessment.reason));
             if proposals.is_empty() {
                 self.commit_capture_page();
-                self.task.phase = if !self.task.batch_capture {
-                    Phase::AwaitingReview
-                } else if self.task.capture_due {
+                self.task.phase = if self.task.capture_due {
                     self.capture_work_phase()
-                } else if self.task.final_capture {
+                } else if !self.task.batch_capture || self.task.final_capture {
                     Phase::AwaitingReview
                 } else {
                     self.task.after_review
@@ -1238,14 +1305,9 @@ impl Runner {
                 self.task.capture_request = None;
                 self.task.capture_end = None;
                 self.task.capture_due = true;
-                self.task.capture_repairs += 1;
                 self.event(format!("Capture rejected before persistence; revise the proposal using this validation result: {error}"));
-                if self.task.capture_repairs >= 3 {
-                    self.task.phase = Phase::AwaitingInput;
-                    self.task.last_response = "Capture proposals were rejected three times. Review the validation evidence and provide guidance.".into();
-                }
                 self.persist()?;
-                return Err(error);
+                return Err(error.context(InvalidModelOutput));
             }
             Err(error) => return Err(error),
         };
@@ -1311,7 +1373,12 @@ impl Runner {
             "set MOOSEDEV_LLM_BASE_URL to enable the harness model"
         );
         // Never silently truncate governing knowledge to fit the model.
-        let limit = MAX_CONTEXT.min(config.context_window_tokens.saturating_sub(4096) * 3);
+        let limit = MAX_CONTEXT.min(
+            config
+                .context_window_tokens
+                .saturating_sub(4096)
+                .saturating_mul(3),
+        );
         anyhow::ensure!(prompt.len() <= limit, "required context is {} bytes (budget {limit}); narrow the working set or increase the configured context window", prompt.len());
         let client = self.model_client.clone().unwrap_or_else(|| {
             OpenAiCompatClient::new_with_structured_output(
@@ -1388,7 +1455,7 @@ impl Runner {
             match serde_json::from_str::<T>(text.trim()) {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt < 2 => request = format!("{base_request}\nYour last response failed validation: {}. Return one JSON object matching the schema, without markdown.", bounded(&error.to_string(),256)),
-                Err(error) => return Err(error).context("model returned malformed output after three attempts"),
+                Err(error) => return Err(error).context(InvalidModelOutput).context("model returned malformed output after three attempts"),
             }
         }
         unreachable!()
@@ -1417,7 +1484,7 @@ impl Runner {
         } else {
             prompt.push_str("Return exactly one JSON action.\n");
         }
-        prompt.push_str("\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), edit(file,before,after), command(command), question(question), reply(message), replan(reason), finish(summary). A plan lists explicit permitted files and required shell verification commands. Editing uses exact whole UTF-8 contents; null means absent/deleted. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan for changed scope or approach. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n");
+        prompt.push_str("\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), edit(file,before,after), command(command), question(question), reply(message), replan(reason), finish(summary). A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. Editing uses exact whole UTF-8 contents; null means absent/deleted. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan for changed scope or approach. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n");
         prompt.push_str(&format!(
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent human guidance: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
             config.model, self.task.objective, self.task.guidance, context.context,
@@ -1510,6 +1577,7 @@ impl Runner {
             bail!("plan evidence changed; renewed approval required");
         }
         self.task.approved_revision = Some(context.revision);
+        self.task.completion_pending = false;
         self.task.mode = Mode::Auto;
         self.task.phase = Phase::Working;
         self.task.turn_finished = false;
@@ -1555,6 +1623,14 @@ impl Runner {
     pub fn request_review(&mut self) -> Result<()> {
         anyhow::ensure!(self.task.batch_capture, "interactive review is not enabled");
         anyhow::ensure!(
+            !self.task.cleanup_pending,
+            "cancelled task cleanup is pending; retry cancel or resume before opening review"
+        );
+        anyhow::ensure!(
+            !self.task.completion_pending,
+            "knowledge review is already resolved; use /continue to retry completion"
+        );
+        anyhow::ensure!(
             self.task.capture_request.is_none() && !self.task.capture_due,
             "finish the outstanding capture assessment first"
         );
@@ -1585,7 +1661,6 @@ impl Runner {
             if accept { "accepted" } else { "rejected" },
             serde_json::to_string(&item.request)?
         ));
-        self.persist()?;
         if self.task.reviews.is_empty() && self.task.phase == Phase::AwaitingReview {
             if self.task.capture_due {
                 self.task.phase = self.capture_work_phase();
@@ -1666,7 +1741,8 @@ impl Runner {
         self.task.steps = 0;
         self.task.capture_repairs = 0;
         self.task.approved_revision = None;
-        self.task.pending_edit = None;
+        self.discard_pending_edit("new human guidance invalidated the proposed edit")?;
+        self.task.completion_pending = false;
         self.task.check_results.clear();
         self.task.final_capture = false;
         self.task.mode = Mode::Plan;
@@ -1680,6 +1756,16 @@ impl Runner {
         }
         // Existing uncertain capture requests remain frozen for idempotent retry.
         self.persist()
+    }
+
+    fn discard_pending_edit(&mut self, reason: &str) -> Result<()> {
+        if let Some(edit) = self.task.pending_edit.take() {
+            self.event(format!(
+                "Discarded pending policy edit: {reason}.\n{}",
+                serde_json::to_string(&edit)?
+            ));
+        }
+        Ok(())
     }
 
     fn has_governing_reviews(&self) -> bool {
@@ -1743,7 +1829,6 @@ impl Runner {
         self.task.capture_request = None;
         self.commit_capture_page();
         self.task.capture_repairs = 0;
-        self.persist()?;
         if self.task.capture_due {
             self.task.phase = self.capture_work_phase();
             return self.persist();
@@ -1774,7 +1859,6 @@ impl Runner {
                 .any(|e| e.message.starts_with("Human response:"));
         }
         self.task.capture_repairs = 0;
-        self.persist()?;
         if self.task.capture_due {
             self.task.phase = self.capture_work_phase();
             self.persist()
@@ -1797,8 +1881,14 @@ impl Runner {
                 && !self.task.capture_due,
             "knowledge review remains unresolved"
         );
+        // Publish resolved review and this retryable completion intent together.
+        // A failed checkpoint must not send the user back to a no-change review.
+        self.task.completion_pending = true;
+        self.task.phase = Phase::Verifying;
+        self.persist()?;
         if !self.fresh_approval().await? {
             self.task.final_capture = false;
+            self.task.completion_pending = false;
             return self.persist();
         }
         let files = self.task.plan.as_ref().context("no plan")?.files.clone();
@@ -1832,13 +1922,19 @@ impl Runner {
             "knowledge changed during completion; refresh and approve the plan again"
         );
         self.task.knowledge_revision = checkpoint.revision;
+        executor::cleanup_task(&self.scratch_path())?;
         self.task.phase = Phase::Complete;
+        self.task.completion_pending = false;
         self.task.final_capture = false;
         self.event("Complete: required checks passed, human knowledge review resolved, graph validated and durably checkpointed.");
         self.persist()
     }
 
     pub async fn mode_plan(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.task.cleanup_pending,
+            "cancelled task cleanup is pending; retry cancel or resume before replanning"
+        );
         anyhow::ensure!(
             self.task.phase != Phase::Complete
                 && self.task.pending_capture.is_none()
@@ -1848,7 +1944,8 @@ impl Runner {
         self.task.mode = Mode::Plan;
         self.task.phase = Phase::Planning;
         self.task.approved_revision = None;
-        self.task.pending_edit = None;
+        self.discard_pending_edit("human returned the task to Plan")?;
+        self.task.completion_pending = false;
         self.task.final_capture = false;
         self.task.check_results.clear();
         self.task.after_review = Phase::Planning;
@@ -1868,10 +1965,33 @@ impl Runner {
         );
         if self.task.phase != Phase::Cancelled {
             self.task.resume_phase = self.task.phase;
+            self.task.phase = Phase::Cancelled;
+            self.task.cleanup_pending = true;
+            self.event("Cancelled; unresolved actions, capture obligations, and scratch cleanup preserved.");
+            self.persist()?;
         }
-        self.task.phase = Phase::Cancelled;
-        self.event("Cancelled; unresolved actions and capture obligations preserved.");
-        self.persist()
+        self.retry_cancelled_cleanup()
+    }
+
+    fn retry_cancelled_cleanup(&mut self) -> Result<()> {
+        if !self.task.cleanup_pending {
+            return Ok(());
+        }
+        match executor::cleanup_task(&self.scratch_path()) {
+            Ok(()) => {
+                self.task.cleanup_pending = false;
+                self.task.last_error = None;
+                self.event("Cancelled task scratch cleanup finished.");
+                self.persist()
+            }
+            Err(error) => {
+                let message = format!("Cancellation took effect; scratch cleanup is pending: {error:#}. Press Esc or retry cancel to clean up; /continue (headless resume) retries cleanup before resuming work.");
+                self.task.last_error = Some(message.clone());
+                self.event(message.clone());
+                self.persist()?;
+                bail!(message)
+            }
+        }
     }
 
     fn reconcile(&mut self) -> Result<()> {
@@ -1915,6 +2035,7 @@ impl Runner {
             self.task.phase != Phase::Complete,
             "task is already complete"
         );
+        self.retry_cancelled_cleanup()?;
         if self.task.phase == Phase::Cancelled {
             self.task.phase = self.task.resume_phase;
         }
@@ -2174,7 +2295,7 @@ fn action_schema() -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",s.clone()),("files",a.clone()),("checks",a)]),variant("edit",&[("file",s.clone()),("before",json!({"type":["string","null"]})),("after",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]})
+    json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a)]),variant("edit",&[("file",s.clone()),("before",json!({"type":["string","null"]})),("after",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]})
 }
 fn capture_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"required":["proposals","reason"],"properties":{"reason":{"type":"string"},"proposals":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["kind","title","description","evidence","files","components","requirement","supersedes","retracts"],"properties":{"kind":{"type":"string","enum":["ArchitecturalDecision","Requirement","Constraint","Lesson","Pattern","AntiPattern"]},"title":{"type":"string"},"description":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"files":{"type":"array","items":{"type":"string"}},"components":{"type":"array","items":{"type":"string"}},"requirement":{"type":["string","null"]},"supersedes":{"type":["string","null"]},"retracts":{"type":["string","null"]}}}}}})

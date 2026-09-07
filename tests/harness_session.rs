@@ -111,7 +111,7 @@ impl Fixture {
         let app = Router::new()
             .route("/api/v1/health", get(health))
             .route("/api/v1/harness/context", post(context))
-            .route("/api/v1/harness/checkpoint", get(checkpoint))
+            .route("/api/v1/harness/checkpoint", post(checkpoint))
             .route("/v1/chat/completions", post(model))
             .route("/v1/models", get(models))
             .with_state(state.clone());
@@ -503,6 +503,90 @@ async fn interrupting_a_completed_task_is_an_idle_noop() {
             .iter()
             .any(|m| m.text.contains("cannot be cancelled")));
     }
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interruption_preserves_failed_cleanup_and_escape_retries_it_after_reconnect() {
+    use fs2::FileExt;
+    let fixture = Fixture::new().await;
+    let conversation = Conversation::new(fixture.root.clone());
+    let conversation_id = conversation.id.clone();
+    let (input, mut updates, handle) = fixture.controller(conversation);
+    until(&mut updates, |state| !state.busy).await;
+    input
+        .send(Command::Input("Explain this project.".into()))
+        .unwrap();
+    let working = until(&mut updates, |state| state.busy && state.task.is_some()).await;
+    tokio::time::timeout(Duration::from_secs(10), fixture.state.started.notified())
+        .await
+        .unwrap();
+    let task_id = working.task.unwrap().id;
+    let scratch = fixture
+        .root
+        .join(".moosedev/harness/scratch")
+        .join(&task_id);
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::write(scratch.join("cache-data"), "owned task cache").unwrap();
+    let owner = std::fs::File::open(&scratch).unwrap();
+    owner.try_lock_exclusive().unwrap();
+    input.send(Command::Interrupt).unwrap();
+    let stopped = until(&mut updates, |state| {
+        !state.busy
+            && state
+                .task
+                .as_ref()
+                .is_some_and(|task| task.phase == Phase::Cancelled && task.cleanup_pending)
+            && state.status.contains("Cancellation took effect")
+    })
+    .await;
+    assert!(stopped
+        .conversation
+        .messages
+        .iter()
+        .any(|message| message.text.contains("scratch cleanup is pending")));
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+
+    let saved = Conversation::load(&fixture.root, &conversation_id).unwrap();
+    let (input, mut updates, handle) = fixture.controller(saved);
+    let restored = until(&mut updates, |state| {
+        !state.busy
+            && state.task.as_ref().is_some_and(|task| task.cleanup_pending)
+            && state.status.contains("scratch cleanup is pending")
+    })
+    .await;
+    assert_eq!(restored.task.unwrap().phase, Phase::Cancelled);
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 1);
+    FileExt::unlock(&owner).unwrap();
+    drop(owner);
+    input.send(Command::Interrupt).unwrap();
+    until(&mut updates, |state| {
+        !state.busy
+            && state
+                .task
+                .as_ref()
+                .is_some_and(|task| task.phase == Phase::Cancelled && !task.cleanup_pending)
+    })
+    .await;
+    assert!(!scratch.exists());
+    assert_eq!(
+        fixture.state.calls.load(Ordering::SeqCst),
+        1,
+        "cleanup retry must not resume model work"
+    );
+    input.send(Command::Input("/continue".into())).unwrap();
+    until(&mut updates, |state| {
+        !state.busy
+            && state
+                .task
+                .as_ref()
+                .is_some_and(|task| task.turn_finished && !task.cleanup_pending)
+    })
+    .await;
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 2);
     input.send(Command::Quit).unwrap();
     handle.await.unwrap();
 }
