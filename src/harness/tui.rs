@@ -138,10 +138,7 @@ struct Composer {
 }
 impl Composer {
     fn insert(&mut self, value: &str) {
-        let value: String = value
-            .chars()
-            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-            .collect();
+        let value = visible(value);
         self.text.insert_str(self.cursor, &value);
         self.cursor += value.len();
     }
@@ -645,13 +642,9 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
         }
         KeyCode::Up => view.composer.vertical(false),
         KeyCode::Down => view.composer.vertical(true),
-        KeyCode::Tab => {
-            view.tab = (view.tab + 1) % 5;
-            view.scroll = 0;
-            view.follow = view.tab < 2;
-        }
-        KeyCode::BackTab => {
-            view.tab = (view.tab + 4) % 5;
+        KeyCode::Tab | KeyCode::BackTab => {
+            let offset = if key.code == KeyCode::Tab { 1 } else { 4 };
+            view.tab = (view.tab + offset) % 5;
             view.scroll = 0;
             view.follow = view.tab < 2;
         }
@@ -690,41 +683,58 @@ async fn show(
     };
     let mut interval = tokio::time::interval(Duration::from_millis(40));
     let result = async {
-        let mut dirty=true;
+        let mut dirty = true;
         loop {
             tokio::select! {
-                update = output_rx.recv() => { dirty=true;match update {Some(Update::State(state))=>snapshot = *state,
-                    Some(Update::Progress(super::progress::Progress::Status(text)))=>snapshot.status=text,
-                    Some(Update::Progress(_))=>{},
-                    Some(Update::RestoreInput(text))=>view.retained_inputs.push_back(text),
-                    Some(Update::Closed)|None=>break,}},
-                result = &mut controller => {result?;break;},
+                update = output_rx.recv() => {
+                    dirty = true;
+                    match update {
+                        Some(Update::State(state)) => snapshot = *state,
+                        Some(Update::Progress(super::progress::Progress::Status(text))) => {
+                            snapshot.status = text;
+                        }
+                        Some(Update::Progress(_)) => {},
+                        Some(Update::RestoreInput(text)) => view.retained_inputs.push_back(text),
+                        Some(Update::Closed) | None => break,
+                    }
+                },
+                result = &mut controller => {
+                    result?;
+                    break;
+                },
                 _ = interval.tick() => {
-                    view.tick+=1;
+                    view.tick += 1;
                     while event::poll(Duration::ZERO)? {
-                        dirty=true;
-                        let command = match event::read()? {Event::Key(event)=>key(&mut view,event),Event::Paste(text)=>{view.composer.insert(&text);None},_=>None};
+                        dirty = true;
+                        let command = match event::read()? {
+                            Event::Key(event) => key(&mut view, event),
+                            Event::Paste(text) => {
+                                view.composer.insert(&text);
+                                None
+                            }
+                            _ => None,
+                        };
                         if let Some(command) = command {
-                            let quit=matches!(command,Command::Quit);
-                            input.send(command).map_err(|_|anyhow::anyhow!("session controller stopped"))?;
+                            let quit = matches!(command, Command::Quit);
+                            input.send(command).map_err(|_| anyhow::anyhow!("session controller stopped"))?;
                             if quit {
-                                view.notice="Saving session…".into();
+                                view.notice = "Saving session…".into();
                                 // An unavailable startup server must not trap the terminal.
-                                if tokio::time::timeout(Duration::from_secs(3),&mut controller).await.is_err() {controller.abort();}
-                                return Ok::<(),anyhow::Error>(());
+                                finish_controller(&mut controller).await;
+                                return Ok::<(), anyhow::Error>(());
                             }
                         }
                     }
                     if view.composer.text.is_empty() {
                         if let Some(text) = view.retained_inputs.pop_front() {
                             view.composer.insert(&text);
-                            view.notice="Command restored. Submit it after reviewing the displayed gate.".into();
-                            dirty=true;
+                            view.notice = "Command restored. Submit it after reviewing the displayed gate.".into();
+                            dirty = true;
                         }
                     }
                     if dirty || (snapshot.busy && view.tick.is_multiple_of(3)) {
-                        screen.terminal.draw(|frame|render(frame,&snapshot,&mut view))?;
-                        dirty=false;
+                        screen.terminal.draw(|frame| render(frame, &snapshot, &mut view))?;
+                        dirty = false;
                     }
                 }
             }
@@ -733,14 +743,18 @@ async fn show(
     }.await;
     if !controller.is_finished() {
         let _ = input.send(Command::Quit);
-        if tokio::time::timeout(Duration::from_secs(3), &mut controller)
-            .await
-            .is_err()
-        {
-            controller.abort();
-        }
+        finish_controller(&mut controller).await;
     }
     result
+}
+
+async fn finish_controller(controller: &mut tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(Duration::from_secs(3), &mut *controller)
+        .await
+        .is_err()
+    {
+        controller.abort();
+    }
 }
 
 pub async fn interactive(

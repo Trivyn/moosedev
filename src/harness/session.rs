@@ -378,12 +378,25 @@ impl Controller {
                 result = &mut connection => break result?,
                 command = self.input.recv() => match command {
                     Some(Command::Input(text)) if !text.trim_start().starts_with('/') => {
-                        if let Err(error) = self.conversation.enqueue(text) {self.status=error.to_string();} else {self.status="Connecting; your message is saved and queued.".into();}
+                        self.status = match self.conversation.enqueue(text) {
+                            Ok(()) => "Connecting; your message is saved and queued.".into(),
+                            Err(error) => error.to_string(),
+                        };
                         self.publish(true);
                     },
-                    Some(Command::Quit) | None => {self.quitting=true;return Ok(());},
-                    Some(Command::Interrupt) => {self.status="Connection interrupted. Use /connect to retry.".into();return Ok(());},
-                    Some(command) => {self.deferred.push_back(command);self.status="Command queued until connection finishes. Esc stops connecting.".into();self.publish(true);},
+                    Some(Command::Quit) | None => {
+                        self.quitting = true;
+                        return Ok(());
+                    },
+                    Some(Command::Interrupt) => {
+                        self.status = "Connection interrupted. Use /connect to retry.".into();
+                        return Ok(());
+                    },
+                    Some(command) => {
+                        self.deferred.push_back(command);
+                        self.status = "Command queued until connection finishes. Esc stops connecting.".into();
+                        self.publish(true);
+                    },
                 }
             }
         });
@@ -478,16 +491,8 @@ impl Controller {
                 self.deferred.push_back(command);
             }
             if let Some(command) = self.deferred.pop_front() {
-                match command {
-                    Command::Quit => break,
-                    Command::Interrupt => {
-                        self.interrupt().await;
-                    }
-                    Command::Input(text) => {
-                        if let Err(error) = self.input(text).await {
-                            self.fail(error);
-                        }
-                    }
+                if !self.handle_command(command).await {
+                    break;
                 }
                 continue;
             }
@@ -513,20 +518,27 @@ impl Controller {
                 self.auto = false;
             }
             self.publish(false);
-            match self.input.recv().await {
-                Some(Command::Quit) | None => break,
-                Some(Command::Interrupt) => {
-                    self.interrupt().await;
-                }
-                Some(Command::Input(text)) => {
-                    if let Err(error) = self.input(text).await {
-                        self.fail(error);
-                    }
-                }
+            let Some(command) = self.input.recv().await else {
+                break;
+            };
+            if !self.handle_command(command).await {
+                break;
             }
         }
         let _ = self.save_conversation();
         let _ = self.output.send(Update::Closed);
+    }
+    async fn handle_command(&mut self, command: Command) -> bool {
+        match command {
+            Command::Quit => return false,
+            Command::Interrupt => self.interrupt().await,
+            Command::Input(text) => {
+                if let Err(error) = self.input(text).await {
+                    self.fail(error);
+                }
+            }
+        }
+        true
     }
     fn fail(&mut self, error: anyhow::Error) {
         self.status = format!("{error:#}");
@@ -606,10 +618,23 @@ impl Controller {
             loop {
                 tokio::select! {
                     result = &mut operation => break Some(result),
-                    event = self.progress_rx.recv() => if let Some(event) = event { self.progress_event(event); },
+                    event = self.progress_rx.recv() => {
+                        if let Some(event) = event {
+                            self.progress_event(event);
+                        }
+                    },
                     command = self.input.recv() => match command {
-                        Some(Command::Input(text)) if !text.trim_start().starts_with('/') => { if let Err(error) = self.conversation.enqueue(text) {self.status=error.to_string();self.publish(true);continue;} self.status = "Message queued; it will be delivered before the next action.".into(); self.publish(true); },
-                        Some(Command::Input(text)) if text.trim() == "/quit" => {quit = true; break None;},
+                        Some(Command::Input(text)) if !text.trim_start().starts_with('/') => {
+                            self.status = match self.conversation.enqueue(text) {
+                                Ok(()) => "Message queued; it will be delivered before the next action.".into(),
+                                Err(error) => error.to_string(),
+                            };
+                            self.publish(true);
+                        },
+                        Some(Command::Input(text)) if text.trim() == "/quit" => {
+                            quit = true;
+                            break None;
+                        },
                         Some(Command::Input(text)) => {
                             if matches!(text.split_whitespace().next(), Some("/approve" | "/accept" | "/reject" | "/no-knowledge")) {
                                 self.status = "Review commands must be submitted while the gate is displayed. Your command is retained for resubmission.".into();
@@ -621,7 +646,10 @@ impl Controller {
                             self.publish(true);
                         },
                         Some(Command::Interrupt) => break None,
-                        Some(Command::Quit) | None => { quit = true; break None; },
+                        Some(Command::Quit) | None => {
+                            quit = true;
+                            break None;
+                        },
                     }
                 }
             }
