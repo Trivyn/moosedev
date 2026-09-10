@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "scenario_id": "ruleset_cache",
+  "facts": [
+    {
+      "id": "cache-identity",
+      "claim": "A cached score is valid only for the same integer input and the same immutable ruleset identity (name, revision). Different rulesets and revisions may produce different scores. Changing rule behavior requires a new revision; two rulesets with the same name and revision have identical behavior. Keying only by input or name can return stale scores.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#cache-identity"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "cache-reuse",
+      "claim": "Repeated scoring of the same input and ruleset version must reuse the successful result, including zero. Reuse avoids repeating the injected evaluator, which represents expensive work. Failed evaluations propagate and remain retryable; failures are not cached. Cache storage is local to a service instance and is not required to survive restart.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#cache-reuse"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "cache-switch",
+      "claim": "Changing the selected ruleset affects subsequent scores without discarding valid entries belonging to previous rule versions.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "cache-batch",
+      "claim": "Bulk evaluation shares memoized results with scalar scoring and must not mutate the active scalar ruleset.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    }
+  ],
+  "forbidden_claims": [
+    "Results depend only on input, regardless of ruleset.",
+    "Cache entries remain valid when rules change without a revision change.",
+    "The cache must be shared across service instances or survive process restart.",
+    "Failures must be cached as successful scores."
+  ],
+  "review_status": "pending"
+}

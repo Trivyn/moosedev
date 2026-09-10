@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "id": "ruleset_cache",
+  "track": "inherited",
+  "title": "Ruleset-dependent scoring cache",
+  "initial_facts": [
+    {
+      "id": "cache-identity",
+      "kind": "Constraint",
+      "title": "Cache identity includes ruleset name, revision, and input",
+      "description": "A cached score is valid only for the same integer input and the same immutable ruleset identity (name, revision). Different rulesets and revisions may produce different scores. Changing rule behavior requires a new revision; two rulesets with the same name and revision have identical behavior. Keying only by input or name can return stale scores.",
+      "component": "Scoring service",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#cache-identity"
+      ]
+    },
+    {
+      "id": "cache-reuse",
+      "kind": "Requirement",
+      "title": "Reuse successful results within a service instance",
+      "description": "Repeated scoring of the same input and ruleset version must reuse the successful result, including zero. Reuse avoids repeating the injected evaluator, which represents expensive work. Failed evaluations propagate and remain retryable; failures are not cached. Cache storage is local to a service instance and is not required to survive restart.",
+      "component": "Scoring service",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#cache-reuse"
+      ]
+    }
+  ],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "Implement result caching in the existing scoring service according to the supplied project knowledge. Preserve the public constructor and score(value) API. Add tests for reuse and failure recovery.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "cache-identity",
+        "cache-reuse"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    },
+    {
+      "id": "e2",
+      "prompt": "Users now switch rule versions without restarting. Add ScoringService.set_ruleset(ruleset), effective for subsequent score calls. Keep previously computed entries usable when switching back to a previous version. Preserve the scoring and evaluator APIs.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "cache-identity",
+        "cache-reuse",
+        "cache-switch"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e2.py",
+      "reference": "reference/e2",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    },
+    {
+      "id": "e3",
+      "prompt": "Add ScoringService.score_many(jobs) for an iterable of (ruleset, integer_value) pairs. Return scores in input order, including duplicates, and return [] for no jobs. Use the service's existing cache and evaluator; batch scoring must not change the active ruleset used by score(value).",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "cache-identity",
+        "cache-reuse",
+        "cache-switch",
+        "cache-batch"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e3.py",
+      "reference": "reference/e3",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "value-only-key",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/value_only",
+      "expected": "fail"
+    },
+    {
+      "id": "zero-miss",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/zero_miss",
+      "expected": "fail"
+    },
+    {
+      "id": "batch-selection-leak",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/batch_selection",
+      "expected": "fail"
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md"
+}

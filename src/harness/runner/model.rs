@@ -1,7 +1,8 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
-use super::{bounded, ContextResponse, Mode, Runner, MAX_PLAN_SUMMARY};
+use super::{ContextResponse, Mode, Runner, MAX_PLAN_SUMMARY};
 use crate::harness::progress::Progress;
-use crate::llm::{LlmConfig, OpenAiCompatClient};
+use crate::harness::response::{self, ResponsePolicy};
+use crate::llm::{LlmConfig, OpenAiCompatClient, UsageContext};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +41,54 @@ pub(super) fn observation_preview(text: &str, budget: usize) -> String {
 }
 
 impl Runner {
+    async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
+        let policy = match self.response_policy {
+            Some(policy) => policy,
+            None => ResponsePolicy::from_env()?.unwrap_or_default(),
+        };
+        let key = response::cache_key(config, policy);
+        if let Some((cached_key, client)) = &self.model_client {
+            if *cached_key == key {
+                return Ok(client.clone());
+            }
+        }
+        if let Some(progress) = &self.progress {
+            let _ = progress.send(Progress::Status(
+                "Checking model response compatibility…".into(),
+            ));
+        }
+        let prepared = match response::prepare_with_observer(
+            config,
+            policy,
+            Some(self.task.token_usage.observer(self.progress.clone())),
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.task.response_receipt = Some(error.receipt.clone());
+                self.event(format!(
+                    "Model response compatibility failed: {}",
+                    serde_json::to_string(&error.receipt)?
+                ));
+                self.persist()?;
+                return Err(error.into());
+            }
+        };
+        let notice = format!(
+            "Model response compatibility verified: {}",
+            serde_json::to_string(&prepared.receipt)?
+        );
+        self.task.response_receipt = Some(prepared.receipt);
+        self.event(notice.clone());
+        if let Some(progress) = &self.progress {
+            let _ = progress.send(Progress::Status(notice));
+        }
+        self.model_client = Some((key, prepared.client.clone()));
+        self.persist()?;
+        Ok(prepared.client)
+    }
+
     pub(super) fn prompt_budget(&self) -> Result<usize> {
         let config = self
             .config
@@ -79,31 +128,51 @@ impl Runner {
                 .saturating_mul(3),
         );
         anyhow::ensure!(prompt.len() <= limit, "required context is {} bytes (budget {limit}); narrow the working set or increase the configured context window", prompt.len());
-        let client = self.model_client.clone().unwrap_or_else(|| {
-            OpenAiCompatClient::new_with_structured_output(
-                config.base_url,
-                config.api_key,
-                config.structured_output,
-            )
-        });
         let base_request = format!(
             "{prompt}\nRequired JSON schema:\n{}",
             serde_json::to_string(&schema)?
         );
         anyhow::ensure!(
-            base_request.len() <= limit,
+            base_request.len() <= limit.saturating_sub(REPAIR_RESERVE),
             "prompt plus output schema exceeds configured context budget"
         );
-        let mut request = base_request.clone();
-        for attempt in 0..3 {
-            self.task.model_requests.push(json!({"purpose":name,"revision":self.task.knowledge_revision,"source_hashes":self.snapshot(&self.task.read_files)?,"prompt":request,"response":null}));
+        let client = self.response_client(&config).await?;
+        self.begin_candidate(name)?;
+        let client = client.with_usage_observer(
+            self.task.token_usage.observer(self.progress.clone()),
+            UsageContext {
+                purpose: name.into(),
+                decision_id: self.task.recovery.as_ref().map(|repair| repair.id.clone()),
+                candidate: self
+                    .task
+                    .recovery
+                    .as_ref()
+                    .map(|repair| repair.attempts as u8),
+            },
+        );
+        let mut request = base_request;
+        if let Some(repair) = &self.task.recovery {
+            if !repair.diagnostic.is_empty() {
+                request.push_str(&format!("\nYour last candidate was rejected: {}. Correct it and return one JSON object matching the schema, without markdown.", repair.diagnostic));
+            }
+        }
+        {
+            // Bind audit metadata to the source actually delivered, rather than
+            // rereading files that may have changed while preparing the request.
+            let source_hashes: std::collections::BTreeMap<_, _> = self
+                .task
+                .source
+                .iter()
+                .map(|(file, source)| (file, super::fingerprint(source)))
+                .collect();
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null}));
             self.persist()?;
             let result = if self.task.batch_capture && name == "harness_action" {
                 let partial = Arc::new(Mutex::new(StreamedMessage::default()));
                 self.streaming = Some(partial.clone());
                 let progress = self.progress.clone();
                 client
-                    .chat_completion_json_schema_streaming(
+                    .chat_completion_json_schema_streaming_checked(
                         &config.model,
                         &request,
                         None,
@@ -129,7 +198,7 @@ impl Runner {
                     .await
             } else {
                 client
-                    .chat_completion_json_schema(
+                    .chat_completion_json_schema_checked(
                         &config.model,
                         &request,
                         None,
@@ -145,19 +214,17 @@ impl Runner {
                 }
                 Err(error) => {
                     self.preserve_stream();
+                    self.candidate_unavailable();
                     self.persist()?;
                     return Err(error.into());
                 }
             };
             self.task.model_requests.last_mut().unwrap()["response"] = Value::String(text.clone());
             self.persist()?;
-            match serde_json::from_str::<T>(text.trim()) {
-                Ok(value) => return Ok(value),
-                Err(error) if attempt < 2 => request = format!("{base_request}\nYour last response failed validation: {}. Return one JSON object matching the schema, without markdown.", bounded(&error.to_string(),256)),
-                Err(error) => return Err(error).context(InvalidModelOutput).context("model returned malformed output after three attempts"),
-            }
+            serde_json::from_str::<T>(text.trim())
+                .context(InvalidModelOutput)
+                .context("model returned malformed output")
         }
-        unreachable!()
     }
 
     pub(super) fn prompt(&self, context: &ContextResponse, files: &[String]) -> Result<String> {
@@ -183,7 +250,7 @@ impl Runner {
         } else {
             prompt.push_str("Return exactly one JSON action.\n");
         }
-        prompt.push_str("\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), edit(file,before,after), command(command), question(question), reply(message), replan(reason), finish(summary). A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. Editing uses exact whole UTF-8 contents; null means absent/deleted. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan for changed scope or approach. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n");
+        prompt.push_str("\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan for changed scope or approach. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n");
         prompt.push_str(&format!(
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent human guidance: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
             config.model, self.task.objective, self.task.guidance, context.context,
@@ -205,7 +272,7 @@ impl Runner {
         ));
         prompt.push_str(match self.task.mode {
             Mode::Plan => "\nAllowed actions now: read, search, inspect, question, reply, plan, replan. Editing and execution require human plan approval.",
-            Mode::Auto => "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, edit, command, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review.",
+            Mode::Auto => "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review.",
         });
         // Count the complete mandatory prompt and output schema first. Discovery
         // and historical prose spend only the remainder; governing claims and
@@ -291,6 +358,15 @@ pub(super) enum Action {
         file: String,
         before: Option<String>,
         after: Option<String>,
+    },
+    Replace {
+        file: String,
+        old_text: String,
+        new_text: String,
+    },
+    Write {
+        file: String,
+        content: Option<String>,
     },
     Command {
         command: String,
@@ -453,7 +529,7 @@ pub(super) fn conversational_schema(mode: Mode) -> Value {
     actions["oneOf"].as_array_mut().unwrap().retain(|variant| {
         let name = variant["properties"]["action"]["const"].as_str().unwrap();
         match mode {
-            Mode::Plan => !matches!(name, "edit" | "command" | "finish"),
+            Mode::Plan => !matches!(name, "replace" | "write" | "command" | "finish"),
             Mode::Auto => name != "plan",
         }
     });
@@ -473,7 +549,7 @@ pub(super) fn action_schema() -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a)]),variant("edit",&[("file",s.clone()),("before",json!({"type":["string","null"]})),("after",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]})
+    json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a)]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]})
 }
 #[cfg(test)]
 mod tests {
@@ -510,7 +586,7 @@ mod tests {
                 .map(|v| v["properties"]["action"]["const"].as_str().unwrap())
                 .collect();
             assert_eq!(names.contains(&"plan"), mode == Mode::Plan);
-            for action in ["edit", "command", "finish"] {
+            for action in ["replace", "write", "command", "finish"] {
                 assert_eq!(names.contains(&action), mode == Mode::Auto);
             }
             assert!(

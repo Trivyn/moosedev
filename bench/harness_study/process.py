@@ -1,0 +1,308 @@
+"""Bounded native-session observation and ordinary scripted reviewer inputs."""
+import base64
+import hashlib
+import json
+import os
+import selectors
+import signal
+import subprocess
+import time
+
+from .artifacts import canonical_json
+from .adapters import normalize_event
+from .reviewer import review_input
+from .usage import UsageLedger, resource_metrics
+
+
+def _gate_key(event, decision):
+    """Gate identity excludes incidental transcript/output changes in snapshots."""
+    task = event.get("task") or {}
+    fields = ("id", "phase", "steps", "plan", "pending_edit", "knowledge_revision",
+              "capture_request", "reviews", "capture_cursor", "capture_offset",
+              "capture_end", "capture_end_offset", "capture_checkpoint_end",
+              "last_response", "turn_finished")
+    return hashlib.sha256(canonical_json({"gate": {key: task.get(key) for key in fields},
+                                          "input": decision["input"]})).hexdigest()
+
+
+def _leader_exited(process):
+    # WNOWAIT retains the leader as an unreaped child. Its PID cannot be reused
+    # before the single group termination, even if descendants retain pipes.
+    result = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    return result is not None and result.si_pid == process.pid
+
+
+def _group_exited(process):
+    """Darwin may report EPERM for a group containing only zombies.
+
+    The unreaped owned leader reserves the PGID. Ignore that error only after
+    confirming the leader exited and every remaining group member is a zombie;
+    denied inspection or any live member remains a cleanup failure.
+    """
+    try:
+        if not _leader_exited(process):
+            return False
+        listing = subprocess.check_output(
+            ["/bin/ps", "-axo", "pid=,pgid=,stat="], text=True, timeout=2,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        rows = (line.split() for line in listing.splitlines())
+        members = [row for row in rows if len(row) == 3 and row[1] == str(process.pid)]
+        return (any(row[0] == str(process.pid) for row in members)
+                and all(row[2].startswith("Z") for row in members))
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def observe(command, *, backend, workspace, environment, prompt, episode,
+            record, seconds=1200, expected_model=None):
+    if seconds <= 0:
+        raise ValueError("episode deadline must be positive")
+    started = time.monotonic()
+    process = subprocess.Popen(command, cwd=workspace, env=environment, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True, close_fds=True)
+    selector = selectors.DefaultSelector()
+    buffers = {"stdout": b"", "stderr": b""}
+    pending_input = bytearray()
+    outcome = {"status": "agent_failure", "returncode": None, "metrics": {
+        "elapsed_seconds": None, "simulated_approvals": 0, "input_tokens": None,
+        "output_tokens": None, "cache_read_tokens": None, "helper_tokens": None}}
+    seen_reviews = set()
+    token_usage = UsageLedger(backend)
+    clarification_count = 0
+    final = None
+    shutdown_deadline = exit_time = None
+    completion_seen = closed_seen = fatal_error = False
+    native_events = 0
+    last_recovery_observation = None
+    last_response_receipt = None
+
+    def send(text=None, kind="input", reason=None):
+        value = {"type": kind}
+        if text is not None:
+            value["text"] = text
+        record("input", {**value, "reason": reason})
+        if process.stdin.closed:
+            return
+        pending_input.extend(canonical_json(value))
+        try:
+            selector.get_key(process.stdin)
+        except KeyError:
+            selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+
+    def begin_shutdown(reason, *, interrupt=False):
+        nonlocal shutdown_deadline
+        if shutdown_deadline is not None:
+            return
+        shutdown_deadline = time.monotonic() + 5
+        if backend == "harness":
+            if interrupt:
+                send(kind="interrupt", reason=reason)
+            send(kind="quit", reason=reason)
+
+    def consume(channel, line):
+        nonlocal final, clarification_count, completion_seen, closed_seen
+        nonlocal fatal_error, native_events
+        nonlocal last_recovery_observation, last_response_receipt
+        record(channel, {"raw_base64": base64.b64encode(line).decode(),
+                         "text": line.decode(errors="replace")})
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeError):
+            return
+        if not isinstance(event, dict):
+            return
+        # Adapter errors can appear on stderr. Diagnostic JSON there is retained
+        # but cannot count as successful native protocol completion.
+        if channel == "stderr" and event.get("type") not in {"error", "turn.failed"}:
+            return
+        observation = normalize_event(backend, event)
+        record("native", {**observation, "channel": channel})
+        native_events += 1
+        event_type = event.get("type")
+        token_usage.native(event)
+        if observation.get("error"):
+            outcome.setdefault("observed_errors", []).append(observation["error"])
+        if event_type in {"error", "turn.failed"}:
+            fatal_error = True
+            outcome["observed_error"] = observation.get("error") or event_type
+        if backend in {"codex", "codex_mcp"} and event_type == "turn.completed":
+            completion_seen = True
+        if backend == "opencode" and event_type == "step_finish":
+            part = event.get("part") if isinstance(event.get("part"), dict) else {}
+            completion_seen = part.get("reason") in {"stop", "end_turn"}
+        if backend == "harness" and event_type == "closed":
+            closed_seen = True
+        if backend != "harness" or event_type != "state":
+            return
+        task = event.get("task") or {}
+        requests = task.get("model_requests") or []
+        recovery = task.get("recovery")
+        receipt = task.get("response_receipt")
+        if receipt is not None:
+            outcome["harness_response_receipt"] = receipt
+            if receipt != last_response_receipt:
+                record("harness_response_compatibility", {"task_id": task.get("id"), "receipt": receipt})
+                last_response_receipt = receipt
+        observation = {"task_id": task.get("id"), "model_request_count": len(requests),
+                       "recovery": recovery}
+        if observation != last_recovery_observation:
+            record("harness_recovery", observation)
+            last_recovery_observation = observation
+        purposes = {}
+        decisions = {}
+        for request in requests:
+            purpose = request.get("purpose", "unknown") if isinstance(request, dict) else "unknown"
+            purposes[purpose] = purposes.get(purpose, 0) + 1
+            if purpose in {"harness_action", "harness_capture"} and request.get("decision_id"):
+                decision = decisions.setdefault(request["decision_id"], {"purpose": purpose, "attempts": []})
+                decision["attempts"].append(request.get("attempt"))
+        candidates = [request for request in requests if isinstance(request, dict)
+                      and request.get("purpose") in {"harness_action", "harness_capture"}]
+        outcome["harness_recovery"] = {"last_state": recovery, "model_requests_by_purpose": purposes,
+            "decisions": decisions,
+            "repair_generations": sum(request["attempt"] > 1 for request in candidates)
+            if candidates and all(type(request.get("attempt")) is int for request in candidates) else None}
+        if expected_model is not None and event.get("model") != expected_model:
+            outcome.update(status="preflight_failure", error="harness state model differs from frozen model",
+                           expected_model=expected_model, observed_model=event.get("model"))
+            begin_shutdown("model identity mismatch")
+            return
+        if shutdown_deadline is not None:
+            return
+        decision = review_input(event, episode)
+        if not decision:
+            return
+        if "terminal" in decision:
+            final = decision
+            begin_shutdown("terminal task state observed")
+            return
+        key = _gate_key(event, decision)
+        if key in seen_reviews:
+            return
+        seen_reviews.add(key)
+        if decision["input"].startswith("/"):
+            outcome["metrics"]["simulated_approvals"] += 1
+        else:
+            clarification_count += 1
+            if clarification_count > 3:
+                final = {"terminal": "agent_failure", "reason": "exhausted frozen clarification responses"}
+                begin_shutdown(final["reason"])
+                return
+        send(decision["input"], reason=decision["reason"])
+
+    def drain(channel, *, eof=False):
+        while b"\n" in buffers[channel]:
+            line, buffers[channel] = buffers[channel].split(b"\n", 1)
+            consume(channel, line + b"\n")
+        if buffers[channel] and (eof or len(buffers[channel]) > 32 * 1024 * 1024):
+            consume(channel, buffers[channel])
+            buffers[channel] = b""
+
+    try:
+        saved_environment = {
+            key: "<redacted>" if any(part in key.upper() for part in
+                                      ("API_KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL")) else value
+            for key, value in environment.items()
+        }
+        record("process", {"pid": process.pid, "command": command, "environment": saved_environment})
+        for channel, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, channel)
+        os.set_blocking(process.stdin.fileno(), False)
+        if backend == "harness":
+            send(prompt, reason="frozen episode prompt")
+        else:
+            process.stdin.close()
+        while True:
+            now = time.monotonic()
+            if _leader_exited(process):
+                exit_time = exit_time or now
+                if not selector.get_map():
+                    break
+                if now - exit_time >= 2:
+                    outcome["drain_incomplete"] = True
+                    break
+            if shutdown_deadline is None and now - started >= seconds:
+                outcome.update(error="episode wall-clock budget exhausted", timed_out=True)
+                begin_shutdown("frozen episode deadline", interrupt=True)
+            if shutdown_deadline is not None and now >= shutdown_deadline:
+                outcome["shutdown_incomplete"] = True
+                break
+            for key, _ in selector.select(timeout=0.05):
+                channel = key.data
+                if channel == "stdin":
+                    try:
+                        count = os.write(key.fileobj.fileno(), pending_input)
+                        del pending_input[:count]
+                    except BrokenPipeError:
+                        pending_input.clear()
+                        outcome["input_delivery_failed"] = True
+                    except BlockingIOError:
+                        continue
+                    if not pending_input:
+                        selector.unregister(key.fileobj)
+                    continue
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    drain(channel, eof=True)
+                else:
+                    buffers[channel] += chunk
+                    drain(channel)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        outcome.update(status="infrastructure_failure", error=str(error))
+    finally:
+        # Stop before reaping: WNOWAIT above reserves this PID throughout output
+        # draining. One kill covers descendants without targeting a reused group.
+        shutdown_deadline = shutdown_deadline or time.monotonic()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError as error:
+            if not _group_exited(process):
+                outcome.update(status="infrastructure_failure",
+                               error=f"cannot terminate owned process group {process.pid}: {error}")
+        except OSError as error:
+            outcome.update(status="infrastructure_failure", error=f"process-group termination failed: {error}")
+        try:
+            outcome["returncode"] = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            outcome.update(status="infrastructure_failure", error="owned process did not reap after termination")
+        drain_deadline = time.monotonic() + 0.5
+        for channel, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            while time.monotonic() < drain_deadline:
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                buffers[channel] += chunk
+                drain(channel)
+            drain(channel, eof=True)
+            stream.close()
+        if not process.stdin.closed:
+            process.stdin.close()
+        selector.close()
+        outcome["metrics"]["elapsed_seconds"] = time.monotonic() - started
+    outcome["request_usage"] = token_usage.report()
+    outcome["metrics"].update(resource_metrics(outcome["request_usage"]))
+    if outcome["status"] in {"preflight_failure", "infrastructure_failure"}:
+        return outcome
+    complete = bool(final and final["terminal"] == "success" and closed_seen) if backend == "harness" else completion_seen
+    if (complete and outcome["returncode"] == 0 and not fatal_error
+            and not any(outcome.get(key) for key in ("timed_out", "drain_incomplete", "shutdown_incomplete"))):
+        outcome["status"] = "success"
+    if final and final.get("reason"):
+        outcome["reason"] = final["reason"]
+    if not native_events:
+        outcome["reason"] = "process produced no native protocol events"
+    elif not complete and not outcome.get("reason"):
+        outcome["reason"] = "native protocol did not confirm completion"
+    return outcome

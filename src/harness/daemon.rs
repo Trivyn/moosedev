@@ -70,6 +70,43 @@ pub fn context_snapshot(
     state.try_ensure_enriched()?;
     let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
     let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
+    let mut targets = CaptureTargets {
+        components: graph::load_components(state)?
+            .into_iter()
+            .take(100)
+            .filter_map(|component| {
+                component.iri.map(|iri| CaptureTarget {
+                    iri,
+                    label: component.name,
+                    kind: "SystemComponent".into(),
+                })
+            })
+            .collect(),
+        records: Vec::new(),
+    };
+    for record in inventory.iter().chain(&records) {
+        if matches!(
+            record.kind.as_str(),
+            "ArchitecturalDecision"
+                | "Requirement"
+                | "Constraint"
+                | "Lesson"
+                | "Pattern"
+                | "AntiPattern"
+        ) && current_status(state, &record.iri)
+            .is_some_and(|status| graph::in_working_set(&status))
+            && !targets
+                .records
+                .iter()
+                .any(|target| target.iri == record.iri)
+        {
+            targets.records.push(CaptureTarget {
+                iri: record.iri.clone(),
+                label: record.label.clone(),
+                kind: record.kind.clone(),
+            });
+        }
+    }
     let mut context = String::from("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; retrieve more context when scope expands. Attached file dossiers remain complete.\n\nCurrent knowledge inventory:\n");
     for record in inventory {
         context.push_str(&format!(
@@ -159,6 +196,7 @@ pub fn context_snapshot(
         revision,
         context,
         files,
+        capture_targets: Some(targets),
     })
 }
 

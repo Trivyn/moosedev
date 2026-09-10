@@ -24,6 +24,23 @@ pub struct ContextResponse {
     pub revision: String,
     pub context: String,
     pub files: Vec<FileContext>,
+    /// None identifies older daemons that cannot supply typed capture choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_targets: Option<CaptureTargets>,
+}
+
+/// Bounded choices from the same knowledge snapshot as context and dossiers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptureTargets {
+    pub components: Vec<CaptureTarget>,
+    pub records: Vec<CaptureTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureTarget {
+    pub iri: String,
+    pub label: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

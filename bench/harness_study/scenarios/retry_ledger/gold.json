@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "scenario_id": "retry_ledger",
+  "facts": [
+    {
+      "id": "retry-durable",
+      "claim": "Persist a receipt atomically with its balance effect so retrying after a lost response or restart returns the original receipt without applying the amount twice.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt",
+        "SOURCE_MAPPING.md#durable-retries"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "retry-conflict",
+      "claim": "Within the current operation identity scope, reusing an ID with a different amount raises ValueError without changing any balance.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt",
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "retry-global",
+      "claim": "In episode 1 the service has one account, so a request ID identifies an operation globally. This policy is replaced by account-scoped identity in episode 2.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt",
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "retry-account",
+      "claim": "Since episode 2 operation identity is (account, request_id), replacing global ID uniqueness because independent clients may reuse IDs. Distinct pairs must not collide even with separator characters.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "retry-migration",
+      "claim": "Account support preserves existing callers and migrates original balances and receipts into the default account without repeating effects.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt",
+        "project/README.md"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "retry-batch",
+      "claim": "Batch import reuses account-scoped durable operations, commits each successful item separately, and stops at the first conflict while preserving its prefix and leaving its suffix untouched.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    }
+  ],
+  "forbidden_claims": [
+    "Request IDs remain globally unique across accounts after episode 2.",
+    "Retrying may apply the same committed amount twice.",
+    "A replay returns the latest account balance instead of the original receipt total.",
+    "The entire batch must be atomic and rolled back on any failure.",
+    "Exactly-once delivery is guaranteed across arbitrary external services."
+  ],
+  "review_status": "pending"
+}

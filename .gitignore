@@ -70,6 +70,9 @@ clients/vscode/*.vsix
 # The Instrument A/B harness under bench/ is committed; its regenerable run
 # output (seed-recall JSONs) is not.
 bench/seed_recall/
+# Retained private study bundles survive Cargo cleanup and may contain source
+# archives that require a separate publication review.
+/bench/private-evidence/
 
 # ── Embedding weights ─────────────────────────────────────────────────────
 # Release tarballs bundle models/snowflake-arctic-embed-s/ beside the binary

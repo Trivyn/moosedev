@@ -52,6 +52,7 @@ impl Drop for Env {
 #[derive(Default)]
 struct Script {
     root: PathBuf,
+    usage: Option<Value>,
     context: Option<String>,
     replies: VecDeque<(&'static str, Value)>,
     requests: Vec<Value>,
@@ -59,6 +60,7 @@ struct Script {
     fail_capture_once: bool,
     fail_capture: bool,
     fail_context: bool,
+    missing_capture_targets: bool,
     reject_capture_once: bool,
     deny_edit: bool,
     revision: String,
@@ -68,29 +70,104 @@ struct Script {
     attest_review: bool,
     reject_stale_review: bool,
     fail_global_checkpoint_once: bool,
+    mutation_during_model: Option<String>,
+    held_response: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 type Shared = Arc<Mutex<Script>>;
 
 async fn model(State(state): State<Shared>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+    let held = if body["response_format"]["json_schema"]["name"] != "harness_response_probe" {
+        state.lock().unwrap().held_response.take()
+    } else {
+        None
+    };
+    let response = model_response(state, body);
+    if let Some((received, release)) = held {
+        received.notify_one();
+        release.notified().await;
+    }
+    response
+}
+
+fn model_response(state: Shared, body: Value) -> (StatusCode, Json<Value>) {
     let mut script = state.lock().unwrap();
     let name = body["response_format"]["json_schema"]["name"]
         .as_str()
         .unwrap_or("");
+    if name == "harness_response_probe" {
+        let mut response = json!({"choices":[{
+            "message":{"role":"assistant","content":"{\"status\":\"ok\"}"},
+            "finish_reason":"stop"
+        }]});
+        if let Some(usage) = &script.usage {
+            response["usage"] = usage.clone();
+        }
+        return (StatusCode::OK, Json(response));
+    }
     script
         .requests
         .push(json!({"kind":"model","schema":name,"body":body}));
-    let Some((expected, answer)) = script.replies.pop_front() else {
+    let Some((expected, mut answer)) = script.replies.pop_front() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error":"unexpected model invocation"})),
         );
     };
     assert_eq!(name, expected, "harness called the wrong sensor stage");
-    (
-        StatusCode::OK,
-        Json(json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()}}]})),
-    )
+    // Existing scenarios describe which observation supports a claim. Translate
+    // those fixture selectors to the actual harness-issued IDs for this request;
+    // production accepts IDs only, never quotations.
+    if name == "harness_capture" {
+        let prompt = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .find(|text| text.contains("\nEvidence:\n"))
+            .unwrap();
+        let page = prompt
+            .split_once("\nEvidence:\n")
+            .unwrap()
+            .1
+            .split_once("\nRequired JSON schema:\n")
+            .unwrap()
+            .0;
+        let page: Vec<Value> = serde_json::from_str(page).unwrap();
+        if let Some(proposals) = answer.get_mut("proposals").and_then(Value::as_array_mut) {
+            for proposal in proposals {
+                if let Some(quotes) = proposal.as_object_mut().unwrap().remove("evidence") {
+                    proposal["evidence_ids"] = json!(quotes
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|quote| {
+                            page.iter()
+                                .find(|entry| {
+                                    entry["text"]
+                                        .as_str()
+                                        .unwrap()
+                                        .contains(quote.as_str().unwrap())
+                                })
+                                .map(|entry| entry["id"].clone())
+                                .unwrap_or_else(|| json!("not-on-evidence-page"))
+                        })
+                        .collect::<Vec<_>>());
+                }
+            }
+        }
+    }
+    if name == "harness_action" {
+        if let Some(content) = script.mutation_during_model.take() {
+            std::fs::write(script.root.join("code.txt"), content).unwrap();
+        }
+    }
+    let mut response = json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()},"finish_reason":"stop"}]});
+    if let Some(usage) = &script.usage {
+        response["usage"] = usage.clone();
+    }
+    let response = Json(response);
+    (StatusCode::OK, response)
 }
 
 async fn context(
@@ -109,6 +186,7 @@ async fn context(
     (
         status,
         Json(ContextResponse {
+            capture_targets: (!script.missing_capture_targets).then(Default::default),
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             context: script.context.clone().unwrap_or_else(|| {
@@ -628,21 +706,17 @@ async fn definitely_unpersisted_capture_can_be_reassessed_after_http_400() {
             "evidence":["Model action:"],"files":["code.txt"],"components":components,"requirement":null,"supersedes":null,"retracts":null
         }]})
     };
-    fixture.reply("harness_capture", assessment(json!(["missing component"])));
-    fixture.shared.lock().unwrap().reject_capture_once = true;
-    assert!(runner.advance().await.is_err());
-    assert!(
-        runner.task.capture_request.is_none(),
-        "only definitely unpersisted captures may discard their request identity"
-    );
-    let calls = fixture.model_calls();
     fixture.reply("harness_capture", assessment(json!([])));
+    fixture.shared.lock().unwrap().reject_capture_once = true;
+    fixture.reply("harness_capture", assessment(json!([])));
+    let calls = fixture.model_calls();
     runner.advance().await.unwrap();
     assert_eq!(
         fixture.model_calls(),
-        calls + 1,
-        "validation rejection requires a new sensor assessment"
+        calls + 3,
+        "one action and two capture candidates"
     );
+    assert!(runner.task.last_error.is_none());
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     let captures = fixture.shared.lock().unwrap().capture_requests.clone();
     assert_eq!(captures.len(), 2);
@@ -1148,7 +1222,7 @@ async fn interactive_no_change_confirmation_preserves_later_steering_for_capture
     assert!(runner.task.reviews[0].request.proposals[0]
         .evidence
         .iter()
-        .any(|quote| quote == steering));
+        .any(|quote| quote.contains(steering)));
     let requests = fixture.shared.lock().unwrap().requests.clone();
     let assessment = requests
         .iter()
@@ -1452,7 +1526,7 @@ async fn headless_partial_capture_import_preserves_remaining_evidence_after_rest
         .map(|request| request["body"]["messages"][0]["content"].as_str().unwrap())
         .collect();
     assert!(prompts.len() > 2);
-    assert!(prompts[1].contains(&format!("Event {next_event}, byte {next_offset}:")));
+    assert!(prompts[1].contains(&format!("Event {next_event}, bytes {next_offset}..")));
     assert!(
         prompts
             .iter()
@@ -1675,8 +1749,8 @@ async fn malformed_capture_stops_after_bounded_attempts_across_reload_and_resume
     fixture.conversational(
         json!({"action":"reply","message":"The project has a local coding harness."}),
     );
-    // Each failed assessment may repair malformed JSON three times. Across
-    // advance/resume calls, the checkpoint itself must also have a finite budget.
+    // Parsing and semantic validation share exactly three candidates per page,
+    // including across advance/resume calls.
     for _ in 0..40 {
         fixture.reply("harness_capture", json!("not an assessment object"));
     }
@@ -1700,9 +1774,9 @@ async fn malformed_capture_stops_after_bounded_attempts_across_reload_and_resume
         .iter()
         .filter(|request| request["schema"] == "harness_capture")
         .count();
-    assert!(
-        (1..=9).contains(&capture_calls),
-        "capture attempts escaped their checkpoint budget: {capture_calls}"
+    assert_eq!(
+        capture_calls, 3,
+        "capture attempts escaped their checkpoint budget"
     );
     let calls = fixture.model_calls();
     let id = runner.task.id.clone();
@@ -2048,4 +2122,327 @@ async fn cancelled_cleanup_failure_survives_reload_and_explicit_cancel_or_resume
         let legacy: moosedev::harness::runner::Task = serde_json::from_value(legacy).unwrap();
         assert!(!legacy.cleanup_pending);
     }
+}
+
+#[tokio::test]
+async fn capture_requires_typed_daemon_capability_before_sensor_generation() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive_objective("Explain this project").await;
+    fixture.shared.lock().unwrap().missing_capture_targets = true;
+    fixture.conversational(json!({"action":"reply","message":"This project contains code.txt."}));
+    let error = runner.advance().await.unwrap_err();
+    assert!(format!("{error:#}").contains("upgrade the project daemon"));
+    assert_eq!(
+        fixture.model_calls(),
+        1,
+        "capture must stop before asking the sensor to invent missing choices"
+    );
+    assert!(fixture.shared.lock().unwrap().capture_requests.is_empty());
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["capture_cursor"],
+        0
+    );
+    fixture.shared.lock().unwrap().missing_capture_targets = false;
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    assert!(runner.task.last_error.is_none());
+}
+
+#[tokio::test]
+async fn malformed_and_fragment_edit_share_one_budget_and_apply_once() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.shared.lock().unwrap().usage =
+        Some(json!({"prompt_tokens":19,"completion_tokens":5,"total_tokens":24}));
+    let start = runner.task.model_requests.len();
+    fixture.reply("harness_action", json!("not an action object"));
+    fixture.conversational(
+        json!({"action":"edit","file":"code.txt","before":"original","after":"changed"}),
+    );
+    fixture.conversational(
+        json!({"action":"replace","file":"code.txt","old_text":"original","new_text":"changed"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(runner.task.edits.len(), 1);
+    assert!(runner.task.recovery.is_none());
+    assert!(runner.task.last_error.is_none());
+    let requests = &runner.task.model_requests[start..];
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r["attempt"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(requests
+        .iter()
+        .all(|r| r["decision_id"] == requests[0]["decision_id"]));
+    assert!(requests[1]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("last candidate was rejected"));
+    assert!(requests[2]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("entire supplied file"));
+    let metered = metered_decision(&runner, requests[0]["decision_id"].as_str().unwrap());
+    assert_eq!(metered.len(), 3, "each correction is a physical request");
+    assert_eq!(
+        metered
+            .iter()
+            .map(|r| r["context"]["candidate"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        metered
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert!(metered.iter().all(|r| r["status"] == "completed"
+        && r["context"]["purpose"] == "harness_action"
+        && r["tokens"]["prompt_tokens"] == 19
+        && r["tokens"]["completion_tokens"] == 5));
+}
+
+fn metered_decision(runner: &Runner, decision: &str) -> Vec<Value> {
+    serde_json::to_value(&runner.task).unwrap()["token_usage"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["context"]["decision_id"] == decision)
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn invalid_replacements_exhaust_without_write_and_restart_cannot_refill() {
+    use moosedev::harness::runner::RecoveryStatus;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    for old_text in ["", "missing", "not there"] {
+        fixture.conversational(
+            json!({"action":"replace","file":"code.txt","old_text":old_text,"new_text":"changed"}),
+        );
+    }
+    assert!(runner.advance().await.is_err());
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(
+        runner.task.recovery.as_ref().unwrap().status,
+        RecoveryStatus::AwaitingGuidance
+    );
+    assert_eq!(runner.task.recovery.as_ref().unwrap().attempts, 3);
+    assert!(runner.task.edits.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n"
+    );
+    let calls = fixture.model_calls();
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    runner.resume().await.unwrap();
+    assert!(runner.advance().await.is_err());
+    assert_eq!(fixture.model_calls(), calls);
+    assert_eq!(runner.task.recovery.as_ref().unwrap().attempts, 3);
+}
+
+#[tokio::test]
+async fn full_write_uses_snapshot_and_deletion_still_requires_review() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"write","file":"code.txt","content":"replacement\n"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits[0].before.as_deref(), Some("original\n"));
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"write","file":"code.txt","content":null}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPolicy);
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "replacement\n"
+    );
+    let pending = runner.task.pending_edit.as_ref().unwrap();
+    assert_eq!(pending.before.as_deref(), Some("replacement\n"));
+    assert_eq!(pending.after, None);
+}
+
+#[tokio::test]
+async fn source_change_during_generation_requires_fresh_approval_without_edit() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.shared.lock().unwrap().mutation_during_model = Some("human change\n".into());
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"original","new_text":"model change"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.edits.is_empty());
+    assert!(runner.task.pending_edit.is_none());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "human change\n"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_during_generation_preserves_charged_candidate_on_resume() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let received = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    fixture.shared.lock().unwrap().held_response = Some((received.clone(), release.clone()));
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"original","new_text":"must not apply"}));
+    {
+        let advance = runner.advance();
+        tokio::pin!(advance);
+        tokio::select! {
+            result = &mut advance => panic!("held generation completed before cancellation: {result:?}"),
+            waited = tokio::time::timeout(std::time::Duration::from_secs(10), received.notified()) => waited.expect("fixture did not receive model request"),
+        }
+        // Dropping the future now interrupts an actually received request, not
+        // a filesystem write or scheduling delay before the HTTP call.
+    }
+    release.notify_one();
+    assert_eq!(runner.task.recovery.as_ref().unwrap().attempts, 1);
+    let decision = runner.task.recovery.as_ref().unwrap().id.clone();
+    runner.cancel().await.unwrap();
+    let interrupted = metered_decision(&runner, &decision);
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0]["status"], "cancelled");
+    assert!(interrupted[0]["tokens"]["prompt_tokens"].is_null());
+    assert!(interrupted[0]["tokens"]["completion_tokens"].is_null());
+    assert!(runner.task.edits.is_empty());
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(metered_decision(&runner, &decision), interrupted);
+    runner.configure(fixture.config(), None);
+    runner.resume().await.unwrap();
+    for _ in 0..2 {
+        fixture.reply("harness_action", json!("invalid action"));
+    }
+    assert!(runner.advance().await.is_err());
+    assert_eq!(runner.task.recovery.as_ref().unwrap().attempts, 3);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let metered = metered_decision(&runner, &decision);
+    assert_eq!(metered.len(), 3, "reloading must not duplicate accounting");
+    assert_eq!(
+        metered
+            .iter()
+            .filter(|r| r["status"] == "cancelled")
+            .count(),
+        1
+    );
+    assert_eq!(
+        metered
+            .iter()
+            .map(|r| r["context"]["candidate"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(runner.task.edits.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n"
+    );
+}
+
+#[tokio::test]
+async fn legacy_pending_capture_rejection_starts_a_charged_repair_budget() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    fixture.captured("Lesson", "Keep the observed repair");
+    fixture.shared.lock().unwrap().fail_capture = true;
+    assert!(runner.advance().await.is_err());
+    let original = runner.task.capture_request.clone().unwrap();
+    let mut legacy = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(legacy["recovery"]["attempts"], 1);
+    legacy.as_object_mut().unwrap().remove("recovery");
+    let id = runner.task.id.clone();
+    drop(runner);
+    std::fs::write(
+        fixture
+            .root
+            .join(".moosedev/harness/tasks")
+            .join(format!("{id}.json")),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    assert!(runner.task.recovery.is_none());
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.fail_capture = false;
+        script.reject_capture_once = true;
+    }
+    fixture.captured("Lesson", "Keep the corrected repair");
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls + 1);
+    assert_eq!(runner.task.model_requests.last().unwrap()["attempt"], 2);
+    assert!(runner.task.recovery.is_none());
+    let script = fixture.shared.lock().unwrap();
+    assert_eq!(script.capture_requests.len(), 3);
+    assert_eq!(
+        serde_json::to_value(&script.capture_requests[1]).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_ne!(
+        script.capture_requests[2].operation_id,
+        original.operation_id
+    );
+}
+
+#[tokio::test]
+async fn invented_capture_target_is_repaired_before_any_daemon_operation() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    fixture.shared.lock().unwrap().usage = Some(json!({"prompt_tokens":31,"completion_tokens":7}));
+    fixture.reply("harness_capture", json!({"reason":"The edit establishes a durable constraint.","proposals":[{
+        "kind":"Constraint","title":"Preserve behavior","description":"Preserve public behavior.",
+        "evidence":["Applied edit code.txt"],"files":["code.txt"],"components":["Ledger"],
+        "requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    fixture.captured("Constraint", "Preserve observed behavior");
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls + 2);
+    assert_eq!(runner.task.model_requests.last().unwrap()["attempt"], 2);
+    let decision = runner.task.model_requests.last().unwrap()["decision_id"]
+        .as_str()
+        .unwrap();
+    let metered = metered_decision(&runner, decision);
+    assert_eq!(metered.len(), 2);
+    assert!(metered
+        .iter()
+        .all(|r| r["context"]["purpose"] == "harness_capture"
+            && r["tokens"]["prompt_tokens"] == 31
+            && r["tokens"]["completion_tokens"] == 7
+            && r["tokens"]["total_tokens"].is_null()));
+    let script = fixture.shared.lock().unwrap();
+    assert_eq!(
+        script.capture_requests.len(),
+        1,
+        "invalid target must be rejected locally before minting an operation"
+    );
+    assert!(script.capture_requests[0].proposals[0]
+        .components
+        .is_empty());
+    assert!(script.capture_requests[0].proposals[0].evidence[0].contains("Task "));
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
 }

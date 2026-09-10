@@ -854,3 +854,51 @@ async fn unrelated_write_before_review_cannot_be_credited_to_acceptance() {
         Some("proposed")
     );
 }
+
+#[test]
+fn capture_targets_are_typed_current_choices_from_the_context_snapshot() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let component = record(&state, "SystemComponent", "Ledger");
+    let requirement = record(&state, "Requirement", "Preserve retry identity");
+    let constraint = record(&state, "Constraint", "Preserve public API");
+    let pending = daemon::capture_operation(
+        &state,
+        request(
+            "pending-target",
+            vec![proposal("Lesson", "Unreviewed proposal")],
+        ),
+    )
+    .unwrap();
+    let context = daemon::context_snapshot(
+        &state,
+        &ContextRequest {
+            topic: "retry identity".into(),
+            files: vec![],
+        },
+    )
+    .unwrap();
+    let choices = context.capture_targets.as_ref().unwrap();
+    assert!(choices
+        .components
+        .iter()
+        .any(|target| target.iri == component && target.kind == "SystemComponent"));
+    assert!(choices
+        .records
+        .iter()
+        .any(|target| target.iri == requirement && target.kind == "Requirement"));
+    assert!(choices
+        .records
+        .iter()
+        .any(|target| target.iri == constraint && target.kind == "Constraint"));
+    assert!(!choices
+        .records
+        .iter()
+        .any(|target| target.iri == component || target.iri == pending.proposals[0].iri));
+    let mut legacy = serde_json::to_value(&context).unwrap();
+    legacy.as_object_mut().unwrap().remove("capture_targets");
+    assert!(serde_json::from_value::<ContextResponse>(legacy)
+        .unwrap()
+        .capture_targets
+        .is_none());
+}

@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "id": "retry_ledger",
+  "track": "accumulation",
+  "title": "Durable retry identity across account evolution",
+  "initial_facts": [],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "Fix retries in the ledger. A request ID identifies one operation for this single-account service. Committing an operation and then losing its response must be safe: retrying the same ID and amount, including after reopening the database, returns the original receipt without applying the amount again. Reusing an ID with a different amount raises ValueError without changing the balance. Persist the balance change and receipt together. Keep the existing API and database schema compatible; no concurrent callers are required.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "retry-durable",
+        "retry-conflict",
+        "retry-global"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    },
+    {
+      "id": "e2",
+      "prompt": "The ledger now serves independent accounts. Replace the old global request-ID rule: identity is the pair (account, request_id), because clients in different accounts may legitimately issue the same ID. Extend process(request_id, amount, *, account=\"default\") and total(account=\"default\"). Accounts have independent balances starting at zero. Default arguments preserve old callers; migrate any existing database in the documented original schema into the default account, retaining old receipts and balances. Return the same receipt fields as before. Account names and IDs are arbitrary strings, so separator characters must not cause collisions.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "retry-durable",
+        "retry-conflict",
+        "retry-account",
+        "retry-migration"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e2.py",
+      "reference": "reference/e2",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    },
+    {
+      "id": "e3",
+      "prompt": "Add Ledger.process_batch(operations) taking an iterable of (account, request_id, amount) triples and returning receipts in order; no operations returns []. The importer may restart after only a prefix was committed, so use the existing operation API for each item. Commit each successful item independently. Stop and raise on the first conflict, leaving the committed prefix intact and the suffix untouched. Retrying the batch should return the original receipts.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "retry-durable",
+        "retry-conflict",
+        "retry-account",
+        "retry-migration",
+        "retry-batch"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e3.py",
+      "reference": "reference/e3",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "no-durable-dedup",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/no_dedup",
+      "expected": "fail"
+    },
+    {
+      "id": "global-identity",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/global_identity",
+      "expected": "fail"
+    },
+    {
+      "id": "batch-ignores-account",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/batch_account",
+      "expected": "fail"
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md"
+}

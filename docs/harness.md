@@ -51,9 +51,54 @@ coding session; it does not reconfigure a shared daemon.
 and validated JSON fallback otherwise. `required` rejects providers without
 native structured output. Complete model actions are validated before execution;
 streamed partial text never authorizes an edit or command.
-Malformed capture assessments stop after three failed assessment attempts
-(each permits at most three JSON-generation attempts). Resuming does not reset
-that limit; new human guidance permits another attempt and preserves the evidence.
+Before the first task generation, the harness verifies both streaming and
+nonstreaming structured responses with neutral connection probes. The harness-only
+`MOOSEDEV_HARNESS_RESPONSE_POLICY` setting accepts `auto` (default),
+`provider-default`, or `reasoning-off`. Auto first tests the provider default; if a
+completed response contains only reasoning, it tests `reasoning_effort: "none"`.
+The resolved mode must pass both content paths and is recorded in the session.
+This setting fixes the observed Qwen MLX response routing on LM Studio; it is not
+assumed to work on every provider. Reasoning text never becomes an executable
+action. A model/endpoint/settings change invalidates the compatibility cache.
+
+Invalid JSON and repairable action/capture arguments share **three candidate
+outputs total** per action decision or evidence page. The runner automatically
+supplies bounded validation feedback for attempts two and three, then pauses for
+human guidance. Retry progress is visible, and the attempt count survives restart,
+interruption, and `/continue`. New human guidance permits a fresh repair cycle.
+Permission denials and source/knowledge changes still require the applicable
+human review; correction never grants approval.
+
+## Request usage accounting
+
+Task journals expose `token_usage`, with one current receipt per explicit client
+HTTP attempt (internal HTTP redirects are outside this boundary). Receipts
+identify the model and sanitized endpoint, request purpose,
+repair decision and candidate, status, elapsed time, and provider-reported usage.
+Actions, capture assessments, and compatibility probes are separate purposes;
+schema or optional streaming-usage fallbacks have separate request IDs. Raw usage
+is retained alongside nullable token fields. Missing counts stay unknown, and
+cache/reasoning detail fields must not be added to input/output totals blindly.
+
+The client requests final streaming usage. A provider that explicitly rejects the
+optional usage parameter can be retried without it; this attempt is also recorded.
+An absent or interrupted usage report remains an accounting gap. These receipts
+measure provider requests, not whether the resulting action or code is correct.
+
+An adjacent `<task-id>.usage.jsonl` file saves started and terminal receipts under
+the task's existing lease. Replay merges receipts by request ID. A crash that
+loses a terminal receipt leaves an outstanding request with unknown consumption;
+old tasks without accounting carry a legacy gap. Persistence errors are recorded
+as accounting gaps and surfaced in progress. Usage files are private task data
+and are excluded from project-knowledge capture prompts.
+
+The study runner additionally observes agent and daemon/helper proxy traffic,
+keeps native-client and proxy measurements separate, and reports observation
+coverage. It publishes a field's full total only when every request in that
+measurement scope has a final observed value. Native harness journals alone do
+not meter separate daemon processes, embeddings, hardware energy, or hosted
+billing. Compare resource use alongside task completion and knowledge quality;
+short failed runs do not demonstrate better efficiency.
 
 ## Conversation and review
 
@@ -76,7 +121,20 @@ begins a conversation. `/resume` lists saved conversations; `/resume ID` opens o
 unfinished work. The CLI can reopen one with `moosedev-harness resume-session ID`.
 
 The runner retrieves project knowledge before planning and affected-file dossiers
-before edits. Every edit crosses the execution boundary. Capture assessments
+before edits. The model can request one unique literal replacement or supply
+whole new file content. The runner constructs the edit precondition from the exact
+source delivered for that request; ambiguous replacements are rejected. Concurrent
+file changes still invalidate approval or fail the executor's exact comparison.
+Deletion continues to require human approval. Legacy whole-file edit requests
+remain readable with their original strict semantics.
+
+Capture prompts supply evidence references and typed choices for existing graph
+targets. The runner resolves those choices into exact journal evidence and graph
+IRIs before daemon submission. Existing knowledge is not contemporaneous evidence,
+and selecting a reference does not establish that a claim is true: proposals still
+require human review. A daemon without the typed-choice capability must be upgraded.
+
+Every edit crosses the execution boundary. Capture assessments
 continue during work and accumulate for human review; proposals remain outside
 policy authority until ratified. Completion requires the approved checks to pass,
 human acceptance/rejection of outstanding capture operations (or consolidated
@@ -91,7 +149,7 @@ still require renewed plan approval before execution. If review succeeds but the
 final checkpoint fails, `/continue` retries completion without repeating capture
 or claiming that no knowledge changed.
 
-Daemon or model-server outages pause work without consuming the malformed-capture
+Daemon or model-server outages pause work without consuming the model-repair
 budget. Restore the connection, then use `/continue` (headless `step` or `run`) to
 retry. Pending capture evidence and any already-submitted operation ID remain
 in the journal; a connection failure does not require new model guidance.

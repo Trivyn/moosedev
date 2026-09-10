@@ -1,0 +1,473 @@
+from contextlib import ExitStack
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from bench.harness_study import run as runner
+from bench.harness_study.artifacts import ArtifactStore, sha256_file
+from bench.harness_study.grading import report
+
+
+class RunTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.repo = self.root / "repo"
+        (self.repo / "bench/harness_study").mkdir(parents=True)
+        (self.repo / "bench/harness_study/driver.py").write_text("# frozen driver fixture\n")
+        (self.repo / "spec").mkdir()
+        (self.repo / "spec/harness_evaluation_protocol.md").write_text("frozen fixture protocol\n")
+        self.scenarios = self.root / "scenarios"
+        project = self.scenarios / "fixture/project"
+        project.mkdir(parents=True)
+        (project / "service.py").write_text("EPISODE = 0\n")
+        hidden = self.scenarios / "fixture/hidden"
+        hidden.mkdir()
+        for episode in ("e1", "e2", "e3"):
+            (hidden / f"{episode}.py").write_text("# grading is mocked\n")
+        self.scenario = {"id": "fixture", "gold_sha256": "a" * 64,
+                         "package_sha256": "b" * 64, "initial_facts": [],
+                         "episodes": [{"id": f"e{n}", "prompt": f"Implement episode {n}",
+                                       "clarifications": {"scope": "fixture only"},
+                                       "visible_checks": ["python3 -m unittest discover -s tests"],
+                                       "hidden_test": f"hidden/e{n}.py"} for n in (1, 2, 3)]}
+        self.build = self.root / "private-build"
+        self.build.mkdir()
+        binaries = {}
+        for role in ("daemon", "harness", "session"):
+            path = self.build / role
+            path.write_text(f"fixture {role}")
+            binaries[role] = str(path)
+        (self.build / "engine-source.tar.gz").write_bytes(b"private engine archive")
+        self.binary_manifest = {"directory": str(self.build), "binaries": binaries,
+                                "binary_hashes": {role: sha256_file(Path(path)) for role, path in binaries.items()}}
+        self.assets = self.root / "assets"
+        self.assets.mkdir()
+        self.config = {"study_id": "test-study", "endpoint": "http://127.0.0.1:1234/v1",
+                       "helper_model": "helper-exact", "context_tokens": 32768,
+                       "episode_seconds": 1200, "local_models": [], "hosted_endpoints": [],
+                       "gold_approval": str(self.root / "approval.json"),
+                       "binary_manifest": str(self.build / "manifest.json")}
+        self.frozen = {"config": self.config, "ready": True, "binaries": self.binary_manifest,
+                       "assets": {"directory": str(self.assets), "files": {}}}
+        for role in ("codex", "opencode", "lms"):
+            path = self.root / role
+            path.write_text(f"fixture {role}")
+            self.config[role] = str(path)
+            self.frozen[role] = {"path": str(path), "sha256": sha256_file(path)}
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        self.cell = {"scenario_id": "fixture", "model": "agent-exact", "backend": "harness",
+                     "condition": "harness", "repetition": 1}
+        self.executions, self.grants, self.observed = [], [], []
+        self.archive_calls = 0
+        self.model_load_calls = 0
+        self.command_arguments = []
+
+    def test_development_runs_refuse_original_store_and_non_harness_cells(self):
+        self.config["evaluation_mode"] = "local-harness-development"
+        with patch.object(runner, "REPO", self.repo):
+            with self.assertRaisesRegex(ValueError, "separate evidence store"):
+                runner.run_cell(self.repo / "target/harness-study/evidence", self.frozen, self.cell)
+            self.assertFalse((self.repo / "target/harness-study/evidence").exists())
+            with self.assertRaisesRegex(ValueError, "local harness cells"):
+                runner.run_cell(self.root / "separate", self.frozen, dict(self.cell, backend="opencode"))
+
+    def test_development_run_archives_addendum_and_works_without_frontier_clients(self):
+        self.config.update(evaluation_mode="local-harness-development", harness_response_policy="auto",
+                           parent_pilot={"study_id": "parent", "config_sha256": "parent-config"})
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        for role in ("codex", "opencode"):
+            self.frozen.pop(role)
+        (self.repo / "bench/harness_study/DEVELOPMENT.md").write_text("development-only protocol\n")
+        result = self._run()
+        self.assertEqual(result["status"], "success")
+        retained = Path(result["path"])
+        self.assertEqual((retained / "development-protocol.md").read_text(), "development-only protocol\n")
+        manifest = json.loads((retained / "manifest.json").read_text())
+        self.assertEqual(manifest["evaluation_mode"], "local-harness-development")
+        self.assertEqual(manifest["parent_pilot"]["study_id"], "parent")
+        self.assertEqual(self.command_arguments[0][1]["harness_response_policy"], "auto")
+
+    def _run(self, *, fail_episode=None, approval_error=None, snapshot_failure=False,
+             fail_setup_episode=None, interrupt_episode=None, fail_checkpoint_episode=None):
+        create_temp = tempfile.mkdtemp
+        original_snapshot = runner.snapshot
+        verified_clients, phases = set(), []
+
+        def temporary(**kwargs):
+            kwargs["dir"] = self.root
+            path = create_temp(**kwargs)
+            self.executions.append(Path(path))
+            return path
+
+        class Proxy:
+            def __init__(self, *args, **kwargs):
+                self.url, self.failures = "http://127.0.0.1:4567/v1", []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class Daemon:
+            def __init__(self, **kwargs):
+                self.url = "http://127.0.0.1:7654"
+                self.socket = kwargs["runtime"] / "daemon.sock"
+                self.identity = {"pid": 12345, "sha256": kwargs["expected_sha256"]}
+                self.log = kwargs["log_path"]
+                self.episode_id = kwargs["runtime"].name
+
+            def __enter__(self):
+                if self.episode_id == fail_setup_episode:
+                    raise RuntimeError("fixture daemon setup failure")
+                self.log.parent.mkdir(parents=True, exist_ok=True)
+                self.log.write_text("owned daemon fixture\n")
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def checkpoint(self):
+                if self.episode_id == fail_checkpoint_episode:
+                    raise RuntimeError("fixture checkpoint failure")
+                return {"published": True}
+
+        def command(backend, **kwargs):
+            self.command_arguments.append((backend, kwargs))
+            if backend.startswith("codex"):
+                (kwargs["runtime"] / "codex").mkdir()
+            return [str(kwargs["executable"]), "fixture"], {}
+
+        def load_models(config, cell, record, *, executable):
+            self.model_load_calls += 1
+            self.assertEqual(executable, self.frozen["lms"]["path"])
+            self.assertEqual(phases[-1], "archived")
+
+        def fingerprint(path):
+            verified_clients.add(str(path))
+            return sha256_file(path)
+
+        def archive_clients(store, run, identities):
+            expected = [self.frozen[role] for role in runner.required_clients(self.config)]
+            self.assertEqual(identities, expected)
+            self.assertTrue({identity["path"] for identity in expected} <= verified_clients)
+            self.archive_calls += 1
+            phases.append("archived")
+
+        def sandbox(command, **kwargs):
+            self.grants.append(kwargs)
+            return command
+
+        def observe(command, **kwargs):
+            workspace, episode = kwargs["workspace"], kwargs["episode"]
+            number = int(episode["id"][1:])
+            self.assertEqual((workspace / "service.py").read_text(), f"EPISODE = {number - 1}\n")
+            self.assertFalse((workspace / ".moosedev/harness").exists(), "native history leaked into fresh episode")
+            if number > 1:
+                self.assertEqual((workspace / "PROJECT_NOTES.md").read_text(), f"remember episode {number - 1}\n")
+                self.assertIn(f"graph episode {number - 1}", (workspace / ".moosedev/kg.nq").read_text())
+            self.observed.append(episode["id"])
+            (workspace / "service.py").write_text(f"EPISODE = {number}\n")
+            (workspace / "PROJECT_NOTES.md").write_text(f"remember episode {number}\n")
+            (workspace / ".moosedev").mkdir(exist_ok=True)
+            with (workspace / ".moosedev/kg.nq").open("a") as graph:
+                graph.write(f"# graph episode {number}\n")
+            history = workspace / ".moosedev/harness/conversations"
+            history.mkdir(parents=True)
+            (history / "session.json").write_text(json.dumps({"episode": number}))
+            if episode["id"] == interrupt_episode:
+                kwargs["record"]("native", {"event": "progress", "episode_number": number})
+                raise KeyboardInterrupt("fixture native observation interrupted")
+            kwargs["record"]("native", {"event": "completed", "episode_number": number})
+            return {"status": "agent_failure" if episode["id"] == fail_episode else "success",
+                    "metrics": {"elapsed_seconds": 1, "output_tokens": None}}
+
+        def snapshot(*args, **kwargs):
+            prefix = args[3]
+            if snapshot_failure and prefix in {"episodes/e1/workspace", "interrupted-workspace"}:
+                raise ValueError("fixture snapshot failure; do not discard execution")
+            return original_snapshot(*args, **kwargs)
+
+        with ExitStack() as stack:
+            replacements = {"SCENARIOS": self.scenarios, "REPO": self.repo,
+                            "load_scenario": lambda name: self.scenario,
+                            "verify_binaries": lambda path: self.binary_manifest,
+                            "sha256_file": fingerprint, "archive_clients": archive_clients,
+                            "load_models": load_models, "ModelProxy": Proxy, "DomainProxy": Proxy, "OwnedDaemon": Daemon,
+                            "build_command": command, "sandbox_command": sandbox, "observe": observe,
+                            "snapshot": snapshot,
+                            "execute_check": lambda *args: {"passed": True, "status": "success", "tests_run": 1,
+                                                           "stdout": "", "stderr": "", "returncode": 0}}
+            for name, value in replacements.items():
+                stack.enter_context(patch.object(runner, name, value))
+            stack.enter_context(patch.object(runner, "verify_approval", side_effect=approval_error))
+            stack.enter_context(patch.object(runner.tempfile, "mkdtemp", side_effect=temporary))
+            stack.enter_context(patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"", b"")))
+            result = runner.run_cell(self.root / "evidence", self.frozen, self.cell)
+        ArtifactStore(self.root / "evidence").verify_run(Path(result["path"]))
+        return result
+
+    def test_pending_approval_is_a_retained_preflight_attempt(self):
+        result = self._run(approval_error=ValueError("scenario rubric approval is pending"))
+        self.assertEqual(result["status"], "preflight_failure")
+        self.assertIn("approval is pending", result["error"])
+        self.assertEqual(self.observed, [])
+        self.assertTrue((Path(result["path"]) / "preflight.json").is_file())
+        self.assertTrue((Path(result["path"]) / "outcome.json").is_file())
+
+    def _freeze_ca_bundle(self):
+        bundle = self.root / "fixture-ca.pem"
+        bundle.write_bytes(b"fixture public CA bundle; no TLS is performed\n")
+        self.config["codex_ca_bundle"] = str(bundle)
+        self.frozen["codex_ca_bundle"] = {"path": str(bundle), "sha256": sha256_file(bundle)}
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        return bundle
+
+    def test_changed_ca_bundle_fails_before_model_setup(self):
+        bundle = self._freeze_ca_bundle()
+        bundle.write_bytes(b"changed after freezing\n")
+        result = self._run()
+        self.assertEqual(result["status"], "preflight_failure", result)
+        self.assertIn("CA bundle changed", result["error"])
+        self.assertEqual(self.model_load_calls, 0)
+        self.assertEqual(self.command_arguments, [])
+        self.assertEqual(self.observed, [])
+        self.assertEqual([episode["status"] for episode in result["episodes"]], ["unattempted"] * 3)
+
+    def test_verified_ca_bundle_is_archived_and_forwarded_only_to_codex_backends(self):
+        auth = self.root / "fixture-auth.json"
+        auth.write_text('{"OPENAI_API_KEY":"test-only-credential"}')
+        self.config["codex_auth"] = str(auth)
+        bundle = self._freeze_ca_bundle()
+        for backend, condition in (("codex", "without"), ("codex_mcp", "codex_mcp"),
+                                   ("opencode", "without"), ("harness", "harness")):
+            with self.subTest(backend=backend):
+                self.cell.update(backend=backend, condition=condition)
+                self.command_arguments.clear()
+                result = self._run()
+                self.assertEqual(result["status"], "success", result)
+                self.assertEqual((Path(result["path"]) / "hosted-ca-bundle.pem").read_bytes(), bundle.read_bytes())
+                self.assertEqual(len(self.command_arguments), 3)
+                for observed_backend, arguments in self.command_arguments:
+                    self.assertEqual(observed_backend, backend)
+                    self.assertEqual(arguments.get("ca_bundle"), bundle if backend.startswith("codex") else None)
+
+    def test_three_episodes_preserve_code_notes_graph_but_reset_history(self):
+        result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(self.observed, ["e1", "e2", "e3"])
+        self.assertEqual(self.archive_calls, 1)
+        self.assertEqual([episode["status"] for episode in result["episodes"]], ["success"] * 3)
+        run = Path(result["path"])
+        for number in (1, 2, 3):
+            saved = run / f"episodes/e{number}/workspace"
+            self.assertEqual((saved / "service.py").read_text(), f"EPISODE = {number}\n")
+            self.assertEqual((saved / "PROJECT_NOTES.md").read_text(), f"remember episode {number}\n")
+            self.assertIn(f"graph episode {number}", (saved / ".moosedev/kg.nq").read_text())
+            self.assertTrue((saved / ".moosedev/harness/conversations/session.json").is_file())
+        self.assertTrue(all(not execution.exists() for execution in self.executions))
+
+    def test_agent_failure_keeps_dependent_episodes_unattempted(self):
+        result = self._run(fail_episode="e1")
+        self.assertEqual(result["status"], "agent_failure", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertEqual([episode["status"] for episode in result["episodes"]],
+                         ["agent_failure", "unattempted", "unattempted"])
+
+    def test_failed_snapshot_retains_execution_for_recovery(self):
+        result = self._run(snapshot_failure=True)
+        self.assertEqual(result["status"], "infrastructure_failure", result)
+        self.assertIn("snapshot failure", result["error"])
+        self.assertTrue(all(execution.exists() for execution in self.executions))
+        self.assertEqual((self.executions[0] / "work/service.py").read_text(), "EPISODE = 1\n")
+
+    def test_interrupted_observation_preserves_attempted_episode_and_evidence(self):
+        result = self._run(interrupt_episode="e1")
+        self.assertEqual(result["status"], "infrastructure_failure", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertEqual([episode["status"] for episode in result["episodes"]],
+                         ["infrastructure_failure", "unattempted", "unattempted"])
+        episode = result["episodes"][0]
+        self.assertIn("KeyboardInterrupt", episode["error"])
+        self.assertTrue(all(value is None for value in episode["metrics"].values()))
+        self.assertEqual(episode["request_usage"]["sources"]["proxy"]["summary"]["requests"], 0)
+        self.assertEqual(episode["checks"], [])
+        self.assertFalse(episode["observation_complete"])
+        saved = Path(result["path"])
+        self.assertEqual(json.loads((saved / "episodes/e1/outcome.json").read_text()), episode)
+        self.assertEqual((saved / "interrupted-workspace/service.py").read_text(), "EPISODE = 1\n")
+        self.assertTrue((saved / "seal.json").is_file())
+        self.assertTrue(all(not execution.exists() for execution in self.executions))
+        inventory = report(self.root / "evidence")
+        self.assertEqual(inventory["integrity_counts"], {"sealed": 1})
+        self.assertEqual(inventory["runs"][0]["status"], "infrastructure_failure")
+        self.assertEqual(inventory["groups"][0]["episode_statuses"],
+                         {"infrastructure_failure": 1, "unattempted": 2})
+
+    def test_second_episode_setup_failure_preserves_first_success_without_claiming_run_success(self):
+        result = self._run(fail_setup_episode="e2")
+        self.assertEqual(result["status"], "infrastructure_failure", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertIn("daemon setup failure", result["error"])
+        self.assertEqual([episode["status"] for episode in result["episodes"]],
+                         ["success", "unattempted", "unattempted"])
+        saved = Path(result["path"])
+        self.assertEqual(json.loads((saved / "episodes/e1/outcome.json").read_text())["status"], "success")
+        self.assertEqual((saved / "episodes/e1/workspace/service.py").read_text(), "EPISODE = 1\n")
+        self.assertEqual((saved / "interrupted-workspace/PROJECT_NOTES.md").read_text(), "remember episode 1\n")
+
+    def test_checkpoint_failure_preserves_completed_observation_as_attempted_episode(self):
+        result = self._run(fail_checkpoint_episode="e1")
+        self.assertEqual(result["status"], "infrastructure_failure", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertEqual([episode["status"] for episode in result["episodes"]],
+                         ["infrastructure_failure", "unattempted", "unattempted"])
+        episode = result["episodes"][0]
+        self.assertIn("checkpoint failure", episode["error"])
+        self.assertTrue(episode["observation_complete"])
+        saved = Path(result["path"])
+        self.assertEqual(json.loads((saved / "episodes/e1/outcome.json").read_text()), episode)
+        self.assertEqual((saved / "interrupted-workspace/service.py").read_text(), "EPISODE = 1\n")
+        self.assertEqual(report(self.root / "evidence")["integrity_counts"], {"sealed": 1})
+
+    def test_private_build_archives_are_saved_but_never_granted_to_agents(self):
+        result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual((Path(result["path"]) / "build/engine-source.tar.gz").read_bytes(), b"private engine archive")
+        expected = {Path(self.binary_manifest["binaries"][role]) for role in ("session", "daemon")}
+        for grants in self.grants:
+            self.assertEqual(set(grants["readable_paths"]), expected)
+            self.assertNotIn(self.build, grants["readable_paths"])
+
+
+class RunHelperTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    def test_runtime_snapshot_excludes_authentication_and_rejects_aliases(self):
+        store = ArtifactStore(self.root / "evidence")
+        run = store.create_run({"model": "fixture"})
+        runtime = self.root / "runtime"
+        (runtime / "codex").mkdir(parents=True)
+        (runtime / "codex/auth.json").write_text('{"token":"private"}')
+        (runtime / "native.json").write_text('{"event":"done"}')
+        runner.snapshot(store, run, runtime, "runtime", runtime=True)
+        self.assertFalse((run / "runtime/codex/auth.json").exists())
+        self.assertTrue((run / "runtime/native.json").exists())
+        (runtime / "leaked.json").symlink_to(runtime / "codex/auth.json")
+        with self.assertRaises(ValueError):
+            runner.snapshot(store, run, runtime, "runtime-again", runtime=True)
+
+    def test_reset_preserves_durable_files_and_rejects_parent_alias(self):
+        workspace = self.root / "work"
+        history = workspace / ".moosedev/harness/conversations"
+        history.mkdir(parents=True)
+        (history / "old.json").write_text("old conversation")
+        (workspace / ".moosedev/kg.nq").write_text("durable graph")
+        (workspace / ".moosedev/http.addr").write_text("old address")
+        (workspace / "notes.md").write_text("durable notes")
+        runner.reset_episode(workspace)
+        self.assertFalse(history.exists())
+        self.assertEqual((workspace / ".moosedev/kg.nq").read_text(), "durable graph")
+        self.assertEqual((workspace / "notes.md").read_text(), "durable notes")
+        self.assertFalse((workspace / ".moosedev/http.addr").exists())
+        outside = self.root / "external-knowledge"
+        (outside / "harness").mkdir(parents=True)
+        (outside / "harness/do-not-delete").write_text("external")
+        alias_work = self.root / "aliased-work"
+        alias_work.mkdir()
+        (alias_work / ".moosedev").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            runner.reset_episode(alias_work)
+        self.assertEqual((outside / "harness/do-not-delete").read_text(), "external")
+
+    def test_loaded_models_require_exact_identity_and_context(self):
+        config = {"endpoint": "http://127.0.0.1:1234/v1", "helper_model": "helper",
+                  "context_tokens": 32768, "lms": "/explicit/lms"}
+        cell = {"backend": "harness", "condition": "harness", "model": "agent"}
+
+        def inventory(context=32768, identifier="agent"):
+            return {"models": [
+                {"key": "agent", "loaded_instances": [{"id": identifier, "config": {"context_length": context}}]},
+                {"key": "helper", "loaded_instances": [{"id": "helper", "config": {"context_length": 32768}}]},
+            ]}
+
+        with patch.object(runner, "inventory", return_value=inventory()), \
+                patch.object(runner.subprocess, "run") as launch:
+            runner.load_models(config, cell, lambda *args: None)
+            launch.assert_not_called()
+        for context in (8192, 262144):
+            with self.subTest(context=context), \
+                    patch.object(runner, "inventory", return_value=inventory(context=context)), \
+                    patch.object(runner.subprocess, "run") as launch:
+                with self.assertRaisesRegex(ValueError, "different context"):
+                    runner.load_models(config, cell, lambda *args: None)
+                launch.assert_not_called()
+        with patch.object(runner, "inventory", return_value=inventory(identifier="alias")), \
+                patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"", b"")) as launch:
+            with self.assertRaisesRegex(ValueError, "exact requested identity"):
+                runner.load_models(config, cell, lambda *args: None)
+            argv = launch.call_args.args[0]
+            self.assertEqual(argv[:5], ["/explicit/lms", "load", "agent", "--identifier", "agent"])
+
+    def test_runtime_context_override_is_exact_and_preserves_requested_load_context(self):
+        config = {"endpoint": "http://127.0.0.1:1234/v1", "helper_model": "helper",
+                  "context_tokens": 32768, "lms": "/explicit/lms",
+                  "local_models": [{"id": "agent", "runtime_context_tokens": 262144}]}
+        cell = {"backend": "harness", "condition": "harness", "model": "agent"}
+
+        def inventory(context):
+            instances = [] if context is None else [{"id": "agent", "config": {"context_length": context}}]
+            return {"models": [
+                {"key": "agent", "loaded_instances": instances},
+                {"key": "helper", "loaded_instances": [{"id": "helper", "config": {"context_length": 32768}}]},
+            ]}
+
+        for already_loaded in (False, True):
+            for observed in (32768, 131072, 262144, 524288):
+                with self.subTest(already_loaded=already_loaded, observed=observed):
+                    before = inventory(observed if already_loaded else None)
+                    after = inventory(observed)
+                    events = []
+                    with patch.object(runner, "inventory", side_effect=[before, after]), \
+                            patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"", b"")) as launch:
+                        if observed == 262144:
+                            runner.load_models(config, cell, lambda *event: events.append(event))
+                        else:
+                            with self.assertRaises(ValueError):
+                                runner.load_models(config, cell, lambda *event: events.append(event))
+                    if already_loaded:
+                        launch.assert_not_called()
+                    else:
+                        self.assertEqual(launch.call_args.args[0], ["/explicit/lms", "load", "agent",
+                            "--identifier", "agent", "--context-length", "32768", "--parallel", "1"])
+                    self.assertEqual(events[0], ("model_context_policy", {
+                        "client_context_tokens": 32768, "requested_load_context_tokens": 32768,
+                        "expected_runtime_context_tokens": {"agent": 262144, "helper": 32768}}))
+                    self.assertIn(("model_inventory_before", before), events)
+                    if not already_loaded or observed == 262144:
+                        self.assertIn(("model_inventory", after), events)
+
+    def test_malformed_runtime_context_override_fails_before_model_setup(self):
+        cell = {"backend": "opencode", "condition": "without", "model": "agent"}
+        for override in (True, False, None, "262144", 262144.0, -1, 0, 32767):
+            with self.subTest(override=override):
+                config = {"context_tokens": 32768,
+                          "local_models": [{"id": "agent", "runtime_context_tokens": override}]}
+                with patch.object(runner, "inventory") as inventory, \
+                        patch.object(runner.subprocess, "run") as launch:
+                    with self.assertRaisesRegex(ValueError, "runtime_context_tokens.*integer >= context_tokens"):
+                        runner.load_models(config, cell, lambda *args: None)
+                    inventory.assert_not_called()
+                    launch.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

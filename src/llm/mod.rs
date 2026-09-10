@@ -5,6 +5,13 @@
 //! is a *sensor*, not the controller; without provider config the server pins
 //! assistance to pure symbolic mode.
 
+mod completion;
+mod usage;
+pub use completion::CompletionError;
+use completion::{complete_content, CompletionStream, MAX_STREAM_BYTES};
+use usage::{RequestObservation, UsageBinding};
+pub use usage::{RequestStatus, RequestUsage, TokenUsage, UsageContext, UsageObserver};
+
 use async_trait::async_trait;
 use moose::traits::LlmClient;
 use moose::types::{EngineError, LlmParams};
@@ -113,6 +120,7 @@ impl LlmConfig {
 struct UsageCounters {
     prompt: AtomicU64,
     completion: AtomicU64,
+    reported: AtomicU8,
 }
 
 /// An OpenAI-compatible chat-completions client.
@@ -128,6 +136,12 @@ pub struct OpenAiCompatClient {
     usage: Arc<UsageCounters>,
     structured_output_mode: StructuredOutputMode,
     structured_output_capability: Arc<AtomicU8>,
+    reasoning_off: bool,
+    strict_content: bool,
+    max_output_tokens: Option<u32>,
+    request_allowance: Option<Arc<AtomicU8>>,
+    usage_binding: Option<UsageBinding>,
+    stream_usage_unsupported: Arc<AtomicU8>,
 }
 
 impl OpenAiCompatClient {
@@ -151,6 +165,67 @@ impl OpenAiCompatClient {
             usage: Arc::new(UsageCounters::default()),
             structured_output_mode,
             structured_output_capability: Arc::new(AtomicU8::new(0)),
+            reasoning_off: false,
+            strict_content: false,
+            max_output_tokens: None,
+            request_allowance: None,
+            usage_binding: None,
+            stream_usage_unsupported: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    /// Observe each physical HTTP request with caller-owned attribution. The
+    /// callback is preserved by clones, including `with_fresh_usage`.
+    pub fn with_usage_observer(mut self, observer: UsageObserver, context: UsageContext) -> Self {
+        self.usage_binding = Some(UsageBinding { observer, context });
+        self
+    }
+
+    /// Scope stricter completion semantics to a harness client, without changing
+    /// daemon sensors or provider-wide defaults. Reasoning is never executable.
+    pub fn for_harness(mut self, reasoning_off: bool) -> Self {
+        self.reasoning_off = reasoning_off;
+        self.strict_content = true;
+        self
+    }
+
+    /// Bound neutral connection probes independently of ordinary action output.
+    pub fn with_output_limit(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = Some(tokens);
+        self
+    }
+
+    pub fn without_output_limit(mut self) -> Self {
+        self.max_output_tokens = None;
+        self
+    }
+
+    pub fn with_request_allowance(mut self, allowance: Option<Arc<AtomicU8>>) -> Self {
+        self.request_allowance = allowance;
+        self
+    }
+
+    fn reserve_request(&self) -> Result<(), CompletionError> {
+        if let Some(allowance) = &self.request_allowance {
+            allowance
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .map_err(|_| {
+                    CompletionError::InvalidResponse(
+                        "Neutral response probes exhausted their four-request allowance".into(),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    fn apply_request_options(&self, body: &mut serde_json::Value) {
+        if self.reasoning_off {
+            body["reasoning_effort"] = json!("none");
+        }
+        if let Some(tokens) = self.max_output_tokens {
+            body["max_tokens"] = json!(tokens);
         }
     }
 
@@ -165,6 +240,12 @@ impl OpenAiCompatClient {
             usage: Arc::new(UsageCounters::default()),
             structured_output_mode: self.structured_output_mode,
             structured_output_capability: self.structured_output_capability.clone(),
+            reasoning_off: self.reasoning_off,
+            strict_content: self.strict_content,
+            max_output_tokens: self.max_output_tokens,
+            request_allowance: self.request_allowance.clone(),
+            usage_binding: self.usage_binding.clone(),
+            stream_usage_unsupported: self.stream_usage_unsupported.clone(),
         }
     }
 
@@ -179,11 +260,24 @@ impl OpenAiCompatClient {
         schema_name: &str,
         schema: serde_json::Value,
     ) -> Result<String, EngineError> {
+        self.chat_completion_json_schema_checked(model, prompt, params, schema_name, schema)
+            .await
+            .map_err(CompletionError::into_engine)
+    }
+
+    pub async fn chat_completion_json_schema_checked(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: Option<&LlmParams>,
+        schema_name: &str,
+        schema: serde_json::Value,
+    ) -> Result<String, CompletionError> {
         if self.structured_output_mode == StructuredOutputMode::Disabled
             || (self.structured_output_mode == StructuredOutputMode::Auto
                 && self.structured_output_capability.load(Ordering::Acquire) == 2)
         {
-            return self.chat_completion(model, prompt, params).await;
+            return self.request_completion(model, prompt, params, None).await;
         }
         let response_format = json!({
             "type": "json_schema",
@@ -202,17 +296,15 @@ impl OpenAiCompatClient {
                     .store(1, Ordering::Release);
                 Ok(text)
             }
-            Err(RequestError::StructuredOutputUnsupported) => {
+            Err(CompletionError::StructuredOutputUnsupported) => {
                 if self.structured_output_mode == StructuredOutputMode::Required {
-                    return Err(EngineError::InternalError(
-                        "LLM provider does not support required JSON-schema output".to_string(),
-                    ));
+                    return Err(CompletionError::StructuredOutputUnsupported);
                 }
                 self.structured_output_capability
                     .store(2, Ordering::Release);
-                self.chat_completion(model, prompt, params).await
+                self.request_completion(model, prompt, params, None).await
             }
-            Err(RequestError::Engine(error)) => Err(error),
+            Err(error) => Err(error),
         }
     }
 
@@ -227,6 +319,27 @@ impl OpenAiCompatClient {
         schema: serde_json::Value,
         on_delta: impl Fn(&str) + Send + Sync,
     ) -> Result<String, EngineError> {
+        self.chat_completion_json_schema_streaming_checked(
+            model,
+            prompt,
+            params,
+            schema_name,
+            schema,
+            on_delta,
+        )
+        .await
+        .map_err(CompletionError::into_engine)
+    }
+
+    pub async fn chat_completion_json_schema_streaming_checked(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: Option<&LlmParams>,
+        schema_name: &str,
+        schema: serde_json::Value,
+        on_delta: impl Fn(&str) + Send + Sync,
+    ) -> Result<String, CompletionError> {
         let use_schema = self.structured_output_mode != StructuredOutputMode::Disabled
             && !(self.structured_output_mode == StructuredOutputMode::Auto
                 && self.structured_output_capability.load(Ordering::Acquire) == 2);
@@ -247,16 +360,15 @@ impl OpenAiCompatClient {
                 }
                 Ok(text)
             }
-            Err(RequestError::StructuredOutputUnsupported)
+            Err(CompletionError::StructuredOutputUnsupported)
                 if self.structured_output_mode == StructuredOutputMode::Auto =>
             {
                 self.structured_output_capability
                     .store(2, Ordering::Release);
                 self.request_stream(model, prompt, params, None, &on_delta)
                     .await
-                    .map_err(RequestError::into_engine)
             }
-            Err(error) => Err(error.into_engine()),
+            Err(error) => Err(error),
         }
     }
 
@@ -267,96 +379,150 @@ impl OpenAiCompatClient {
         params: Option<&LlmParams>,
         response_format: Option<serde_json::Value>,
         on_delta: &(impl Fn(&str) + Send + Sync),
-    ) -> Result<String, RequestError> {
+    ) -> Result<String, CompletionError> {
+        match self
+            .request_stream_once(model, prompt, params, response_format.clone(), on_delta)
+            .await
+        {
+            Err(CompletionError::UsageReportingUnsupported) => {
+                self.stream_usage_unsupported.store(1, Ordering::Release);
+                self.request_stream_once(model, prompt, params, response_format, on_delta)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn request_stream_once(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: Option<&LlmParams>,
+        response_format: Option<serde_json::Value>,
+        on_delta: &(impl Fn(&str) + Send + Sync),
+    ) -> Result<String, CompletionError> {
         let mut body = json!({
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": params.and_then(|p| p.temperature).unwrap_or(0.0),
             "stream": true,
         });
+        if self.stream_usage_unsupported.load(Ordering::Acquire) == 0 {
+            body["stream_options"] = json!({"include_usage": true});
+        }
         if let Some(format) = response_format {
             body["response_format"] = format;
         }
+        self.reserve_request()?;
+        self.apply_request_options(&mut body);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut response = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| RequestError::message(format!("LLM request to {url}: {error}")))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            let lower = text.to_ascii_lowercase();
-            if body.get("response_format").is_some()
-                && matches!(status.as_u16(), 400 | 404 | 422)
-                && (lower.contains("response_format")
-                    || lower.contains("json_schema")
-                    || lower.contains("structured"))
-            {
-                return Err(RequestError::StructuredOutputUnsupported);
-            }
-            return Err(RequestError::message(format!(
-                "LLM endpoint returned HTTP {status}: {text}"
-            )));
-        }
-        let is_json = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"));
-        let mut stream = CompletionStream::default();
-        let mut json_body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| RequestError::message(format!("LLM stream read: {error}")))?
-        {
-            if is_json {
-                if json_body.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
-                    return Err(RequestError::message("LLM response exceeds size limit"));
+        let mut observation =
+            RequestObservation::start(self.usage_binding.as_ref(), &url, model, true);
+        let result = async {
+            let request = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
+            let mut response = observation
+                .attribute(request)
+                .send()
+                .await
+                .map_err(|error| {
+                    CompletionError::message(format!("LLM request to {url}: {error}"))
+                })?;
+            observation.http_status(response.status());
+            if !response.status().is_success() {
+                let status = response.status();
+                let received = response.text().await;
+                if received.is_ok() {
+                    observation.response_complete();
                 }
-                json_body.extend_from_slice(&chunk);
-            } else {
-                stream
-                    .feed(&chunk, on_delta)
-                    .map_err(RequestError::message)?;
-                if stream.done {
-                    break;
+                let text = received.unwrap_or_default();
+                if let Ok(value) = serde_json::from_str(&text) {
+                    observation.observe(&value);
                 }
-            }
-        }
-        if is_json {
-            // Some compatible servers ignore stream=true. Their complete JSON
-            // response remains usable; it simply produces one observation.
-            let value: serde_json::Value = serde_json::from_slice(&json_body)
-                .map_err(|error| RequestError::message(format!("LLM response decode: {error}")))?;
-            if let Some(error) = value.get("error") {
-                return Err(RequestError::message(format!(
-                    "LLM response error: {error}"
+                let lower = text.to_ascii_lowercase();
+                if body.get("stream_options").is_some()
+                    && matches!(status.as_u16(), 400 | 422)
+                    && (lower.contains("stream_options") || lower.contains("include_usage"))
+                    && [
+                        "unsupported",
+                        "not supported",
+                        "unrecognized",
+                        "unknown",
+                        "not permitted",
+                        "not allowed",
+                        "unexpected",
+                        "extra inputs",
+                    ]
+                    .iter()
+                    .any(|reason| lower.contains(reason))
+                {
+                    return Err(CompletionError::UsageReportingUnsupported);
+                }
+                if body.get("response_format").is_some()
+                    && matches!(status.as_u16(), 400 | 404 | 422)
+                    && (lower.contains("response_format")
+                        || lower.contains("json_schema")
+                        || lower.contains("structured"))
+                {
+                    return Err(CompletionError::StructuredOutputUnsupported);
+                }
+                return Err(CompletionError::message(format!(
+                    "LLM endpoint returned HTTP {status}: {text}"
                 )));
             }
-            if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
-                if reason != "stop" {
-                    return Err(RequestError::message(format!(
-                        "LLM completion ended with {reason}"
-                    )));
+            let is_json = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/json"));
+            let mut stream = CompletionStream::default();
+            let mut json_body = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|error| CompletionError::message(format!("LLM stream read: {error}")))?
+            {
+                if is_json {
+                    if json_body.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
+                        return Err(CompletionError::message("LLM response exceeds size limit"));
+                    }
+                    json_body.extend_from_slice(&chunk);
+                } else {
+                    let fed = stream.feed(&chunk, on_delta);
+                    if let Some(usage) = &stream.usage {
+                        observation.observe(usage);
+                    }
+                    if stream.done {
+                        observation.response_complete();
+                    }
+                    fed?;
+                    if stream.done {
+                        break;
+                    }
                 }
             }
-            let text = value["choices"][0]["message"]["content"]
-                .as_str()
-                .ok_or_else(|| RequestError::message("LLM response missing message content"))?;
-            self.record_usage(&value);
-            on_delta(text);
-            return Ok(text.to_owned());
+            if is_json {
+                observation.response_complete();
+                // Some compatible servers ignore stream=true. Their complete JSON
+                // response remains usable; it simply produces one observation.
+                let value: serde_json::Value =
+                    serde_json::from_slice(&json_body).map_err(|error| {
+                        CompletionError::message(format!("LLM response decode: {error}"))
+                    })?;
+                observation.observe(&value);
+                self.record_usage(&value);
+                let text = complete_content(&value, self.strict_content)?;
+                on_delta(text);
+                return Ok(text.to_owned());
+            }
+            if let Some(usage) = &stream.usage {
+                self.record_usage(usage);
+            }
+            stream.finish()?;
+            Ok(stream.content)
         }
-        stream.finish().map_err(RequestError::message)?;
-        if let Some(usage) = &stream.usage {
-            self.record_usage(usage);
-        }
-        Ok(stream.content)
+        .await;
+        observation.finish(result.is_ok());
+        result
     }
 
     /// `(prompt_tokens, completion_tokens)` accumulated since construction/fork,
@@ -368,9 +534,20 @@ impl OpenAiCompatClient {
         )
     }
 
+    /// Unlike legacy sensor counters, a probe receipt must distinguish absent
+    /// usage from a measured zero.
+    pub fn take_usage_observation(&self) -> Option<(u64, u64)> {
+        let reported = self.usage.reported.swap(0, Ordering::AcqRel) != 0;
+        let usage = self.take_usage();
+        reported.then_some(usage)
+    }
+
     /// Accumulate `usage.prompt_tokens` / `usage.completion_tokens` from a
     /// chat-completions response body; absent fields count as 0.
     fn record_usage(&self, body: &serde_json::Value) {
+        if body["usage"]["prompt_tokens"].is_u64() && body["usage"]["completion_tokens"].is_u64() {
+            self.usage.reported.store(1, Ordering::Release);
+        }
         let prompt = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
         let completion = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);
         if prompt > 0 {
@@ -389,7 +566,7 @@ impl OpenAiCompatClient {
         prompt: &str,
         params: Option<&LlmParams>,
         response_format: Option<serde_json::Value>,
-    ) -> Result<String, RequestError> {
+    ) -> Result<String, CompletionError> {
         let temperature = params.and_then(|p| p.temperature).unwrap_or(0.0);
         let mut body = json!({
             "model": model,
@@ -400,171 +577,69 @@ impl OpenAiCompatClient {
         if let Some(response_format) = response_format {
             body["response_format"] = response_format;
         }
+        self.reserve_request()?;
+        self.apply_request_options(&mut body);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| {
-                RequestError::Engine(EngineError::InternalError(format!(
-                    "LLM request to {url}: {error}"
-                )))
-            })?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let lower = text.to_ascii_lowercase();
-            if body.get("response_format").is_some()
-                && matches!(status.as_u16(), 400 | 404 | 422)
-                && (lower.contains("response_format")
-                    || lower.contains("json_schema")
-                    || lower.contains("structured"))
-            {
-                return Err(RequestError::StructuredOutputUnsupported);
-            }
-            return Err(RequestError::Engine(EngineError::InternalError(format!(
-                "LLM endpoint returned HTTP {status}: {text}"
-            ))));
-        }
-        let value: serde_json::Value = resp.json().await.map_err(|error| {
-            RequestError::Engine(EngineError::InternalError(format!(
-                "LLM response decode: {error}"
-            )))
-        })?;
-        self.record_usage(&value);
-        value["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| {
-                RequestError::Engine(EngineError::InternalError(
-                    "LLM response missing message content".to_string(),
-                ))
-            })
-    }
-}
-
-enum RequestError {
-    StructuredOutputUnsupported,
-    Engine(EngineError),
-}
-
-impl RequestError {
-    fn message(message: impl Into<String>) -> Self {
-        Self::Engine(EngineError::InternalError(message.into()))
-    }
-
-    fn into_engine(self) -> EngineError {
-        match self {
-            Self::Engine(error) => error,
-            Self::StructuredOutputUnsupported => EngineError::InternalError(
-                "LLM provider does not support required JSON-schema output".to_owned(),
-            ),
-        }
-    }
-}
-
-const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
-
-/// Parse SSE on byte boundaries, including CRLF and UTF-8 split across chunks.
-#[derive(Default)]
-struct CompletionStream {
-    pending: Vec<u8>,
-    data: String,
-    content: String,
-    received: usize,
-    stopped: bool,
-    done: bool,
-    usage: Option<serde_json::Value>,
-}
-
-impl CompletionStream {
-    fn feed(&mut self, bytes: &[u8], on_delta: &impl Fn(&str)) -> Result<(), String> {
-        self.received = self.received.saturating_add(bytes.len());
-        if self.received > MAX_STREAM_BYTES {
-            return Err("LLM stream exceeds size limit".into());
-        }
-        self.pending.extend_from_slice(bytes);
-        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let line = self.pending.drain(..=end).collect::<Vec<_>>();
-            let line =
-                std::str::from_utf8(&line).map_err(|_| "LLM stream contains invalid UTF-8")?;
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                if !self.data.is_empty() {
-                    self.event(on_delta)?;
+        let mut observation =
+            RequestObservation::start(self.usage_binding.as_ref(), &url, model, false);
+        let result =
+            async {
+                let request = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
+                let mut resp = observation
+                    .attribute(request)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        CompletionError::Provider(EngineError::InternalError(format!(
+                            "LLM request to {url}: {error}"
+                        )))
+                    })?;
+                observation.http_status(resp.status());
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let received = resp.text().await;
+                    if received.is_ok() {
+                        observation.response_complete();
+                    }
+                    let text = received.unwrap_or_default();
+                    if let Ok(value) = serde_json::from_str(&text) {
+                        observation.observe(&value);
+                    }
+                    let lower = text.to_ascii_lowercase();
+                    if body.get("response_format").is_some()
+                        && matches!(status.as_u16(), 400 | 404 | 422)
+                        && (lower.contains("response_format")
+                            || lower.contains("json_schema")
+                            || lower.contains("structured"))
+                    {
+                        return Err(CompletionError::StructuredOutputUnsupported);
+                    }
+                    return Err(CompletionError::Provider(EngineError::InternalError(
+                        format!("LLM endpoint returned HTTP {status}: {text}"),
+                    )));
                 }
-            } else if let Some(data) = line.strip_prefix("data:") {
-                if !self.data.is_empty() {
-                    self.data.push('\n');
+                let mut bytes = Vec::new();
+                while let Some(chunk) = resp.chunk().await.map_err(|error| {
+                    CompletionError::message(format!("LLM response read: {error}"))
+                })? {
+                    if bytes.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
+                        return Err(CompletionError::InvalidResponse(
+                            "LLM response exceeds size limit".into(),
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk);
                 }
-                self.data.push_str(data.strip_prefix(' ').unwrap_or(data));
+                observation.response_complete();
+                let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+                    CompletionError::InvalidResponse(format!("LLM response decode: {error}"))
+                })?;
+                observation.observe(&value);
+                self.record_usage(&value);
+                complete_content(&value, self.strict_content).map(str::to_owned)
             }
-            if self.done {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn event(&mut self, on_delta: &impl Fn(&str)) -> Result<(), String> {
-        let data = std::mem::take(&mut self.data);
-        if data == "[DONE]" {
-            if !self.stopped {
-                return Err("LLM stream ended without successful finish_reason".into());
-            }
-            self.done = true;
-            return Ok(());
-        }
-        let value: serde_json::Value = serde_json::from_str(&data)
-            .map_err(|error| format!("LLM stream event decode: {error}"))?;
-        if let Some(error) = value.get("error") {
-            return Err(format!("LLM stream error: {error}"));
-        }
-        if value.get("usage").is_some_and(|usage| !usage.is_null()) {
-            self.usage = Some(value.clone());
-        }
-        let choices = value["choices"]
-            .as_array()
-            .ok_or("LLM stream event missing choices")?;
-        for choice in choices {
-            if choice["index"].as_u64().unwrap_or(0) != 0 {
-                continue;
-            }
-            if choice["delta"].get("tool_calls").is_some()
-                || choice["delta"]["refusal"].as_str().is_some()
-            {
-                return Err("LLM stream returned tools or refusal instead of content".into());
-            }
-            if let Some(content) = choice["delta"]["content"].as_str() {
-                if self.stopped && !content.is_empty() {
-                    return Err("LLM stream content after finish_reason".into());
-                }
-                self.content.push_str(content);
-                if !content.is_empty() {
-                    on_delta(content);
-                }
-            }
-            if let Some(reason) = choice["finish_reason"].as_str() {
-                if reason != "stop" {
-                    return Err(format!("LLM stream ended with {reason}"));
-                }
-                self.stopped = true;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(&self) -> Result<(), String> {
-        if !self.done || !self.stopped {
-            return Err("LLM stream interrupted before completion".into());
-        }
-        if self.content.is_empty() {
-            return Err("LLM stream missing message content".into());
-        }
-        Ok(())
+            .await;
+        observation.finish(result.is_ok());
+        result
     }
 }
 
@@ -578,12 +653,7 @@ impl LlmClient for OpenAiCompatClient {
     ) -> Result<String, EngineError> {
         self.request_completion(model, prompt, params, None)
             .await
-            .map_err(|error| match error {
-                RequestError::StructuredOutputUnsupported => EngineError::InternalError(
-                    "LLM provider rejected structured output".to_string(),
-                ),
-                RequestError::Engine(error) => error,
-            })
+            .map_err(CompletionError::into_engine)
     }
 }
 
@@ -811,5 +881,106 @@ mod tests {
         assert!(requests[1].get("response_format").is_none());
         assert!(requests[2].get("response_format").is_none());
         assert_eq!(client.take_usage(), (4, 6));
+    }
+    #[test]
+    fn checked_content_never_uses_reasoning_or_incomplete_results() {
+        let make = |message: serde_json::Value, finish: serde_json::Value| json!({"choices":[{"message":message,"finish_reason":finish}]});
+        assert!(matches!(
+            complete_content(
+                &make(
+                    json!({"content":"","reasoning_content":"{\"action\":\"finish\"}"}),
+                    json!("stop")
+                ),
+                true
+            ),
+            Err(CompletionError::ReasoningOnly)
+        ));
+        assert!(matches!(
+            complete_content(&make(json!({"content":"{}"}), json!("length")), true),
+            Err(CompletionError::Incomplete(_))
+        ));
+        assert!(matches!(
+            complete_content(
+                &make(json!({"content":"{}"}), serde_json::Value::Null),
+                true
+            ),
+            Err(CompletionError::Incomplete(_))
+        ));
+        for message in [
+            json!({"content":"{}","tool_calls":[{}]}),
+            json!({"content":"{}","refusal":"no"}),
+        ] {
+            assert!(matches!(
+                complete_content(&make(message, json!("stop")), true),
+                Err(CompletionError::InvalidResponse(_))
+            ));
+        }
+        let value = make(
+            json!({"content":"{}","reasoning_content":"discard me","tool_calls":[]}),
+            json!("stop"),
+        );
+        assert_eq!(complete_content(&value, true).unwrap(), "{}");
+        assert!(matches!(
+            complete_content(&make(json!({"content":"  "}), json!("stop")), true),
+            Err(CompletionError::MissingContent)
+        ));
+    }
+
+    #[test]
+    fn reasoning_deltas_are_observed_only_as_presence() {
+        let reasoning = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"reasoning_content":"{\"action\":\"finish\"}"}}]})
+        );
+        let mut stream = CompletionStream::default();
+        let mut observed = String::new();
+        stream
+            .feed(reasoning.as_bytes(), &|_| {
+                panic!("reasoning must not be emitted")
+            })
+            .unwrap();
+        stream.feed(sse("", "stop").as_bytes(), &|_| {}).unwrap();
+        assert!(matches!(
+            stream.finish().unwrap_err(),
+            CompletionError::ReasoningOnly
+        ));
+        let mut stream = CompletionStream::default();
+        let deltas = Mutex::new(String::new());
+        stream
+            .feed(reasoning.as_bytes(), &|text| {
+                deltas.lock().unwrap().push_str(text)
+            })
+            .unwrap();
+        stream
+            .feed(sse("{}", "stop").as_bytes(), &|text| {
+                deltas.lock().unwrap().push_str(text)
+            })
+            .unwrap();
+        stream.finish().unwrap();
+        observed.push_str(&deltas.into_inner().unwrap());
+        assert_eq!(observed, "{}");
+    }
+
+    #[test]
+    fn harness_request_options_do_not_change_daemon_clients() {
+        let base = client();
+        let mut body = json!({});
+        base.apply_request_options(&mut body);
+        assert_eq!(body, json!({}));
+        let harness = base
+            .clone()
+            .for_harness(true)
+            .with_output_limit(128)
+            .with_fresh_usage();
+        harness.apply_request_options(&mut body);
+        assert_eq!(body, json!({"reasoning_effort":"none","max_tokens":128}));
+        let mut later = json!({});
+        harness
+            .without_output_limit()
+            .apply_request_options(&mut later);
+        assert_eq!(later, json!({"reasoning_effort":"none"}));
+        let mut unchanged = json!({});
+        base.apply_request_options(&mut unchanged);
+        assert_eq!(unchanged, json!({}));
     }
 }

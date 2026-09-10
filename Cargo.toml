@@ -122,6 +122,12 @@ name = "migrate_namespace"
 path = "examples/migrate_namespace.rs"
 test = true
 
+[[example]]
+name = "harness_study_session"
+path = "examples/harness_study_session.rs"
+required-features = ["harness"]
+test = true
+
 [patch.crates-io]
 # Mirror of moose/Cargo.toml: pin every oxigraph-workspace crate to the Trivyn fork.
 # Required because oxigraph types (Store, NamedNode, …) cross MOOSE's public API and

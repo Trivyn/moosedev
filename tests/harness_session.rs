@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, Notify, Semaphore};
 struct StateData {
     root: PathBuf,
     calls: AtomicUsize,
+    probe_calls: AtomicUsize,
     started: Notify,
     release: Semaphore,
     prompts: Mutex<Vec<String>>,
@@ -48,6 +49,7 @@ async fn context(
     Json(request): Json<ContextRequest>,
 ) -> Json<ContextResponse> {
     Json(ContextResponse {
+        capture_targets: Some(Default::default()),
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),
         context: "Constraint: reading must precede work.".into(),
@@ -74,7 +76,10 @@ async fn model(State(state): State<Shared>, Json(request): Json<Value>) -> Json<
     let schema = request["response_format"]["json_schema"]["name"]
         .as_str()
         .unwrap_or("");
-    let answer = if schema == "harness_capture" {
+    let answer = if schema == "harness_response_probe" {
+        state.probe_calls.fetch_add(1, Ordering::SeqCst);
+        json!({"status":"ok"})
+    } else if schema == "harness_capture" {
         json!({"proposals":[],"reason":"No durable project claim was established by this explanation."})
     } else {
         let count = state.calls.fetch_add(1, Ordering::SeqCst);
@@ -85,7 +90,9 @@ async fn model(State(state): State<Shared>, Json(request): Json<Value>) -> Json<
         }
         state.replies.lock().unwrap().pop_front().unwrap_or_else(||json!({"message":"I will explain the project.","action":{"action":"reply","message":format!("Actual answer {}.",count+1)}}))
     };
-    Json(json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()}}]}))
+    Json(
+        json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()},"finish_reason":"stop"}]}),
+    )
 }
 struct Fixture {
     root: PathBuf,
@@ -102,6 +109,7 @@ impl Fixture {
         let state = Arc::new(StateData {
             root: root.clone(),
             calls: AtomicUsize::new(0),
+            probe_calls: AtomicUsize::new(0),
             started: Notify::new(),
             release: Semaphore::new(0),
             prompts: Mutex::new(vec![]),
@@ -587,6 +595,70 @@ async fn interruption_preserves_failed_cleanup_and_escape_retries_it_after_recon
     })
     .await;
     assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 2);
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_action_is_repaired_without_another_human_message_or_reprobe() {
+    let fixture = Fixture::new().await;
+    fixture.state.release.add_permits(1);
+    *fixture.state.replies.lock().unwrap() = VecDeque::from([
+        json!({"message":"I will explain the project.","action":{"action":"invented_action"}}),
+        json!({"message":"I corrected the action.","action":{"action":"reply","message":"Recovered answer."}}),
+    ]);
+    let (input, mut updates, handle) = fixture.controller(Conversation::new(fixture.root.clone()));
+    until(&mut updates, |state| !state.busy).await;
+    input
+        .send(Command::Input("Explain the project.".into()))
+        .unwrap();
+    let finished =
+        until(&mut updates, |state| {
+            !state.busy
+                && state.conversation.messages.iter().any(|message| {
+                    message.role == "assistant" && message.text == "Recovered answer."
+                })
+        })
+        .await;
+    let task = finished.task.unwrap();
+    assert!(task.last_error.is_none());
+    assert!(task.recovery.is_none());
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.state.probe_calls.load(Ordering::SeqCst),
+        2,
+        "validated provider should remain cached during correction"
+    );
+    let actions: Vec<_> = task
+        .model_requests
+        .iter()
+        .filter(|request| request["purpose"] == "harness_action")
+        .collect();
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0]["decision_id"], actions[1]["decision_id"]);
+    assert_eq!(actions[0]["attempt"], 1);
+    assert_eq!(actions[1]["attempt"], 2);
+    assert!(actions[0]["response"]
+        .as_str()
+        .unwrap()
+        .contains("invented_action"));
+    assert!(actions[1]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("Your last candidate was rejected"));
+    assert!(task
+        .events
+        .iter()
+        .any(|event| event.message.contains("Correcting action, attempt 2 of 3")));
+    assert_eq!(
+        finished
+            .conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        1
+    );
     input.send(Command::Quit).unwrap();
     handle.await.unwrap();
 }

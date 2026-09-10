@@ -3,6 +3,7 @@ use super::{
     executor::{self, Workspace},
     progress::{Progress, ProgressSender},
     protocol::*,
+    response::{ResponseKey, ResponsePolicy, ResponseReceipt},
 };
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::policy::{GateDisposition, PolicyDecision};
@@ -17,9 +18,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+mod actions;
 mod capture;
 mod model;
+mod recovery;
+mod usage;
 use model::{action_schema, conversational_schema, Action, ModelOutput, StreamedMessage};
+pub use recovery::{RecoveryStatus, RepairState};
+pub use usage::UsageLedger;
 
 const MAX_STEPS: usize = 256;
 const MAX_FILES: usize = 100;
@@ -95,6 +101,13 @@ pub struct Task {
     #[serde(default)]
     pub edits: Vec<PendingEdit>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub recovery: Option<RepairState>,
+    #[serde(default)]
+    pub response_receipt: Option<ResponseReceipt>,
+    /// Physical-request accounting; separate from project capture evidence.
+    #[serde(default)]
+    pub token_usage: UsageLedger,
     pub last_response: String,
     pub knowledge_revision: String,
     pub read_files: Vec<String>,
@@ -157,7 +170,8 @@ pub struct Runner {
     _lock: File,
     context: Option<ContextResponse>,
     config: Option<LlmConfig>,
-    model_client: Option<OpenAiCompatClient>,
+    model_client: Option<(ResponseKey, OpenAiCompatClient)>,
+    response_policy: Option<ResponsePolicy>,
     progress: Option<ProgressSender>,
     streaming: Option<Arc<Mutex<StreamedMessage>>>,
     last_saved: Mutex<Option<[u8; 32]>>,
@@ -278,6 +292,9 @@ impl Runner {
             pending_edit: None,
             edits: vec![],
             last_error: None,
+            recovery: None,
+            response_receipt: None,
+            token_usage: UsageLedger::new(&journal),
             last_response: String::new(),
             knowledge_revision: String::new(),
             read_files: vec![],
@@ -322,6 +339,7 @@ impl Runner {
             context: None,
             config: None,
             model_client: None,
+            response_policy: None,
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
@@ -346,6 +364,7 @@ impl Runner {
             task.schema == 1 && task.id == id && task.root == workspace.root(),
             "task schema or project identity mismatch"
         );
+        task.token_usage.attach(&journal);
         Ok(Self {
             task,
             workspace,
@@ -356,6 +375,7 @@ impl Runner {
             context: None,
             config: None,
             model_client: None,
+            response_policy: None,
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
@@ -363,13 +383,12 @@ impl Runner {
     }
 
     pub fn configure(&mut self, config: LlmConfig, progress: Option<ProgressSender>) {
-        self.model_client = Some(OpenAiCompatClient::new_with_structured_output(
-            config.base_url.clone(),
-            config.api_key.clone(),
-            config.structured_output,
-        ));
         self.config = Some(config);
         self.progress = progress;
+    }
+
+    pub fn set_response_policy(&mut self, policy: ResponsePolicy) {
+        self.response_policy = Some(policy);
     }
 
     pub fn daemon_url(&self) -> &str {
@@ -545,7 +564,12 @@ impl Runner {
 
     pub async fn advance(&mut self) -> Result<()> {
         self.task.last_error = None;
-        let result = self.advance_inner().await;
+        let result = loop {
+            match self.advance_inner().await {
+                Err(error) if self.repair_candidate(&error)? => continue,
+                outcome => break outcome,
+            }
+        };
         if let Err(error) = &result {
             self.task.last_error = Some(format!("{error:#}"));
             self.event(format!("Step rejected or interrupted: {error:#}"));
@@ -608,6 +632,11 @@ impl Runner {
             )
             .await?;
         let (message, action) = output.parts();
+        self.validate_permission(&action)?;
+        let action = self
+            .validate_action(action)
+            .context(model::InvalidModelOutput)?;
+        self.candidate_accepted();
         if !message.trim().is_empty() {
             self.task.last_response = message.clone();
             self.event(format!("Assistant: {message}"));
@@ -809,6 +838,9 @@ impl Runner {
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
                 self.task.intent = None;
+            }
+            Action::Replace { .. } | Action::Write { .. } => {
+                unreachable!("edits materialized before dispatch")
             }
             Action::Question { question } => {
                 self.event(format!("Assistant: {question}"));
@@ -1078,6 +1110,7 @@ impl Runner {
             self.task.delivered_messages.push(id.to_owned());
         }
         self.task.guidance = text.clone();
+        self.task.recovery = None;
         self.task.last_response = text;
         self.task.turn_finished = false;
         self.task.steps = 0;
@@ -1188,7 +1221,6 @@ impl Runner {
         self.task.read_files.clear();
         self.task.source.clear();
         self.task.steps = 0;
-        self.task.capture_repairs = 0;
         self.event("Human returned the task to Plan.");
         self.persist()
     }
@@ -1298,6 +1330,8 @@ impl Runner {
             "no question awaiting an answer"
         );
         self.event(format!("Human response: {text}"));
+        self.task.guidance = text.clone();
+        self.task.recovery = None;
         self.task.last_response = text;
         self.task.steps = 0;
         self.task.capture_repairs = 0;
@@ -1336,6 +1370,7 @@ mod recovery_tests {
     async fn command_observation_keeps_durable_intent_until_caller_commits_outcome() {
         async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
             Json(ContextResponse {
+                capture_targets: Some(Default::default()),
                 project_root: root.to_string_lossy().into_owned(),
                 revision: "fixture".into(),
                 context: String::new(),

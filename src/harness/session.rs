@@ -354,6 +354,7 @@ impl Controller {
         if let Some(runner) = &mut self.runner {
             runner.enable_interactive()?;
             runner.configure(self.provider.config.clone(), Some(self.progress.clone()));
+            runner.set_response_policy(self.provider.response_policy);
             runner.set_conversation_context(self.conversation.context());
         }
         Ok(())

@@ -277,10 +277,13 @@ fn checked_executable(path: &Path, current: &Path) -> Result<PathBuf> {
 #[derive(Clone, Debug)]
 pub struct ProviderSettings {
     pub config: LlmConfig,
+    pub response_policy: super::response::ResponsePolicy,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct RememberedProvider {
+    #[serde(default)]
+    response_policy: super::response::ResponsePolicy,
     base_url: String,
     model: String,
 }
@@ -291,6 +294,7 @@ impl ProviderSettings {
     /// selection; this does not silently execute with a different provider.
     pub fn fallback() -> Self {
         Self {
+            response_policy: super::response::ResponsePolicy::Auto,
             config: LlmConfig {
                 base_url: "http://127.0.0.1:1234/v1".into(),
                 api_key: std::env::var("MOOSEDEV_LLM_API_KEY")
@@ -327,7 +331,12 @@ impl ProviderSettings {
         }
         validate_provider_url(&config.base_url)?;
         config.configured = !config.model.is_empty();
-        Ok(Self { config })
+        let response_policy =
+            super::response::ResponsePolicy::from_env()?.unwrap_or(remembered.response_policy);
+        Ok(Self {
+            config,
+            response_policy,
+        })
     }
 
     pub async fn models(&self) -> Result<Vec<String>> {
@@ -387,6 +396,7 @@ impl ProviderSettings {
             .open(&temporary)?;
         use std::io::Write;
         file.write_all(&serde_json::to_vec_pretty(&RememberedProvider {
+            response_policy: self.response_policy,
             base_url: self.config.base_url.clone(),
             model: self.config.model.clone(),
         })?)?;
@@ -425,6 +435,7 @@ mod tests {
             Json(json!({"data":[{"id":"qwen/local-model"},{"id":"a"},{"id":"a"},{"id":""},{"name":"missing-id"}]}))
         }))).await;
         let mut settings = ProviderSettings {
+            response_policy: super::super::response::ResponsePolicy::Auto,
             config: LlmConfig::from_env().unwrap(),
         };
         settings
@@ -564,9 +575,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("md-provider-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let mut settings = ProviderSettings {
+            response_policy: super::super::response::ResponsePolicy::Auto,
             config: LlmConfig::from_env().unwrap(),
         };
         settings.config.api_key = "do-not-store-this-key".into();
+        settings.response_policy = super::super::response::ResponsePolicy::ReasoningOff;
         settings
             .select(Some("http://127.0.0.1:1234/v1"), "exact-id")
             .unwrap();
@@ -574,6 +587,18 @@ mod tests {
         let saved = std::fs::read_to_string(root.join(".moosedev/harness/provider.json")).unwrap();
         assert!(!saved.contains("do-not-store-this-key"));
         assert!(!saved.contains("api_key"));
+        let remembered: RememberedProvider = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            remembered.response_policy,
+            super::super::response::ResponsePolicy::ReasoningOff
+        );
+        let legacy: RememberedProvider =
+            serde_json::from_value(json!({"base_url":"http://127.0.0.1:1234/v1","model":"old"}))
+                .unwrap();
+        assert_eq!(
+            legacy.response_policy,
+            super::super::response::ResponsePolicy::Auto
+        );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved).unwrap()["model"],
             "exact-id"

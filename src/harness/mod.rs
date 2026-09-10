@@ -6,6 +6,8 @@ pub mod executor;
 pub mod progress;
 pub mod protocol;
 #[cfg(feature = "harness")]
+pub mod response;
+#[cfg(feature = "harness")]
 pub mod runner;
 #[cfg(feature = "harness")]
 pub mod session;
