@@ -33,10 +33,7 @@ const REVIEWER: &str = "moosedev-harness-human";
 #[derive(Serialize, Deserialize)]
 struct Operation {
     request: CaptureRequest,
-    #[serde(default)]
-    owner_id: Option<String>,
-    #[serde(default)]
-    reconciliation_operation_ids: Vec<String>,
+    owner_id: String,
     timestamp: String,
     entries: Vec<Entry>,
     review: Option<bool>,
@@ -85,43 +82,6 @@ pub fn context_snapshot(
     state.try_ensure_enriched()?;
     let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
     let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
-    let mut targets = CaptureTargets {
-        components: graph::load_components(state)?
-            .into_iter()
-            .take(100)
-            .filter_map(|component| {
-                component.iri.map(|iri| CaptureTarget {
-                    iri,
-                    label: component.name,
-                    kind: "SystemComponent".into(),
-                })
-            })
-            .collect(),
-        records: Vec::new(),
-    };
-    for record in inventory.iter().chain(&records) {
-        if matches!(
-            record.kind.as_str(),
-            "ArchitecturalDecision"
-                | "Requirement"
-                | "Constraint"
-                | "Lesson"
-                | "Pattern"
-                | "AntiPattern"
-        ) && current_status(state, &record.iri)
-            .is_some_and(|status| graph::in_working_set(&status))
-            && !targets
-                .records
-                .iter()
-                .any(|target| target.iri == record.iri)
-        {
-            targets.records.push(CaptureTarget {
-                iri: record.iri.clone(),
-                label: record.label.clone(),
-                kind: record.kind.clone(),
-            });
-        }
-    }
     let mut context = String::from("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; retrieve more context when scope expands. Attached file dossiers remain complete.\n\nCurrent knowledge inventory:\n");
     for record in inventory {
         context.push_str(&format!(
@@ -211,10 +171,32 @@ pub fn context_snapshot(
         revision,
         context,
         files,
-        capture_targets: Some(targets),
-        capture_contracts: Some(vec![1, 2]),
-        intent_contracts: Some(vec![1, 2]),
+        capture_contracts: vec![2],
+        intent_contracts: vec![2],
     })
+}
+
+/// The current knowledge records offered to the link path: the bounded
+/// inventory plus the topic recall for change obligations.
+pub(super) fn current_record_targets(state: &AppState) -> anyhow::Result<Vec<CaptureTarget>> {
+    let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
+    let topical =
+        graph::relevant_context_snapshot(state, Some("change purpose obligations"), 12, false)?;
+    let mut targets: Vec<CaptureTarget> = Vec::new();
+    for record in inventory.iter().chain(&topical) {
+        if is_record_kind(&record.kind)
+            && current_status(state, &record.iri)
+                .is_some_and(|status| graph::in_working_set(&status))
+            && !targets.iter().any(|target| target.iri == record.iri)
+        {
+            targets.push(CaptureTarget {
+                iri: record.iri.clone(),
+                label: record.label.clone(),
+                kind: record.kind.clone(),
+            });
+        }
+    }
+    Ok(targets)
 }
 
 /// Ignore unratified subjects AND inferred incoming links to those subjects.
@@ -258,19 +240,6 @@ fn accepted_revision_masked(state: &AppState, masked: &HashSet<String>) -> anyho
     ))
 }
 
-pub async fn capture(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<CaptureRequest>,
-) -> Result<Json<CaptureResponse>, ApiError> {
-    match capture_operation(&state, request) {
-        Ok(response) => Ok(Json(response)),
-        Err(error) if error.is::<CaptureInputError>() => {
-            Err(ApiError::bad_request(error.to_string()))
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
 pub async fn capture_v2(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CaptureV2Request>,
@@ -295,21 +264,17 @@ impl std::fmt::Display for CaptureInputError {
 }
 impl std::error::Error for CaptureInputError {}
 
+/// Capture that must succeed outright: a title collision is an error here.
 pub fn capture_operation(
-    state: &AppState,
-    request: CaptureRequest,
-) -> anyhow::Result<CaptureResponse> {
-    capture_operation_inner(state, request, None, Vec::new())
-}
-
-pub fn capture_operation_owned(
     state: &AppState,
     request: CaptureV2Request,
 ) -> anyhow::Result<CaptureResponse> {
     match capture_v2_operation(state, request)? {
         CaptureV2Response::Captured { capture } => Ok(capture),
-        CaptureV2Response::ReconciliationRequired { .. } => {
-            anyhow::bail!("capture requires semantic reconciliation")
+        CaptureV2Response::Collision { collisions } => {
+            anyhow::bail!(
+                "capture title collides with current or pending knowledge: {collisions:?}"
+            )
         }
     }
 }
@@ -334,9 +299,8 @@ pub fn capture_v2_operation(
             "operation_id was already used for a different capture"
         );
         anyhow::ensure!(
-            stored.owner_id.as_deref() == Some(request.owner_id.as_str())
-                && stored.reconciliation_operation_ids == request.reconciliation_operation_ids,
-            "operation_id was retried with different ownership or reconciliation receipts"
+            stored.owner_id == request.owner_id,
+            "operation_id was retried with different ownership"
         );
         finish_capture(state, &path, &mut stored)?;
         durable_flush(state)?;
@@ -351,10 +315,9 @@ pub fn capture_v2_operation(
         });
     }
 
-    // Bind semantic receipts, collision discovery, and operation preparation to
-    // one graph snapshot. Persist the resulting intent before any graph write.
+    // Bind collision discovery and operation preparation to one graph
+    // snapshot. Persist the resulting intent before any graph write.
     let proposal_guard = state.lock_proposal_writes()?;
-    reconciliation::authorize_capture(state, &request)?;
     let mut collisions = Vec::new();
     for (proposal_index, proposal) in request.proposals.iter().enumerate() {
         let candidate_iris = graph::resolve_record_exact_all(state, &proposal.title)
@@ -375,15 +338,10 @@ pub fn capture_v2_operation(
         }
     }
     if !collisions.is_empty() {
-        return Ok(CaptureV2Response::ReconciliationRequired { collisions });
+        return Ok(CaptureV2Response::Collision { collisions });
     }
-    let mut operation = prepare(
-        state,
-        capture_request,
-        Some(request.owner_id),
-        request.reconciliation_operation_ids,
-    )
-    .map_err(|error| CaptureInputError(error.to_string()))?;
+    let mut operation = prepare(state, capture_request, request.owner_id)
+        .map_err(|error| CaptureInputError(error.to_string()))?;
     save_operation(&path, &operation)?;
     drop(proposal_guard);
     finish_capture(state, &path, &mut operation)?;
@@ -399,49 +357,10 @@ pub fn capture_v2_operation(
     })
 }
 
-fn capture_operation_inner(
-    state: &AppState,
-    request: CaptureRequest,
-    owner_id: Option<String>,
-    reconciliation_operation_ids: Vec<String>,
-) -> anyhow::Result<CaptureResponse> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
-    let path = operation_path(state, &request.operation_id)?;
-    let mut operation = if path.exists() {
-        let stored: Operation = serde_json::from_slice(&std::fs::read(&path)?)?;
-        anyhow::ensure!(
-            serde_json::to_value(&stored.request)? == serde_json::to_value(&request)?,
-            "operation_id was already used for a different capture"
-        );
-        anyhow::ensure!(
-            stored.owner_id == owner_id,
-            "operation_id was already used by a different harness owner"
-        );
-        anyhow::ensure!(
-            stored.reconciliation_operation_ids == reconciliation_operation_ids,
-            "operation_id was retried with different reconciliation receipts"
-        );
-        stored
-    } else {
-        let prepared = prepare(state, request, owner_id, reconciliation_operation_ids)
-            .map_err(|error| CaptureInputError(error.to_string()))?;
-        save_operation(&path, &prepared)?;
-        prepared
-    };
-    finish_capture(state, &path, &mut operation)?;
-    durable_flush(state)?;
-    Ok(CaptureResponse {
-        proposals: operation.entries.into_iter().map(|e| e.response).collect(),
-    })
-}
-
 fn prepare(
     state: &AppState,
     request: CaptureRequest,
-    owner_id: Option<String>,
-    reconciliation_operation_ids: Vec<String>,
+    owner_id: String,
 ) -> anyhow::Result<Operation> {
     anyhow::ensure!(
         request.proposals.len() <= 32,
@@ -453,18 +372,7 @@ fn prepare(
     let mut retired_targets = HashSet::new();
     let mut titles = HashSet::new();
     for proposal in &request.proposals {
-        anyhow::ensure!(
-            matches!(
-                proposal.kind.as_str(),
-                "ArchitecturalDecision"
-                    | "Requirement"
-                    | "Constraint"
-                    | "Lesson"
-                    | "Pattern"
-                    | "AntiPattern"
-            ),
-            "unsupported capture kind"
-        );
+        anyhow::ensure!(is_record_kind(&proposal.kind), "unsupported capture kind");
         anyhow::ensure!(
             !proposal.title.trim().is_empty() && !proposal.description.trim().is_empty(),
             "capture needs a title and description"
@@ -533,7 +441,7 @@ fn prepare(
                 anyhow::anyhow!("reconciliation receipt missing for derived relation")
             })?;
             anyhow::ensure!(
-                Some(receipt.owner_id.as_str()) == owner_id.as_deref()
+                receipt.owner_id == owner_id
                     && receipt.disposition == "refines"
                     && receipt.candidate_iri.as_deref() == Some(reconciled.target_iri.as_str())
                     && (receipt.confidence - reconciled.confidence).abs() < 1e-9,
@@ -594,7 +502,6 @@ fn prepare(
     Ok(Operation {
         request,
         owner_id,
-        reconciliation_operation_ids,
         entries,
         timestamp: Utc::now().to_rfc3339(),
         review: None,
@@ -960,13 +867,7 @@ fn review_operation_checked(
             actual == expected,
             "knowledge changed before review; refresh approval before accepting"
         );
-        if request.accept
-            && operation.request.proposals.iter().all(|proposal| {
-                !matches!(proposal.kind.as_str(), "Requirement" | "Constraint")
-                    && proposal.supersedes.is_none()
-                    && proposal.retracts.is_none()
-            })
-        {
+        if request.accept && !operation.request.has_governing() {
             operation.review_base_revision = Some(actual);
             operation.review_claims = Some(review_claims(state, &subjects)?);
         }

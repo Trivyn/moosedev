@@ -49,9 +49,8 @@ async fn context(
     Json(request): Json<ContextRequest>,
 ) -> Json<ContextResponse> {
     Json(ContextResponse {
-        capture_contracts: Some(vec![1, 2]),
-        intent_contracts: Some(vec![1, 2]),
-        capture_targets: Some(Default::default()),
+        capture_contracts: vec![2],
+        intent_contracts: vec![2],
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),
         context: "Constraint: reading must precede work.".into(),
@@ -81,8 +80,8 @@ async fn model(State(state): State<Shared>, Json(request): Json<Value>) -> Json<
     let answer = if schema == "harness_response_probe" {
         state.probe_calls.fetch_add(1, Ordering::SeqCst);
         json!({"status":"ok"})
-    } else if schema == "harness_capture" {
-        json!({"proposals":[],"reason":"No durable project claim was established by this explanation."})
+    } else if schema == "harness_capture_note" {
+        json!({"note":"nothing beyond the diff"})
     } else {
         let count = state.calls.fetch_add(1, Ordering::SeqCst);
         state.prompts.lock().unwrap().push(request.to_string());

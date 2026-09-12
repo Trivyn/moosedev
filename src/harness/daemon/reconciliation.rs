@@ -1,23 +1,14 @@
-//! Durable, model-independent reconciliation of capture candidates.
-//!
-//! Candidate retrieval may nominate an existing record. It never asserts
-//! semantic equivalence: that disposition is journaled separately and, for
-//! reuse, remains an explicit human review obligation.
+//! Snapshot-bound candidate retrieval for capture reconciliation: the records
+//! a fresh proposal may restate or refine, with their complete assertions.
+//! Retrieval nominates; it never asserts semantic equivalence.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
-use std::sync::Arc;
 
-use axum::extract::State;
-use axum::Json;
 use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::{
-    current_status, operation_path, save_operation, validate_owner_id, Operation, OPERATIONS,
-};
-use crate::api::error::ApiError;
+use super::{current_status, validate_owner_id, Operation};
 use crate::graph::{self, AppState, EdgeDirection, PROJECT_KG_GRAPH_IRI};
 use crate::harness::protocol::*;
 
@@ -28,21 +19,6 @@ const MAX_ASSERTIONS_PER_CANDIDATE: usize = 256;
 const MAX_ASSERTION_BYTES: usize = 32 * 1024;
 const MAX_CANDIDATE_ASSERTION_BYTES: usize = 64 * 1024;
 const MAX_CANDIDATE_PAGE_BYTES: usize = 96 * 1024;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ReconciliationOperation {
-    request: ReconcileCaptureRequest,
-    response: ReconcileCaptureResponse,
-    #[serde(default)]
-    review: Option<bool>,
-}
-
-pub async fn candidates(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<CaptureCandidateRequest>,
-) -> Result<Json<CaptureCandidatePage>, ApiError> {
-    Ok(Json(candidate_page(&state, &request)?))
-}
 
 pub fn candidate_page(
     state: &AppState,
@@ -150,184 +126,6 @@ pub fn candidate_page(
         candidates,
         next_cursor,
     })
-}
-
-pub async fn reconcile(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ReconcileCaptureRequest>,
-) -> Result<Json<ReconcileCaptureResponse>, ApiError> {
-    Ok(Json(reconcile_operation(&state, request)?))
-}
-
-pub fn reconcile_operation(
-    state: &AppState,
-    request: ReconcileCaptureRequest,
-) -> anyhow::Result<ReconcileCaptureResponse> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
-    validate_owner_id(&request.owner_id)?;
-    validate_operation_id(&request.operation_id)?;
-    anyhow::ensure!(
-        !request.rationale.trim().is_empty(),
-        "reconciliation needs a rationale"
-    );
-    let path = reconciliation_path(state, &request.operation_id)?;
-    if path.exists() {
-        let stored: ReconciliationOperation = serde_json::from_slice(&std::fs::read(&path)?)?;
-        anyhow::ensure!(
-            serde_json::to_value(&stored.request)? == serde_json::to_value(&request)?,
-            "operation_id was already used for a different reconciliation"
-        );
-        return Ok(stored.response);
-    }
-    let _proposal_guard = state.lock_proposal_writes()?;
-    anyhow::ensure!(
-        request.candidate_revision == project_assertion_revision(state)?,
-        "candidate snapshot is stale; retrieve candidates again"
-    );
-    let candidate_class =
-        graph::require_information_record(state, &NamedNode::new(&request.candidate_iri)?)?;
-    let (_, _, _, digest) = candidate_assertions(state, &request.candidate_iri)?;
-    anyhow::ensure!(
-        digest == request.candidate_digest,
-        "candidate assertions changed; retrieve candidates again"
-    );
-    let status = current_status(state, &request.candidate_iri)
-        .ok_or_else(|| anyhow::anyhow!("candidate record disappeared"))?;
-    let origin = capture_origins(state)?.get(&request.candidate_iri).cloned();
-    match request.disposition {
-        CaptureDisposition::ReuseUnchanged => anyhow::ensure!(
-            request.replacement_proposal.is_none(),
-            "reuse cannot replace or modify the existing assertion"
-        ),
-        CaptureDisposition::ReviseProposal | CaptureDisposition::DistinctKnowledge => {
-            let replacement = request
-                .replacement_proposal
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("this disposition needs a replacement proposal"))?;
-            anyhow::ensure!(
-                replacement.kind == request.proposal.kind
-                    && replacement.evidence == request.proposal.evidence
-                    && replacement.files == request.proposal.files
-                    && replacement.components == request.proposal.components
-                    && replacement.requirement == request.proposal.requirement
-                    && replacement.supersedes == request.proposal.supersedes
-                    && replacement.retracts == request.proposal.retracts,
-                "replacement may change only title and description"
-            );
-            if request.disposition == CaptureDisposition::ReviseProposal {
-                anyhow::ensure!(
-                    graph::local_name(&candidate_class) == replacement.kind,
-                    "revision must preserve the pending record kind"
-                );
-            }
-            anyhow::ensure!(
-                graph::resolve_record_exact_all(state, &replacement.title)
-                    .into_iter()
-                    .all(|(iri, _)| {
-                        (request.disposition == CaptureDisposition::ReviseProposal
-                            && iri == request.candidate_iri)
-                            || current_status(state, &iri).is_none_or(|status| {
-                                status != "proposed" && !graph::in_working_set(&status)
-                            })
-                    }),
-                "replacement title still collides with current or pending knowledge"
-            );
-        }
-    }
-    let pending_capture_operation = match request.disposition {
-        CaptureDisposition::ReuseUnchanged => match status.as_str() {
-            "accepted" => None,
-            "proposed" => {
-                let owned = origin
-                    .as_ref()
-                    .filter(|origin| origin.owner_id == request.owner_id);
-                anyhow::ensure!(
-                    owned.is_some(),
-                    "pending candidate belongs to another operation and cannot be reused"
-                );
-                owned.map(|origin| origin.operation_id.clone())
-            }
-            _ => anyhow::bail!("only accepted or task-owned pending knowledge can be reused"),
-        },
-        CaptureDisposition::ReviseProposal => {
-            anyhow::ensure!(
-                status == "proposed"
-                    && origin
-                        .as_ref()
-                        .is_some_and(|origin| origin.owner_id == request.owner_id),
-                "only a task-owned pending proposal can be revised"
-            );
-            origin.map(|origin| origin.operation_id)
-        }
-        CaptureDisposition::DistinctKnowledge => None,
-    };
-    let response = ReconcileCaptureResponse {
-        operation_id: request.operation_id.clone(),
-        disposition: request.disposition.clone(),
-        candidate_iri: request.candidate_iri.clone(),
-        requires_human_review: request.disposition == CaptureDisposition::ReuseUnchanged,
-        pending_capture_operation,
-        review: None,
-    };
-    save_operation(
-        &path,
-        &ReconciliationOperation {
-            request,
-            response: response.clone(),
-            review: None,
-        },
-    )?;
-    Ok(response)
-}
-
-pub async fn review(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ReconcileReviewRequest>,
-) -> Result<Json<ReconcileCaptureResponse>, ApiError> {
-    Ok(Json(review_operation(&state, &request)?))
-}
-
-pub fn review_operation(
-    state: &AppState,
-    request: &ReconcileReviewRequest,
-) -> anyhow::Result<ReconcileCaptureResponse> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
-    let path = reconciliation_path(state, &request.operation_id)?;
-    let mut operation: ReconciliationOperation = serde_json::from_slice(&std::fs::read(&path)?)?;
-    anyhow::ensure!(
-        operation.response.requires_human_review,
-        "this reconciliation has no human review obligation"
-    );
-    anyhow::ensure!(
-        operation.review.is_none_or(|prior| prior == request.accept),
-        "this reconciliation already has a different review decision"
-    );
-    if operation.review.is_some() {
-        return Ok(operation.response);
-    }
-    let _proposal_guard = state.lock_proposal_writes()?;
-    let (_, _, _, digest) = candidate_assertions(state, &operation.request.candidate_iri)?;
-    anyhow::ensure!(
-        digest == operation.request.candidate_digest,
-        "candidate assertions changed before reconciliation review; retrieve and decide again"
-    );
-    if current_status(state, &operation.request.candidate_iri).as_deref() == Some("proposed") {
-        let origin = capture_origins(state)?
-            .remove(&operation.request.candidate_iri)
-            .ok_or_else(|| anyhow::anyhow!("pending candidate no longer has a proven owner"))?;
-        anyhow::ensure!(
-            origin.owner_id == operation.request.owner_id,
-            "pending candidate belongs to another harness owner"
-        );
-    }
-    operation.review = Some(request.accept);
-    operation.response.review = Some(request.accept);
-    save_operation(&path, &operation)?;
-    Ok(operation.response)
 }
 
 pub(super) fn candidate_assertions(
@@ -454,15 +252,12 @@ fn capture_origins(state: &AppState) -> anyhow::Result<HashMap<String, Candidate
             continue;
         }
         let operation: Operation = serde_json::from_slice(&std::fs::read(&path)?)?;
-        let Some(owner_id) = operation.owner_id else {
-            continue;
-        };
         for entry in operation.entries {
             origins.insert(
                 entry.response.iri,
                 CandidateOrigin {
                     operation_id: operation.request.operation_id.clone(),
-                    owner_id: owner_id.clone(),
+                    owner_id: operation.owner_id.clone(),
                 },
             );
         }
@@ -492,97 +287,6 @@ fn project_assertion_revision(state: &AppState) -> anyhow::Result<String> {
     ))
 }
 
-pub(super) fn authorize_capture(
-    state: &AppState,
-    request: &CaptureV2Request,
-) -> anyhow::Result<()> {
-    let mut used = BTreeSet::new();
-    let mut authorized_proposals = BTreeSet::new();
-    for id in &request.reconciliation_operation_ids {
-        anyhow::ensure!(used.insert(id), "duplicate reconciliation operation ID");
-        let operation: ReconciliationOperation =
-            serde_json::from_slice(&std::fs::read(reconciliation_path(state, id)?)?)?;
-        anyhow::ensure!(
-            operation.request.owner_id == request.owner_id,
-            "reconciliation operation belongs to another harness owner"
-        );
-        anyhow::ensure!(
-            matches!(
-                operation.request.disposition,
-                CaptureDisposition::ReviseProposal | CaptureDisposition::DistinctKnowledge
-            ),
-            "reuse reconciliation cannot authorize a new capture"
-        );
-        let replacement = operation
-            .request
-            .replacement_proposal
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("reconciliation has no replacement proposal"))?;
-        let matches = request
-            .proposals
-            .iter()
-            .enumerate()
-            .filter_map(|(index, proposal)| {
-                (serde_json::to_value(proposal).ok() == serde_json::to_value(replacement).ok())
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            matches.len() == 1,
-            "reconciliation must authorize exactly one submitted proposal"
-        );
-        anyhow::ensure!(
-            authorized_proposals.insert(matches[0]),
-            "multiple reconciliation receipts authorize the same proposal"
-        );
-        match operation.request.disposition {
-            CaptureDisposition::DistinctKnowledge => {
-                anyhow::ensure!(
-                    operation.request.candidate_revision == project_assertion_revision(state)?,
-                    "distinct-knowledge candidate snapshot changed before capture"
-                );
-                let (_, _, _, digest) =
-                    candidate_assertions(state, &operation.request.candidate_iri)?;
-                anyhow::ensure!(
-                    digest == operation.request.candidate_digest,
-                    "distinct-knowledge candidate changed before capture"
-                );
-            }
-            CaptureDisposition::ReviseProposal => {
-                let origin = operation
-                    .response
-                    .pending_capture_operation
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("revision has no originating capture"))?;
-                let original: Operation =
-                    serde_json::from_slice(&std::fs::read(operation_path(state, origin)?)?)?;
-                anyhow::ensure!(
-                    original.owner_id.as_deref() == Some(request.owner_id.as_str())
-                        && original.review == Some(false)
-                        && original.reviewed
-                        && current_status(state, &operation.request.candidate_iri).as_deref()
-                            == Some("rejected"),
-                    "original owned capture must be wholly rejected before revision"
-                );
-            }
-            CaptureDisposition::ReuseUnchanged => unreachable!(),
-        }
-    }
-    Ok(())
-}
-
 fn json_digest(value: &impl Serialize) -> anyhow::Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
-}
-
-fn validate_operation_id(id: &str) -> anyhow::Result<()> {
-    validate_owner_id(id).map_err(|_| anyhow::anyhow!("invalid operation_id"))
-}
-
-fn reconciliation_path(state: &AppState, id: &str) -> anyhow::Result<PathBuf> {
-    validate_operation_id(id)?;
-    Ok(state
-        .data_dir
-        .join("harness/operations")
-        .join(format!("{id}.reconcile.json")))
 }

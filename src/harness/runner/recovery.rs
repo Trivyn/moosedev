@@ -36,11 +36,7 @@ impl Runner {
             self.task.recovery = Some(RepairState {
                 id: uuid::Uuid::new_v4().to_string(),
                 purpose: purpose.into(),
-                attempts: if purpose == "harness_capture" {
-                    self.task.capture_repairs
-                } else {
-                    0
-                },
+                attempts: 0,
                 diagnostic: String::new(),
                 status: RecoveryStatus::Generating,
             });
@@ -67,7 +63,6 @@ impl Runner {
 
     pub(super) fn candidate_accepted(&mut self) {
         self.task.recovery = None;
-        self.task.capture_repairs = 0;
     }
 
     /// Returns true only for an invalid candidate that can safely be regenerated.
@@ -96,11 +91,7 @@ impl Runner {
             RecoveryStatus::Retrying
         };
         let stage = match repair.purpose.as_str() {
-            "harness_capture" => "capture",
             "harness_action" => "action",
-            "harness_purpose_selection" => "purpose selection",
-            "harness_association_selection" => "association selection",
-            "harness_capture_resolution" => "capture resolution",
             "harness_capture_note" => "capture note",
             other => other,
         };

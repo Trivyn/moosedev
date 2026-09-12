@@ -20,20 +20,6 @@ impl Runner {
                     "edit is outside approved file scope; return to Plan"
                 );
             }
-            Action::Associate { targets } => {
-                ensure!(
-                    self.task.mode == Mode::Auto,
-                    "approve a plan before proposing code associations"
-                );
-                ensure!(
-                    targets.iter().all(|t| self
-                        .task
-                        .plan
-                        .as_ref()
-                        .is_some_and(|p| p.files.contains(&t.file))),
-                    "association is outside approved file scope"
-                );
-            }
             Action::Command { .. } | Action::Finish { .. } => ensure!(
                 self.task.mode == Mode::Auto,
                 "Plan mode cannot execute or finish code work; human approval is required"
@@ -53,7 +39,6 @@ impl Runner {
                 summary,
                 files,
                 checks,
-                change_intent: _,
             } => {
                 ensure!(!summary.trim().is_empty() && summary.len() <= MAX_PLAN_SUMMARY && !files.is_empty() && files.len() <= MAX_FILES,
                     "plan requires a nonempty summary of at most 4000 bytes and 1..100 explicit file paths");
@@ -90,26 +75,6 @@ impl Runner {
             }
             _ => {}
         }
-        let action = match action {
-            Action::Associate { targets } => Action::Associate {
-                targets: self.resolve_association_targets(targets)?,
-            },
-            Action::Plan {
-                summary,
-                files,
-                checks,
-                change_intent,
-            } => {
-                let change_intent = self.resolve_change_intent(change_intent, &files)?;
-                Action::Plan {
-                    summary,
-                    files,
-                    checks,
-                    change_intent,
-                }
-            }
-            other => other,
-        };
         let file = match &action {
             Action::Replace { file, .. }
             | Action::Write { file, .. }

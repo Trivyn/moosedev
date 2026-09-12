@@ -71,10 +71,20 @@ fn proposal(kind: &str, title: &str) -> KnowledgeProposal {
     }
 }
 
-fn request(id: &str, proposals: Vec<KnowledgeProposal>) -> CaptureRequest {
-    CaptureRequest {
+fn request(id: &str, proposals: Vec<KnowledgeProposal>) -> CaptureV2Request {
+    CaptureV2Request {
         operation_id: id.into(),
+        owner_id: "test-owner".into(),
         proposals,
+    }
+}
+
+fn captured(response: CaptureV2Response) -> CaptureResponse {
+    match response {
+        CaptureV2Response::Captured { capture } => capture,
+        CaptureV2Response::Collision { collisions } => {
+            panic!("unexpected collision {collisions:?}")
+        }
     }
 }
 
@@ -130,37 +140,16 @@ fn install_intent_index_as(fixture: &Fixture, state: &AppState, producer: &str) 
     document.occurrences.push(occurrence);
     let mut index = Index::new();
     index.documents.push(document);
-    let mut meta = SubstrateMeta::single(producer, "test", Utc::now(), 1, 1);
+    let mut meta = SubstrateMeta::single(
+        producer,
+        SubstrateMeta::current_head(&fixture.0),
+        Utc::now(),
+        1,
+        1,
+    );
     meta.indexed_started_at = Some(Utc::now());
     state.set_substrate(Arc::new(
         Substrate::from_index_rooted(index, meta, false, &fixture.0).unwrap(),
-    ));
-}
-
-fn install_deleted_intent_index_with_digest(state: &AppState, root: &Path, digest: String) {
-    use moosedev::code::substrate::{
-        HistoricalDefinitionProof, HistoricalFileProof, Substrate, SubstrateMeta,
-    };
-    use scip::types::Index;
-    let symbol = "scip-python python sample 1 labels/render_name().";
-    let index = Index::new();
-    let mut meta = SubstrateMeta::single("scip-python", "test", Utc::now(), 0, 0);
-    meta.indexed_started_at = Some(Utc::now());
-    meta.historical_files.insert(
-        "labels.py".into(),
-        HistoricalFileProof {
-            source_digest: digest,
-            index_generation: Some("prior-generation".into()),
-            definitions: vec![HistoricalDefinitionProof {
-                symbol: symbol.into(),
-                name: Some("render_name".into()),
-                definition_range: [0, 4, 0, 15],
-                enclosing_range: None,
-            }],
-        },
-    );
-    state.set_substrate(Arc::new(
-        Substrate::from_index_rooted(index, meta, false, root).unwrap(),
     ));
 }
 
@@ -487,11 +476,11 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
     .map(|kind| proposal(kind, &format!("Harness candidate {kind}")))
     .collect();
     let response = server
-        .post("/api/v1/harness/capture")
+        .post("/api/v1/harness/capture/v2")
         .json(&request("all-kinds", proposals))
         .await;
     response.assert_status_ok();
-    let captured: CaptureResponse = response.json();
+    let captured = captured(response.json::<CaptureV2Response>());
     assert_eq!(captured.proposals.len(), 6);
     let queue = graph::list_proposals(&state, Some("proposed")).unwrap();
     for proposal in &captured.proposals {
@@ -650,7 +639,10 @@ async fn invalid_batch_writes_nothing_and_unindexed_files_are_reported() {
     let invalid = request("invalid", vec![proposal("Lesson", "Valid first"), invalid]);
     assert!(daemon::capture_operation(&state, invalid.clone()).is_err());
     let server = TestServer::new(build_routes(state.clone())).unwrap();
-    let rejected = server.post("/api/v1/harness/capture").json(&invalid).await;
+    let rejected = server
+        .post("/api/v1/harness/capture/v2")
+        .json(&invalid)
+        .await;
     rejected.assert_status_bad_request();
     assert!(!state.data_dir.join("harness/operations/invalid.json").exists(),
         "HTTP 400 must mean no operation was persisted and the sensor can safely revise the proposal");
@@ -674,7 +666,7 @@ async fn checkpoint_never_claims_durability_when_canonical_publication_fails() {
         vec![proposal("Lesson", "Persisted but not acknowledged")],
     );
     server
-        .post("/api/v1/harness/capture")
+        .post("/api/v1/harness/capture/v2")
         .json(&request)
         .await
         .assert_status_internal_server_error();
@@ -685,10 +677,13 @@ async fn checkpoint_never_claims_durability_when_canonical_publication_fails() {
     let pending = graph::list_proposals(&state, Some("proposed")).unwrap();
     assert_eq!(pending.len(), 1);
     std::fs::remove_dir(state.data_dir.join("kg.nq")).unwrap();
-    let retry = server.post("/api/v1/harness/capture").json(&request).await;
+    let retry = server
+        .post("/api/v1/harness/capture/v2")
+        .json(&request)
+        .await;
     retry.assert_status_ok();
     assert_eq!(
-        retry.json::<CaptureResponse>().proposals[0].iri,
+        captured(retry.json::<CaptureV2Response>()).proposals[0].iri,
         pending[0].iri
     );
 }
@@ -1200,51 +1195,16 @@ async fn unrelated_write_before_review_cannot_be_credited_to_acceptance() {
 }
 
 #[test]
-fn capture_targets_are_typed_current_choices_from_the_context_snapshot() {
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    let component = record(&state, "SystemComponent", "Ledger");
-    let requirement = record(&state, "Requirement", "Preserve retry identity");
-    let constraint = record(&state, "Constraint", "Preserve public API");
-    let pending = daemon::capture_operation(
-        &state,
-        request(
-            "pending-target",
-            vec![proposal("Lesson", "Unreviewed proposal")],
-        ),
-    )
-    .unwrap();
-    let context = daemon::context_snapshot(
-        &state,
-        &ContextRequest {
-            topic: "retry identity".into(),
-            files: vec![],
-        },
-    )
-    .unwrap();
-    let choices = context.capture_targets.as_ref().unwrap();
-    assert!(choices
-        .components
-        .iter()
-        .any(|target| target.iri == component && target.kind == "SystemComponent"));
-    assert!(choices
-        .records
-        .iter()
-        .any(|target| target.iri == requirement && target.kind == "Requirement"));
-    assert!(choices
-        .records
-        .iter()
-        .any(|target| target.iri == constraint && target.kind == "Constraint"));
-    assert!(!choices
-        .records
-        .iter()
-        .any(|target| target.iri == component || target.iri == pending.proposals[0].iri));
-    let mut legacy = serde_json::to_value(&context).unwrap();
-    legacy.as_object_mut().unwrap().remove("capture_targets");
-    assert!(serde_json::from_value::<ContextResponse>(legacy)
-        .unwrap()
-        .capture_targets
-        .is_none());
+fn context_response_without_contract_fields_deserializes_with_empty_vectors() {
+    let legacy = json!({
+        "project_root": "/tmp/project",
+        "revision": "accepted-v1",
+        "context": "",
+        "files": []
+    });
+    let context: ContextResponse = serde_json::from_value(legacy).unwrap();
+    assert!(context.capture_contracts.is_empty());
+    assert!(context.intent_contracts.is_empty());
 }
 
 #[tokio::test]
@@ -1259,12 +1219,11 @@ async fn capture_v2_returns_typed_collision_without_creating_an_operation() {
             operation_id: "typed-collision".into(),
             owner_id: "task-a".into(),
             proposals: vec![proposal("Lesson", "Reuse the existing capture")],
-            reconciliation_operation_ids: vec![],
         })
         .await;
     response.assert_status_ok();
     match response.json::<CaptureV2Response>() {
-        CaptureV2Response::ReconciliationRequired { collisions } => {
+        CaptureV2Response::Collision { collisions } => {
             assert_eq!(collisions.len(), 1);
             assert_eq!(collisions[0].candidate_iris, [existing]);
         }
@@ -1312,319 +1271,25 @@ fn candidate_lookup_is_complete_bounded_and_shacl_derived() {
 }
 
 #[test]
-fn accepted_reuse_is_a_durable_human_receipt_without_graph_mutation() {
-    use daemon::reconciliation::{candidate_page, reconcile_operation, review_operation};
-
+fn capture_v2_replays_a_completed_operation_from_its_journal() {
     let fixture = Fixture::new();
     let state = fixture.state();
-    let existing = record(&state, "Lesson", "A durable existing lesson");
-    let proposed = proposal("Lesson", "A durable existing lesson");
-    let page = candidate_page(
-        &state,
-        &CaptureCandidateRequest {
-            owner_id: "task-a".into(),
-            proposal: proposed.clone(),
-            topic: None,
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    let candidate = page
-        .candidates
-        .iter()
-        .find(|candidate| candidate.iri == existing)
-        .unwrap();
-    let response = reconcile_operation(
-        &state,
-        ReconcileCaptureRequest {
-            operation_id: "reuse-accepted".into(),
-            owner_id: "task-a".into(),
-            proposal: proposed,
-            candidate_iri: candidate.iri.clone(),
-            candidate_digest: candidate.assertion_digest.clone(),
-            candidate_revision: page.revision.clone(),
-            disposition: CaptureDisposition::ReuseUnchanged,
-            replacement_proposal: None,
-            rationale: "The existing lesson expresses the same observation.".into(),
-        },
-    )
-    .unwrap();
-    assert!(response.requires_human_review);
-    assert!(response.pending_capture_operation.is_none());
-    assert_eq!(
-        candidate_page(
-            &state,
-            &CaptureCandidateRequest {
-                owner_id: "task-a".into(),
-                proposal: proposal("Lesson", "A durable existing lesson"),
-                topic: None,
-                cursor: None,
-                limit: None,
-            }
-        )
-        .unwrap()
-        .revision,
-        page.revision
+    let request = request(
+        "replayed-capture",
+        vec![proposal("Lesson", "Specific capture recovery boundary")],
     );
-    let reviewed = review_operation(
-        &state,
-        &ReconcileReviewRequest {
-            operation_id: "reuse-accepted".into(),
-            accept: true,
-        },
-    )
-    .unwrap();
-    assert_eq!(reviewed.review, Some(true));
-    record(&state, "Constraint", "An unrelated later assertion");
-    assert_eq!(
-        review_operation(
-            &state,
-            &ReconcileReviewRequest {
-                operation_id: "reuse-accepted".into(),
-                accept: true,
-            }
-        )
-        .unwrap()
-        .review,
-        Some(true),
-        "a lost review response must remain replayable after unrelated writes"
-    );
-    assert_eq!(
-        status_literal(&state, &existing, &state.capture.status).as_deref(),
-        Some("accepted")
-    );
-}
-
-#[test]
-fn pending_reuse_requires_persisted_owner_and_cannot_import_review_authority() {
-    use daemon::reconciliation::{candidate_page, reconcile_operation, review_operation};
-
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    let proposal = proposal("Lesson", "One owned pending lesson");
-    let captured = daemon::capture_operation_owned(
-        &state,
-        CaptureV2Request {
-            operation_id: "owned-capture".into(),
-            owner_id: "task-a".into(),
-            proposals: vec![proposal.clone()],
-            reconciliation_operation_ids: vec![],
-        },
-    )
-    .unwrap();
-    let candidate_iri = captured.proposals[0].iri.clone();
-    let page = candidate_page(
-        &state,
-        &CaptureCandidateRequest {
-            owner_id: "task-a".into(),
-            proposal: proposal.clone(),
-            topic: None,
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    let candidate = page
-        .candidates
-        .iter()
-        .find(|candidate| candidate.iri == candidate_iri)
-        .unwrap();
-    assert!(candidate.owned_by_requester);
-    assert_eq!(
-        candidate.origin.as_ref().unwrap().operation_id,
-        "owned-capture"
-    );
-    let base = ReconcileCaptureRequest {
-        operation_id: "reuse-owned".into(),
-        owner_id: "task-a".into(),
-        proposal: proposal.clone(),
-        candidate_iri: candidate_iri.clone(),
-        candidate_digest: candidate.assertion_digest.clone(),
-        candidate_revision: page.revision.clone(),
-        disposition: CaptureDisposition::ReuseUnchanged,
-        replacement_proposal: None,
-        rationale: "This is the already queued proposal.".into(),
-    };
-    let reused = reconcile_operation(&state, base.clone()).unwrap();
-    assert_eq!(
-        reused.pending_capture_operation.as_deref(),
-        Some("owned-capture")
-    );
-    review_operation(
-        &state,
-        &ReconcileReviewRequest {
-            operation_id: "reuse-owned".into(),
-            accept: true,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        status_literal(&state, &candidate_iri, &state.capture.status).as_deref(),
-        Some("proposed"),
-        "reuse review must not ratify the originating capture"
-    );
-    let mut external = base;
-    external.operation_id = "reuse-external".into();
-    external.owner_id = "task-b".into();
-    assert!(reconcile_operation(&state, external).is_err());
-}
-
-#[test]
-fn reuse_review_rejects_a_candidate_changed_after_the_model_disposition() {
-    use daemon::reconciliation::{candidate_page, reconcile_operation, review_operation};
-
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    let existing = record(&state, "Lesson", "Fresh at recommendation time");
-    let proposed = proposal("Lesson", "Fresh at recommendation time");
-    let page = candidate_page(
-        &state,
-        &CaptureCandidateRequest {
-            owner_id: "task-a".into(),
-            proposal: proposed.clone(),
-            topic: None,
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    let candidate = page
-        .candidates
-        .iter()
-        .find(|candidate| candidate.iri == existing)
-        .unwrap();
-    reconcile_operation(
-        &state,
-        ReconcileCaptureRequest {
-            operation_id: "stale-reuse".into(),
-            owner_id: "task-a".into(),
-            proposal: proposed,
-            candidate_iri: existing.clone(),
-            candidate_digest: candidate.assertion_digest.clone(),
-            candidate_revision: page.revision,
-            disposition: CaptureDisposition::ReuseUnchanged,
-            replacement_proposal: None,
-            rationale: "The claims currently match.".into(),
-        },
-    )
-    .unwrap();
-    graph::retract_decision(
-        &state,
-        &existing,
-        "Candidate changed before reuse review",
-        "test-human",
-        Utc::now(),
-    )
-    .unwrap();
-    assert!(review_operation(
-        &state,
-        &ReconcileReviewRequest {
-            operation_id: "stale-reuse".into(),
-            accept: true,
-        }
-    )
-    .is_err());
-}
-
-#[test]
-fn reconciliation_retry_is_exact_and_revision_bound() {
-    use daemon::reconciliation::{candidate_page, reconcile_operation};
-
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    let existing = record(&state, "Lesson", "Exact durable retry");
-    let proposed = proposal("Lesson", "Exact durable retry");
-    let page = candidate_page(
-        &state,
-        &CaptureCandidateRequest {
-            owner_id: "task-a".into(),
-            proposal: proposed.clone(),
-            topic: None,
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    let candidate = page
-        .candidates
-        .iter()
-        .find(|candidate| candidate.iri == existing)
-        .unwrap();
-    let request = ReconcileCaptureRequest {
-        operation_id: "exact-reconciliation".into(),
-        owner_id: "task-a".into(),
-        proposal: proposed,
-        candidate_iri: existing,
-        candidate_digest: candidate.assertion_digest.clone(),
-        candidate_revision: page.revision,
-        disposition: CaptureDisposition::ReuseUnchanged,
-        replacement_proposal: None,
-        rationale: "Same semantic observation.".into(),
-    };
-    let first = reconcile_operation(&state, request.clone()).unwrap();
-    assert_eq!(first, reconcile_operation(&state, request.clone()).unwrap());
-    let mut changed = request;
-    changed.rationale = "Different retry payload.".into();
-    assert!(reconcile_operation(&state, changed).is_err());
-}
-
-#[test]
-fn completed_v2_capture_replays_without_revalidating_spent_candidate_snapshot() {
-    use daemon::reconciliation::{candidate_page, reconcile_operation};
-
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    let existing = record(&state, "Lesson", "General capture recovery");
-    let proposed = proposal("Lesson", "Specific capture recovery boundary");
-    let page = candidate_page(
-        &state,
-        &CaptureCandidateRequest {
-            owner_id: "task-a".into(),
-            proposal: proposed.clone(),
-            topic: Some("capture recovery".into()),
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    let candidate = page
-        .candidates
-        .iter()
-        .find(|candidate| candidate.iri == existing)
-        .unwrap();
-    reconcile_operation(
-        &state,
-        ReconcileCaptureRequest {
-            operation_id: "distinct-receipt".into(),
-            owner_id: "task-a".into(),
-            proposal: proposed.clone(),
-            candidate_iri: existing,
-            candidate_digest: candidate.assertion_digest.clone(),
-            candidate_revision: page.revision,
-            disposition: CaptureDisposition::DistinctKnowledge,
-            replacement_proposal: Some(proposed.clone()),
-            rationale: "The narrower boundary is a different lesson.".into(),
-        },
-    )
-    .unwrap();
-    let request = CaptureV2Request {
-        operation_id: "distinct-capture".into(),
-        owner_id: "task-a".into(),
-        proposals: vec![proposed],
-        reconciliation_operation_ids: vec!["distinct-receipt".into()],
-    };
-    let first = match daemon::capture_v2_operation(&state, request.clone()).unwrap() {
-        CaptureV2Response::Captured { capture } => capture,
-        CaptureV2Response::ReconciliationRequired { .. } => panic!("title was noncolliding"),
-    };
-    // The capture itself changes the full assertion revision. A lost response
-    // retry must use its durable operation journal rather than spend the receipt again.
-    let retry = match daemon::capture_v2_operation(&state, request).unwrap() {
-        CaptureV2Response::Captured { capture } => capture,
-        CaptureV2Response::ReconciliationRequired { .. } => panic!("retry did not replay"),
-    };
+    let first = captured(daemon::capture_v2_operation(&state, request.clone()).unwrap());
+    // The first capture makes the title pending knowledge. A lost-response
+    // retry must replay the durable operation journal rather than re-run
+    // collision typing against the record it created.
+    let retry = captured(daemon::capture_v2_operation(&state, request).unwrap());
     assert_eq!(first.proposals[0].iri, retry.proposals[0].iri);
+    assert_eq!(
+        graph::list_proposals(&state, Some("proposed"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 fn sha256_text(value: &str) -> String {
@@ -1633,241 +1298,52 @@ fn sha256_text(value: &str) -> String {
 }
 
 #[test]
-fn purpose_candidates_are_accepted_complete_paged_and_snapshot_bound() {
-    use daemon::intent_candidates::purpose_page;
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    record(&state, "Requirement", "Purpose paging alpha");
-    record(&state, "Constraint", "Purpose paging beta");
-    let request = PurposeCandidateRequest {
-        objective: "Purpose paging".into(),
-        files: Vec::new(),
-        cursor: None,
-        limit: Some(1),
-    };
-    let graph_path = fixture.0.join(".moosedev/kg.nq");
-    let graph_before = std::fs::read(&graph_path).ok();
-    let generation_before = state.project_write_generation();
-    let first = purpose_page(&state, &request).unwrap();
-    assert_eq!(std::fs::read(&graph_path).ok(), graph_before);
-    assert_eq!(state.project_write_generation(), generation_before);
-    assert!(!fixture.0.join(".moosedev/harness/operations").exists());
-    assert_eq!(first.candidates.len(), 1);
-    assert_eq!(first.candidates[0].lifecycle, "accepted");
-    assert!(!first.candidates[0].claim.literals.is_empty());
-    assert!(!first.candidates[0].assertion_digest.is_empty());
-    let mut continuation = request.clone();
-    continuation.cursor = first.next_cursor.clone();
-    let second = purpose_page(&state, &continuation).unwrap();
-    assert_eq!(second.candidates.len(), 1);
-    assert_ne!(first.candidates[0].iri, second.candidates[0].iri);
-    record(&state, "Lesson", "Purpose paging changed snapshot");
-    assert!(purpose_page(&state, &continuation)
-        .unwrap_err()
-        .to_string()
-        .contains("stale snapshot"));
-}
-
-#[test]
-fn postedit_candidates_prove_current_source_and_definition_scope() {
-    use daemon::intent_candidates::intent_page;
+fn associate_reports_deleted_files_as_unresolved_without_bindings() {
+    use daemon::associate::associate_page;
     let fixture = Fixture::new();
     let state = fixture.state();
     install_intent_index(&fixture, &state);
-    record(&state, "Requirement", "Rendering remains stable");
+    let requirement = record(&state, "Requirement", "Rendering remains stable");
     let source = std::fs::read_to_string(fixture.0.join("labels.py")).unwrap();
-    let digest = sha256_text(&source);
-    let page = intent_page(
-        &state,
-        &IntentCandidateRequest {
-            files: vec![ChangedFile {
-                file: "labels.py".into(),
-                before_digest: Some(digest.clone()),
-                after_digest: Some(digest.clone()),
-                changed_ranges: vec![HarnessSourceRange {
-                    start: HarnessSourcePosition { line: 0, col: 4 },
-                    end: HarnessSourcePosition { line: 0, col: 15 },
-                }],
-            }],
-            refresh_policy: IntentRefreshPolicy::None,
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(page.index.status, IntentIndexStatus::Current);
-    assert!(page.unresolved.is_empty());
-    assert_eq!(page.candidates.len(), 1);
-    assert_eq!(
-        page.candidates[0].scope_basis,
-        IntentScopeBasis::ChangedDefinition
-    );
-    assert!(page.candidates[0].symbol.is_some());
-    assert_eq!(page.candidates[0].source_digest, digest);
-    assert!(!page.candidates[0].record_choices.is_empty());
-    assert!(page.candidates[0].record_choices.iter().any(|record| {
-        record.kind == "Requirement" && record.legal_predicates.iter().any(|p| p == "concerns")
-    }));
-}
-
-#[test]
-fn deletion_keeps_historical_scope_without_offering_a_link_candidate() {
-    use daemon::intent_candidates::intent_page;
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    install_intent_index(&fixture, &state);
-    let source = std::fs::read_to_string(fixture.0.join("labels.py")).unwrap();
-    assert_eq!(
-        state
-            .substrate()
-            .unwrap()
-            .indexed_source_digest("labels.py"),
-        Some(sha256_text(&source))
-    );
     std::fs::remove_file(fixture.0.join("labels.py")).unwrap();
-    let page = intent_page(
+    let page = associate_page(
         &state,
-        &IntentCandidateRequest {
+        &AssociateRequest {
             files: vec![ChangedFile {
                 file: "labels.py".into(),
                 before_digest: Some(sha256_text(&source)),
                 after_digest: None,
                 changed_ranges: Vec::new(),
             }],
+            governing: [("labels.py".to_string(), vec![requirement])]
+                .into_iter()
+                .collect(),
             refresh_policy: IntentRefreshPolicy::None,
-            cursor: None,
-            limit: None,
+            knowledge_revision: daemon::accepted_revision(&state).unwrap(),
         },
     )
     .unwrap();
-    assert!(page.unresolved.is_empty());
-    assert!(page.candidates.is_empty());
-    assert_eq!(page.deleted.len(), 1);
-    assert!(page.deleted[0].symbol.contains("render_name"));
-}
-
-#[test]
-fn deletion_without_matching_daemon_source_proof_abstains() {
-    use daemon::intent_candidates::intent_page;
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    install_intent_index(&fixture, &state);
-    let source = std::fs::read_to_string(fixture.0.join("labels.py")).unwrap();
-    // Deliberately do not ask the substrate to prove/cache the source before deletion.
-    std::fs::remove_file(fixture.0.join("labels.py")).unwrap();
-    let page = intent_page(
-        &state,
-        &IntentCandidateRequest {
-            files: vec![ChangedFile {
-                file: "labels.py".into(),
-                before_digest: Some(sha256_text(&source)),
-                after_digest: None,
-                changed_ranges: Vec::new(),
-            }],
-            refresh_policy: IntentRefreshPolicy::None,
-            cursor: None,
-            limit: None,
-        },
-    )
-    .unwrap();
-    assert!(page.deleted.is_empty());
-    assert!(page.candidates.is_empty());
+    assert!(page.bindings.is_empty());
+    assert!(page.skipped.is_empty());
+    assert!(page.ungoverned.is_empty());
+    assert_eq!(page.unresolved.len(), 1);
+    assert_eq!(page.unresolved[0].file, "labels.py");
+    assert!(page.unresolved[0].reason.contains("deleted"));
     assert_eq!(page.index.status, IntentIndexStatus::Stale);
-    assert!(page
-        .unresolved
-        .iter()
-        .any(|item| item.reason.contains("proven")));
 }
 
 #[test]
-fn deletion_scope_recovers_from_durable_index_proof_after_daemon_restart() {
-    use daemon::intent_candidates::intent_page;
-    let fixture = Fixture::new();
-    let first = fixture.state();
-    install_intent_index(&fixture, &first);
-    let source = std::fs::read_to_string(fixture.0.join("labels.py")).unwrap();
-    let before_digest = sha256_text(&source);
-    std::fs::remove_file(fixture.0.join("labels.py")).unwrap();
-    drop(first);
-    let restarted = fixture.state();
-    install_deleted_intent_index_with_digest(&restarted, &fixture.0, before_digest.clone());
-    let request = IntentCandidateRequest {
-        files: vec![ChangedFile {
-            file: "labels.py".into(),
-            before_digest: Some(before_digest.clone()),
-            after_digest: None,
-            changed_ranges: Vec::new(),
-        }],
-        refresh_policy: IntentRefreshPolicy::None,
-        cursor: None,
-        limit: None,
-    };
-    let page = intent_page(&restarted, &request).unwrap();
-    assert!(page.unresolved.is_empty());
-    assert!(page.candidates.is_empty());
-    assert_eq!(page.deleted.len(), 1);
-    assert!(page.deleted[0].symbol.contains("render_name"));
-    assert_eq!(
-        intent_page(&restarted, &request).unwrap(),
-        page,
-        "lost response retry must replay the same historical projection"
-    );
-    let mut forged = request;
-    forged.files[0].before_digest = Some("00".repeat(32));
-    let rejected = intent_page(&restarted, &forged).unwrap();
-    assert!(rejected.deleted.is_empty());
-    assert_eq!(rejected.index.status, IntentIndexStatus::Stale);
-    assert!(!rejected.unresolved.is_empty());
-}
-
-#[test]
-fn purpose_candidates_never_nominate_pending_records() {
-    use daemon::intent_candidates::purpose_page;
-    let fixture = Fixture::new();
-    let state = fixture.state();
-    let accepted = record(&state, "Requirement", "Current purpose choice");
-    let pending = daemon::capture_operation(
-        &state,
-        request(
-            "pending-purpose",
-            vec![proposal("Requirement", "Pending purpose choice")],
-        ),
-    )
-    .unwrap()
-    .proposals[0]
-        .iri
-        .clone();
-    let page = purpose_page(
-        &state,
-        &PurposeCandidateRequest {
-            objective: "purpose choice".into(),
-            files: Vec::new(),
-            cursor: None,
-            limit: Some(16),
-        },
-    )
-    .unwrap();
-    assert!(page
-        .candidates
-        .iter()
-        .any(|candidate| candidate.iri == accepted));
-    assert!(page
-        .candidates
-        .iter()
-        .all(|candidate| candidate.iri != pending && candidate.lifecycle == "accepted"));
-}
-
-#[test]
-fn new_unindexed_file_is_conservative_and_never_guesses_a_symbol() {
-    use daemon::intent_candidates::intent_page;
+fn unindexed_changed_file_yields_no_binding_and_a_stale_index() {
+    use daemon::associate::associate_page;
     let fixture = Fixture::new();
     let state = fixture.state();
     install_intent_index(&fixture, &state);
+    let requirement = record(&state, "Requirement", "Helpers stay pure");
     let source = "def helper():\n    return 1\n";
     std::fs::write(fixture.0.join("helper.py"), source).unwrap();
-    let page = intent_page(
+    let page = associate_page(
         &state,
-        &IntentCandidateRequest {
+        &AssociateRequest {
             files: vec![ChangedFile {
                 file: "helper.py".into(),
                 before_digest: None,
@@ -1877,96 +1353,94 @@ fn new_unindexed_file_is_conservative_and_never_guesses_a_symbol() {
                     end: HarnessSourcePosition { line: 1, col: 12 },
                 }],
             }],
+            governing: [("helper.py".to_string(), vec![requirement])]
+                .into_iter()
+                .collect(),
             refresh_policy: IntentRefreshPolicy::None,
-            cursor: None,
-            limit: None,
+            knowledge_revision: daemon::accepted_revision(&state).unwrap(),
         },
     )
     .unwrap();
-    assert_eq!(page.candidates.len(), 1);
-    assert_eq!(
-        page.candidates[0].scope_basis,
-        IntentScopeBasis::ConservativeFile
-    );
-    assert!(page.candidates[0].symbol.is_none());
-    assert!(page.candidates[0].definition_range.is_none());
+    assert!(page.bindings.is_empty(), "{:#?}", page.bindings);
+    assert!(page.skipped.is_empty());
+    assert!(page.unresolved.is_empty(), "{:?}", page.unresolved);
+    assert!(page.ungoverned.is_empty());
     assert_eq!(page.index.status, IntentIndexStatus::Stale);
 }
 
 #[test]
 fn unsupported_refresh_is_explicit_and_does_not_hide_current_index() {
-    use daemon::intent_candidates::intent_page;
+    use daemon::associate::associate_page;
     let fixture = Fixture::new();
     let state = fixture.state();
     install_intent_index_as(&fixture, &state, "rust-analyzer");
     let source = std::fs::read_to_string(fixture.0.join("labels.py")).unwrap();
     let digest = sha256_text(&source);
-    let page = intent_page(
+    let page = associate_page(
         &state,
-        &IntentCandidateRequest {
-            files: vec![ChangedFile {
-                file: "labels.py".into(),
-                before_digest: Some(digest.clone()),
-                after_digest: Some(digest),
-                changed_ranges: vec![HarnessSourceRange {
-                    start: HarnessSourcePosition { line: 0, col: 4 },
-                    end: HarnessSourcePosition { line: 0, col: 15 },
-                }],
-            }],
+        &AssociateRequest {
+            files: vec![changed("labels.py", &digest, &[(0, 4, 0, 15)])],
+            governing: Default::default(),
             refresh_policy: IntentRefreshPolicy::SupportedFrozen,
-            cursor: None,
-            limit: None,
+            knowledge_revision: daemon::accepted_revision(&state).unwrap(),
         },
     )
     .unwrap();
     assert_eq!(page.index.refresh_action, IntentRefreshAction::Unsupported);
     assert_eq!(page.index.status, IntentIndexStatus::Current);
+    assert_eq!(page.index.producer.as_deref(), Some("rust-analyzer"));
 }
 
 #[test]
 fn candidate_digest_changes_with_index_snapshot_even_when_scope_is_identical() {
-    use daemon::intent_candidates::intent_page;
+    use daemon::associate::associate_page;
     let fixture = Fixture::new();
     let state = fixture.state();
     install_intent_index(&fixture, &state);
+    let requirement = record(&state, "Requirement", "Rendering remains stable");
     let source = std::fs::read_to_string(fixture.0.join("labels.py")).unwrap();
     let digest = sha256_text(&source);
-    let request = IntentCandidateRequest {
-        files: vec![ChangedFile {
-            file: "labels.py".into(),
-            before_digest: Some(digest.clone()),
-            after_digest: Some(digest),
-            changed_ranges: vec![HarnessSourceRange {
-                start: HarnessSourcePosition { line: 0, col: 4 },
-                end: HarnessSourcePosition { line: 0, col: 15 },
-            }],
-        }],
+    let request = AssociateRequest {
+        files: vec![changed("labels.py", &digest, &[(0, 4, 0, 15)])],
+        governing: [("labels.py".to_string(), vec![requirement.clone()])]
+            .into_iter()
+            .collect(),
         refresh_policy: IntentRefreshPolicy::None,
-        cursor: None,
-        limit: None,
+        knowledge_revision: daemon::accepted_revision(&state).unwrap(),
     };
-    let first = intent_page(&state, &request).unwrap();
+    let first = associate_page(&state, &request).unwrap();
+    assert_eq!(first.bindings.len(), 1, "{:#?}", first);
+    assert_eq!(first.bindings[0].name.as_deref(), Some("render_name"));
+    assert_eq!(first.bindings[0].record_iri, requirement);
+    assert_eq!(first.bindings[0].predicate, "concerns");
+    assert_eq!(first.bindings[0].source_digest, digest);
     std::thread::sleep(std::time::Duration::from_millis(2));
     install_intent_index(&fixture, &state);
-    let second = intent_page(&state, &request).unwrap();
+    let second = associate_page(&state, &request).unwrap();
+    assert_eq!(second.bindings.len(), 1);
     assert_ne!(first.index.revision, second.index.revision);
+    assert_ne!(first.scope_digest, second.scope_digest);
     assert_ne!(
-        first.candidates[0].candidate_digest,
-        second.candidates[0].candidate_digest
+        first.bindings[0].candidate_digest,
+        second.bindings[0].candidate_digest
+    );
+    assert_eq!(
+        first.bindings[0].assertion_digest, second.bindings[0].assertion_digest,
+        "the record itself did not change; only the index snapshot did"
     );
 }
 
 #[test]
-fn postedit_rejects_non_utf8_boundary_columns_in_current_source() {
-    use daemon::intent_candidates::intent_page;
+fn associate_rejects_non_utf8_boundary_columns() {
+    use daemon::associate::associate_page;
     let fixture = Fixture::new();
     let state = fixture.state();
     install_intent_index(&fixture, &state);
     let source = "éx\n";
     std::fs::write(fixture.0.join("unicode.py"), source).unwrap();
-    let error = intent_page(
+    let error = associate_page(
         &state,
-        &IntentCandidateRequest {
+        &AssociateRequest {
             files: vec![ChangedFile {
                 file: "unicode.py".into(),
                 before_digest: None,
@@ -1976,13 +1450,13 @@ fn postedit_rejects_non_utf8_boundary_columns_in_current_source() {
                     end: HarnessSourcePosition { line: 0, col: 2 },
                 }],
             }],
+            governing: Default::default(),
             refresh_policy: IntentRefreshPolicy::None,
-            cursor: None,
-            limit: None,
+            knowledge_revision: daemon::accepted_revision(&state).unwrap(),
         },
     )
     .unwrap_err();
-    assert!(error.to_string().contains("UTF-8 byte boundary"));
+    assert!(error.to_string().contains("UTF-8 byte boundary"), "{error}");
 }
 
 /// Two Python definitions plus a parameter in `labels.py`, and one function in
@@ -2540,7 +2014,6 @@ fn typing_request(
         note: note.into(),
         note_evidence: vec!["event 12: capture note".into()],
         plan_summary: plan_summary.into(),
-        plan_files: changed.iter().map(|f| f.to_string()).collect(),
         changed_files: changed.iter().map(|f| f.to_string()).collect(),
         check_history: checks
             .iter()
@@ -2636,13 +2109,12 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     changed.note = "different".into();
     assert!(capture_type_operation(&state, changed).await.is_err());
     // The distinct lesson captures through the ordinary path.
-    let captured = daemon::capture_operation_owned(
+    let captured = daemon::capture_operation(
         &state,
         CaptureV2Request {
             operation_id: "cap-1".into(),
             owner_id: "task-a".into(),
             proposals: vec![lesson.proposal.clone()],
-            reconciliation_operation_ids: vec![],
         },
     )
     .unwrap();
@@ -2686,23 +2158,21 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     );
     let mut tampered = refined.proposal.clone();
     tampered.reconciled[0].confidence = 0.99;
-    assert!(daemon::capture_operation_owned(
+    assert!(daemon::capture_operation(
         &state,
         CaptureV2Request {
             operation_id: "cap-tampered".into(),
             owner_id: "task-a".into(),
             proposals: vec![tampered],
-            reconciliation_operation_ids: vec![],
         },
     )
     .is_err());
-    let captured = daemon::capture_operation_owned(
+    let captured = daemon::capture_operation(
         &state,
         CaptureV2Request {
             operation_id: "cap-2".into(),
             owner_id: "task-a".into(),
             proposals: vec![refined.proposal.clone()],
-            reconciliation_operation_ids: vec![],
         },
     )
     .unwrap();

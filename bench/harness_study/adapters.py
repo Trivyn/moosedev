@@ -93,7 +93,7 @@ def build_command(
     daemon_exe: Path | None = None, daemon_socket: Path | None = None,
     context_tokens: int = 32768, ca_bundle: Path | None = None,
     harness_response_policy: str = "auto",
-    harness_intent_policy: str = "current",
+    harness_intent_policy: str = "symbolic",
     postedit_association_contract: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     """Build argv and controlled env additions; write only runtime configuration.
@@ -111,8 +111,10 @@ def build_command(
         raise ValueError(f"unknown backend: {backend}")
     if harness_response_policy not in {"auto", "provider-default", "reasoning-off"}:
         raise ValueError("unknown harness response policy")
-    if harness_intent_policy not in {"current", "change-level", "change-level-v2", "symbolic"}:
-        raise ValueError("unknown harness intent policy")
+    if harness_intent_policy != "symbolic":
+        # The sealed policies (current, change-level, change-level-v2) survive
+        # only in frozen manifests and reports; no build can run them again.
+        raise ValueError("unknown harness intent policy: only symbolic can be run")
     if type(postedit_association_contract) is not bool:
         raise ValueError("post-edit association contract flag must be Boolean")
     if not isinstance(model, str) or not model.strip() or model.startswith("-"):
@@ -208,10 +210,9 @@ def build_command(
                 "MOOSEDEV_LLM_BASE_URL": endpoint, "MOOSEDEV_LLM_MODEL": model,
                 "MOOSEDEV_LLM_API_KEY": "local-study",
                 "MOOSEDEV_HARNESS_RESPONSE_POLICY": harness_response_policy,
-                "MOOSEDEV_HARNESS_INTENT_POLICY": harness_intent_policy,
                 "MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS": str(context_tokens)})
-    if postedit_association_contract:
-        env["MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS"] = "1"
+    # The policy and association contract are intrinsic to the harness now;
+    # the parameters stay so sealed command receipts keep their shape.
     return [str(binary), "--project", str(workspace), "--daemon", daemon_url,
             "--daemon-exe", str(daemon), "--model", model, "--endpoint", endpoint], env
 

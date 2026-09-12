@@ -403,12 +403,24 @@ impl Controller {
         });
         self.save_conversation()?;
         if self.runner.is_none() {
-            if let Some(id) = &self.conversation.active_task {
-                self.runner = Some(Runner::load(
+            if let Some(id) = self.conversation.active_task.clone() {
+                match Runner::load(
                     self.conversation.root.clone(),
                     self.daemon.clone().unwrap(),
-                    id,
-                )?);
+                    &id,
+                ) {
+                    Ok(runner) => self.runner = Some(runner),
+                    Err(error) => {
+                        // A journal from an earlier build cannot be resumed;
+                        // the conversation continues with a fresh task.
+                        self.conversation.active_task = None;
+                        self.conversation.push(
+                            "system",
+                            format!("Could not resume task {id}: {error:#} Describe the work again to start a new task."),
+                        );
+                        self.save_conversation()?;
+                    }
+                }
             }
         }
         if self.provider.config.model.is_empty() {
@@ -917,7 +929,7 @@ fn assistant_suffix(
     if !failed {
         return "";
     }
-    if request.is_some_and(|request| request["purpose"] == "harness_capture") {
+    if request.is_some_and(|request| request["purpose"] == "harness_capture_note") {
         return "\n[capture assessment failed; see the session error]";
     }
     let complete = request.is_some_and(|request| {
@@ -1065,7 +1077,7 @@ mod tests {
             assistant_suffix(true, true, Some(&complete)),
             "\n[interrupted]"
         );
-        let capture = serde_json::json!({"purpose":"harness_capture","response":null});
+        let capture = serde_json::json!({"purpose":"harness_capture_note","response":null});
         assert!(assistant_suffix(false, true, Some(&capture)).contains("capture assessment failed"));
     }
     #[tokio::test]

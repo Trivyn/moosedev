@@ -1,13 +1,11 @@
-//! Symbolic intent policy. The coding model answers only `harness_action` and
-//! one final `harness_capture_note`; purpose, obligations, associations and
-//! capture typing are derived by the daemon from the approved plan, the
-//! resolved definition scopes and the graph. Everything here is reached by a
-//! one-line dispatch placed before the existing policy logic, so the other
-//! policies' prompts, schemas, events and errors are untouched.
+//! The harness's own decisions. The coding model answers only `harness_action`
+//! and one final `harness_capture_note`; obligations, associations and capture
+//! typing are derived by the daemon from the approved plan, the resolved
+//! definition scopes and the graph.
 use super::intent_v2::changed_files;
 use super::intent_v2::{digest_json, ApprovedChangeScope, ApprovedDefinitionScope};
 use super::model::{observation_preview, Action, NoopEdit};
-use super::{ContextResponse, IntentPolicy, Mode, Phase, Progress, Runner};
+use super::{ContextResponse, Mode, PendingEdit, Phase, Progress, Runner};
 use crate::harness::daemon::intent::{
     IntentBinding, IntentLinkRequest, IntentResolveRequest, IntentResolveResponse,
 };
@@ -23,13 +21,14 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Edits outside the plan files replan autonomously this many times per task;
 /// the next one parks for human guidance.
 pub const MAX_SCOPE_ESCAPES: usize = 3;
+/// A rejected typed capture is retyped under fresh ids this many times per
+/// task; the next rejection parks for human guidance.
+pub const MAX_RETYPES: usize = 3;
 
-/// Durable symbolic-policy state. Obligations are re-derived at every plan
-/// approval; the counters bound autonomous recoveries for the whole task.
+/// Durable derived state. Obligations are re-derived at every plan approval;
+/// the counters bound autonomous recoveries for the whole task.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SymbolicState {
-    /// The approved plan summary stands in for a selected purpose record.
-    pub purpose_summary: String,
     /// Plan file -> direct dossier records of its resolved definitions.
     pub obligations: BTreeMap<String, Vec<String>>,
     pub obligations_digest: String,
@@ -38,6 +37,8 @@ pub struct SymbolicState {
     pub scope_escapes: usize,
     #[serde(default)]
     pub noop_continuations: usize,
+    #[serde(default)]
+    pub retypes: usize,
     /// The association derived for the current edit batch; cleared by each
     /// applied edit so a later batch is derived afresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,11 +69,10 @@ struct NoteAnswer {
     note: String,
 }
 
-/// One derived association batch: the request, the daemon's page and the
-/// review it entered. `derived` -> `awaiting_review` -> `resolved`.
+/// One derived association batch: the daemon's page and the review it
+/// entered. `derived` -> `awaiting_review` -> `resolved`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolicAssociation {
-    pub request: AssociateRequest,
     pub page: AssociatePage,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,8 +80,30 @@ pub struct SymbolicAssociation {
 }
 
 impl Runner {
-    pub(super) fn uses_symbolic_intent(&self) -> bool {
-        self.task.intent_policy == IntentPolicy::Symbolic
+    pub(super) fn symbolic_state_mut(&mut self) -> &mut SymbolicState {
+        self.task.symbolic.get_or_insert_with(Default::default)
+    }
+
+    /// Every applied edit starts a new association batch and a new note.
+    pub(super) fn clear_symbolic_batch_state(&mut self, edit: &PendingEdit) {
+        if let Some(scope) = self.task.approved_change_scope.as_mut() {
+            scope
+                .files
+                .insert(edit.file.clone(), super::fingerprint(&edit.after));
+            if let Some(after_digest) = super::fingerprint(&edit.after) {
+                for definition in scope
+                    .definition_scopes
+                    .iter_mut()
+                    .filter(|definition| definition.file == edit.file)
+                {
+                    definition.source_digest = after_digest.clone();
+                }
+            }
+        }
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.association = None;
+            state.capture_note = None;
+        }
     }
 
     /// Derive the approved change scope from the plan alone: obligations are
@@ -118,7 +140,6 @@ impl Runner {
                 file: entity.file.clone(),
                 symbol: entity.symbol.clone(),
                 source_digest: entity.source_digest.clone(),
-                purpose_iris: records.into_iter().collect(),
             });
         }
         let obligations: BTreeMap<String, Vec<String>> = obligations
@@ -133,27 +154,16 @@ impl Runner {
             .into_iter()
             .collect();
         let obligations_digest = digest_json(&obligations)?;
-        let plan_digest = digest_json(&json!({
-            "summary": plan.summary,
-            "files": plan.files,
-            "checks": plan.checks,
-            "snapshots": self.task.snapshots,
-        }))?;
         self.task.approved_change_scope = Some(ApprovedChangeScope {
             version: 2,
-            plan_digest,
             knowledge_revision: context.revision.clone(),
             files: self.task.snapshots.clone(),
-            purpose_iris: vec![],
             obligation_iris: obligation_iris.clone(),
-            selected_records: vec![],
             definition_scopes,
             checks: plan.checks.clone(),
             approval_cycle: self.task.intent_cycle.clone().unwrap_or_default(),
-            purpose_summary: Some(plan.summary.clone()),
         });
-        let state = self.task.symbolic.get_or_insert_with(Default::default);
-        state.purpose_summary = plan.summary.clone();
+        let state = self.symbolic_state_mut();
         state.obligations = obligations;
         state.obligations_digest = obligations_digest.clone();
         state.knowledge_revision = context.revision.clone();
@@ -180,7 +190,7 @@ impl Runner {
     /// becomes the ordinary replan transition naming the file, bounded per
     /// task. Returns `None` once parked for guidance.
     pub(super) fn symbolic_intercept(&mut self, action: Action) -> Result<Option<Action>> {
-        if !self.uses_symbolic_intent() || self.task.mode != Mode::Auto {
+        if self.task.mode != Mode::Auto {
             return Ok(Some(action));
         }
         let file = match &action {
@@ -198,7 +208,7 @@ impl Runner {
         if plan_files.contains(&file) {
             return Ok(Some(action));
         }
-        let state = self.task.symbolic.get_or_insert_with(Default::default);
+        let state = self.symbolic_state_mut();
         state.scope_escapes += 1;
         let escapes = state.scope_escapes;
         let scope = plan_files.join(", ");
@@ -236,10 +246,10 @@ impl Runner {
     /// The first no-op edit of a task means the source already matches: run
     /// the required checks instead of spending the repair budget.
     pub(super) fn symbolic_noop_continuation(&mut self, error: &anyhow::Error) -> Option<Action> {
-        if !self.uses_symbolic_intent() || !error.is::<NoopEdit>() {
+        if !error.is::<NoopEdit>() {
             return None;
         }
-        let state = self.task.symbolic.get_or_insert_with(Default::default);
+        let state = self.symbolic_state_mut();
         if state.noop_continuations >= 1 {
             return None;
         }
@@ -331,22 +341,18 @@ impl Runner {
                     "derived"
                 };
                 let association = SymbolicAssociation {
-                    request,
                     page,
                     status: status.into(),
                     link_operation_id: None,
                 };
-                self.task
-                    .symbolic
-                    .get_or_insert_with(Default::default)
-                    .association = Some(association.clone());
+                self.symbolic_state_mut().association = Some(association.clone());
                 self.persist()?;
                 association
             }
         };
         match association.status.as_str() {
             "resolved" => Ok(false),
-            "awaiting_review" => self.prepare_intent_links(false).await,
+            "awaiting_review" => self.prepare_intent_links().await,
             "derived" => {
                 let mut bindings: Vec<IntentBinding> = Vec::new();
                 for derived in &association.page.bindings {
@@ -369,28 +375,17 @@ impl Runner {
                 let operation_id = request.operation_id.clone();
                 self.task.pending_intent_links = Some(request);
                 let association = self
-                    .task
-                    .symbolic
+                    .symbolic_state_mut()
+                    .association
                     .as_mut()
-                    .and_then(|state| state.association.as_mut())
                     .context("symbolic association state missing")?;
                 association.link_operation_id = Some(operation_id);
                 association.status = "awaiting_review".into();
                 self.persist()?;
-                self.prepare_intent_links(false).await
+                self.prepare_intent_links().await
             }
             other => bail!("unknown symbolic association status {other}"),
         }
-    }
-
-    pub(super) fn symbolic_association_matches(&self, operation_id: &str) -> bool {
-        self.task
-            .symbolic
-            .as_ref()
-            .and_then(|state| state.association.as_ref())
-            .is_some_and(|association| {
-                association.link_operation_id.as_deref() == Some(operation_id)
-            })
     }
 
     pub(super) fn symbolic_associations_resolved(&self) -> bool {
@@ -417,26 +412,19 @@ impl Runner {
 
 impl Runner {
     pub(super) fn record_symbolic_check(&mut self, command: &str, success: bool) {
-        if !self.uses_symbolic_intent() {
-            return;
-        }
         let after_edit = !self.task.edits.is_empty();
-        self.task
-            .symbolic
-            .get_or_insert_with(Default::default)
-            .check_history
-            .push(CheckOutcome {
-                command: command.to_string(),
-                success,
-                after_edit,
-            });
+        self.symbolic_state_mut().check_history.push(CheckOutcome {
+            command: command.to_string(),
+            success,
+            after_edit,
+        });
     }
 
-    /// Symbolic capture: intermediate checkpoints only journal; the final
-    /// checkpoint asks the model one plain question, has the daemon type and
-    /// reconcile the answer, and hands typed proposals to the ordinary
-    /// capture submission and review. Returns true when `capture_request` is
-    /// set and the caller should submit it.
+    /// Intermediate checkpoints only journal; the final checkpoint asks the
+    /// model one plain question, has the daemon type and reconcile the answer,
+    /// and hands typed proposals to the ordinary capture submission and
+    /// review. Returns true when `capture_request` is set and the caller
+    /// should submit it.
     pub(super) async fn symbolic_capture_page(&mut self) -> Result<bool> {
         let checkpoint_end = *self
             .task
@@ -448,7 +436,8 @@ impl Runner {
                 "Capture checkpoint deferred to the final note ({events} events)."
             ));
             self.intent_event("capture_deferred", &format!("{events} events"));
-            return self.finish_symbolic_capture_page(checkpoint_end, vec![]);
+            self.advance_after_capture_page(checkpoint_end)?;
+            return Ok(false);
         }
         if self
             .task
@@ -470,10 +459,7 @@ impl Runner {
                 "capture_note",
                 &format!("{} bytes, event {note_event}", note.len()),
             );
-            self.task
-                .symbolic
-                .get_or_insert_with(Default::default)
-                .capture_note = Some(CaptureNoteState {
+            self.symbolic_state_mut().capture_note = Some(CaptureNoteState {
                 operation_id: uuid::Uuid::new_v4().to_string(),
                 capture_operation_id: uuid::Uuid::new_v4().to_string(),
                 note_event,
@@ -499,7 +485,6 @@ impl Runner {
                     note: state.note.clone(),
                     note_evidence: vec![format!("Event {}: capture note", state.note_event)],
                     plan_summary: plan.summary.clone(),
-                    plan_files: plan.files.clone(),
                     changed_files: self.changed_file_names(),
                     check_history: self
                         .task
@@ -559,10 +544,9 @@ impl Runner {
                     self.intent_event(kind, &detail);
                 }
                 let note = self
-                    .task
-                    .symbolic
+                    .symbolic_state_mut()
+                    .capture_note
                     .as_mut()
-                    .and_then(|state| state.capture_note.as_mut())
                     .context("symbolic capture note state missing")?;
                 note.status = "typed".into();
                 note.response = Some(response.clone());
@@ -589,10 +573,10 @@ impl Runner {
         self.task.capture_reason = Some(reason.clone());
         self.event(format!("Capture assessment: {reason}"));
         if proposals.is_empty() {
-            return self.finish_symbolic_capture_page(checkpoint_end, vec![]);
+            self.advance_after_capture_page(checkpoint_end)?;
+            return Ok(false);
         }
         self.task.capture_end = Some(checkpoint_end);
-        self.task.capture_end_offset = 0;
         self.task.capture_request = Some(CaptureRequest {
             operation_id: state.capture_operation_id,
             proposals,
@@ -601,28 +585,44 @@ impl Runner {
         Ok(true)
     }
 
-    /// Consume the checkpoint without a submission, then continue exactly as
-    /// the empty-proposals branch of the model-driven capture does.
-    fn finish_symbolic_capture_page(
-        &mut self,
-        checkpoint_end: usize,
-        _proposals: Vec<KnowledgeProposal>,
-    ) -> Result<bool> {
-        self.task.capture_end = Some(checkpoint_end);
-        self.task.capture_end_offset = 0;
-        self.commit_capture_page();
-        self.candidate_accepted();
-        self.task.phase = if self.capture_reviews_block_progress() {
-            Phase::AwaitingReview
-        } else if self.task.capture_due {
-            self.capture_work_phase()
-        } else if !self.task.batch_capture || self.task.final_capture {
-            Phase::AwaitingReview
-        } else {
-            self.task.after_review
+    /// A definite pre-persistence rejection of the typed proposals: keep the
+    /// note, discard the typing, and let the daemon type it again under fresh
+    /// ids (it qualifies colliding titles on the next call). Bounded per task.
+    pub(super) async fn retype_capture_note(&mut self, reason: &str) -> Result<()> {
+        self.task.capture_request = None;
+        self.task.capture_end = None;
+        self.task.capture_due = true;
+        let state = self.symbolic_state_mut();
+        let Some(note) = state.capture_note.as_mut() else {
+            bail!("capture rejected before persistence without a note to retype: {reason}");
         };
-        self.persist()?;
-        Ok(false)
+        state.retypes += 1;
+        let retypes = state.retypes;
+        if retypes > MAX_RETYPES {
+            let message = format!(
+                "The daemon rejected the typed capture {MAX_RETYPES} times ({reason}). Provide guidance; the note and the checkpoint are preserved."
+            );
+            self.intent_event(
+                "capture_retype_exhausted",
+                &format!("retype {retypes}, bound {MAX_RETYPES}"),
+            );
+            self.task.phase = Phase::AwaitingInput;
+            self.task.last_response = message.clone();
+            self.event(message);
+            return self.persist();
+        }
+        note.status = "asked".into();
+        note.response = None;
+        note.operation_id = uuid::Uuid::new_v4().to_string();
+        note.capture_operation_id = uuid::Uuid::new_v4().to_string();
+        self.intent_event(
+            "capture_retyped",
+            &format!("{retypes} of {MAX_RETYPES}: {reason}"),
+        );
+        self.event(format!(
+            "Capture rejected before persistence; retyping the same note under fresh identities ({retypes} of {MAX_RETYPES}): {reason}"
+        ));
+        self.persist()
     }
 
     fn changed_file_names(&self) -> Vec<String> {

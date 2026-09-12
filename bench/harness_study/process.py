@@ -115,7 +115,7 @@ def _journal_metrics(outcome, task):
                           "individual_dispositions", "plan_approval_attempts", "gate_decisions",
                           "review_interactions", "approval_cycles"):
                 outcome["metrics"]["evolution_" + field] = outcome["evolution_reviews"][field]
-    if task.get("intent_policy") == "symbolic" and "intent_events" in task:
+    if (task.get("schema", 1) >= 2 or task.get("intent_policy") == "symbolic") and "intent_events" in task:
         outcome["symbolic"] = symbolic_metrics(task["intent_events"], task.get("model_requests") or [])
         for field, value in outcome["symbolic"].items():
             if isinstance(value, int):

@@ -1,4 +1,4 @@
-//! Symbolic policy capture typing: one plain-prose note from the coding model,
+//! Capture typing: one plain-prose note from the coding model,
 //! plus the plan, the diff and the check history, become typed proposals.
 //! Two proposals are purely symbolic (a decision for the change, a lesson for
 //! a check that failed then passed); a bounded LLM sensor may add more when
@@ -14,28 +14,20 @@ use serde_json::json;
 
 use super::reconcile_score::{record_receipt, score_proposal, ScoreReceipt, ScoredDisposition};
 use super::{accepted_revision, current_status, operation_path, save_operation, validate_owner_id};
+use crate::api::error::ApiError;
 use crate::graph::{self, AppState};
 use crate::harness::protocol::*;
 
 const MAX_SENSOR_PROPOSALS: usize = 5;
 const MAX_PROPOSALS: usize = 16;
 const MAX_TITLE_CHARS: usize = 100;
-const KINDS: [&str; 6] = [
-    "ArchitecturalDecision",
-    "Requirement",
-    "Constraint",
-    "Lesson",
-    "Pattern",
-    "AntiPattern",
-];
 
 pub async fn capture_type(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CaptureTypeRequest>,
-) -> Result<Json<CaptureTypeResponse>, ApiErrorAlias> {
+) -> Result<Json<CaptureTypeResponse>, ApiError> {
     Ok(Json(capture_type_operation(&state, request).await?))
 }
-type ApiErrorAlias = crate::api::error::ApiError;
 
 #[derive(Debug, Deserialize)]
 struct SensorTyping {
@@ -203,7 +195,7 @@ pub async fn capture_type_operation(
             Ok(typed) => {
                 let known: Vec<String> = raw.iter().map(|(p, _)| normalized(&p.title)).collect();
                 for proposal in typed.proposals.into_iter().take(MAX_SENSOR_PROPOSALS) {
-                    if !KINDS.contains(&proposal.kind.as_str())
+                    if !is_record_kind(&proposal.kind)
                         || proposal.title.trim().is_empty()
                         || proposal.description.trim().is_empty()
                         || known.contains(&normalized(&proposal.title))
@@ -463,7 +455,7 @@ async fn sensor_typing(
                     "additionalProperties": false,
                     "required": ["kind", "title", "description"],
                     "properties": {
-                        "kind": {"type": "string", "enum": KINDS},
+                        "kind": {"type": "string", "enum": RECORD_KINDS},
                         "title": {"type": "string", "minLength": 1, "maxLength": 200},
                         "description": {"type": "string", "minLength": 1, "maxLength": 2000}
                     }

@@ -20,26 +20,22 @@ use std::sync::{Arc, Mutex};
 
 mod actions;
 mod capture;
-mod capture_resolution;
 mod change_intent;
 mod intent_v2;
 mod model;
 mod recovery;
 mod symbolic;
 mod usage;
-pub use change_intent::{ChangeIntent, ChangeTarget, IntentEvent, IntentPolicy};
-pub use intent_v2::{
-    probe_intent_contracts, IntentContractProbeAttempt, IntentContractProbeReceipt,
-    IntentContractProbeUsage,
-};
+pub use change_intent::IntentEvent;
+pub use intent_v2::{ApprovedChangeScope, ApprovedDefinitionScope};
 use model::{action_schema, conversational_schema, Action, ModelOutput, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
-pub use symbolic::SymbolicState;
+pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
 pub use usage::UsageLedger;
 
-const fn legacy_capture_contract() -> u32 {
-    1
-}
+/// Task journal contract. Journals written by earlier builds are refused;
+/// there is no in-place migration.
+pub const SCHEMA: u32 = 2;
 
 const MAX_STEPS: usize = 256;
 const MAX_FILES: usize = 100;
@@ -68,8 +64,6 @@ pub struct Plan {
     pub summary: String,
     pub files: Vec<String>,
     pub checks: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change_intent: Option<ChangeIntent>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -99,8 +93,6 @@ enum Intent {
 pub struct ReviewItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_links: Option<super::daemon::intent::IntentLinkRequest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_resolution: Option<capture_resolution::ResolutionReview>,
     pub request: CaptureRequest,
     pub response: CaptureResponse,
     pub reason: String,
@@ -113,44 +105,15 @@ pub struct Task {
     pub mode: Mode,
     pub phase: Phase,
     pub plan: Option<Plan>,
-    /// Capture prompt/wire contract. Missing means the original contract.
-    #[serde(default = "legacy_capture_contract")]
-    pub capture_contract: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_resolution: Option<capture_resolution::CaptureResolution>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_batch: Option<capture_resolution::CaptureBatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_revision: Option<capture_resolution::PendingRevision>,
-    #[serde(default)]
-    pub intent_policy: IntentPolicy,
-    #[serde(default)]
-    pub entity_links: bool,
-    /// Missing is the legacy contract. Version 1 makes post-edit association
-    /// assessment mandatory independently of the intent policy.
-    #[serde(default)]
-    pub postedit_association_contract: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub purpose_selection: Option<intent_v2::PurposeSelectionState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved_change_scope: Option<intent_v2::ApprovedChangeScope>,
-    /// Symbolic-policy scope and recovery counters. Absent under other policies.
+    pub approved_change_scope: Option<ApprovedChangeScope>,
+    /// Derived scope, associations, capture note and recovery counters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbolic: Option<SymbolicState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub postedit_association: Option<intent_v2::PostEditAssociationState>,
-    #[serde(default)]
-    pub scope_assessments: Vec<intent_v2::EditScopeAssessment>,
-    #[serde(default)]
-    pub postedit_rejected_bindings: Vec<super::daemon::intent::IntentBinding>,
     #[serde(default)]
     pub intent_events: Vec<IntentEvent>,
     #[serde(default)]
     intent_cycle: Option<String>,
-    #[serde(default)]
-    intent_missing_rounds: usize,
-    #[serde(default)]
-    intent_bound: Vec<super::daemon::intent::IntentBinding>,
     #[serde(default)]
     pending_intent_links: Option<super::daemon::intent::IntentLinkRequest>,
     /// A reviewed intent/link receipt is already durable; only this fallible
@@ -165,8 +128,8 @@ pub struct Task {
     #[serde(default)]
     pub edits: Vec<PendingEdit>,
     pub last_error: Option<String>,
-    /// Typed class of `last_error`: model_output, controller_invariant,
-    /// daemon_rejection, service, or other. Absent in older journals.
+    /// Typed class of `last_error`: model_output, daemon_rejection, service,
+    /// or other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_kind: Option<String>,
     #[serde(default)]
@@ -199,13 +162,7 @@ pub struct Task {
     #[serde(default)]
     capture_end: Option<usize>,
     #[serde(default)]
-    capture_offset: usize,
-    #[serde(default)]
-    capture_end_offset: usize,
-    #[serde(default)]
     capture_checkpoint_end: Option<usize>,
-    #[serde(default)]
-    capture_files: Vec<String>,
     schema: u32,
     snapshots: BTreeMap<String, Option<String>>,
     approved_revision: Option<String>,
@@ -217,8 +174,6 @@ pub struct Task {
     steps: usize,
     capture_operations: Vec<String>,
     capture_cursor: usize,
-    #[serde(default)]
-    capture_repairs: usize,
     /// Human capture review is resolved; retry only completion checks on failure.
     #[serde(default)]
     completion_pending: bool,
@@ -237,7 +192,6 @@ pub struct Runner {
     journal: PathBuf,
     _lock: File,
     context: Option<ContextResponse>,
-    intent_choices: Option<super::daemon::intent::IntentResolveResponse>,
     config: Option<LlmConfig>,
     model_client: Option<(ResponseKey, OpenAiCompatClient)>,
     response_policy: Option<ResponsePolicy>,
@@ -264,8 +218,6 @@ impl std::error::Error for HttpFailure {}
 fn error_kind(error: &anyhow::Error) -> &'static str {
     if error.is::<model::InvalidModelOutput>() {
         "model_output"
-    } else if error.is::<model::ControllerInvariant>() {
-        "controller_invariant"
     } else if let Some(failure) = error.downcast_ref::<HttpFailure>() {
         if (400..500).contains(&failure.status) {
             "daemon_rejection"
@@ -369,32 +321,16 @@ impl Runner {
         let root = workspace.root().to_path_buf();
         let id = uuid::Uuid::new_v4().to_string();
         let (journal, lock) = Self::storage(&root, &id)?;
-        let intent_policy = IntentPolicy::from_env()?;
-        let postedit_association_contract =
-            change_intent::postedit_associations_from_env(intent_policy)?;
         let task = Task {
             id,
             objective,
             mode: Mode::Plan,
             phase: Phase::Planning,
             plan: None,
-            capture_contract: 2,
-            capture_resolution: None,
-            capture_batch: None,
-            pending_revision: None,
-            intent_policy,
-            entity_links: change_intent::entity_links_from_env()?,
-            postedit_association_contract,
-            purpose_selection: None,
             approved_change_scope: None,
             symbolic: None,
-            postedit_association: None,
-            scope_assessments: vec![],
-            postedit_rejected_bindings: vec![],
             intent_events: vec![],
             intent_cycle: None,
-            intent_missing_rounds: 0,
-            intent_bound: vec![],
             pending_intent_links: None,
             intent_refresh_pending: vec![],
             events: vec![],
@@ -422,11 +358,8 @@ impl Runner {
             delivered_messages: Vec::new(),
             guidance: String::new(),
             capture_end: None,
-            capture_offset: 0,
-            capture_end_offset: 0,
             capture_checkpoint_end: None,
-            capture_files: Vec::new(),
-            schema: 1,
+            schema: SCHEMA,
             snapshots: BTreeMap::new(),
             approved_revision: None,
             intent: None,
@@ -437,7 +370,6 @@ impl Runner {
             steps: 0,
             capture_operations: vec![],
             capture_cursor: 0,
-            capture_repairs: 0,
             completion_pending: false,
             cleanup_pending: false,
             source: BTreeMap::new(),
@@ -450,7 +382,6 @@ impl Runner {
             journal,
             _lock: lock,
             context: None,
-            intent_choices: None,
             config: None,
             model_client: None,
             response_policy: None,
@@ -459,14 +390,7 @@ impl Runner {
             last_saved: Mutex::new(None),
         };
         let context = runner.refresh(&[]).await?;
-        anyhow::ensure!(
-            context
-                .capture_contracts
-                .as_ref()
-                .is_some_and(|versions| versions.contains(&2)),
-            "project daemon does not advertise capture contract v2; upgrade the daemon before creating a new harness task"
-        );
-        runner.validate_intent_contract(&context)?;
+        Self::validate_daemon_contracts(&context)?;
         runner.event("Task created in Plan mode; current project knowledge retrieved.");
         runner.persist()?;
         Ok(runner)
@@ -483,14 +407,13 @@ impl Runner {
         );
         let task: Task = serde_json::from_reader(File::open(&journal)?)?;
         anyhow::ensure!(
-            task.schema == 1 && task.id == id && task.root == workspace.root(),
-            "task schema or project identity mismatch"
+            task.schema == SCHEMA,
+            "task journal schema {} is unsupported by this build; start a new task",
+            task.schema
         );
         anyhow::ensure!(
-            !task.intent_policy.mandates_postedit_associations()
-                || task.postedit_association_contract == 1,
-            "{} journal requires postedit_association_contract 1",
-            task.intent_policy.env_name()
+            task.id == id && task.root == workspace.root(),
+            "task identity or project mismatch"
         );
         task.token_usage.attach(&journal);
         Ok(Self {
@@ -501,7 +424,6 @@ impl Runner {
             journal,
             _lock: lock,
             context: None,
-            intent_choices: None,
             config: None,
             model_client: None,
             response_policy: None,
@@ -533,15 +455,12 @@ impl Runner {
         ) {
             self.task.reviews.push(ReviewItem {
                 intent_links: None,
-                capture_resolution: None,
                 request,
                 response,
                 reason: self.task.capture_reason.clone().unwrap_or_default(),
             });
             self.task.capture_request = None;
             self.task.pending_capture = None;
-            // Pre-paging journals lacked a frozen page position. New journals
-            // must carry both event index and byte offset through this conversion.
             self.task.capture_end.get_or_insert(self.task.events.len());
             self.commit_capture_page();
             if self.task.capture_due {
@@ -683,11 +602,12 @@ impl Runner {
             self.task.mode = Mode::Plan;
             self.task.phase = Phase::AwaitingPlan;
             self.task.approved_revision = None;
-            self.task.purpose_selection = None;
             self.task.approved_change_scope = None;
             self.task.snapshots = sources;
             self.task.check_results.clear();
             self.discard_pending_edit("source or accepted knowledge changed")?;
+            self.abandon_pending_intent("source or accepted knowledge changed")
+                .await?;
             self.intent_event("intent_invalidated", "source or accepted knowledge changed");
             self.start_intent_cycle();
             self.event("Source or accepted knowledge changed. Refreshed evidence; review and approve the plan again.");
@@ -732,7 +652,7 @@ impl Runner {
             return Ok(());
         }
         if self.task.pending_intent_links.is_some() {
-            self.prepare_intent_links(false).await?;
+            self.prepare_intent_links().await?;
             return Ok(());
         }
         if self.task.capture_due || self.task.capture_request.is_some() {
@@ -759,7 +679,6 @@ impl Runner {
                 .source
                 .insert(file.clone(), self.workspace.read(file)?);
         }
-        self.refresh_intent_choices(&targets, false).await?;
         let files = self.workspace.files()?;
         let prompt = self.prompt(&context, &files)?;
         let output: ModelOutput = self
@@ -862,14 +781,10 @@ impl Runner {
                 };
                 self.event(self.task.last_response.clone());
             }
-            Action::Associate { targets } => {
-                self.propose_associations(targets).await?;
-            }
             Action::Plan {
                 summary,
                 files,
                 checks,
-                change_intent,
             } => {
                 anyhow::ensure!(
                     self.task.mode == Mode::Plan,
@@ -898,11 +813,8 @@ impl Runner {
                     summary: summary.clone(),
                     files,
                     checks,
-                    change_intent,
                 });
-                self.task.purpose_selection = None;
                 self.task.approved_change_scope = None;
-                self.task.scope_assessments.clear();
                 self.start_intent_cycle();
                 self.event(format!(
                     "Proposed plan: {}",
@@ -913,12 +825,6 @@ impl Runner {
                 self.task.after_review = Phase::AwaitingPlan;
                 self.task.capture_due = true;
                 self.capture().await?;
-                if self.task.phase == Phase::AwaitingPlan
-                    && !self.task.capture_due
-                    && self.task.reviews.is_empty()
-                {
-                    self.prepare_v2_purpose().await?;
-                }
             }
             Action::Edit {
                 file,
@@ -978,9 +884,6 @@ impl Runner {
                     reason,
                     revision: context.revision,
                 };
-                if !self.assess_v2_edit(&edit).await? {
-                    return Ok(());
-                }
                 self.persist()?;
                 if !edit.reason.is_empty() {
                     self.task.pending_edit = Some(edit);
@@ -1039,10 +942,7 @@ impl Runner {
                     "approve and execute a plan before completion"
                 );
                 self.task.last_response = summary;
-                if self.prepare_postedit_associations().await? {
-                    return Ok(());
-                }
-                if self.prepare_intent_links(true).await? {
+                if self.prepare_symbolic_associations().await? {
                     return Ok(());
                 }
                 self.task.phase = Phase::Verifying;
@@ -1065,7 +965,7 @@ impl Runner {
         self.task
             .source
             .insert(edit.file.clone(), edit.after.clone());
-        self.record_owned_v2_transition(&edit);
+        self.clear_symbolic_batch_state(&edit);
         self.intent_event("edit_applied", &edit.file);
         self.event(format!(
             "Applied edit {}\nBefore:\n{}\nAfter:\n{}",
@@ -1177,7 +1077,6 @@ impl Runner {
         let snapshots = self.snapshot(&files)?;
         if previous != context.revision || snapshots != self.task.snapshots {
             self.task.snapshots = snapshots;
-            self.task.purpose_selection = None;
             self.task.approved_change_scope = None;
             self.event(
                 "Evidence changed before approval; inspect refreshed context and approve again.",
@@ -1185,47 +1084,12 @@ impl Runner {
             self.persist()?;
             bail!("plan evidence changed; renewed approval required");
         }
-        if !self.validate_intent_approval(&context).await? {
-            return Ok(());
-        }
-        let purpose_was_reviewable = self
-            .task
-            .purpose_selection
-            .as_ref()
-            .is_some_and(|selection| selection.status == "ready");
-        if !self.prepare_v2_purpose().await? {
-            if self.task.capture_due {
-                self.task.after_review = Phase::AwaitingPlan;
-                self.capture().await?;
-            }
-            return Ok(());
-        }
-        if self.uses_v2_intent() && !purpose_was_reviewable {
-            self.task.phase = Phase::AwaitingPlan;
-            self.task.last_response = "Purpose and obligation choices are ready. Review their complete claims and rationales, then approve the plan again to bind them to execution scope.".into();
-            self.intent_event(
-                "purpose_review_required",
-                "human must review selected purpose metadata before execution approval",
-            );
-            return self.persist();
-        }
-        if self.prepare_intent_links(false).await? {
+        if self.prepare_intent_links().await? {
             self.intent_event("plan_blocked", "intent associations await human review");
             return self.persist();
         }
-        if self.uses_symbolic_intent() {
-            self.derive_symbolic_scope(&context).await?;
-        }
+        self.derive_symbolic_scope(&context).await?;
         self.task.approved_revision = Some(context.revision);
-        self.approve_v2_scope().await?;
-        if self.resume_scope_review_after_governing_selection()? {
-            self.intent_event(
-                "plan_approved",
-                "approved renewed governing selection; exact affected scope awaits review",
-            );
-            self.end_intent_cycle("approved");
-            return self.persist();
-        }
         self.task.completion_pending = false;
         self.task.mode = Mode::Auto;
         self.task.phase = Phase::Working;
@@ -1267,7 +1131,6 @@ impl Runner {
             "Human approved the exact pending edit to {}.",
             edit.file
         ));
-        self.approve_v2_edit_scope(&edit)?;
         self.apply_edit(edit)
     }
 
@@ -1345,8 +1208,6 @@ impl Runner {
         self.task.last_response = text;
         self.task.turn_finished = false;
         self.task.steps = 0;
-        self.task.capture_repairs = 0;
-        self.task.intent_missing_rounds = 0;
         self.end_intent_cycle("new human guidance");
         self.task.approved_revision = None;
         self.discard_pending_edit("new human guidance invalidated the proposed edit")?;
@@ -1383,20 +1244,10 @@ impl Runner {
                 && !self.task.capture_due,
             "knowledge review remains unresolved"
         );
-        if self.uses_postedit_associations() && !self.task.edits.is_empty() {
-            let resolved = if self.uses_symbolic_intent() {
-                self.symbolic_associations_resolved()
-            } else {
-                self.task
-                    .postedit_association
-                    .as_ref()
-                    .is_some_and(|state| state.status == "resolved")
-            };
-            anyhow::ensure!(
-                resolved,
-                "post-edit association assessment remains unresolved"
-            );
-        }
+        anyhow::ensure!(
+            self.task.edits.is_empty() || self.symbolic_associations_resolved(),
+            "post-edit association assessment remains unresolved"
+        );
         // Publish resolved review and this retryable completion intent together.
         // A failed checkpoint must not send the user back to a no-change review.
         self.task.completion_pending = true;
@@ -1558,17 +1409,9 @@ impl Runner {
             self.task.phase = self.task.resume_phase;
         }
         self.reconcile()?;
-        self.normalize_v2_missing_capture_resume();
         self.resume_intent_refresh().await?;
         let files = self.task.read_files.clone();
         self.refresh(&files).await?;
-        if self.awaiting_v2_missing_capture() && !self.task.capture_due {
-            self.persist()?;
-            if self.finish_v2_missing_capture_if_quiescent().await? {
-                self.event("Resumed with refreshed project knowledge.");
-                return self.persist();
-            }
-        }
         // Recover an outstanding capture before approval freshness can change
         // the phase: AwaitingPlan cannot advance an uncertain capture request.
         if self.task.mode == Mode::Auto
@@ -1593,7 +1436,6 @@ impl Runner {
         self.task.recovery = None;
         self.task.last_response = text;
         self.task.steps = 0;
-        self.task.capture_repairs = 0;
         if self.task.intent.take().is_some() {
             self.task.mode = Mode::Plan;
             self.task.approved_revision = None;
@@ -1629,9 +1471,8 @@ mod recovery_tests {
     async fn command_observation_keeps_durable_intent_until_caller_commits_outcome() {
         async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
             Json(ContextResponse {
-                capture_contracts: Some(vec![1, 2]),
-                intent_contracts: Some(vec![1, 2]),
-                capture_targets: Some(Default::default()),
+                capture_contracts: vec![2],
+                intent_contracts: vec![2],
                 project_root: root.to_string_lossy().into_owned(),
                 revision: "fixture".into(),
                 context: String::new(),

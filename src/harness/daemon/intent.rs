@@ -1,4 +1,4 @@
-//! Journal-side plan associations use existing graph predicates and ratification.
+//! Derived code associations use existing graph predicates and ratification.
 //! A symbol is usable only while filesystem evidence proves its indexed source.
 use super::*;
 
@@ -66,8 +66,7 @@ struct LinkOperation {
     reviewed: bool,
 }
 
-const LINK_EVIDENCE: &str =
-    "approved change-level plan association; relevance requires human review";
+const LINK_EVIDENCE: &str = "derived post-edit association; relevance requires human review";
 
 pub async fn resolve(
     State(state): State<Arc<AppState>>,
@@ -118,16 +117,9 @@ pub fn resolve_entities(
         )?;
         state.load_substrate(&state.project_root());
     }
-    let snapshot = context_snapshot(
-        state,
-        &ContextRequest {
-            topic: "change purpose obligations".into(),
-            files: Vec::new(),
-        },
-    )?;
     let mut response = IntentResolveResponse {
-        revision: snapshot.revision,
-        records: snapshot.capture_targets.unwrap_or_default().records,
+        revision: accepted_revision(state)?,
+        records: current_record_targets(state)?,
         entities: Vec::new(),
         unresolved: Vec::new(),
     };
@@ -248,11 +240,19 @@ pub fn link_operation(
                 binding.symbol.is_some() != binding.planned_name.is_some(),
                 "intent target requires exactly one symbol or planned name"
             );
-            let record = choices
-                .records
-                .iter()
-                .find(|record| record.iri == binding.record_iri)
-                .ok_or_else(|| anyhow::anyhow!("intent record is not a current supplied choice"))?;
+            // The record is verified directly against the graph; the bounded
+            // inventory in `choices.records` is informational only.
+            let record_class =
+                graph::require_information_record(state, &NamedNode::new(&binding.record_iri)?)
+                    .map_err(|error| {
+                        anyhow::anyhow!("intent record is not a knowledge record: {error}")
+                    })?;
+            anyhow::ensure!(
+                current_status(state, &binding.record_iri)
+                    .as_deref()
+                    .is_some_and(graph::in_working_set),
+                "intent record is not current accepted knowledge"
+            );
             let candidates: Vec<_> = choices
                 .entities
                 .iter()
@@ -294,7 +294,7 @@ pub fn link_operation(
             if !response.resolved.contains(&resolved) {
                 response.resolved.push(resolved);
                 predicates.push(
-                    if record.kind == "Constraint" {
+                    if graph::local_name(&record_class) == "Constraint" {
                         "constrains"
                     } else {
                         "concerns"

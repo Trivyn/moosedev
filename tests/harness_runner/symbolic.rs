@@ -1,8 +1,8 @@
-//! Symbolic intent policy: the coding model answers only `harness_action`
-//! and one final `harness_capture_note`; the daemon derives everything else.
-//! Same scripted sensor and filesystem as the other runner tests.
+//! The harness's own decisions: the coding model answers only `harness_action`
+//! and one final `harness_capture_note`; obligations, associations and capture
+//! typing come from the scripted daemon. Same scripted sensor and filesystem
+//! as the other runner tests.
 use super::*;
-use moosedev::harness::runner::IntentPolicy;
 use sha2::{Digest, Sha256};
 
 /// Mock of `intent/associate`: every `def` in a changed file is a Function
@@ -11,11 +11,17 @@ use sha2::{Digest, Sha256};
 pub(super) async fn associate(
     State(state): State<Shared>,
     Json(request): Json<AssociateRequest>,
-) -> Json<AssociatePage> {
+) -> (StatusCode, Json<Value>) {
     let mut script = state.lock().unwrap();
     script
         .requests
         .push(json!({"kind":"intent_associate","request":request}));
+    if let Some(status) = script.associate_status {
+        return (
+            StatusCode::from_u16(status).unwrap(),
+            Json(json!({"error":"scripted association failure"})),
+        );
+    }
     let mut bindings = Vec::new();
     let mut skipped = Vec::new();
     let mut ungoverned = Vec::new();
@@ -104,82 +110,26 @@ pub(super) async fn associate(
             }
         }
     }
-    Json(AssociatePage {
-        knowledge_revision: script.revision.clone(),
-        index: IntentIndexSnapshot {
-            revision: Some("fixture-index".into()),
-            producer: Some("scip-python".into()),
-            status: IntentIndexStatus::Current,
-            refresh_action: IntentRefreshAction::NotRequested,
-        },
-        scope_digest: "fixture-scope".into(),
-        bindings,
-        skipped,
-        ungoverned,
-        unresolved: Vec::new(),
-    })
-}
-
-#[tokio::test]
-async fn symbolic_policy_persists_its_mandatory_contract_across_reload() {
-    let _env_lock = ENVIRONMENT.lock().await;
-    let fixture = Fixture::new().await;
-    let mut runner = fixture.interactive().await;
-    runner.set_intent_policy(IntentPolicy::Symbolic).unwrap();
-    assert_eq!(runner.task.postedit_association_contract, 1);
-    let id = runner.task.id.clone();
-    drop(runner);
-    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
-    assert_eq!(runner.task.intent_policy, IntentPolicy::Symbolic);
-    assert_eq!(runner.task.postedit_association_contract, 1);
-    drop(runner);
-    // A journal claiming the policy without its contract is refused on load,
-    // exactly as a change-level-v2 journal is.
-    let journal = fixture
-        .root
-        .join(".moosedev/harness/tasks")
-        .join(format!("{id}.json"));
-    let mut persisted: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
-    assert_eq!(persisted["intent_policy"], json!("symbolic"));
-    persisted["postedit_association_contract"] = json!(0);
-    std::fs::write(&journal, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
-    let error = Runner::load(fixture.root.clone(), fixture.url.clone(), &id)
-        .err()
-        .expect("symbolic journal without the association contract must not load");
-    assert!(error
-        .to_string()
-        .contains("symbolic journal requires postedit_association_contract 1"));
-}
-
-#[tokio::test]
-async fn symbolic_job_text_is_added_only_under_the_symbolic_policy() {
-    let _env_lock = ENVIRONMENT.lock().await;
-    let fixture = Fixture::new().await;
-    let mut runner = fixture.interactive().await;
-    fixture.conversational(json!({"action":"reply","message":"Hello."}));
-    fixture.no_capture();
-    runner.advance().await.unwrap();
-    let plain = fixture.last_model_prompt("harness_action");
-    assert!(!plain.contains("Your job: read, edit, run checks, finish."));
-
-    let fixture = Fixture::new().await;
-    let mut runner = fixture.interactive().await;
-    runner.set_intent_policy(IntentPolicy::Symbolic).unwrap();
-    fixture.conversational(json!({"action":"reply","message":"Hello."}));
-    runner.advance().await.unwrap();
-    let symbolic = fixture.last_model_prompt("harness_action");
-    assert!(symbolic.contains("Your job: read, edit, run checks, finish."));
-    assert!(symbolic.contains("one plain question"));
-}
-
-fn symbolic_events(runner: &Runner, kind: &str) -> Vec<String> {
-    runner
-        .task
-        .intent_events
-        .iter()
-        .filter(|event| event.kind == kind)
-        .map(|event| event.detail.clone())
-        .collect()
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(AssociatePage {
+                knowledge_revision: script.revision.clone(),
+                index: IntentIndexSnapshot {
+                    revision: Some("fixture-index".into()),
+                    producer: Some("scip-python".into()),
+                    status: IntentIndexStatus::Current,
+                    refresh_action: IntentRefreshAction::NotRequested,
+                },
+                scope_digest: "fixture-scope".into(),
+                bindings,
+                skipped,
+                ungoverned,
+                unresolved: Vec::new(),
+            })
+            .unwrap(),
+        ),
+    )
 }
 
 /// Mock of `capture/type`: by default the note becomes one distinct
@@ -194,7 +144,13 @@ pub(super) async fn capture_type(
         .requests
         .push(json!({"kind":"capture_type","operation_id":request.operation_id}));
     script.capture_type_requests.push(request.clone());
-    if std::mem::take(&mut script.fail_capture_type_once) {
+    if let Some(status) = script.capture_type_status {
+        return (
+            StatusCode::from_u16(status).unwrap(),
+            Json(json!({"error":"scripted typing rejection"})),
+        );
+    }
+    if script.fail_capture_type || std::mem::take(&mut script.fail_capture_type_once) {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error":"simulated lost typing acknowledgment"})),
@@ -239,13 +195,18 @@ pub(super) async fn capture_type(
     )
 }
 
-const PRESERVE: &str = "https://moosedev.dev/kg/Requirement/preserve-labels";
-const UNLINKED: &str = "https://moosedev.dev/kg/Constraint/unlinked";
-const RENDER_NAME: &str = "scip-python python fixture . labels.py/render_name().";
+fn symbolic_events(runner: &Runner, kind: &str) -> Vec<String> {
+    intent_details(runner, kind)
+}
+
+pub(super) const PRESERVE: &str = "https://moosedev.dev/kg/Requirement/preserve-labels";
+pub(super) const UNLINKED: &str = "https://moosedev.dev/kg/Constraint/unlinked";
+pub(super) const RENDER_NAME: &str = "scip-python python fixture . labels.py/render_name().";
+pub(super) const NORMALIZE: &str = "scip-python python fixture . labels.py/normalize().";
 
 /// Two accepted records exist; only one is linked to a definition in the plan
 /// file. The direct dossier rule makes that one the obligation.
-async fn symbolic_fixture() -> Fixture {
+pub(super) async fn symbolic_fixture() -> Fixture {
     let fixture = Fixture::new().await;
     std::fs::write(
         fixture.root.join("labels.py"),
@@ -276,15 +237,65 @@ async fn symbolic_fixture() -> Fixture {
     fixture
 }
 
-async fn planned_symbolic_runner(fixture: &Fixture) -> Runner {
+pub(super) async fn planned_symbolic_runner(fixture: &Fixture) -> Runner {
     let mut runner = fixture.interactive().await;
-    runner.set_intent_policy(IntentPolicy::Symbolic).unwrap();
     fixture.conversational(json!({"action":"read","file":"labels.py"}));
     runner.advance().await.unwrap();
     fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["fixture-required-check"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     runner
+}
+
+/// The edit every association scenario applies: a new `normalize` helper
+/// next to the governed `render_name`.
+pub(super) fn add_helper(fixture: &Fixture) {
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return normalize(name)\n\ndef normalize(value):\n    return value.strip()\n"}));
+}
+
+#[tokio::test]
+async fn schema_1_journal_is_refused_with_start_a_new_task() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let runner = fixture.interactive().await;
+    let id = runner.task.id.clone();
+    drop(runner);
+    let journal = fixture
+        .root
+        .join(".moosedev/harness/tasks")
+        .join(format!("{id}.json"));
+    let mut persisted: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+    assert_eq!(
+        persisted["schema"],
+        json!(moosedev::harness::runner::SCHEMA)
+    );
+    assert_eq!(persisted["schema"], json!(2));
+    assert!(persisted.get("intent_policy").is_none());
+    assert!(persisted.get("capture_contract").is_none());
+    Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    persisted["schema"] = json!(1);
+    std::fs::write(&journal, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+    let error = Runner::load(fixture.root.clone(), fixture.url.clone(), &id)
+        .err()
+        .expect("a schema 1 journal must not load");
+    assert_eq!(
+        error.to_string(),
+        "task journal schema 1 is unsupported by this build; start a new task"
+    );
+}
+
+#[tokio::test]
+async fn job_text_names_the_single_final_note() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"reply","message":"Hello."}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("Your job: read, edit, run checks, finish."));
+    assert!(prompt.contains("one plain question"));
+    assert!(!prompt.contains("change_intent"));
+    assert!(!prompt.contains("\"associate\""));
 }
 
 #[tokio::test]
@@ -301,32 +312,21 @@ async fn symbolic_approval_derives_obligations_from_direct_dossier_records() {
     );
     assert_eq!(runner.task.phase, Phase::Working);
     assert_eq!(runner.task.mode, Mode::Auto);
-    assert!(runner.task.purpose_selection.is_none());
-    assert!(symbolic_events(&runner, "purpose_review_required").is_empty());
     assert_eq!(symbolic_events(&runner, "obligations_derived").len(), 1);
 
     let scope = runner.task.approved_change_scope.clone().unwrap();
     assert_eq!(scope.version, 2);
-    assert!(scope.purpose_iris.is_empty());
     assert_eq!(scope.obligation_iris, vec![PRESERVE.to_string()]);
-    assert_eq!(
-        scope.purpose_summary.as_deref(),
-        Some("Preserve display behavior while adding a helper")
-    );
     assert_eq!(scope.knowledge_revision, "accepted-v1");
+    assert_eq!(scope.checks, vec!["fixture-required-check".to_string()]);
     assert_eq!(scope.definition_scopes.len(), 1);
     assert_eq!(scope.definition_scopes[0].file, "labels.py");
     assert_eq!(scope.definition_scopes[0].symbol, RENDER_NAME);
-    assert_eq!(
-        scope.definition_scopes[0].purpose_iris,
-        vec![PRESERVE.to_string()]
-    );
     let state = runner.task.symbolic.clone().unwrap();
     assert_eq!(
         state.obligations.get("labels.py").unwrap(),
         &vec![PRESERVE.to_string()]
     );
-    assert_eq!(state.purpose_summary, scope.purpose_summary.unwrap());
     assert_eq!(state.knowledge_revision, "accepted-v1");
     assert!(!state.obligations_digest.is_empty());
     assert_eq!(state.scope_escapes, 0);
@@ -386,10 +386,6 @@ async fn symbolic_replan_rederives_obligations_and_keeps_task_counters() {
     assert_eq!(runner.task.phase, Phase::Working);
     let state = runner.task.symbolic.clone().unwrap();
     assert_eq!(state.scope_escapes, 2, "task-wide bounds survive a replan");
-    assert_eq!(
-        state.purpose_summary,
-        "Preserve display behavior in the helper"
-    );
     assert_eq!(
         state.obligations.get("labels.py").unwrap(),
         &vec![UNLINKED.to_string(), PRESERVE.to_string()]
@@ -518,8 +514,6 @@ async fn symbolic_first_noop_edit_runs_checks_and_the_second_repairs() {
     assert_eq!(symbolic_events(&runner, "repair_exhausted").len(), 1);
 }
 
-const NORMALIZE: &str = "scip-python python fixture . labels.py/normalize().";
-
 fn request_kinds(fixture: &Fixture) -> Vec<String> {
     fixture
         .shared
@@ -543,7 +537,7 @@ async fn symbolic_associations_are_derived_and_ratified_without_a_model() {
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
-    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return normalize(name)\n\ndef normalize(value):\n    return value.strip()\n"}));
+    add_helper(&fixture);
     runner.advance().await.unwrap();
     assert_eq!(runner.task.edits.len(), 1);
     runner.advance().await.unwrap();
@@ -555,12 +549,13 @@ async fn symbolic_associations_are_derived_and_ratified_without_a_model() {
         calls + 1,
         "finish is the only model call"
     );
-    assert!(request_kinds(&fixture).contains(&"intent_associate".to_string()));
+    let kinds = request_kinds(&fixture);
+    assert!(kinds.contains(&"intent_associate".to_string()));
     assert!(
-        !request_kinds(&fixture)
+        kinds
             .iter()
-            .any(|kind| kind == "model:harness_association_selection"
-                || kind == "postedit_candidates")
+            .all(|kind| !kind.starts_with("model:") || kind == "model:harness_action"),
+        "{kinds:?}"
     );
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     let links = fixture.shared.lock().unwrap().intent_link_requests.clone();
@@ -586,6 +581,11 @@ async fn symbolic_associations_are_derived_and_ratified_without_a_model() {
         association.link_operation_id.as_deref(),
         Some(links[0].operation_id.as_str())
     );
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert_eq!(
+        runner.task.reviews[0].response.proposals[0].kind,
+        "DerivedAssociation"
+    );
     fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
     runner.review(true).await.unwrap();
     assert_eq!(runner.task.phase, Phase::Verifying);
@@ -609,15 +609,8 @@ async fn symbolic_associations_are_derived_and_ratified_without_a_model() {
     runner.resume().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Verifying);
     assert_eq!(fixture.shared.lock().unwrap().intent_link_requests.len(), 1);
-    runner.task.check_results = vec![CheckResult {
-        command: "fixture-required-check".into(),
-        success: true,
-        output: "scripted verification".into(),
-    }];
-    fixture.reply(
-        "harness_capture_note",
-        json!({"note":"nothing beyond the diff"}),
-    );
+    runner.task.check_results = vec![passed_check()];
+    fixture.note("nothing beyond the diff");
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     assert_eq!(runner.task.reviews.len(), 1);
@@ -673,10 +666,10 @@ async fn symbolic_ungoverned_edit_journals_and_proceeds_to_checks() {
 
 /// Drive a symbolic task through plan, approval, one edit that adds a helper,
 /// link review and passing checks, up to the final capture checkpoint.
-async fn symbolic_task_ready_for_final_capture(fixture: &Fixture) -> Runner {
+pub(super) async fn symbolic_task_ready_for_final_capture(fixture: &Fixture) -> Runner {
     let mut runner = planned_symbolic_runner(fixture).await;
     runner.approve_plan().await.unwrap();
-    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return normalize(name)\n\ndef normalize(value):\n    return value.strip()\n"}));
+    add_helper(fixture);
     runner.advance().await.unwrap();
     let calls = fixture.model_calls();
     runner.advance().await.unwrap();
@@ -692,11 +685,7 @@ async fn symbolic_task_ready_for_final_capture(fixture: &Fixture) -> Runner {
     fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
     runner.review(true).await.unwrap();
     assert_eq!(runner.task.phase, Phase::Verifying);
-    runner.task.check_results = vec![CheckResult {
-        command: "fixture-required-check".into(),
-        success: true,
-        output: "scripted verification".into(),
-    }];
+    runner.task.check_results = vec![passed_check()];
     runner
         .task
         .symbolic
@@ -724,13 +713,12 @@ fn model_schemas(fixture: &Fixture) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn symbolic_policy_never_requests_purpose_association_resolution_or_capture_schemas() {
+async fn only_action_and_capture_note_schemas_are_ever_requested() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
-    fixture.reply(
-        "harness_capture_note",
-        json!({"note":"The helper strips whitespace so labels compare equal; keep normalization in one place."}),
+    fixture.note(
+        "The helper strips whitespace so labels compare equal; keep normalization in one place.",
     );
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
@@ -752,11 +740,11 @@ async fn symbolic_policy_never_requests_purpose_association_resolution_or_captur
     assert_eq!(typing.len(), 1);
     assert_eq!(typing[0].owner_id, runner.task.id);
     assert_eq!(typing[0].changed_files, vec!["labels.py".to_string()]);
-    assert_eq!(typing[0].plan_files, vec!["labels.py".to_string()]);
     assert_eq!(
         typing[0].plan_summary,
         "Preserve display behavior while adding a helper"
     );
+    assert_eq!(typing[0].knowledge_revision, "accepted-links");
     assert_eq!(typing[0].check_history.len(), 1);
     assert!(typing[0].check_history[0].after_edit);
     assert!(typing[0].note.starts_with("The helper strips whitespace"));
@@ -813,10 +801,7 @@ async fn symbolic_capture_note_survives_restart_before_and_after_typing() {
     let fixture = symbolic_fixture().await;
     let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
     fixture.shared.lock().unwrap().fail_capture_type_once = true;
-    fixture.reply(
-        "harness_capture_note",
-        json!({"note":"Keep normalization in one helper."}),
-    );
+    fixture.note("Keep normalization in one helper.");
     assert!(
         runner.advance().await.is_err(),
         "typing acknowledgment was lost"
@@ -861,35 +846,19 @@ async fn symbolic_capture_note_survives_restart_before_and_after_typing() {
     runner.resume().await.unwrap();
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
-    {
-        let script = fixture.shared.lock().unwrap();
-        let typing_ids: Vec<_> = script
-            .capture_type_requests
-            .iter()
-            .map(|r| r.operation_id.clone())
-            .collect();
-        assert_eq!(
-            typing_ids,
-            vec![note.operation_id.clone(), note.operation_id.clone()]
-        );
-        let capture_ids: Vec<_> = script
-            .capture_requests
-            .iter()
-            .map(|r| r.operation_id.clone())
-            .collect();
-        assert_eq!(
-            capture_ids,
-            vec![
-                note.capture_operation_id.clone(),
-                note.capture_operation_id.clone()
-            ]
-        );
-    }
     assert_eq!(
-        model_schemas(&fixture)
-            .iter()
-            .filter(|schema| *schema == "harness_capture_note")
-            .count(),
+        fixture.typing_ids(),
+        vec![note.operation_id.clone(), note.operation_id.clone()]
+    );
+    assert_eq!(
+        fixture.capture_ids(),
+        vec![
+            note.capture_operation_id.clone(),
+            note.capture_operation_id.clone()
+        ]
+    );
+    assert_eq!(
+        fixture.note_calls(),
         1,
         "the note is asked once for the whole task"
     );
@@ -902,7 +871,7 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
-    fixture.shared.lock().unwrap().capture_type_reply = Some(vec![TypedProposal {
+    fixture.typed(vec![TypedProposal {
         proposal: KnowledgeProposal {
             kind: "Requirement".into(),
             title: "Preserve display label behavior".into(),
@@ -924,10 +893,7 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
         },
         resolved_by: "symbolic".into(),
     }]);
-    fixture.reply(
-        "harness_capture_note",
-        json!({"note":"Labels keep their display form."}),
-    );
+    fixture.note("Labels keep their display form.");
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     assert!(runner.task.reviews.is_empty());

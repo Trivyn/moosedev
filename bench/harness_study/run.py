@@ -384,8 +384,6 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                     search_path = str(node_bin) + ":" + search_path
                 environment.update({"PATH": search_path,
                                     "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"})
-                if harness_cell:
-                    environment["MOOSEDEV_HARNESS_ENTITY_LINKS"] = "1"
                 if hosted:
                     environment.update({"HTTPS_PROXY": hosted.url, "HTTP_PROXY": hosted.url,
                                         "ALL_PROXY": hosted.url, "NO_PROXY": "127.0.0.1,localhost,::1"})

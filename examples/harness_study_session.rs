@@ -32,11 +32,6 @@ The driver supplies a controlled environment. MOOSEDEV_LLM_API_KEY,
 MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS, and MOOSEDEV_LLM_STRUCTURED_OUTPUT configure
 the provider; explicit --model and --endpoint always override environment values.
 MOOSEDEV_DATA_DIR and executor settings retain their ordinary harness semantics.
-
-Neutral contract preflight (no project, daemon, or coding actions):
-harness_study_session --probe-intent-contracts --model ID --endpoint URL
-Emits complete native purpose/association probe receipts as JSON. A failed
-contract emits its retained receipt before exiting unsuccessfully.
 ";
 
 fn explicit_arguments(
@@ -73,22 +68,6 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
     };
     provider.select(Some(endpoint), model)?;
     Ok(provider)
-}
-
-async fn run_contract_probe(args: impl IntoIterator<Item = String>) -> Result<()> {
-    let values = explicit_arguments(args, &["--model", "--endpoint"])?;
-    let provider = provider_settings(&values["--model"], &values["--endpoint"])?;
-    let receipt = moosedev::harness::runner::probe_intent_contracts(
-        &provider.config,
-        provider.response_policy,
-    )
-    .await?;
-    emit(&mut std::io::stdout(), &serde_json::to_value(&receipt)?)?;
-    ensure!(
-        receipt.passed,
-        "native intent contract probe failed; see retained JSON receipt"
-    );
-    Ok(())
 }
 
 struct Options {
@@ -272,20 +251,13 @@ async fn run(options: Options) -> Result<()> {
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let result = if args
-        .first()
-        .is_some_and(|arg| arg == "--probe-intent-contracts")
-    {
-        run_contract_probe(args.into_iter().skip(1)).await
-    } else {
-        match Options::parse(args) {
-            Ok(Some(options)) => run(options).await,
-            Ok(None) => {
-                print!("{HELP}");
-                Ok(())
-            }
-            Err(error) => Err(error),
+    let result = match Options::parse(args) {
+        Ok(Some(options)) => run(options).await,
+        Ok(None) => {
+            print!("{HELP}");
+            Ok(())
         }
+        Err(error) => Err(error),
     };
     if let Err(error) = result {
         let _ = emit(

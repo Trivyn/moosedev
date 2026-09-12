@@ -35,14 +35,16 @@ class AdapterTests(unittest.TestCase):
         values.update(kwargs)
         return adapters.build_command(backend, **values)
 
-    def test_harness_accepts_every_persisted_intent_policy_and_nothing_else(self):
+    def test_harness_accepts_only_the_symbolic_policy_and_emits_no_policy_env(self):
         harness = dict(executable=self.daemon, daemon_exe=self.daemon, daemon_url="http://127.0.0.1:8000",
                        endpoint="http://127.0.0.1:1234/v1", context_tokens=65536)
-        for policy in ("current", "change-level", "change-level-v2", "symbolic"):
-            _command, env = self.build("harness", harness_intent_policy=policy, **harness)
-            self.assertEqual(env["MOOSEDEV_HARNESS_INTENT_POLICY"], policy)
-        with self.assertRaisesRegex(ValueError, "unknown harness intent policy"):
-            self.build("harness", harness_intent_policy="neuro", **harness)
+        _command, env = self.build("harness", harness_intent_policy="symbolic", **harness)
+        self.assertNotIn("MOOSEDEV_HARNESS_INTENT_POLICY", env)
+        self.assertNotIn("MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS", env)
+        self.assertNotIn("MOOSEDEV_HARNESS_ENTITY_LINKS", env)
+        for sealed in ("current", "change-level", "change-level-v2", "neuro"):
+            with self.assertRaisesRegex(ValueError, "unknown harness intent policy"):
+                self.build("harness", harness_intent_policy=sealed, **harness)
 
     def test_codex_has_isolation_flags_and_no_bypass(self):
         command, env = self.build("codex")
@@ -161,16 +163,12 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "response policy"):
             self.build("harness", harness_response_policy="unknown")
 
-    def test_postedit_association_contract_is_explicit_and_opt_in(self):
-        _, old = self.build("harness", executable=self.daemon, daemon_exe=self.daemon,
-                            daemon_url="http://127.0.0.1:8000",
-                            endpoint="http://127.0.0.1:1234/v1")
-        self.assertNotIn("MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS", old)
+    def test_postedit_association_contract_flag_is_accepted_but_never_emitted(self):
         _, stage2 = self.build("harness", executable=self.daemon, daemon_exe=self.daemon,
                                daemon_url="http://127.0.0.1:8000",
                                endpoint="http://127.0.0.1:1234/v1",
                                postedit_association_contract=True)
-        self.assertEqual(stage2["MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS"], "1")
+        self.assertNotIn("MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS", stage2)
         with self.assertRaisesRegex(ValueError, "Boolean"):
             self.build("harness", postedit_association_contract=1)
 

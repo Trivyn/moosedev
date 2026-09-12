@@ -1,5 +1,5 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
-use super::{ContextResponse, IntentPolicy, Mode, Runner, MAX_PLAN_SUMMARY};
+use super::{ContextResponse, Mode, Runner, MAX_PLAN_SUMMARY};
 use crate::harness::progress::Progress;
 use crate::harness::response::{self, ResponsePolicy};
 use crate::llm::{LlmConfig, OpenAiCompatClient, UsageContext};
@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 
 const MAX_CONTEXT: usize = 100_000;
 const REPAIR_RESERVE: usize = 1024;
-pub(super) const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
+const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
 
-pub(super) fn json_request_bytes(prompt: &str, schema: &Value) -> Result<usize> {
+fn json_request_bytes(prompt: &str, schema: &Value) -> Result<usize> {
     let schema = serde_json::to_vec(schema)?;
     prompt
         .len()
@@ -30,21 +30,9 @@ impl std::fmt::Display for InvalidModelOutput {
 }
 impl std::error::Error for InvalidModelOutput {}
 
-/// Marks a failure of the controller's own durable state, as opposed to model
-/// output that failed validation. Attached as error context so the runner can
-/// classify `last_error` without matching on message text.
-#[derive(Debug)]
-pub(super) struct ControllerInvariant;
-impl std::fmt::Display for ControllerInvariant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("controller invariant violated")
-    }
-}
-impl std::error::Error for ControllerInvariant {}
-
-/// An edit whose result equals the current source. Displays the legacy
-/// validation message so other policies' diagnostics are unchanged; the
-/// symbolic policy matches on the type to run checks instead of repairing.
+/// An edit whose result equals the current source. The first one in a task
+/// runs the required checks instead of spending the repair budget; a repeat
+/// is repaired like any other invalid output.
 #[derive(Debug)]
 pub(super) struct NoopEdit;
 impl std::fmt::Display for NoopEdit {
@@ -287,9 +275,7 @@ impl Runner {
             prompt.push_str("Return exactly one JSON action.\n");
         }
         prompt.push_str("\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan for changed scope or approach. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n");
-        if self.task.intent_policy == IntentPolicy::Symbolic {
-            prompt.push_str("\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n");
-        }
+        prompt.push_str("\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n");
         prompt.push_str(&format!(
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent human guidance: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
             config.model, self.task.objective, self.task.guidance, context.context,
@@ -318,15 +304,6 @@ impl Runner {
         // file dossiers are never clipped to accommodate a directory listing.
         let schema = self.action_schema();
         let limit = self.prompt_budget()?;
-        let intent_budget = limit
-            .saturating_sub(
-                prompt.len()
-                    + "\nRequired JSON schema:\n".len()
-                    + serde_json::to_string(&schema)?.len()
-                    + 1024,
-            )
-            .min(12_000);
-        prompt.push_str(&self.intent_prompt(intent_budget)?);
         let required = prompt.len()
             + "\nRequired JSON schema:\n".len()
             + serde_json::to_string(&schema)?.len();
@@ -393,15 +370,10 @@ pub(super) enum Action {
     Search {
         query: String,
     },
-    Associate {
-        targets: Vec<super::ChangeTarget>,
-    },
     Plan {
         summary: String,
         files: Vec<String>,
         checks: Vec<String>,
-        #[serde(default)]
-        change_intent: Option<super::ChangeIntent>,
     },
     Edit {
         file: String,

@@ -24,61 +24,26 @@ pub struct ContextResponse {
     pub revision: String,
     pub context: String,
     pub files: Vec<FileContext>,
-    /// None identifies older daemons that cannot supply typed capture choices.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_targets: Option<CaptureTargets>,
-    /// Supported durable capture protocol versions. Absent on legacy daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_contracts: Option<Vec<u32>>,
-    /// Supported deterministic intent-discovery contracts. Absent on legacy daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_contracts: Option<Vec<u32>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompleteClaim {
-    pub literals: Vec<CandidateLiteral>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PurposeCandidate {
-    pub handle: String,
-    pub iri: String,
-    pub kind: String,
-    pub title: String,
-    pub claim: CompleteClaim,
-    pub lifecycle: String,
-    pub assertion_digest: String,
-    pub relations: Vec<CandidateRelation>,
-    pub legal_predicates: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PurposeRetrieval {
-    Page,
-    ExhaustedEmpty,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PurposeCandidateRequest {
-    pub objective: String,
+    /// Supported durable capture protocol versions.
     #[serde(default)]
-    pub files: Vec<String>,
+    pub capture_contracts: Vec<u32>,
+    /// Supported deterministic intent-discovery contracts.
     #[serde(default)]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
+    pub intent_contracts: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PurposeCandidatePage {
-    pub revision: String,
-    pub candidates: Vec<PurposeCandidate>,
-    pub retrieval: PurposeRetrieval,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
+/// The knowledge record classes the harness captures and reconciles.
+pub const RECORD_KINDS: [&str; 6] = [
+    "ArchitecturalDecision",
+    "Requirement",
+    "Constraint",
+    "Lesson",
+    "Pattern",
+    "AntiPattern",
+];
+
+pub fn is_record_kind(kind: &str) -> bool {
+    RECORD_KINDS.contains(&kind)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -146,73 +111,11 @@ pub enum IntentScopeBasis {
     ConservativeFile,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PostEditCandidate {
-    pub id: String,
-    pub file: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub symbol: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition_range: Option<HarnessSourceRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enclosing_range: Option<HarnessSourceRange>,
-    pub source_digest: String,
-    pub scope_basis: IntentScopeBasis,
-    pub candidate_digest: String,
-    pub existing_record_iris: Vec<String>,
-    pub record_choices: Vec<PurposeCandidate>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntentCandidateUnresolved {
     pub file: String,
     pub reason: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IntentCandidateRequest {
-    pub files: Vec<ChangedFile>,
-    pub refresh_policy: IntentRefreshPolicy,
-    #[serde(default)]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IntentCandidatePage {
-    pub knowledge_revision: String,
-    pub index: IntentIndexSnapshot,
-    pub scope_digest: String,
-    pub candidates: Vec<PostEditCandidate>,
-    pub unresolved: Vec<IntentCandidateUnresolved>,
-    /// Historical definition evidence for deleted files. These are audit
-    /// scopes, never candidates for a new CodeEntity link.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deleted: Vec<DeletedDefinitionScope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeletedDefinitionScope {
-    pub file: String,
-    pub symbol: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub definition_range: HarnessSourceRange,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enclosing_range: Option<HarnessSourceRange>,
-    pub before_digest: String,
-    pub scope_digest: String,
-}
-
-/// Bounded choices from the same knowledge snapshot as context and dossiers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CaptureTargets {
-    pub components: Vec<CaptureTarget>,
-    pub records: Vec<CaptureTarget>,
-}
-
+/// A current knowledge record offered to the link path by IRI, label and kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureTarget {
     pub iri: String,
@@ -238,11 +141,19 @@ pub struct KnowledgeProposal {
     pub supersedes: Option<String>,
     #[serde(default)]
     pub retracts: Option<String>,
-    /// Symbolic policy: relations the daemon derived for this proposal from a
-    /// durable reconciliation receipt (today only `refines`). Absent in every
-    /// other flow, so old journals and mocks are unaffected.
+    /// Relations the daemon derived for this proposal from a durable
+    /// reconciliation receipt (today only `refines`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reconciled: Vec<ReconciledRelation>,
+}
+
+impl KnowledgeProposal {
+    /// Governing knowledge blocks further work until a human reviews it.
+    pub fn is_governing(&self) -> bool {
+        matches!(self.kind.as_str(), "Requirement" | "Constraint")
+            || self.supersedes.is_some()
+            || self.retracts.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -261,17 +172,19 @@ pub struct CaptureRequest {
     pub proposals: Vec<KnowledgeProposal>,
 }
 
-/// Versioned capture request for harness tasks that need durable ownership.
-/// The legacy capture route deliberately has no implicit owner.
+impl CaptureRequest {
+    pub fn has_governing(&self) -> bool {
+        self.proposals.iter().any(KnowledgeProposal::is_governing)
+    }
+}
+
+/// Owned capture request: every harness capture names the task that owns it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureV2Request {
     pub operation_id: String,
     pub owner_id: String,
     pub proposals: Vec<KnowledgeProposal>,
-    /// Durable semantic dispositions authorizing otherwise colliding proposals.
-    #[serde(default)]
-    pub reconciliation_operation_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -283,8 +196,14 @@ pub struct CaptureCollision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CaptureV2Response {
-    Captured { capture: CaptureResponse },
-    ReconciliationRequired { collisions: Vec<CaptureCollision> },
+    Captured {
+        capture: CaptureResponse,
+    },
+    /// A proposal title already names current or pending knowledge; the
+    /// caller retypes under a qualified title rather than duplicating.
+    Collision {
+        collisions: Vec<CaptureCollision>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,48 +282,6 @@ pub struct CaptureCandidatePage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureDisposition {
-    ReuseUnchanged,
-    ReviseProposal,
-    DistinctKnowledge,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReconcileCaptureRequest {
-    pub operation_id: String,
-    pub owner_id: String,
-    pub proposal: KnowledgeProposal,
-    pub candidate_iri: String,
-    pub candidate_digest: String,
-    pub candidate_revision: String,
-    pub disposition: CaptureDisposition,
-    #[serde(default)]
-    pub replacement_proposal: Option<KnowledgeProposal>,
-    pub rationale: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReconcileCaptureResponse {
-    pub operation_id: String,
-    pub disposition: CaptureDisposition,
-    pub candidate_iri: String,
-    pub requires_human_review: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_capture_operation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReconcileReviewRequest {
-    pub operation_id: String,
-    pub accept: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapturedProposal {
     pub iri: String,
@@ -435,8 +312,8 @@ pub struct CheckpointResponse {
     pub pending: Vec<String>,
 }
 
-/// Symbolic policy: deterministic post-edit associations derived by the daemon
-/// from the changed definition scopes and the runner's governing records.
+/// Deterministic post-edit associations derived by the daemon from the changed
+/// definition scopes and the runner's governing records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssociateRequest {
@@ -536,8 +413,8 @@ pub struct CheckOutcome {
     pub after_edit: bool,
 }
 
-/// Symbolic policy: turn one prose note plus the task's plan, diff and check
-/// history into typed, reconciled proposals.
+/// Turn one prose note plus the task's plan, diff and check history into
+/// typed, reconciled proposals.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureTypeRequest {
@@ -547,7 +424,6 @@ pub struct CaptureTypeRequest {
     /// Evidence references the runner journaled for the note.
     pub note_evidence: Vec<String>,
     pub plan_summary: String,
-    pub plan_files: Vec<String>,
     pub changed_files: Vec<String>,
     pub check_history: Vec<CheckOutcome>,
     pub knowledge_revision: String,

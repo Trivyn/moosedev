@@ -399,7 +399,7 @@ sys.exit(2)''',
     def test_symbolic_policy_metrics_count_derived_decisions_and_model_purposes(self):
         import json
         from bench.harness_study.process import symbolic_metrics
-        final_task = {"id": "one", "phase": "Complete", "capture_contract": 2, "intent_policy": "symbolic",
+        final_task = {"id": "one", "phase": "Complete", "schema": 2,
                       "recovery": None, "response_receipt": {"requested": "auto", "resolved": "reasoning-off"},
                       "intent_events": [
                           {"id": "a", "cycle": "c1", "kind": "obligations_derived", "detail": "1 files"},
@@ -415,14 +415,14 @@ sys.exit(2)''',
                       "events": [{"message": "Read labels.py: source"}],
                       "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
                                          {"purpose": "harness_capture_note", "attempt": 1, "decision_id": "d2"}]}
-        expected = symbolic_metrics(final_task["intent_events"], final_task["model_requests"])
-        self.assertEqual(expected["obligations_derived"], 1)
-        self.assertEqual(expected["scope_escape_replan"], 1)
-        self.assertEqual(expected["capture_deferred"], 1, "duplicate journal ids count once")
-        self.assertEqual(expected["reconciled_restates"], 1)
-        self.assertEqual(expected["capture_notes"], 1)
-        self.assertEqual(expected["structured_model_decisions"], 0)
-        self.assertEqual(expected["autonomous_recoveries"], 1)
+        expected = {"obligations_derived": 1, "obligations_unresolved": 0, "scope_escape_replan": 1,
+                    "scope_escape_exhausted": 0, "noop_edit_continuation": 0, "association_derived": 1,
+                    "association_none": 0, "association_skipped": 0, "association_unresolved": 0,
+                    "capture_deferred": 1, "capture_note": 1, "capture_typed": 1, "reconciled_restates": 1,
+                    "reconciled_refines": 0, "reconciled_distinct": 1, "capture_notes": 1,
+                    "structured_model_decisions": 0, "autonomous_recoveries": 1}
+        self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,
+                         "duplicate journal ids count once")
         result, records = self.run_client(f"""
             import json, sys
             json.loads(sys.stdin.readline())
