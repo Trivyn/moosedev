@@ -1,5 +1,6 @@
 //! Thin interactive frontend. Human review commands never enter the model action surface.
-use super::runner::{Phase, Runner, Task};
+use super::protocol::{AssociatePage, DerivedBasis, TypedDisposition, TypingMode};
+use super::runner::{Phase, ReviewItem, Runner, Task};
 use super::{
     session::{Command, Controller, Conversation, Snapshot, Update},
     startup::{ProviderSettings, StartupOptions},
@@ -255,7 +256,7 @@ fn gate(task: &Task) -> String {
     match task.phase {
         Phase::AwaitingPlan => task.plan.as_ref().map(|plan| {
             let mut text = format!("PLAN · human approval required\n{}\nFiles: {}\nChecks:\n{}", plan.summary, plan.files.join(", "), plan.checks.join("\n"));
-            text.push_str("\n/approve to execute · send feedback to revise");
+            text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
             text
         }).unwrap_or_default(),
         Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Knowledge (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
@@ -332,14 +333,21 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
                             "\nCode associations · {}\n",
                             associations.operation_id
                         ));
-                        for binding in &associations.bindings {
-                            text.push_str(&format!(
-                                "{}\n{} · {}\n\n",
-                                binding.record_iri, binding.file, binding.symbol
-                            ));
+                        match derived_page(task, &associations.operation_id) {
+                            Some(page) => text.push_str(&link_review(page)),
+                            None => {
+                                for binding in &associations.bindings {
+                                    text.push_str(&format!(
+                                        "{}\n{} · {}\n\n",
+                                        binding.record_iri, binding.file, binding.symbol
+                                    ));
+                                }
+                                text.push_str("Derivation detail unavailable\n");
+                            }
                         }
                         text.push_str("Review each record's relevance to its target; acceptance is not proof of correctness.\n");
                     }
+                    text.push_str(&final_review(task, review));
                     for proposal in &review.request.proposals {
                         text.push_str(&format!(
                             "\n{} · {}\n{}\n\nEvidence\n{}\n",
@@ -378,6 +386,7 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
                         index + 1
                     ));
                 }
+                text.push_str(&symbolic_scope(task));
                 text.push_str(&format!(
                     "Current assessment\n{}\n",
                     task.capture_reason
@@ -406,6 +415,170 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
         }
     }
     visible(&text)
+}
+
+const SYMBOLIC_APPROVAL: &str = "On /approve the harness derives obligations from the plan files' governing records; no model call";
+
+/// Record class from a `/kg/<Class>/<id>` IRI; the journal stores IRIs only.
+fn record_kind(iri: &str) -> &str {
+    iri.rsplit('/').nth(1).unwrap_or("record")
+}
+
+/// What plan approval derived and how much autonomy the task has spent, all
+/// from the journal.
+fn symbolic_scope(task: &Task) -> String {
+    let Some(symbolic) = &task.symbolic else {
+        return String::new();
+    };
+    let mut text = String::from("Derived scope\n");
+    if symbolic.obligations.is_empty() {
+        text.push_str("No approved plan scope derived yet.\n");
+    }
+    for (file, records) in &symbolic.obligations {
+        if records.is_empty() {
+            text.push_str(&format!("{file} · ungoverned\n"));
+            continue;
+        }
+        text.push_str(&format!("{file}\n"));
+        for iri in records {
+            text.push_str(&format!("  {} · {iri}\n", record_kind(iri)));
+        }
+    }
+    if let Some(scope) = &task.approved_change_scope {
+        for definition in &scope.definition_scopes {
+            text.push_str(&format!(
+                "  def {} · {}\n",
+                definition.file, definition.symbol
+            ));
+        }
+    }
+    text.push_str(&format!(
+        "Revision {} · obligations {}\nScope escapes {} · no-op continuations {} · retypes {}\n",
+        symbolic.knowledge_revision,
+        &symbolic.obligations_digest[..symbolic.obligations_digest.len().min(12)],
+        symbolic.scope_escapes,
+        symbolic.noop_continuations,
+        symbolic.retypes
+    ));
+    for check in &symbolic.check_history {
+        text.push_str(&format!(
+            "  {} · {}{}\n",
+            if check.success { "PASS" } else { "FAIL" },
+            check.command,
+            if check.after_edit {
+                " · after edit"
+            } else {
+                ""
+            }
+        ));
+    }
+    text.push('\n');
+    text
+}
+
+/// The derived association page behind a link review, when the journal still
+/// holds the batch that produced it.
+fn derived_page<'a>(task: &'a Task, operation_id: &str) -> Option<&'a AssociatePage> {
+    task.symbolic
+        .as_ref()?
+        .association
+        .as_ref()
+        .filter(|association| association.link_operation_id.as_deref() == Some(operation_id))
+        .map(|association| &association.page)
+}
+
+fn link_review(page: &AssociatePage) -> String {
+    let mut text = String::new();
+    for binding in &page.bindings {
+        text.push_str(&format!(
+            "{} · {}\n{} · {} ({}) · line {}\n-{}-> {}\n\n",
+            binding.record_kind,
+            binding.record_iri,
+            binding.file,
+            binding.name.as_deref().unwrap_or(&binding.symbol),
+            binding.kind.as_deref().unwrap_or("definition"),
+            binding.definition_range.start.line + 1,
+            binding.predicate,
+            match binding.basis {
+                DerivedBasis::Obligation => "plan obligation",
+                DerivedBasis::FileDossier => "sibling definition's dossier",
+            }
+        ));
+    }
+    if !page.skipped.is_empty() {
+        let mut counts = std::collections::BTreeMap::new();
+        for skipped in &page.skipped {
+            *counts
+                .entry(format!("{:?}", skipped.reason))
+                .or_insert(0usize) += 1;
+        }
+        text.push_str("Skipped: ");
+        text.push_str(
+            &counts
+                .iter()
+                .map(|(reason, count)| format!("{reason} {count}"))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+        text.push('\n');
+    }
+    if !page.ungoverned.is_empty() {
+        text.push_str(&format!("Ungoverned: {}\n", page.ungoverned.join(", ")));
+    }
+    for unresolved in &page.unresolved {
+        text.push_str(&format!(
+            "Unresolved: {} · {}\n",
+            unresolved.file, unresolved.reason
+        ));
+    }
+    text
+}
+
+/// The final review card: the model's one note and how the daemon typed it.
+fn final_review(task: &Task, review: &ReviewItem) -> String {
+    let Some(note) = task
+        .symbolic
+        .as_ref()
+        .and_then(|symbolic| symbolic.capture_note.as_ref())
+        .filter(|note| note.capture_operation_id == review.request.operation_id)
+    else {
+        return String::new();
+    };
+    let mut text = format!("\nCapture note\n{}\n", note.note);
+    let Some(typed) = &note.response else {
+        return text;
+    };
+    text.push_str(&format!(
+        "Typing: {}{}\n",
+        match typed.typing_mode {
+            TypingMode::SymbolicOnly => "symbolic only",
+            TypingMode::Sensor => "symbolic with sensor",
+        },
+        typed
+            .typing_note
+            .as_deref()
+            .map(|note| format!(" · {note}"))
+            .unwrap_or_default()
+    ));
+    for proposal in &typed.proposals {
+        text.push_str(&format!(
+            "{:?} · {} · {} — {}\n",
+            proposal.origin,
+            proposal.proposal.kind,
+            proposal.proposal.title,
+            match &proposal.disposition {
+                TypedDisposition::Restates { candidate_iri, .. } =>
+                    format!("restates {candidate_iri}; no record proposed"),
+                TypedDisposition::Refines {
+                    candidate_iri,
+                    confidence,
+                    ..
+                } => format!("refines {candidate_iri} ({confidence:.2})"),
+                TypedDisposition::Distinct { .. } => "new record".into(),
+            }
+        ));
+    }
+    text
 }
 
 fn excerpt(value: &str) -> String {
@@ -876,6 +1049,158 @@ mod tests {
         assert!(!summary.contains("FULL_PROMPT_PAYLOAD"));
         assert!(summary.contains("harness_action · response saved"));
         assert!(summary.contains(".moosedev/harness/tasks/"));
+    }
+    fn snapshot_for(task: Task) -> Snapshot {
+        Snapshot {
+            conversation: Conversation::new(PathBuf::from("/project")),
+            task: Some(task),
+            status: String::new(),
+            busy: false,
+            endpoint: String::new(),
+            model: String::new(),
+            live: Default::default(),
+        }
+    }
+    fn knowledge_view() -> View {
+        View {
+            tab: 3,
+            ..Default::default()
+        }
+    }
+    const PRESERVE: &str = "https://moosedev.dev/kg/Constraint/preserve-names";
+    const LABELS: &str = "https://moosedev.dev/kg/Requirement/label-intent";
+    fn symbolic_task() -> Task {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.symbolic = Some(
+            serde_json::from_value(serde_json::json!({
+                "obligations": {"labels.py": [PRESERVE, LABELS], "util.py": []},
+                "obligations_digest": "0123456789abcdef0123",
+                "knowledge_revision": "accepted-v3",
+                "scope_escapes": 1, "noop_continuations": 2, "retypes": 0,
+                "check_history": [{"command": "pytest -q", "success": false, "after_edit": true},
+                                   {"command": "pytest -q", "success": true, "after_edit": true}]
+            }))
+            .unwrap(),
+        );
+        task.approved_change_scope = Some(serde_json::from_value(serde_json::json!({
+            "version": 2, "knowledge_revision": "accepted-v3", "files": {"labels.py": null},
+            "obligation_iris": [PRESERVE, LABELS],
+            "definition_scopes": [{"file": "labels.py", "symbol": "labels/render_name().", "source_digest": "d"}],
+            "checks": ["pytest -q"], "approval_cycle": "cycle-1"
+        }))
+        .unwrap());
+        task
+    }
+    fn review_item(operation_id: &str, links: Option<serde_json::Value>) -> ReviewItem {
+        serde_json::from_value(serde_json::json!({
+            "intent_links": links,
+            "request": {"operation_id": operation_id, "proposals": [{
+                "kind": "Lesson", "title": "Strip before comparing", "description": "Whitespace differs.",
+                "evidence": ["Event 9: capture note"]}]},
+            "response": {"proposals": []},
+            "reason": "Final checkpoint"
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn approval_gate_explains_symbolic_derivation() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingPlan;
+        task.plan = Some(super::super::runner::Plan {
+            summary: "Trim label whitespace".into(),
+            files: vec!["labels.py".into()],
+            checks: vec!["pytest -q".into()],
+        });
+        let text = gate(&task);
+        assert!(text.contains("PLAN · human approval required"));
+        assert!(text.contains(SYMBOLIC_APPROVAL));
+        assert!(text.contains("no model call"));
+        assert!(text.ends_with("/approve to execute · send feedback to revise"));
+    }
+    #[test]
+    fn knowledge_tab_renders_derived_obligations_for_the_approved_plan() {
+        let text = body(&snapshot_for(symbolic_task()), &knowledge_view());
+        assert!(text.contains("Derived scope\nlabels.py\n  Constraint · https://moosedev.dev/kg/Constraint/preserve-names\n  Requirement · https://moosedev.dev/kg/Requirement/label-intent\nutil.py · ungoverned\n"));
+        assert!(text.contains("  def labels.py · labels/render_name().\n"));
+        assert!(text.contains("Revision accepted-v3 · obligations 0123456789ab\n"));
+        assert!(text.contains("Scope escapes 1 · no-op continuations 2 · retypes 0\n"));
+        assert!(text.contains("  FAIL · pytest -q · after edit\n  PASS · pytest -q · after edit\n"));
+        let mut bare = task_fixture(PathBuf::from("/project"));
+        bare.symbolic = Some(Default::default());
+        let text = body(&snapshot_for(bare), &knowledge_view());
+        assert!(text.contains("No approved plan scope derived yet."));
+    }
+    #[test]
+    fn link_review_renders_derived_bindings_with_predicate_and_basis() {
+        let mut task = symbolic_task();
+        let links = serde_json::json!({"operation_id": "link-1", "revision": "accepted-v3", "bindings": [
+            {"record_iri": PRESERVE, "file": "labels.py", "symbol": "labels/render_name().", "source_digest": "d"}]});
+        task.reviews.push(review_item("cap-0", Some(links.clone())));
+        task.symbolic.as_mut().unwrap().association = Some(serde_json::from_value(serde_json::json!({
+            "status": "awaiting_review", "link_operation_id": "link-1",
+            "page": {
+                "knowledge_revision": "accepted-v3",
+                "index": {"revision": "idx", "producer": "scip-python", "status": "current", "refresh_action": "not_requested"},
+                "scope_digest": "s",
+                "bindings": [{
+                    "file": "labels.py", "symbol": "labels/render_name().", "name": "render_name", "kind": "function",
+                    "definition_range": {"start": {"line": 4, "col": 0}, "end": {"line": 6, "col": 0}},
+                    "scope_basis": "changed_definition", "source_digest": "d",
+                    "record_iri": PRESERVE, "record_kind": "Constraint", "assertion_digest": "a",
+                    "predicate": "constrains", "basis": "obligation", "candidate_digest": "c"}],
+                "skipped": [
+                    {"file": "labels.py", "symbol": "labels/render_name().(name)", "reason": "parameter"},
+                    {"file": "labels.py", "symbol": "labels/_tmp.", "reason": "local"},
+                    {"file": "labels.py", "symbol": "labels/_tmp2.", "reason": "local"}],
+                "ungoverned": ["util.py"],
+                "unresolved": [{"file": "new.py", "reason": "not indexed"}]
+            }
+        }))
+        .unwrap());
+        let text = body(&snapshot_for(task.clone()), &knowledge_view());
+        assert!(text.contains("Code associations · link-1\n"));
+        assert!(text.contains("Constraint · https://moosedev.dev/kg/Constraint/preserve-names\nlabels.py · render_name (function) · line 5\n-constrains-> plan obligation\n"));
+        assert!(text.contains("Skipped: Local 2 · Parameter 1\n"));
+        assert!(text.contains("Ungoverned: util.py\n"));
+        assert!(text.contains("Unresolved: new.py · not indexed\n"));
+        assert!(!text.contains("Derivation detail unavailable"));
+        // A journal whose batch moved on keeps the plain binding list.
+        task.symbolic.as_mut().unwrap().association = None;
+        let text = body(&snapshot_for(task), &knowledge_view());
+        assert!(text.contains("labels.py · labels/render_name().\n"));
+        assert!(text.contains("Derivation detail unavailable\n"));
+    }
+    #[test]
+    fn final_review_renders_the_note_and_typed_dispositions() {
+        let mut task = symbolic_task();
+        task.phase = Phase::AwaitingReview;
+        task.reviews.push(review_item("cap-1", None));
+        task.symbolic.as_mut().unwrap().capture_note = Some(serde_json::from_value(serde_json::json!({
+            "operation_id": "type-1", "capture_operation_id": "cap-1", "note_event": 9,
+            "note": "Names are stripped before comparison.", "status": "typed",
+            "response": {
+                "revision": "accepted-v3", "typing_mode": "sensor", "typing_note": "sensor added one proposal",
+                "thresholds": {"restates": 0.8, "refines": 0.55, "refines_containment": 0.6, "tiebreak_band": 0.08},
+                "proposals": [
+                    {"proposal": {"kind": "ArchitecturalDecision", "title": "Trim label whitespace", "description": "d", "evidence": []},
+                     "origin": "symbolic_decision", "resolved_by": "symbolic",
+                     "disposition": {"kind": "restates", "candidate_iri": LABELS, "score": 0.9, "confidence": 0.9, "receipt_operation_id": "r1"}},
+                    {"proposal": {"kind": "Lesson", "title": "Strip before comparing", "description": "d", "evidence": []},
+                     "origin": "symbolic_lesson", "resolved_by": "symbolic",
+                     "disposition": {"kind": "refines", "candidate_iri": PRESERVE, "score": 0.6, "containment": 0.7, "confidence": 0.6333, "receipt_operation_id": "r2"}},
+                    {"proposal": {"kind": "Pattern", "title": "Normalize then compare", "description": "d", "evidence": []},
+                     "origin": "llm_sensor", "resolved_by": "symbolic",
+                     "disposition": {"kind": "distinct", "receipt_operation_id": "r3"}}
+                ]
+            }
+        }))
+        .unwrap());
+        let text = body(&snapshot_for(task), &knowledge_view());
+        assert!(text.contains("REVIEW 1\nFinal checkpoint\n\nCapture note\nNames are stripped before comparison.\nTyping: symbolic with sensor · sensor added one proposal\n"));
+        assert!(text.contains("SymbolicDecision · ArchitecturalDecision · Trim label whitespace — restates https://moosedev.dev/kg/Requirement/label-intent; no record proposed\n"));
+        assert!(text.contains("SymbolicLesson · Lesson · Strip before comparing — refines https://moosedev.dev/kg/Constraint/preserve-names (0.63)\n"));
+        assert!(text.contains("LlmSensor · Pattern · Normalize then compare — new record\n"));
+        assert!(text.contains("/accept 1 · /reject 1"));
     }
     #[test]
     fn opening_a_task_reuses_its_conversation_without_saving_before_a_lease() {
