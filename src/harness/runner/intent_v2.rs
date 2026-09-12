@@ -68,6 +68,9 @@ pub struct ApprovedChangeScope {
     pub definition_scopes: Vec<ApprovedDefinitionScope>,
     pub checks: Vec<String>,
     pub approval_cycle: String,
+    /// Symbolic policy only: the plan summary standing in for a purpose record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +179,7 @@ enum AssociationChoice {
     },
 }
 
-fn digest_json(value: &impl Serialize) -> Result<String> {
+pub(super) fn digest_json(value: &impl Serialize) -> Result<String> {
     Ok(hash(&serde_json::to_string(value)?))
 }
 
@@ -710,6 +713,7 @@ impl Runner {
             definition_scopes,
             checks: plan.checks.clone(),
             approval_cycle: self.task.intent_cycle.clone().unwrap_or_default(),
+            purpose_summary: None,
         });
         Ok(())
     }
@@ -1029,12 +1033,19 @@ impl Runner {
         }
         if self.uses_postedit_associations() {
             self.task.postedit_association = None;
+            if let Some(state) = self.task.symbolic.as_mut() {
+                state.association = None;
+                state.capture_note = None;
+            }
         }
     }
 
     pub(super) async fn prepare_postedit_associations(&mut self) -> Result<bool> {
         if !self.uses_postedit_associations() || self.task.edits.is_empty() {
             return Ok(false);
+        }
+        if self.uses_symbolic_intent() {
+            return self.prepare_symbolic_associations().await;
         }
         if self.task.postedit_association.is_none() {
             let request = IntentCandidateRequest {
@@ -1335,7 +1346,7 @@ impl Runner {
     }
 }
 
-fn changed_files(edits: &[PendingEdit]) -> Result<Vec<ChangedFile>> {
+pub(super) fn changed_files(edits: &[PendingEdit]) -> Result<Vec<ChangedFile>> {
     let mut chains: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
     for edit in edits {
         chains

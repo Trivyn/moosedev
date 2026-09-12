@@ -165,7 +165,7 @@ impl Runner {
         }
     }
 
-    fn capture_reviews_block_progress(&self) -> bool {
+    pub(super) fn capture_reviews_block_progress(&self) -> bool {
         self.has_governing_reviews()
             || self
                 .task
@@ -258,6 +258,12 @@ impl Runner {
                 proposals,
             });
             self.persist()?;
+        }
+        if self.task.capture_request.is_none()
+            && self.uses_symbolic_intent()
+            && !self.symbolic_capture_page().await?
+        {
+            return Ok(());
         }
         if self.task.capture_request.is_none() {
             let mut files = self
@@ -933,6 +939,7 @@ impl Assessment {
                     requirement: optional(&proposal.requirement, Some("Requirement"))?,
                     supersedes: optional(&proposal.supersedes, Some(&proposal.kind))?,
                     retracts: optional(&proposal.retracts, None)?,
+                    reconciled: vec![],
                 })
             })
             .collect()

@@ -30,15 +30,26 @@ pub enum IntentPolicy {
     Current,
     ChangeLevel,
     ChangeLevelV2,
+    /// The coding model answers only actions and one final capture note; the
+    /// daemon derives purpose, obligations, associations and capture typing.
+    Symbolic,
+}
+impl IntentPolicy {
+    /// Policies whose post-edit association facility is part of the contract
+    /// rather than an optional environment setting.
+    pub fn mandates_postedit_associations(self) -> bool {
+        matches!(self, Self::ChangeLevelV2 | Self::Symbolic)
+    }
 }
 pub(super) fn postedit_associations_from_env(policy: IntentPolicy) -> Result<u8> {
+    let mandatory = policy.mandates_postedit_associations();
     match std::env::var("MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS") {
-        Err(std::env::VarError::NotPresent) if policy == IntentPolicy::ChangeLevelV2 => Ok(1),
+        Err(std::env::VarError::NotPresent) if mandatory => Ok(1),
         Err(std::env::VarError::NotPresent) => Ok(0),
-        Ok(value) if value == "0" && policy != IntentPolicy::ChangeLevelV2 => Ok(0),
+        Ok(value) if value == "0" && !mandatory => Ok(0),
         Ok(value) if value == "1" => Ok(1),
         Ok(value) if value == "0" => {
-            bail!("change-level-v2 includes mandatory post-edit associations; remove the conflicting 0 setting or use 1")
+            bail!("{} includes mandatory post-edit associations; remove the conflicting 0 setting or use 1", policy.env_name())
         }
         _ => bail!("MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS must be 0 or 1"),
     }
@@ -59,9 +70,20 @@ impl IntentPolicy {
             Ok(value) if value == "current" => Ok(Self::Current),
             Ok(value) if value == "change-level" => Ok(Self::ChangeLevel),
             Ok(value) if value == "change-level-v2" => Ok(Self::ChangeLevelV2),
+            Ok(value) if value == "symbolic" => Ok(Self::Symbolic),
             _ => bail!(
-                "MOOSEDEV_HARNESS_INTENT_POLICY must be current, change-level, or change-level-v2"
+                "MOOSEDEV_HARNESS_INTENT_POLICY must be current, change-level, change-level-v2, or symbolic"
             ),
+        }
+    }
+
+    /// The `MOOSEDEV_HARNESS_INTENT_POLICY` spelling of this policy.
+    pub fn env_name(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::ChangeLevel => "change-level",
+            Self::ChangeLevelV2 => "change-level-v2",
+            Self::Symbolic => "symbolic",
         }
     }
 }
@@ -102,7 +124,7 @@ impl Runner {
             "intent policy is fixed once task planning begins"
         );
         self.task.intent_policy = policy;
-        if policy == IntentPolicy::ChangeLevelV2 {
+        if policy.mandates_postedit_associations() {
             self.task.postedit_association_contract = 1;
         }
         self.persist()
@@ -192,7 +214,7 @@ impl Runner {
     ) -> Result<Option<ChangeIntent>> {
         if matches!(
             self.task.intent_policy,
-            IntentPolicy::Current | IntentPolicy::ChangeLevelV2
+            IntentPolicy::Current | IntentPolicy::ChangeLevelV2 | IntentPolicy::Symbolic
         ) {
             anyhow::ensure!(
                 proposal.is_none(),
@@ -474,7 +496,7 @@ impl Runner {
         }
         if matches!(
             self.task.intent_policy,
-            IntentPolicy::Current | IntentPolicy::ChangeLevelV2
+            IntentPolicy::Current | IntentPolicy::ChangeLevelV2 | IntentPolicy::Symbolic
         ) {
             return schema;
         }
@@ -503,7 +525,7 @@ impl Runner {
     ) -> Result<bool> {
         if matches!(
             self.task.intent_policy,
-            IntentPolicy::Current | IntentPolicy::ChangeLevelV2
+            IntentPolicy::Current | IntentPolicy::ChangeLevelV2 | IntentPolicy::Symbolic
         ) {
             return Ok(true);
         }
@@ -599,7 +621,7 @@ impl Runner {
     pub(super) async fn prepare_intent_links(&mut self, include_planned: bool) -> Result<bool> {
         if matches!(
             self.task.intent_policy,
-            IntentPolicy::Current | IntentPolicy::ChangeLevelV2
+            IntentPolicy::Current | IntentPolicy::ChangeLevelV2 | IntentPolicy::Symbolic
         ) && self.task.pending_intent_links.is_none()
         {
             return Ok(false);
@@ -752,7 +774,8 @@ impl Runner {
             .as_ref()
             .is_some_and(|state| {
                 state.pending_link_operation_id.as_deref() == Some(&request.operation_id)
-            });
+            })
+            || self.symbolic_association_matches(&request.operation_id);
         let link_iris = self.task.reviews[position]
             .response
             .proposals
@@ -817,6 +840,7 @@ impl Runner {
             state.pending_link_operation_id = None;
             state.status = "resolved".into();
         }
+        self.resolve_symbolic_association(&request.operation_id);
         self.update_knowledge_revision(response.revision);
         if is_postedit {
             // This task's association disposition changes graph revision but
@@ -950,6 +974,31 @@ mod tests {
             ],
             missing: None,
         }
+    }
+
+    #[test]
+    fn symbolic_policy_parses_and_mandates_the_postedit_contract() {
+        assert_eq!(IntentPolicy::Symbolic.env_name(), "symbolic");
+        assert_eq!(
+            serde_json::to_value(IntentPolicy::Symbolic).unwrap(),
+            serde_json::json!("symbolic")
+        );
+        assert!(IntentPolicy::Symbolic.mandates_postedit_associations());
+        assert!(IntentPolicy::ChangeLevelV2.mandates_postedit_associations());
+        assert!(!IntentPolicy::Current.mandates_postedit_associations());
+        assert!(!IntentPolicy::ChangeLevel.mandates_postedit_associations());
+        let (mut runner, _fixture) = fixture();
+        runner.set_intent_policy(IntentPolicy::Symbolic).unwrap();
+        assert_eq!(runner.task.postedit_association_contract, 1);
+        // The symbolic policy never exposes the legacy mapping or the optional
+        // associate action to the model.
+        runner.task.mode = Mode::Auto;
+        let schema = runner.action_schema().to_string();
+        assert!(!schema.contains("change_intent"));
+        assert!(!schema.contains("\"associate\""));
+        assert!(runner
+            .resolve_change_intent(Some(mapping()), &["code.py".into()])
+            .is_err());
     }
 
     #[test]

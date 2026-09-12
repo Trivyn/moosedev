@@ -35,6 +35,15 @@ class AdapterTests(unittest.TestCase):
         values.update(kwargs)
         return adapters.build_command(backend, **values)
 
+    def test_harness_accepts_every_persisted_intent_policy_and_nothing_else(self):
+        harness = dict(executable=self.daemon, daemon_exe=self.daemon, daemon_url="http://127.0.0.1:8000",
+                       endpoint="http://127.0.0.1:1234/v1", context_tokens=65536)
+        for policy in ("current", "change-level", "change-level-v2", "symbolic"):
+            _command, env = self.build("harness", harness_intent_policy=policy, **harness)
+            self.assertEqual(env["MOOSEDEV_HARNESS_INTENT_POLICY"], policy)
+        with self.assertRaisesRegex(ValueError, "unknown harness intent policy"):
+            self.build("harness", harness_intent_policy="neuro", **harness)
+
     def test_codex_has_isolation_flags_and_no_bypass(self):
         command, env = self.build("codex")
         for flag in ("--ignore-user-config", "--ignore-rules", "--ephemeral", "--json"):

@@ -90,6 +90,14 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
             post(crate::harness::daemon::intent_candidates::intent_candidates),
         )
         .route(
+            "/harness/intent/associate",
+            post(crate::harness::daemon::associate::associate),
+        )
+        .route(
+            "/harness/capture/type",
+            post(crate::harness::daemon::capture_type::capture_type),
+        )
+        .route(
             "/harness/intent/link",
             post(crate::harness::daemon::intent::link),
         )

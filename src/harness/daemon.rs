@@ -17,8 +17,11 @@ use crate::api::error::ApiError;
 use crate::graph::{self, AppState, CaptureStamp, RecordInput, PROJECT_KG_GRAPH_IRI};
 use crate::policy::{self, PolicyDecision, PolicyEvent};
 
+pub mod associate;
+pub mod capture_type;
 pub mod intent;
 pub mod intent_candidates;
+pub mod reconcile_score;
 pub mod reconciliation;
 
 // Serializes operation-journal transitions, including retried HTTP requests.
@@ -56,6 +59,10 @@ struct Entry {
     // Freeze anchors when preparing the operation; retries must not re-resolve
     // against a different index generation.
     anchors: Vec<(String, String)>,
+    /// Receipt-backed derived relations, annotated with confidence after the
+    /// record is written.
+    #[serde(default)]
+    reconciled: Vec<ReconciledRelation>,
 }
 
 pub async fn context(
@@ -516,6 +523,33 @@ fn prepare(
         if let Some(requirement) = &proposal.requirement {
             relations.push(("isMotivatedBy".into(), requirement.clone()));
         }
+        for reconciled in &proposal.reconciled {
+            anyhow::ensure!(
+                reconciled.predicate == "refines",
+                "only refines relations can be derived from a reconciliation receipt"
+            );
+            let receipt = reconcile_score::load_receipt(state, &reconciled.receipt_operation_id)?
+                .ok_or_else(|| {
+                anyhow::anyhow!("reconciliation receipt missing for derived relation")
+            })?;
+            anyhow::ensure!(
+                Some(receipt.owner_id.as_str()) == owner_id.as_deref()
+                    && receipt.disposition == "refines"
+                    && receipt.candidate_iri.as_deref() == Some(reconciled.target_iri.as_str())
+                    && (receipt.confidence - reconciled.confidence).abs() < 1e-9,
+                "derived relation does not match its reconciliation receipt"
+            );
+            let target_class =
+                graph::require_information_record(state, &NamedNode::new(&reconciled.target_iri)?)?;
+            anyhow::ensure!(
+                target_class == input.class_iri
+                    && graph::in_working_set(
+                        &current_status(state, &reconciled.target_iri).unwrap_or_default()
+                    ),
+                "refines target must be current accepted knowledge of the same kind"
+            );
+            relations.push(("refines".into(), reconciled.target_iri.clone()));
+        }
         let mut anchors = Vec::new();
         let mut unanchored = Vec::new();
         for file in &proposal.files {
@@ -554,6 +588,7 @@ fn prepare(
                 .supersedes
                 .as_ref()
                 .map(|_| graph::mint_instance_iri("Rationale")),
+            reconciled: proposal.reconciled.clone(),
         });
     }
     Ok(Operation {
@@ -663,6 +698,17 @@ fn finish_capture(state: &AppState, path: &Path, operation: &mut Operation) -> a
         transaction.commit()?;
         state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
         state.note_project_write();
+    }
+    for entry in &operation.entries {
+        for reconciled in &entry.reconciled {
+            graph::relate_with_confidence_unlocked(
+                state,
+                &entry.response.iri,
+                &reconciled.predicate,
+                &reconciled.target_iri,
+                reconciled.confidence,
+            )?;
+        }
     }
     for (entry, proposal) in operation
         .entries

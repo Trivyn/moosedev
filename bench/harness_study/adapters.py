@@ -111,7 +111,7 @@ def build_command(
         raise ValueError(f"unknown backend: {backend}")
     if harness_response_policy not in {"auto", "provider-default", "reasoning-off"}:
         raise ValueError("unknown harness response policy")
-    if harness_intent_policy not in {"current", "change-level", "change-level-v2"}:
+    if harness_intent_policy not in {"current", "change-level", "change-level-v2", "symbolic"}:
         raise ValueError("unknown harness intent policy")
     if type(postedit_association_contract) is not bool:
         raise ValueError("post-edit association contract flag must be Boolean")

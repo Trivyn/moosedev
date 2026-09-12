@@ -396,6 +396,47 @@ sys.exit(2)''',
         self.assertEqual(result["reject_loop_max_streak"], 7)
         self.assertIsNone(result["reject_loop_limit"])
 
+    def test_symbolic_policy_metrics_count_derived_decisions_and_model_purposes(self):
+        import json
+        from bench.harness_study.process import symbolic_metrics
+        final_task = {"id": "one", "phase": "Complete", "capture_contract": 2, "intent_policy": "symbolic",
+                      "recovery": None, "response_receipt": {"requested": "auto", "resolved": "reasoning-off"},
+                      "intent_events": [
+                          {"id": "a", "cycle": "c1", "kind": "obligations_derived", "detail": "1 files"},
+                          {"id": "b", "cycle": "c1", "kind": "scope_escape_replan", "detail": "other.py: escape 1 of 3"},
+                          {"id": "c", "cycle": None, "kind": "association_derived", "detail": "labels.py normalize"},
+                          {"id": "d", "cycle": None, "kind": "capture_deferred", "detail": "3 events"},
+                          {"id": "d", "cycle": None, "kind": "capture_deferred", "detail": "3 events"},
+                          {"id": "e", "cycle": None, "kind": "capture_note", "detail": "80 bytes"},
+                          {"id": "f", "cycle": None, "kind": "capture_typed", "detail": "SymbolicOnly, 2 proposals"},
+                          {"id": "g", "cycle": None, "kind": "reconciled_restates", "detail": "x restates y"},
+                          {"id": "h", "cycle": None, "kind": "reconciled_distinct", "detail": "Lesson z"},
+                          {"id": "i", "cycle": None, "kind": "link_review", "detail": "accepted"}],
+                      "events": [{"message": "Read labels.py: source"}],
+                      "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
+                                         {"purpose": "harness_capture_note", "attempt": 1, "decision_id": "d2"}]}
+        expected = symbolic_metrics(final_task["intent_events"], final_task["model_requests"])
+        self.assertEqual(expected["obligations_derived"], 1)
+        self.assertEqual(expected["scope_escape_replan"], 1)
+        self.assertEqual(expected["capture_deferred"], 1, "duplicate journal ids count once")
+        self.assertEqual(expected["reconciled_restates"], 1)
+        self.assertEqual(expected["capture_notes"], 1)
+        self.assertEqual(expected["structured_model_decisions"], 0)
+        self.assertEqual(expected["autonomous_recoveries"], 1)
+        result, records = self.run_client(f"""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            print(json.dumps({{"type":"state", "model":"model", "busy":False, "task":json.loads({json.dumps(final_task)!r})}}), flush=True)
+            assert json.loads(sys.stdin.readline())["type"] == "quit"
+            print(json.dumps({{"type":"closed"}}))
+        """, backend="harness", expected_model="model")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["symbolic"], expected)
+        self.assertEqual(result["metrics"]["symbolic_structured_model_decisions"], 0)
+        self.assertEqual(result["metrics"]["symbolic_capture_notes"], 1)
+        self.assertEqual(result["harness_recovery"]["decisions"]["d2"],
+                         {"purpose": "harness_capture_note", "attempts": [1]})
+
     def test_journal_metrics_are_computed_once_from_the_final_snapshot(self):
         import json
         from bench.harness_study.evolution import review_metrics

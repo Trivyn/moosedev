@@ -101,6 +101,7 @@ impl Runner {
             "harness_purpose_selection" => "purpose selection",
             "harness_association_selection" => "association selection",
             "harness_capture_resolution" => "capture resolution",
+            "harness_capture_note" => "capture note",
             other => other,
         };
         let message = if exhausted {

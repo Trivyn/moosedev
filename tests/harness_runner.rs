@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 
 #[path = "harness_runner/intent.rs"]
 mod intent;
+#[path = "harness_runner/symbolic.rs"]
+mod symbolic;
 
 static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -91,6 +93,9 @@ struct Script {
     fail_reconcile_once: bool,
     reject_stale_candidates: bool,
     purpose_candidates_status: Option<u16>,
+    capture_type_reply: Option<Vec<TypedProposal>>,
+    capture_type_requests: Vec<CaptureTypeRequest>,
+    fail_capture_type_once: bool,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -531,6 +536,11 @@ impl Fixture {
                 "/api/v1/harness/intent/candidates",
                 post(intent::postedit_candidates),
             )
+            .route(
+                "/api/v1/harness/intent/associate",
+                post(symbolic::associate),
+            )
+            .route("/api/v1/harness/capture/type", post(symbolic::capture_type))
             .route("/api/v1/harness/intent/link", post(intent::link))
             .route("/api/v1/harness/intent/review", post(review))
             .route("/api/v1/harness/intent/abandon", post(review))
@@ -562,6 +572,22 @@ impl Fixture {
             "harness_action",
             json!({"action":"edit","file":"code.txt","before":"original\n","after":"changed\n"}),
         );
+    }
+    fn last_model_prompt(&self, schema: &str) -> String {
+        let script = self.shared.lock().unwrap();
+        let request = script
+            .requests
+            .iter()
+            .rev()
+            .find(|r| r["kind"] == "model" && r["schema"] == schema)
+            .expect("a model request with that schema was recorded");
+        request["body"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
     fn model_calls(&self) -> usize {
         self.shared
@@ -602,6 +628,7 @@ async fn one_batch_review_interaction_emits_each_capture_link_disposition_once()
                     requirement: None,
                     supersedes: None,
                     retracts: None,
+                    reconciled: vec![],
                 }],
             },
             response: CaptureResponse {

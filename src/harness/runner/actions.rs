@@ -159,7 +159,9 @@ impl Runner {
             }
             _ => unreachable!(),
         };
-        ensure!(before != after, "edit makes no change; choose a different edit or finish if the objective is already satisfied");
+        if before == after {
+            return Err(anyhow::Error::new(super::model::NoopEdit));
+        }
         Ok(Action::Edit {
             file,
             before,

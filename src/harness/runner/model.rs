@@ -1,5 +1,5 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
-use super::{ContextResponse, Mode, Runner, MAX_PLAN_SUMMARY};
+use super::{ContextResponse, IntentPolicy, Mode, Runner, MAX_PLAN_SUMMARY};
 use crate::harness::progress::Progress;
 use crate::harness::response::{self, ResponsePolicy};
 use crate::llm::{LlmConfig, OpenAiCompatClient, UsageContext};
@@ -41,6 +41,18 @@ impl std::fmt::Display for ControllerInvariant {
     }
 }
 impl std::error::Error for ControllerInvariant {}
+
+/// An edit whose result equals the current source. Displays the legacy
+/// validation message so other policies' diagnostics are unchanged; the
+/// symbolic policy matches on the type to run checks instead of repairing.
+#[derive(Debug)]
+pub(super) struct NoopEdit;
+impl std::fmt::Display for NoopEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("edit makes no change; choose a different edit or finish if the objective is already satisfied")
+    }
+}
+impl std::error::Error for NoopEdit {}
 pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     const NOTICE: &str =
         "\n[observation shortened; complete evidence is retained in the task journal]\n";
@@ -275,6 +287,9 @@ impl Runner {
             prompt.push_str("Return exactly one JSON action.\n");
         }
         prompt.push_str("\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan for changed scope or approach. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n");
+        if self.task.intent_policy == IntentPolicy::Symbolic {
+            prompt.push_str("\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n");
+        }
         prompt.push_str(&format!(
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent human guidance: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
             config.model, self.task.objective, self.task.guidance, context.context,

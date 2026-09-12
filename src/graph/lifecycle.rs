@@ -2,7 +2,9 @@
 //! These operations preserve history and write graph edges in transactions.
 
 use chrono::{DateTime, Utc};
-use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad};
+use oxigraph::model::{
+    GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term, Triple,
+};
 
 use super::capture::{
     capture_instance_quads, plan_relation_args, require_information_record, AppliedEdge,
@@ -746,4 +748,173 @@ pub(crate) fn relate_unlocked(
         predicate_iri,
         object_iri: object_iri.to_string(),
     })
+}
+
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+const OWL_ANNOTATION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#AnnotationProperty";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const CONFIDENCE_LOCAL: &str = "confidence";
+
+/// Resolve an `owl:AnnotationProperty` declared in the loaded architecture
+/// ontology by local name, so the annotation namespace stays in the TTL.
+pub(crate) fn resolve_annotation_property(state: &AppState, local: &str) -> anyhow::Result<String> {
+    let graph = GraphNameRef::NamedNode(NamedNodeRef::new(&state.arch_vocab.ontology_graph_iri)?);
+    let found = state
+        .store
+        .quads_for_pattern(
+            None,
+            Some(NamedNodeRef::new_unchecked(moose::RDF_TYPE)),
+            Some(NamedNodeRef::new_unchecked(OWL_ANNOTATION_PROPERTY).into()),
+            Some(graph),
+        )
+        .filter_map(Result::ok)
+        .map(|quad| quad.subject.to_string())
+        .map(|subject| subject.trim_matches(['<', '>']).to_string())
+        .find(|iri| local_name(iri) == local);
+    found.ok_or_else(|| {
+        anyhow::anyhow!("architecture ontology is missing annotation property {local:?}")
+    })
+}
+
+/// [`relate`] plus a confidence annotation on the asserted edge, reified the
+/// RDF 1.2 way: `reifier rdf:reifies <<( s p o )>>` and `reifier
+/// trivyn:confidence "0.87"^^xsd:decimal` in the project graph. One reifier per
+/// edge; a later call replaces the confidence. Used for derived relations such
+/// as `refines` at capture and `restates` between two existing records.
+pub fn relate_with_confidence(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+    confidence: f64,
+) -> anyhow::Result<RelateOutcome> {
+    let _guard = state.lock_proposal_writes()?;
+    relate_with_confidence_unlocked(state, subject_iri, predicate_local, object_iri, confidence)
+}
+
+pub(crate) fn relate_with_confidence_unlocked(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+    confidence: f64,
+) -> anyhow::Result<RelateOutcome> {
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&confidence),
+        "confidence must lie in 0.0..=1.0"
+    );
+    let confidence_iri = resolve_annotation_property(state, CONFIDENCE_LOCAL)?;
+    let outcome = relate_unlocked(state, subject_iri, predicate_local, object_iri)?;
+    let graph = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
+    let edge_term = Term::Triple(Box::new(Triple::new(
+        NamedNode::new(subject_iri)?,
+        NamedNode::new(&outcome.predicate_iri)?,
+        NamedNode::new(object_iri)?,
+    )));
+    let reifies = NamedNode::new(RDF_REIFIES)?;
+    let confidence_predicate = NamedNode::new(&confidence_iri)?;
+    let existing = state
+        .store
+        .quads_for_pattern(
+            None,
+            Some(reifies.as_ref()),
+            Some(edge_term.as_ref()),
+            Some(graph.as_ref()),
+        )
+        .filter_map(Result::ok)
+        .map(|quad| quad.subject)
+        .next();
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("confidence transaction: {e}"))?;
+    let reifier = match existing {
+        Some(reifier) => reifier,
+        None => {
+            let reifier = NamedNode::new(format!(
+                "https://moosedev.dev/kg/Reifier/{}",
+                uuid::Uuid::new_v4()
+            ))?;
+            txn.insert(
+                Quad::new(
+                    reifier.clone(),
+                    reifies.clone(),
+                    edge_term.clone(),
+                    graph.clone(),
+                )
+                .as_ref(),
+            );
+            reifier.into()
+        }
+    };
+    let stale: Vec<Quad> = state
+        .store
+        .quads_for_pattern(
+            Some(reifier.as_ref()),
+            Some(confidence_predicate.as_ref()),
+            None,
+            Some(graph.as_ref()),
+        )
+        .filter_map(Result::ok)
+        .collect();
+    for quad in &stale {
+        txn.remove(quad.as_ref());
+    }
+    txn.insert(
+        Quad::new(
+            reifier,
+            confidence_predicate,
+            Literal::new_typed_literal(format!("{confidence:.4}"), NamedNode::new(XSD_DECIMAL)?),
+            graph,
+        )
+        .as_ref(),
+    );
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("confidence commit: {e}"))?;
+    state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+    Ok(outcome)
+}
+
+/// Read back the confidence annotated on an asserted edge, if any.
+pub fn relation_confidence(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+) -> anyhow::Result<Option<f64>> {
+    let predicate_iri = state.resolve_object_property(predicate_local)?;
+    let confidence_iri = resolve_annotation_property(state, CONFIDENCE_LOCAL)?;
+    let graph = GraphNameRef::NamedNode(NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?);
+    let edge_term = Term::Triple(Box::new(Triple::new(
+        NamedNode::new(subject_iri)?,
+        NamedNode::new(&predicate_iri)?,
+        NamedNode::new(object_iri)?,
+    )));
+    let Some(reifier) = state
+        .store
+        .quads_for_pattern(
+            None,
+            Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
+            Some(edge_term.as_ref()),
+            Some(graph),
+        )
+        .filter_map(Result::ok)
+        .map(|quad| quad.subject)
+        .next()
+    else {
+        return Ok(None);
+    };
+    Ok(state
+        .store
+        .quads_for_pattern(
+            Some(reifier.as_ref()),
+            Some(NamedNodeRef::new(&confidence_iri)?),
+            None,
+            Some(graph),
+        )
+        .filter_map(Result::ok)
+        .find_map(|quad| match quad.object {
+            Term::Literal(value) => value.value().parse::<f64>().ok(),
+            _ => None,
+        }))
 }

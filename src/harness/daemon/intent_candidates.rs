@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::{accepted_revision, current_status, validate_path};
 use crate::api::error::ApiError;
-use crate::code::substrate::{DefinitionScope, SourceRange};
+use crate::code::substrate::{DefinitionScope, SourceRange, Substrate};
 use crate::graph::{self, AppState};
 use crate::harness::protocol::*;
 
@@ -251,57 +251,9 @@ pub fn intent_page(
             next_cursor: None,
         });
     };
-    let indexed_source_proofs = request
-        .files
-        .iter()
-        .map(|file| {
-            (
-                file.file.as_str(),
-                substrate
-                    .read_indexed_source(&file.file)
-                    .map(|source| format!("{:x}", Sha256::digest(source.as_bytes()))),
-            )
-        })
-        .collect::<Vec<_>>();
-    let meta = substrate.meta();
-    let index_revision = digest(&(
-        meta.schema_version,
-        &meta.indexed_commit,
-        meta.indexed_at,
-        &meta.generation,
-        &meta.producers,
-        indexed_source_proofs,
-    ))?;
-    let producer = Some(
-        substrate
-            .meta()
-            .producers
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    let mut status = if substrate.is_stale() {
-        IntentIndexStatus::Stale
-    } else {
-        IntentIndexStatus::Current
-    };
-    if request
-        .files
-        .iter()
-        .any(|changed| match &changed.after_digest {
-            Some(expected) => {
-                substrate
-                    .read_indexed_source(&changed.file)
-                    .map(|source| format!("{:x}", Sha256::digest(source.as_bytes())))
-                    .as_ref()
-                    != Some(expected)
-            }
-            None => substrate.covers_file(&changed.file),
-        })
-    {
-        status = IntentIndexStatus::Stale;
-    }
+    let index_revision = index_revision(&substrate, &request.files)?;
+    let producer = producer_label(&substrate);
+    let mut status = index_status(&substrate, &request.files);
     if request
         .files
         .iter()
@@ -369,27 +321,9 @@ pub fn intent_page(
             }
             continue;
         }
-        let scopes = substrate.definition_scopes_in_file(&changed.file);
-        let mut matched = false;
-        for scope in scopes {
-            let basis = if changed
-                .changed_ranges
-                .iter()
-                .any(|r| intersects(scope.definition.range, (*r).into()))
-            {
-                Some(IntentScopeBasis::ChangedDefinition)
-            } else if scope.enclosing_range.is_some_and(|enclosing| {
-                changed
-                    .changed_ranges
-                    .iter()
-                    .any(|r| intersects(enclosing, (*r).into()))
-            }) {
-                Some(IntentScopeBasis::EnclosingDefinition)
-            } else {
-                None
-            };
-            let Some(basis) = basis else { continue };
-            matched = true;
+        let scopes = changed_scopes(&substrate, changed);
+        let matched = !scopes.is_empty();
+        for (scope, basis) in scopes {
             let candidate = post_candidate(
                 state,
                 &changed.file,
@@ -469,6 +403,99 @@ pub fn intent_page(
     Ok(response)
 }
 
+/// The definitions a change touches: a definition whose name token intersects
+/// a changed range, or whose producer-provided enclosing range does.
+pub(super) fn changed_scopes(
+    substrate: &Substrate,
+    changed: &ChangedFile,
+) -> Vec<(DefinitionScope, IntentScopeBasis)> {
+    substrate
+        .definition_scopes_in_file(&changed.file)
+        .into_iter()
+        .filter_map(|scope| {
+            let basis = if changed
+                .changed_ranges
+                .iter()
+                .any(|r| intersects(scope.definition.range, (*r).into()))
+            {
+                IntentScopeBasis::ChangedDefinition
+            } else if scope.enclosing_range.is_some_and(|enclosing| {
+                changed
+                    .changed_ranges
+                    .iter()
+                    .any(|r| intersects(enclosing, (*r).into()))
+            }) {
+                IntentScopeBasis::EnclosingDefinition
+            } else {
+                return None;
+            };
+            Some((scope, basis))
+        })
+        .collect()
+}
+
+/// Snapshot identity of the loaded index for the requested files.
+pub(super) fn index_revision(
+    substrate: &Substrate,
+    files: &[ChangedFile],
+) -> anyhow::Result<String> {
+    let indexed_source_proofs = files
+        .iter()
+        .map(|file| {
+            (
+                file.file.as_str(),
+                substrate
+                    .read_indexed_source(&file.file)
+                    .map(|source| format!("{:x}", Sha256::digest(source.as_bytes()))),
+            )
+        })
+        .collect::<Vec<_>>();
+    let meta = substrate.meta();
+    digest(&(
+        meta.schema_version,
+        &meta.indexed_commit,
+        meta.indexed_at,
+        &meta.generation,
+        &meta.producers,
+        indexed_source_proofs,
+    ))
+}
+
+pub(super) fn producer_label(substrate: &Substrate) -> Option<String> {
+    Some(
+        substrate
+            .meta()
+            .producers
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// Current unless the index is stale or does not prove the requested current
+/// source; deleted-file history is judged separately by the caller.
+pub(super) fn index_status(substrate: &Substrate, files: &[ChangedFile]) -> IntentIndexStatus {
+    let mut status = if substrate.is_stale() {
+        IntentIndexStatus::Stale
+    } else {
+        IntentIndexStatus::Current
+    };
+    if files.iter().any(|changed| match &changed.after_digest {
+        Some(expected) => {
+            substrate
+                .read_indexed_source(&changed.file)
+                .map(|source| format!("{:x}", Sha256::digest(source.as_bytes())))
+                .as_ref()
+                != Some(expected)
+        }
+        None => substrate.covers_file(&changed.file),
+    }) {
+        status = IntentIndexStatus::Stale;
+    }
+    status
+}
+
 fn range_array(range: SourceRange) -> [u32; 4] {
     [
         range.start.line,
@@ -543,7 +570,7 @@ fn project_record(state: &AppState, iri: &str, ordinal: usize) -> anyhow::Result
     })
 }
 
-fn entity_record_context(
+pub(super) fn entity_record_context(
     state: &AppState,
     symbol: &str,
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
@@ -688,11 +715,11 @@ fn is_record_kind(kind: &str) -> bool {
     )
 }
 
-fn accepted_status(status: &str) -> bool {
+pub(super) fn accepted_status(status: &str) -> bool {
     status.is_empty() || status.eq_ignore_ascii_case("accepted")
 }
 
-fn prove_changed_source(
+pub(super) fn prove_changed_source(
     state: &AppState,
     changed: &ChangedFile,
 ) -> anyhow::Result<(String, Option<String>)> {
@@ -742,7 +769,10 @@ fn prove_changed_source(
     }
 }
 
-fn validate_source_ranges(source: &str, ranges: &[HarnessSourceRange]) -> anyhow::Result<()> {
+pub(super) fn validate_source_ranges(
+    source: &str,
+    ranges: &[HarnessSourceRange],
+) -> anyhow::Result<()> {
     // Retain the final empty line: insertion at EOF after a trailing newline is
     // represented by its zero column and is a valid end-exclusive position.
     let lines = source
@@ -763,7 +793,7 @@ fn validate_source_ranges(source: &str, ranges: &[HarnessSourceRange]) -> anyhow
     Ok(())
 }
 
-fn maybe_refresh(state: &AppState, policy: &IntentRefreshPolicy) -> IntentRefreshAction {
+pub(super) fn maybe_refresh(state: &AppState, policy: &IntentRefreshPolicy) -> IntentRefreshAction {
     if matches!(policy, IntentRefreshPolicy::None) {
         return IntentRefreshAction::NotRequested;
     }
@@ -795,7 +825,7 @@ fn maybe_refresh(state: &AppState, policy: &IntentRefreshPolicy) -> IntentRefres
     }
 }
 
-fn validate_files(files: &[String]) -> anyhow::Result<()> {
+pub(super) fn validate_files(files: &[String]) -> anyhow::Result<()> {
     anyhow::ensure!(files.len() <= MAX_FILES, "at most 32 files");
     let mut unique = std::collections::BTreeSet::new();
     for f in files {
@@ -804,10 +834,10 @@ fn validate_files(files: &[String]) -> anyhow::Result<()> {
     }
     Ok(())
 }
-fn intersects(a: SourceRange, b: SourceRange) -> bool {
+pub(super) fn intersects(a: SourceRange, b: SourceRange) -> bool {
     a.start < b.end && b.start < a.end
 }
-fn digest<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
+pub(super) fn digest<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
 fn encode_cursor(offset: usize, request: &str, revision: &str, kind: &str) -> String {

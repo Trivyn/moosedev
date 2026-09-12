@@ -67,6 +67,7 @@ fn proposal(kind: &str, title: &str) -> KnowledgeProposal {
         requirement: None,
         supersedes: None,
         retracts: None,
+        reconciled: vec![],
     }
 }
 
@@ -1982,4 +1983,907 @@ fn postedit_rejects_non_utf8_boundary_columns_in_current_source() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("UTF-8 byte boundary"));
+}
+
+/// Two Python definitions plus a parameter in `labels.py`, and one function in
+/// a test module: the symbolic association filter has something to drop.
+fn install_symbolic_index(fixture: &Fixture, state: &AppState) {
+    use moosedev::code::substrate::{Substrate, SubstrateMeta};
+    use protobuf::EnumOrUnknown;
+    use scip::types::{symbol_information, Document, Index, Occurrence, SymbolInformation};
+    let source = "def render_name(name):\n    return name.strip()\n\ndef normalize(value):\n    return value\n";
+    let path = fixture.0.join("labels.py");
+    std::fs::write(&path, source).unwrap();
+    let tests_dir = fixture.0.join("tests");
+    std::fs::create_dir_all(&tests_dir).unwrap();
+    let test_source = "def test_render():\n    assert True\n";
+    std::fs::write(tests_dir.join("test_labels.py"), test_source).unwrap();
+    for file in [&path, &tests_dir.join("test_labels.py")] {
+        std::fs::File::open(file)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+    }
+    fn definition(
+        symbol: &str,
+        name: &str,
+        kind: symbol_information::Kind,
+        range: Vec<i32>,
+        enclosing: Vec<i32>,
+    ) -> (SymbolInformation, Occurrence) {
+        let mut info = SymbolInformation::new();
+        info.symbol = symbol.into();
+        info.display_name = name.into();
+        info.kind = EnumOrUnknown::new(kind);
+        let mut occurrence = Occurrence::new();
+        occurrence.symbol = symbol.into();
+        occurrence.symbol_roles = 1;
+        occurrence.range = range;
+        occurrence.enclosing_range = enclosing;
+        (info, occurrence)
+    }
+    let mut labels = Document::new();
+    labels.relative_path = "labels.py".into();
+    for (info, occurrence) in [
+        definition(
+            "scip-python python sample 1 labels/render_name().",
+            "render_name",
+            symbol_information::Kind::Function,
+            vec![0, 4, 15],
+            vec![0, 0, 1, 23],
+        ),
+        definition(
+            "scip-python python sample 1 labels/render_name().(name)",
+            "name",
+            symbol_information::Kind::Parameter,
+            vec![0, 16, 20],
+            vec![],
+        ),
+        definition(
+            "scip-python python sample 1 labels/normalize().",
+            "normalize",
+            symbol_information::Kind::Function,
+            vec![3, 4, 13],
+            vec![3, 0, 4, 16],
+        ),
+    ] {
+        labels.symbols.push(info);
+        labels.occurrences.push(occurrence);
+    }
+    let mut tests = Document::new();
+    tests.relative_path = "tests/test_labels.py".into();
+    let (info, occurrence) = definition(
+        "scip-python python sample 1 tests/test_labels/test_render().",
+        "test_render",
+        symbol_information::Kind::Function,
+        vec![0, 4, 15],
+        vec![0, 0, 1, 15],
+    );
+    tests.symbols.push(info);
+    tests.occurrences.push(occurrence);
+    let mut index = Index::new();
+    index.documents.push(labels);
+    index.documents.push(tests);
+    // The rooted substrate re-checks the repository head two seconds after
+    // construction; index the head the fixture actually has so a slow suite
+    // run cannot turn the synthetic index stale mid-test.
+    let mut meta = SubstrateMeta::single(
+        "scip-python",
+        SubstrateMeta::current_head(&fixture.0),
+        Utc::now(),
+        2,
+        4,
+    );
+    meta.indexed_started_at = Some(Utc::now());
+    state.set_substrate(Arc::new(
+        Substrate::from_index_rooted(index, meta, false, &fixture.0).unwrap(),
+    ));
+}
+
+fn changed(file: &str, digest: &str, ranges: &[(u32, u32, u32, u32)]) -> ChangedFile {
+    ChangedFile {
+        file: file.into(),
+        before_digest: Some(digest.into()),
+        after_digest: Some(digest.into()),
+        changed_ranges: ranges
+            .iter()
+            .map(|(l1, c1, l2, c2)| HarnessSourceRange {
+                start: HarnessSourcePosition {
+                    line: *l1,
+                    col: *c1,
+                },
+                end: HarnessSourcePosition {
+                    line: *l2,
+                    col: *c2,
+                },
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn symbolic_association_filters_kinds_and_binds_by_legal_predicate() {
+    use daemon::associate::associate_page;
+    use daemon::intent::*;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    install_symbolic_index(&fixture, &state);
+    let requirement = record(&state, "Requirement", "Display names stay stable");
+    let constraint = record(&state, "Constraint", "Labels never exceed one line");
+    // The requirement is already linked to render_name through the ordinary
+    // reviewed link path, so it is an existing direct dossier record there.
+    let resolved = resolve_entities(
+        &state,
+        &IntentResolveRequest {
+            files: vec!["labels.py".into()],
+            refresh_index: false,
+        },
+    )
+    .unwrap();
+    let render = resolved
+        .entities
+        .iter()
+        .find(|entity| entity.name == "render_name")
+        .unwrap();
+    link_operation(
+        &state,
+        IntentLinkRequest {
+            operation_id: "seed-render-link".into(),
+            revision: resolved.revision.clone(),
+            bindings: vec![IntentBinding {
+                record_iri: requirement.clone(),
+                file: "labels.py".into(),
+                symbol: Some(render.symbol.clone()),
+                planned_name: None,
+                source_digest: Some(render.source_digest.clone()),
+            }],
+        },
+    )
+    .unwrap();
+    review_links(
+        &state,
+        &ReviewRequest {
+            operation_id: "seed-render-link".into(),
+            accept: true,
+        },
+    )
+    .unwrap();
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let labels_digest = sha256_text(&std::fs::read_to_string(fixture.0.join("labels.py")).unwrap());
+    let tests_digest =
+        sha256_text(&std::fs::read_to_string(fixture.0.join("tests/test_labels.py")).unwrap());
+    let request = AssociateRequest {
+        files: vec![
+            // The parameter token and the new helper's name token changed.
+            changed(
+                "labels.py",
+                &labels_digest,
+                &[(0, 16, 0, 20), (3, 4, 3, 13)],
+            ),
+            changed("tests/test_labels.py", &tests_digest, &[(0, 4, 0, 15)]),
+        ],
+        governing: [
+            (
+                "labels.py".to_string(),
+                vec![requirement.clone(), constraint.clone()],
+            ),
+            (
+                "tests/test_labels.py".to_string(),
+                vec![requirement.clone()],
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        refresh_policy: IntentRefreshPolicy::None,
+        knowledge_revision: revision.clone(),
+    };
+    let page = associate_page(&state, &request).unwrap();
+    assert_eq!(
+        page.index.status,
+        IntentIndexStatus::Current,
+        "index {:#?}; unresolved {:?}; stale={}; head={:?}; indexed labels digest={:?}",
+        page.index,
+        page.unresolved,
+        state.substrate().unwrap().is_stale(),
+        moosedev::code::substrate::SubstrateMeta::current_head(&fixture.0),
+        state
+            .substrate()
+            .unwrap()
+            .indexed_source_digest("labels.py"),
+    );
+    assert!(page.unresolved.is_empty(), "{:?}", page.unresolved);
+    assert!(page.ungoverned.is_empty());
+    let bound: Vec<(String, String, String, String)> = page
+        .bindings
+        .iter()
+        .map(|b| {
+            (
+                b.name.clone().unwrap(),
+                b.record_kind.clone(),
+                b.predicate.clone(),
+                format!("{:?}", b.basis),
+            )
+        })
+        .collect();
+    assert_eq!(
+        bound,
+        vec![
+            // Sorted by file, definition range, symbol, then record IRI.
+            (
+                "render_name".to_string(),
+                "Constraint".to_string(),
+                "constrains".to_string(),
+                "Obligation".to_string()
+            ),
+            (
+                "normalize".to_string(),
+                "Constraint".to_string(),
+                "constrains".to_string(),
+                "Obligation".to_string()
+            ),
+            (
+                "normalize".to_string(),
+                "Requirement".to_string(),
+                "concerns".to_string(),
+                "Obligation".to_string()
+            ),
+        ],
+        "{:#?}",
+        page.bindings
+    );
+    assert!(page
+        .bindings
+        .iter()
+        .all(|b| b.source_digest == labels_digest && !b.assertion_digest.is_empty()));
+    assert_eq!(
+        page.bindings[0].scope_basis,
+        IntentScopeBasis::EnclosingDefinition,
+        "the parameter change resolves to its enclosing kept function"
+    );
+    assert_eq!(
+        page.bindings[1].scope_basis,
+        IntentScopeBasis::ChangedDefinition
+    );
+    assert_eq!(
+        page.bindings[2].scope_basis,
+        IntentScopeBasis::ChangedDefinition
+    );
+    let skipped: Vec<(String, String)> = page
+        .skipped
+        .iter()
+        .map(|s| {
+            (
+                s.symbol.rsplit('/').next().unwrap().to_string(),
+                format!("{:?}", s.reason),
+            )
+        })
+        .collect();
+    assert!(
+        skipped.contains(&("render_name().(name)".to_string(), "Parameter".to_string())),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped.contains(&("test_render().".to_string(), "TestPath".to_string())),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped.contains(&("render_name().".to_string(), "AlreadyLinked".to_string())),
+        "{skipped:?}"
+    );
+    assert!(page
+        .skipped
+        .iter()
+        .find(|s| s.reason == SkipReason::AlreadyLinked)
+        .is_some_and(|s| s.record_iri.as_deref() == Some(requirement.as_str())));
+    // Deterministic and idempotent for the same snapshot.
+    let again = associate_page(&state, &request).unwrap();
+    assert_eq!(again, page);
+    // Bound to the knowledge revision the runner holds.
+    let stale = AssociateRequest {
+        knowledge_revision: "stale".into(),
+        ..request.clone()
+    };
+    let error = associate_page(&state, &stale).unwrap_err().to_string();
+    assert!(
+        error.contains("knowledge changed before association"),
+        "{error}"
+    );
+    // A file with no governing records and no sibling dossier records is
+    // reported, not guessed.
+    let ungoverned = AssociateRequest {
+        files: vec![changed("labels.py", &labels_digest, &[(3, 4, 3, 13)])],
+        governing: Default::default(),
+        refresh_policy: IntentRefreshPolicy::None,
+        knowledge_revision: revision.clone(),
+    };
+    let page = associate_page(&state, &ungoverned).unwrap();
+    assert!(page.bindings.is_empty());
+    assert_eq!(page.ungoverned, vec!["labels.py".to_string()]);
+    // A sibling's direct record reaches the new helper through the file dossier.
+    let sibling = AssociateRequest {
+        files: vec![changed(
+            "labels.py",
+            &labels_digest,
+            &[(0, 16, 0, 20), (3, 4, 3, 13)],
+        )],
+        governing: Default::default(),
+        refresh_policy: IntentRefreshPolicy::None,
+        knowledge_revision: revision,
+    };
+    let page = associate_page(&state, &sibling).unwrap();
+    assert_eq!(page.bindings.len(), 1, "{:#?}", page.bindings);
+    assert_eq!(page.bindings[0].name.as_deref(), Some("normalize"));
+    assert_eq!(page.bindings[0].record_iri, requirement);
+    assert_eq!(page.bindings[0].basis, DerivedBasis::FileDossier);
+    assert!(page.ungoverned.is_empty());
+}
+
+fn record_described(state: &AppState, kind: &str, title: &str, description: &str) -> String {
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri: state.resolve_class(kind).unwrap(),
+            class_local: kind.into(),
+            properties: vec![
+                (
+                    "http://www.w3.org/2000/01/rdf-schema#label".into(),
+                    title.into(),
+                ),
+                (state.capture.title.clone(), title.into()),
+                (state.capture.description.clone(), description.into()),
+            ],
+        },
+        "test-human",
+        Utc::now(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn relate_with_confidence_annotates_edges_and_conforms() {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef};
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let broad = record(&state, "Lesson", "Retry ledger keys are stable");
+    let narrow = record(
+        &state,
+        "Lesson",
+        "Retry ledger keys are stable for every tenant",
+    );
+    let outcome = graph::relate_with_confidence(&state, &narrow, "refines", &broad, 0.77).unwrap();
+    assert!(
+        outcome.predicate_iri.ends_with("#refines"),
+        "{}",
+        outcome.predicate_iri
+    );
+    assert_eq!(
+        graph::relation_confidence(&state, &narrow, "refines", &broad).unwrap(),
+        Some(0.77)
+    );
+    // A second annotation replaces the first; the edge itself is one quad.
+    graph::relate_with_confidence(&state, &narrow, "refines", &broad, 0.9).unwrap();
+    assert_eq!(
+        graph::relation_confidence(&state, &narrow, "refines", &broad).unwrap(),
+        Some(0.9)
+    );
+    let project = GraphNameRef::NamedNode(NamedNodeRef::new(graph::PROJECT_KG_GRAPH_IRI).unwrap());
+    let edges = state
+        .store
+        .quads_for_pattern(
+            Some(NamedNodeRef::new(&narrow).unwrap().into()),
+            Some(NamedNodeRef::new(&outcome.predicate_iri).unwrap()),
+            Some(NamedNodeRef::new(&broad).unwrap().into()),
+            Some(project),
+        )
+        .count();
+    assert_eq!(edges, 1);
+    // Symmetric restatement between two existing records.
+    let a = record(&state, "Lesson", "Configuration is loaded once");
+    let b = record(&state, "Lesson", "Configuration is read a single time");
+    graph::relate_with_confidence(&state, &a, "restates", &b, 0.85).unwrap();
+    assert_eq!(
+        graph::relation_confidence(&state, &a, "restates", &b).unwrap(),
+        Some(0.85)
+    );
+    assert_eq!(
+        graph::relation_confidence(&state, &b, "restates", &a).unwrap(),
+        None,
+        "the annotation sits on the asserted direction; the inverse is inferred, not annotated"
+    );
+    // The annotations are ordinary SPARQL-visible quads on the reifiers.
+    let query = "SELECT (COUNT(?r) AS ?n) WHERE { GRAPH <https://moosedev.dev/kg/project> { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?edge ; <http://trivyn.io/ontology#confidence> ?c } }";
+    let count = moosedev::sparql::run_query(&state.store, query).unwrap();
+    assert!(count.contains("\"value\":\"2\""), "{count}");
+    // SHACL still conforms and the canonical export carries the reifiers.
+    let report = moosedev::validation::validate_project(&state).unwrap();
+    assert!(report.conforms(), "{:#?}", report.violations);
+    let dump = moosedev::export::export_canonical_project(&state.store).unwrap();
+    assert!(
+        dump.text.contains("reifies"),
+        "export dropped the reifier quads"
+    );
+    assert!(dump.text.contains("<<("), "export dropped the triple term");
+    let candidate = daemon::reconciliation::candidate_page(
+        &state,
+        &CaptureCandidateRequest {
+            owner_id: "task-a".into(),
+            proposal: proposal("Lesson", "Retry ledger keys are stable"),
+            topic: None,
+            cursor: None,
+            limit: None,
+        },
+    )
+    .unwrap();
+    let broad_candidate = candidate
+        .candidates
+        .iter()
+        .find(|candidate| candidate.iri == broad)
+        .unwrap();
+    assert!(broad_candidate
+        .relations
+        .iter()
+        .any(|relation| relation.predicate == "refines" && relation.incoming));
+    assert!(
+        graph::relate_with_confidence(&state, &a, "restates", &b, 1.5).is_err(),
+        "confidence outside 0..=1 is refused"
+    );
+}
+
+#[test]
+fn symbolic_reconciliation_scores_restates_refines_and_distinct() {
+    use daemon::reconcile_score::*;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let existing = record_described(
+        &state,
+        "Lesson",
+        "Retry ledger keys are stable across restarts",
+        "The ledger key is derived from the request id and never regenerated after a restart.",
+    );
+    let thresholds = ReconcileThresholds::from_env().unwrap();
+    assert_eq!(thresholds, ReconcileThresholds::default());
+    assert_eq!(
+        (
+            thresholds.restates,
+            thresholds.refines,
+            thresholds.refines_containment,
+            thresholds.tiebreak_band
+        ),
+        (0.80, 0.55, 0.60, 0.08)
+    );
+    let mut same = proposal("Lesson", "Retry ledger keys are stable across restarts");
+    same.description = "Ledger keys derive from the request id and survive a restart.".into();
+    let scored = score_proposal(&state, "task-a", &same, thresholds).unwrap();
+    assert!(
+        matches!(&scored.disposition, ScoredDisposition::Restates { candidate_iri, .. } if candidate_iri == &existing),
+        "{:#?}",
+        scored
+    );
+    assert_eq!(scored.candidates[0].title_score, 1.0);
+    assert_eq!(scored.thresholds, thresholds);
+    assert!(!scored.candidate_revision.is_empty() && !scored.proposal_digest.is_empty());
+
+    let mut narrower = proposal("Lesson", "Tenant-scoped retry ledger keys stay stable");
+    narrower.description = "The ledger key is derived from the request id and never regenerated after a restart. Each tenant owns a separate key space, so keys never collide across tenants.".into();
+    let scored = score_proposal(&state, "task-a", &narrower, thresholds).unwrap();
+    assert!(
+        matches!(&scored.disposition, ScoredDisposition::Refines { candidate_iri, containment, .. } if candidate_iri == &existing && *containment >= 0.6),
+        "{:#?}",
+        scored
+    );
+    assert!(scored.candidates[0].longer);
+
+    let mut unrelated = proposal("Lesson", "Display labels are normalized before rendering");
+    unrelated.description = "Labels are trimmed and lower-cased in the renderer.".into();
+    let scored = score_proposal(&state, "task-a", &unrelated, thresholds).unwrap();
+    assert!(
+        matches!(scored.disposition, ScoredDisposition::Distinct { .. }),
+        "{:#?}",
+        scored
+    );
+
+    // Same title, different kind: never reconciled across kinds.
+    let other_kind = proposal(
+        "ArchitecturalDecision",
+        "Retry ledger keys are stable across restarts",
+    );
+    let scored = score_proposal(&state, "task-a", &other_kind, thresholds).unwrap();
+    assert!(
+        matches!(
+            scored.disposition,
+            ScoredDisposition::Distinct { nearest: None }
+        ),
+        "{:#?}",
+        scored
+    );
+
+    // Receipts are durable, idempotent, and carry the thresholds.
+    let receipt = ScoreReceipt {
+        operation_id: "score-1".into(),
+        owner_id: "task-a".into(),
+        proposal_digest: "p".into(),
+        candidate_revision: "r".into(),
+        thresholds,
+        disposition: "restates".into(),
+        candidate_iri: Some(existing.clone()),
+        candidate_digest: Some("d".into()),
+        score: 0.91,
+        confidence: 0.91,
+        resolved_by: "symbolic".into(),
+    };
+    assert_eq!(record_receipt(&state, receipt.clone()).unwrap(), receipt);
+    assert_eq!(record_receipt(&state, receipt.clone()).unwrap(), receipt);
+    assert_eq!(
+        load_receipt(&state, "score-1").unwrap(),
+        Some(receipt.clone())
+    );
+    let mut changed = receipt.clone();
+    changed.score = 0.5;
+    assert!(record_receipt(&state, changed).is_err());
+    assert_eq!(load_receipt(&state, "score-none").unwrap(), None);
+}
+
+fn typing_request(
+    operation_id: &str,
+    note: &str,
+    plan_summary: &str,
+    changed: &[&str],
+    checks: &[(&str, bool, bool)],
+    revision: &str,
+) -> CaptureTypeRequest {
+    CaptureTypeRequest {
+        owner_id: "task-a".into(),
+        operation_id: operation_id.into(),
+        note: note.into(),
+        note_evidence: vec!["event 12: capture note".into()],
+        plan_summary: plan_summary.into(),
+        plan_files: changed.iter().map(|f| f.to_string()).collect(),
+        changed_files: changed.iter().map(|f| f.to_string()).collect(),
+        check_history: checks
+            .iter()
+            .map(|(command, success, after_edit)| CheckOutcome {
+                command: command.to_string(),
+                success: *success,
+                after_edit: *after_edit,
+            })
+            .collect(),
+        knowledge_revision: revision.into(),
+    }
+}
+
+#[tokio::test]
+async fn symbolic_capture_typing_reconciles_without_a_sensor() {
+    use daemon::capture_type::capture_type_operation;
+    use daemon::reconcile_score::load_receipt;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let existing = record_described(
+        &state,
+        "ArchitecturalDecision",
+        "Preserve display behavior",
+        "Display labels keep their rendered form when the helper changes.",
+    );
+    let revision = daemon::accepted_revision(&state).unwrap();
+    // The plan restates an accepted decision: receipt only. A check that
+    // failed then passed after the edit is a distinct lesson.
+    let request = typing_request(
+        "type-1",
+        "",
+        "Preserve display behavior",
+        &["labels.py"],
+        &[("pytest -q", false, false), ("pytest -q", true, true)],
+        &revision,
+    );
+    let response = capture_type_operation(&state, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(response.typing_mode, TypingMode::SymbolicOnly);
+    assert!(response
+        .typing_note
+        .as_deref()
+        .unwrap()
+        .contains("symbolic typing only"));
+    assert_eq!(response.thresholds, ReconcileThresholds::default());
+    assert_eq!(response.proposals.len(), 2, "{:#?}", response.proposals);
+    let decision = &response.proposals[0];
+    assert_eq!(decision.origin, ProposalOrigin::SymbolicDecision);
+    assert_eq!(decision.proposal.kind, "ArchitecturalDecision");
+    assert_eq!(decision.proposal.files, vec!["labels.py".to_string()]);
+    assert!(decision
+        .proposal
+        .evidence
+        .contains(&"plan approved: Preserve display behavior".to_string()));
+    let TypedDisposition::Restates {
+        candidate_iri,
+        receipt_operation_id,
+        confidence,
+        ..
+    } = &decision.disposition
+    else {
+        panic!("{:#?}", decision.disposition);
+    };
+    assert_eq!(candidate_iri, &existing);
+    assert!(*confidence >= 0.8);
+    let receipt = load_receipt(&state, receipt_operation_id).unwrap().unwrap();
+    assert_eq!(receipt.disposition, "restates");
+    assert_eq!(receipt.thresholds, ReconcileThresholds::default());
+    assert_eq!(receipt.candidate_iri.as_deref(), Some(existing.as_str()));
+    assert_eq!(receipt.resolved_by, "symbolic");
+    let lesson = &response.proposals[1];
+    assert_eq!(lesson.origin, ProposalOrigin::SymbolicLesson);
+    assert_eq!(lesson.proposal.kind, "Lesson");
+    assert!(lesson.proposal.title.contains("pytest -q"));
+    assert!(lesson
+        .proposal
+        .evidence
+        .contains(&"check passed after edit: pytest -q".to_string()));
+    assert!(matches!(
+        lesson.disposition,
+        TypedDisposition::Distinct { .. }
+    ));
+    assert!(lesson.proposal.reconciled.is_empty());
+    // Idempotent by operation id; a different request under the same id is refused.
+    assert_eq!(
+        capture_type_operation(&state, request.clone())
+            .await
+            .unwrap(),
+        response
+    );
+    let mut changed = request.clone();
+    changed.note = "different".into();
+    assert!(capture_type_operation(&state, changed).await.is_err());
+    // The distinct lesson captures through the ordinary path.
+    let captured = daemon::capture_operation_owned(
+        &state,
+        CaptureV2Request {
+            operation_id: "cap-1".into(),
+            owner_id: "task-a".into(),
+            proposals: vec![lesson.proposal.clone()],
+            reconciliation_operation_ids: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(captured.proposals.len(), 1);
+    assert_eq!(
+        status_literal(&state, &captured.proposals[0].iri, &state.capture.status).as_deref(),
+        Some("proposed")
+    );
+
+    // A narrower plan refines the accepted decision: proposal plus a
+    // receipt-backed edge, annotated with confidence at capture.
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let request = typing_request(
+        "type-2",
+        "Display labels keep their rendered form when the helper changes. Tenant-scoped labels additionally keep the tenant prefix so two tenants never render the same label.",
+        "Preserve display behavior for tenant-scoped labels",
+        &["labels.py"],
+        &[],
+        &revision,
+    );
+    let response = capture_type_operation(&state, request).await.unwrap();
+    assert_eq!(response.proposals.len(), 1, "{:#?}", response.proposals);
+    let refined = &response.proposals[0];
+    let TypedDisposition::Refines {
+        candidate_iri,
+        confidence,
+        receipt_operation_id,
+        ..
+    } = &refined.disposition
+    else {
+        panic!("{:#?}", refined.disposition);
+    };
+    assert_eq!(candidate_iri, &existing);
+    assert_eq!(refined.proposal.reconciled.len(), 1);
+    assert_eq!(refined.proposal.reconciled[0].predicate, "refines");
+    assert_eq!(refined.proposal.reconciled[0].target_iri, existing);
+    assert_eq!(refined.proposal.reconciled[0].confidence, *confidence);
+    assert_eq!(
+        &refined.proposal.reconciled[0].receipt_operation_id,
+        receipt_operation_id
+    );
+    let mut tampered = refined.proposal.clone();
+    tampered.reconciled[0].confidence = 0.99;
+    assert!(daemon::capture_operation_owned(
+        &state,
+        CaptureV2Request {
+            operation_id: "cap-tampered".into(),
+            owner_id: "task-a".into(),
+            proposals: vec![tampered],
+            reconciliation_operation_ids: vec![],
+        },
+    )
+    .is_err());
+    let captured = daemon::capture_operation_owned(
+        &state,
+        CaptureV2Request {
+            operation_id: "cap-2".into(),
+            owner_id: "task-a".into(),
+            proposals: vec![refined.proposal.clone()],
+            reconciliation_operation_ids: vec![],
+        },
+    )
+    .unwrap();
+    let new_iri = captured.proposals[0].iri.clone();
+    assert_eq!(
+        graph::relation_confidence(&state, &new_iri, "refines", &existing).unwrap(),
+        Some(*confidence)
+    );
+    assert!(moosedev::validation::validate_project(&state)
+        .unwrap()
+        .conforms());
+
+    // A distinct claim whose title an accepted record of another kind already
+    // uses is qualified so capture accepts it.
+    record_described(
+        &state,
+        "Requirement",
+        "Check pytest -q failed before the edit and passed after it",
+        "A requirement that happens to share the lesson's title.",
+    );
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let request = typing_request(
+        "type-3",
+        "",
+        "Preserve display behavior",
+        &["labels.py"],
+        &[("pytest -q", false, false), ("pytest -q", true, true)],
+        &revision,
+    );
+    let response = capture_type_operation(&state, request).await.unwrap();
+    let lesson = response
+        .proposals
+        .iter()
+        .find(|p| p.origin == ProposalOrigin::SymbolicLesson)
+        .unwrap();
+    assert!(
+        matches!(
+            lesson.disposition,
+            TypedDisposition::Distinct {
+                nearest_iri: None,
+                ..
+            }
+        ),
+        "{:#?}",
+        lesson.disposition
+    );
+    assert!(
+        lesson.proposal.title.ends_with("(labels.py)"),
+        "{}",
+        lesson.proposal.title
+    );
+}
+
+#[tokio::test]
+async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
+    use axum::extract::State as AxumState;
+    use axum::routing::post;
+    use axum::{Json as AxumJson, Router};
+    use daemon::capture_type::capture_type_operation;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct Script {
+        fail: Arc<AtomicBool>,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+    async fn completions(
+        AxumState(script): AxumState<Script>,
+        AxumJson(body): AxumJson<serde_json::Value>,
+    ) -> (axum::http::StatusCode, AxumJson<serde_json::Value>) {
+        script.requests.lock().unwrap().push(body);
+        if script.fail.load(Ordering::Acquire) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                AxumJson(json!({"error":"scripted outage"})),
+            );
+        }
+        let content = json!({
+            "proposals": [
+                {"kind":"Lesson","title":"Renderer trims labels before display","description":"Trimming happens in the renderer, not the model layer."},
+                {"kind":"ArchitecturalDecision","title":"Preserve display behavior","description":"Duplicate of the symbolic decision; dropped."},
+                {"kind":"Bogus","title":"Not a kind","description":"Dropped."}
+            ],
+            "reason": "The note states one gotcha."
+        });
+        (
+            axum::http::StatusCode::OK,
+            AxumJson(
+                json!({"choices":[{"message":{"role":"assistant","content":content.to_string()},"finish_reason":"stop"}]}),
+            ),
+        )
+    }
+    let script = Script {
+        fail: Arc::new(AtomicBool::new(false)),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let routes = Router::new()
+        .route("/v1/chat/completions", post(completions))
+        .with_state(script.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
+
+    let fixture = Fixture::new();
+    let state = AppState::bootstrap_with_llm_config(
+        &fixture.0.join(".moosedev"),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies"),
+        LlmConfig {
+            base_url: format!("{url}/v1"),
+            api_key: "fixture".into(),
+            model: "scripted-daemon-model".into(),
+            configured: true,
+            context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
+            structured_output: moosedev::llm::StructuredOutputMode::Required,
+        },
+    )
+    .unwrap();
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let request = typing_request(
+        "type-sensor",
+        "The renderer trims labels; the model layer must not.",
+        "Preserve display behavior",
+        &["labels.py"],
+        &[],
+        &revision,
+    );
+    let response = capture_type_operation(&state, request).await.unwrap();
+    assert_eq!(response.typing_mode, TypingMode::Sensor);
+    assert!(response.typing_note.is_none(), "{:?}", response.typing_note);
+    let origins: Vec<_> = response.proposals.iter().map(|p| p.origin).collect();
+    assert_eq!(
+        origins,
+        vec![ProposalOrigin::SymbolicDecision, ProposalOrigin::LlmSensor],
+        "{:#?}",
+        response.proposals
+    );
+    let sensed = &response.proposals[1];
+    assert_eq!(sensed.proposal.kind, "Lesson");
+    assert_eq!(
+        sensed.proposal.title,
+        "Renderer trims labels before display"
+    );
+    assert_eq!(
+        sensed.proposal.evidence,
+        vec!["event 12: capture note".to_string()]
+    );
+    assert_eq!(sensed.proposal.files, vec!["labels.py".to_string()]);
+    assert!(matches!(
+        sensed.disposition,
+        TypedDisposition::Distinct { .. }
+    ));
+    let recorded = script.requests.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0]["response_format"]["json_schema"]["name"],
+        "harness_capture_typing"
+    );
+    assert_eq!(recorded[0]["model"], "scripted-daemon-model");
+
+    script.fail.store(true, Ordering::Release);
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let request = typing_request(
+        "type-sensor-outage",
+        "The renderer trims labels; the model layer must not.",
+        "Preserve display behavior",
+        &["labels.py"],
+        &[],
+        &revision,
+    );
+    let response = capture_type_operation(&state, request).await.unwrap();
+    assert_eq!(response.typing_mode, TypingMode::Sensor);
+    assert!(response
+        .typing_note
+        .as_deref()
+        .unwrap()
+        .starts_with("sensor typing failed"));
+    assert_eq!(response.proposals.len(), 1);
+    assert_eq!(
+        response.proposals[0].origin,
+        ProposalOrigin::SymbolicDecision
+    );
+    server.abort();
 }

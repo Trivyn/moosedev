@@ -56,6 +56,44 @@ def _group_exited(process):
         return False
 
 
+MODEL_DECISION_PURPOSES = frozenset({
+    "harness_action", "harness_capture", "harness_capture_resolution",
+    "harness_purpose_selection", "harness_association_selection", "harness_capture_note"})
+# Every structured decision the symbolic policy takes away from the coding model.
+SYMBOLIC_STRUCTURED_PURPOSES = frozenset({
+    "harness_capture", "harness_capture_resolution", "harness_purpose_selection",
+    "harness_association_selection"})
+SYMBOLIC_EVENT_KINDS = (
+    "obligations_derived", "obligations_unresolved", "scope_escape_replan", "scope_escape_exhausted",
+    "noop_edit_continuation", "association_derived", "association_none", "association_skipped",
+    "association_unresolved", "capture_deferred", "capture_note", "capture_typed",
+    "reconciled_restates", "reconciled_refines", "reconciled_distinct")
+
+
+def symbolic_metrics(events, model_requests):
+    """Per-run counts of the symbolic policy's derived decisions and recoveries.
+
+    ``structured_model_decisions`` must be zero for a compliant run: the coding
+    model answered only actions and the one capture note.
+    """
+    unique = {}
+    for event in events:
+        if isinstance(event, dict):
+            unique[event.get("id", id(event))] = event
+    kinds = {}
+    for event in unique.values():
+        kind = event.get("kind", "unknown")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    metrics = {kind: kinds.get(kind, 0) for kind in SYMBOLIC_EVENT_KINDS}
+    metrics["capture_notes"] = sum(1 for request in model_requests if isinstance(request, dict)
+                                   and request.get("purpose") == "harness_capture_note")
+    metrics["structured_model_decisions"] = sum(
+        1 for request in model_requests if isinstance(request, dict)
+        and request.get("purpose") in SYMBOLIC_STRUCTURED_PURPOSES)
+    metrics["autonomous_recoveries"] = (metrics["scope_escape_replan"] + metrics["noop_edit_continuation"])
+    return metrics
+
+
 def _journal_metrics(outcome, task):
     """Derive intent/evolution/recovery metrics once from the final state snapshot."""
     if task is None:
@@ -77,20 +115,22 @@ def _journal_metrics(outcome, task):
                           "individual_dispositions", "plan_approval_attempts", "gate_decisions",
                           "review_interactions", "approval_cycles"):
                 outcome["metrics"]["evolution_" + field] = outcome["evolution_reviews"][field]
+    if task.get("intent_policy") == "symbolic" and "intent_events" in task:
+        outcome["symbolic"] = symbolic_metrics(task["intent_events"], task.get("model_requests") or [])
+        for field, value in outcome["symbolic"].items():
+            if isinstance(value, int):
+                outcome["metrics"]["symbolic_" + field] = value
     requests = task.get("model_requests") or []
     purposes = {}
     decisions = {}
     for request in requests:
         purpose = request.get("purpose", "unknown") if isinstance(request, dict) else "unknown"
         purposes[purpose] = purposes.get(purpose, 0) + 1
-        if purpose in {"harness_action", "harness_capture", "harness_capture_resolution",
-                       "harness_purpose_selection", "harness_association_selection"} and request.get("decision_id"):
+        if purpose in MODEL_DECISION_PURPOSES and request.get("decision_id"):
             decision = decisions.setdefault(request["decision_id"], {"purpose": purpose, "attempts": []})
             decision["attempts"].append(request.get("attempt"))
     candidates = [request for request in requests if isinstance(request, dict)
-                  and request.get("purpose") in {"harness_action", "harness_capture",
-                      "harness_capture_resolution", "harness_purpose_selection",
-                      "harness_association_selection"}]
+                  and request.get("purpose") in MODEL_DECISION_PURPOSES]
     outcome["harness_recovery"] = {"last_state": task.get("recovery"), "model_requests_by_purpose": purposes,
         "decisions": decisions,
         "repair_generations": sum(request["attempt"] > 1 for request in candidates)

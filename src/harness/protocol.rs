@@ -220,7 +220,7 @@ pub struct CaptureTarget {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeProposal {
     pub kind: String,
@@ -238,6 +238,19 @@ pub struct KnowledgeProposal {
     pub supersedes: Option<String>,
     #[serde(default)]
     pub retracts: Option<String>,
+    /// Symbolic policy: relations the daemon derived for this proposal from a
+    /// durable reconciliation receipt (today only `refines`). Absent in every
+    /// other flow, so old journals and mocks are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reconciled: Vec<ReconciledRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReconciledRelation {
+    pub predicate: String,
+    pub target_iri: String,
+    pub confidence: f64,
+    pub receipt_operation_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,4 +433,178 @@ pub struct CheckpointResponse {
     pub durable: bool,
     pub revision: String,
     pub pending: Vec<String>,
+}
+
+/// Symbolic policy: deterministic post-edit associations derived by the daemon
+/// from the changed definition scopes and the runner's governing records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssociateRequest {
+    pub files: Vec<ChangedFile>,
+    /// Plan file -> governing record IRIs (the obligations derived at approval).
+    pub governing: std::collections::BTreeMap<String, Vec<String>>,
+    pub refresh_policy: IntentRefreshPolicy,
+    pub knowledge_revision: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedBasis {
+    /// The record governs the file through the approved plan's obligations.
+    Obligation,
+    /// The record is directly linked to a sibling definition changed in the file.
+    FileDossier,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedBinding {
+    pub file: String,
+    pub symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub definition_range: HarnessSourceRange,
+    pub scope_basis: IntentScopeBasis,
+    pub source_digest: String,
+    pub record_iri: String,
+    pub record_kind: String,
+    pub assertion_digest: String,
+    pub predicate: String,
+    pub basis: DerivedBasis,
+    pub candidate_digest: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    TestPath,
+    Parameter,
+    TypeMember,
+    Local,
+    /// A kept definition that encloses a narrower kept definition of the same change.
+    Enclosing,
+    NoLegalPredicate,
+    AlreadyLinked,
+    NotAccepted,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedScope {
+    pub file: String,
+    pub symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub reason: SkipReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_iri: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssociatePage {
+    pub knowledge_revision: String,
+    pub index: IntentIndexSnapshot,
+    pub scope_digest: String,
+    pub bindings: Vec<DerivedBinding>,
+    pub skipped: Vec<SkippedScope>,
+    /// Changed files with neither obligations nor sibling dossier records.
+    pub ungoverned: Vec<String>,
+    pub unresolved: Vec<IntentCandidateUnresolved>,
+}
+
+/// Frozen default reconciliation thresholds, overridable through environment
+/// only and recorded in every receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ReconcileThresholds {
+    pub restates: f64,
+    pub refines: f64,
+    pub refines_containment: f64,
+    pub tiebreak_band: f64,
+}
+
+impl Default for ReconcileThresholds {
+    fn default() -> Self {
+        Self {
+            restates: 0.80,
+            refines: 0.55,
+            refines_containment: 0.60,
+            tiebreak_band: 0.08,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckOutcome {
+    pub command: String,
+    pub success: bool,
+    /// The check ran after at least one applied edit.
+    pub after_edit: bool,
+}
+
+/// Symbolic policy: turn one prose note plus the task's plan, diff and check
+/// history into typed, reconciled proposals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureTypeRequest {
+    pub owner_id: String,
+    pub operation_id: String,
+    pub note: String,
+    /// Evidence references the runner journaled for the note.
+    pub note_evidence: Vec<String>,
+    pub plan_summary: String,
+    pub plan_files: Vec<String>,
+    pub changed_files: Vec<String>,
+    pub check_history: Vec<CheckOutcome>,
+    pub knowledge_revision: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypingMode {
+    SymbolicOnly,
+    Sensor,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalOrigin {
+    SymbolicDecision,
+    SymbolicLesson,
+    LlmSensor,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TypedDisposition {
+    /// Durable receipt only: no record, no review.
+    Restates {
+        candidate_iri: String,
+        score: f64,
+        confidence: f64,
+        receipt_operation_id: String,
+    },
+    /// Proposal plus a confidence-annotated `refines` edge at capture.
+    Refines {
+        candidate_iri: String,
+        score: f64,
+        containment: f64,
+        confidence: f64,
+        receipt_operation_id: String,
+    },
+    Distinct {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nearest_iri: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        score: Option<f64>,
+        receipt_operation_id: String,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypedProposal {
+    pub proposal: KnowledgeProposal,
+    pub origin: ProposalOrigin,
+    pub disposition: TypedDisposition,
+    /// `symbolic`, or `llm_sensor` when a band tiebreak was resolved by the sensor.
+    pub resolved_by: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureTypeResponse {
+    pub revision: String,
+    pub typing_mode: TypingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing_note: Option<String>,
+    pub thresholds: ReconcileThresholds,
+    pub proposals: Vec<TypedProposal>,
 }

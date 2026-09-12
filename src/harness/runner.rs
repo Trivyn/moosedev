@@ -25,6 +25,7 @@ mod change_intent;
 mod intent_v2;
 mod model;
 mod recovery;
+mod symbolic;
 mod usage;
 pub use change_intent::{ChangeIntent, ChangeTarget, IntentEvent, IntentPolicy};
 pub use intent_v2::{
@@ -33,6 +34,7 @@ pub use intent_v2::{
 };
 use model::{action_schema, conversational_schema, Action, ModelOutput, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
+pub use symbolic::SymbolicState;
 pub use usage::UsageLedger;
 
 const fn legacy_capture_contract() -> u32 {
@@ -132,6 +134,9 @@ pub struct Task {
     pub purpose_selection: Option<intent_v2::PurposeSelectionState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_change_scope: Option<intent_v2::ApprovedChangeScope>,
+    /// Symbolic-policy scope and recovery counters. Absent under other policies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbolic: Option<SymbolicState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postedit_association: Option<intent_v2::PostEditAssociationState>,
     #[serde(default)]
@@ -382,6 +387,7 @@ impl Runner {
             postedit_association_contract,
             purpose_selection: None,
             approved_change_scope: None,
+            symbolic: None,
             postedit_association: None,
             scope_assessments: vec![],
             postedit_rejected_bindings: vec![],
@@ -481,9 +487,10 @@ impl Runner {
             "task schema or project identity mismatch"
         );
         anyhow::ensure!(
-            task.intent_policy != IntentPolicy::ChangeLevelV2
+            !task.intent_policy.mandates_postedit_associations()
                 || task.postedit_association_contract == 1,
-            "change-level-v2 journal requires postedit_association_contract 1"
+            "{} journal requires postedit_association_contract 1",
+            task.intent_policy.env_name()
         );
         task.token_usage.attach(&journal);
         Ok(Self {
@@ -759,10 +766,17 @@ impl Runner {
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;
         let (message, action) = output.parts();
+        let Some(action) = self.symbolic_intercept(action)? else {
+            return self.persist();
+        };
         self.validate_permission(&action)?;
-        let action = self
-            .validate_action(action)
-            .context(model::InvalidModelOutput)?;
+        let action = match self.validate_action(action) {
+            Ok(action) => action,
+            Err(error) => match self.symbolic_noop_continuation(&error) {
+                Some(action) => action,
+                None => return Err(error.context(model::InvalidModelOutput)),
+            },
+        };
         self.candidate_accepted();
         if !message.trim().is_empty() {
             self.task.last_response = message.clone();
@@ -1108,6 +1122,7 @@ impl Runner {
         let index = self.task.check_results.len();
         if let Some(command) = plan.checks.get(index).cloned() {
             let result = self.run_command(&command).await?;
+            self.record_symbolic_check(&command, result.success);
             self.task.check_results.push(CheckResult {
                 command,
                 success: result.success,
@@ -1197,6 +1212,9 @@ impl Runner {
         if self.prepare_intent_links(false).await? {
             self.intent_event("plan_blocked", "intent associations await human review");
             return self.persist();
+        }
+        if self.uses_symbolic_intent() {
+            self.derive_symbolic_scope(&context).await?;
         }
         self.task.approved_revision = Some(context.revision);
         self.approve_v2_scope().await?;
@@ -1366,11 +1384,16 @@ impl Runner {
             "knowledge review remains unresolved"
         );
         if self.uses_postedit_associations() && !self.task.edits.is_empty() {
-            anyhow::ensure!(
+            let resolved = if self.uses_symbolic_intent() {
+                self.symbolic_associations_resolved()
+            } else {
                 self.task
                     .postedit_association
                     .as_ref()
-                    .is_some_and(|state| state.status == "resolved"),
+                    .is_some_and(|state| state.status == "resolved")
+            };
+            anyhow::ensure!(
+                resolved,
                 "post-edit association assessment remains unresolved"
             );
         }

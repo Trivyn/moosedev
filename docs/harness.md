@@ -353,6 +353,43 @@ does not authenticate other programs already running with the user's privileges.
 clients use `POST` to validate and publish a durable checkpoint. This also keeps
 legacy browsers without Fetch Metadata from triggering writes through GET.
 
+## Symbolic policy
+
+`MOOSEDEV_HARNESS_INTENT_POLICY=symbolic` selects the policy in which the coding
+model answers only two questions: `harness_action` while working, and one
+plain-prose `harness_capture_note` at the final checkpoint. Every other decision
+is derived by the daemon and journaled as an intent event, never asked of the
+model:
+
+- Plan approval derives the obligations of each plan file from the direct
+  dossier records of its resolved definitions and takes the plan summary as the
+  purpose (`obligations_derived`). One human approval; no purpose review.
+- An edit outside the plan files is discarded and the task re-enters Plan mode
+  naming the file (`scope_escape_replan`, three per task; the fourth parks for
+  guidance as `scope_escape_exhausted`). The first no-op edit runs the required
+  checks instead of consuming the repair budget (`noop_edit_continuation`).
+- After `finish`, `POST /api/v1/harness/intent/associate` binds the changed
+  definitions to the governing records with the predicate the ontology allows,
+  skipping parameters, type members, locals and test paths
+  (`association_derived`, `association_none`, `association_skipped`). Bindings
+  enter the existing link review; an unresolved index is journaled, not parked.
+- Intermediate capture checkpoints only journal (`capture_deferred`). At the
+  final checkpoint the note is journaled (`capture_note`) and
+  `POST /api/v1/harness/capture/type` types it: a symbolic decision for the
+  change, a symbolic lesson for a check that failed then passed, and, when the
+  daemon has an LLM sensor, bounded sensor proposals. Each proposal is scored
+  against same-kind accepted records and receives a durable receipt:
+  `restates` (receipt only, no record), `refines` (proposal plus a
+  confidence-annotated edge written at capture) or distinct (plain proposal).
+  Thresholds are frozen defaults (`MOOSEDEV_RECONCILE_RESTATES` 0.80,
+  `MOOSEDEV_RECONCILE_REFINES` 0.55, `MOOSEDEV_RECONCILE_REFINES_CONTAINMENT`
+  0.60, `MOOSEDEV_RECONCILE_TIEBREAK_BAND` 0.08), overridable only by
+  environment and recorded in every receipt.
+
+Human review remains only where a new record or a new code link is written.
+The policy is persisted with the task and requires the mandatory post-edit
+association contract. `current` and `change-level-v2` are unchanged.
+
 ## Headless compatibility
 
 Existing headless commands remain available, return JSON, and require a running

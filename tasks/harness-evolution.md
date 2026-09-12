@@ -157,7 +157,25 @@ the native agent at episode 1; is the purpose gate worse than current.
 - [x] Eighteen cells closed 2026-09-12 (19 sealed runs; cell 7 attempt 1 was a provider stall, retained and replaced under the same identity). Capability table: Gemma harness-current 0/3 vs native 2/3 (two harness-fails/native-passes pairs, one both-fail); Qwen 3/3 both ways under current, 0/3 under change-level-v2. Every harness failure on a natively passable package is a human-parking halt (purpose gate ×5, plan-scope escape ×2, no-op-edit repair budget ×1, idle gate ×1). Results: `target/harness-evolution-stage2-baseline-v2/final-results.md`. Lesson `Harness failures on natively passable tasks are unattended workflow halts`.
 - [x] Independent grading 19/19 reviewed (`report-reviewed.json`), audited summary `final-audited-summary.json`; all four harness maintenance conjunctions false (parameter/test links or broken code); Gemma's two native passes lack tests; Qwen native ledger is the only run capturing all three retry facts.
 - [x] Private archive `bench/private-evidence/harness-evolution-stage2-baseline-v2/stage2-baseline-v2.tar.gz`: 69,852 verified files, 5,913,305,757 bytes, SHA-256 `0c4fa95c5550073dad621393a91f6ac4ecc268165c82789972c4d0bcaf9e2a72`.
+- [ ] v2→v3 graph migration: backfill the new record relations (`restates`, `refines`) across an existing graph as proposed, provenance-marked edges; frontier/large model for the judgment step, like bootstrap; replayable and idempotent. Requirement recorded 2026-09-12 (see graph); not yet scheduled.
 - [ ] Review the recovery change set: `tasks/harness-recovery-changeset.md` (six guarded runner transitions; purpose gate and scope escape first).
+
+## Symbolic policy (2026-09-12, in the small)
+
+Mirror of graph Requirement `9ae68a19` (symbolic intent policy), AD `dfc80535`
+(daemon-owned association, scoring and typing) and Constraint `9936d96d`
+(frozen reconciliation thresholds). Plan: `~/.claude/plans/humble-baking-babbage.md`.
+
+- [x] S0 `IntentPolicy::Symbolic`, env `symbolic`, mandatory association contract, symbolic job text, bench allow-list.
+- [x] S1 Obligations derived at approval from direct dossier records; purpose = plan summary; `obligations_derived`.
+- [x] S2 Scope escape replans naming the file (3 per task, then park); first no-op edit runs checks.
+- [x] S3 `intent/associate`: kind-filtered, innermost-definition, legal-predicate bindings; runner derives and ratifies through the existing link review.
+- [x] S4 `relate_with_confidence` (RDF 1.2 reification, `trivyn:confidence`), `reconcile_score` with frozen thresholds and receipts.
+- [x] S5 `capture/type`: symbolic decision + lesson, optional LLM sensor, three dispositions; `KnowledgeProposal.reconciled` validated against receipts and annotated at capture.
+- [x] S6 Runner note flow: one `harness_capture_note`, typed proposals into the ordinary review; restart-safe; negative proof (only `harness_action` and `harness_capture_note` reach the model).
+- [x] S7 Bench: `symbolic` accepted; `symbolic_*` metrics; docs.
+- [ ] S8 Cleanup: remove the model-facing structured decisions (separate commit after review).
+- [ ] Matched campaign: one harness arm (`symbolic`) beside `opencode-without`, new identity.
 
 ## Fixed boundaries
 
