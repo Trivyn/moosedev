@@ -17,6 +17,10 @@ use crate::api::error::ApiError;
 use crate::graph::{self, AppState, CaptureStamp, RecordInput, PROJECT_KG_GRAPH_IRI};
 use crate::policy::{self, PolicyDecision, PolicyEvent};
 
+pub mod intent;
+pub mod intent_candidates;
+pub mod reconciliation;
+
 // Serializes operation-journal transitions, including retried HTTP requests.
 // Graph lifecycle primitives separately serialize the shared ratification queue.
 static OPERATIONS: Mutex<()> = Mutex::new(());
@@ -26,6 +30,10 @@ const REVIEWER: &str = "moosedev-harness-human";
 #[derive(Serialize, Deserialize)]
 struct Operation {
     request: CaptureRequest,
+    #[serde(default)]
+    owner_id: Option<String>,
+    #[serde(default)]
+    reconciliation_operation_ids: Vec<String>,
     timestamp: String,
     entries: Vec<Entry>,
     review: Option<bool>,
@@ -197,6 +205,8 @@ pub fn context_snapshot(
         context,
         files,
         capture_targets: Some(targets),
+        capture_contracts: Some(vec![1, 2]),
+        intent_contracts: Some(vec![1, 2]),
     })
 }
 
@@ -254,6 +264,19 @@ pub async fn capture(
     }
 }
 
+pub async fn capture_v2(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CaptureV2Request>,
+) -> Result<Json<CaptureV2Response>, ApiError> {
+    match capture_v2_operation(&state, request) {
+        Ok(response) => Ok(Json(response)),
+        Err(error) if error.is::<CaptureInputError>() => {
+            Err(ApiError::bad_request(error.to_string()))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 // Only errors before an operation journal exists permit a caller to replace
 // its proposal. Errors after persistence require retrying the identical ID.
 #[derive(Debug)]
@@ -269,6 +292,112 @@ pub fn capture_operation(
     state: &AppState,
     request: CaptureRequest,
 ) -> anyhow::Result<CaptureResponse> {
+    capture_operation_inner(state, request, None, Vec::new())
+}
+
+pub fn capture_operation_owned(
+    state: &AppState,
+    request: CaptureV2Request,
+) -> anyhow::Result<CaptureResponse> {
+    match capture_v2_operation(state, request)? {
+        CaptureV2Response::Captured { capture } => Ok(capture),
+        CaptureV2Response::ReconciliationRequired { .. } => {
+            anyhow::bail!("capture requires semantic reconciliation")
+        }
+    }
+}
+
+pub fn capture_v2_operation(
+    state: &AppState,
+    request: CaptureV2Request,
+) -> anyhow::Result<CaptureV2Response> {
+    validate_owner_id(&request.owner_id)?;
+    let _guard = OPERATIONS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
+    let path = operation_path(state, &request.operation_id)?;
+    let capture_request = CaptureRequest {
+        operation_id: request.operation_id.clone(),
+        proposals: request.proposals.clone(),
+    };
+    if path.exists() {
+        let mut stored: Operation = serde_json::from_slice(&std::fs::read(&path)?)?;
+        anyhow::ensure!(
+            serde_json::to_value(&stored.request)? == serde_json::to_value(&capture_request)?,
+            "operation_id was already used for a different capture"
+        );
+        anyhow::ensure!(
+            stored.owner_id.as_deref() == Some(request.owner_id.as_str())
+                && stored.reconciliation_operation_ids == request.reconciliation_operation_ids,
+            "operation_id was retried with different ownership or reconciliation receipts"
+        );
+        finish_capture(state, &path, &mut stored)?;
+        durable_flush(state)?;
+        return Ok(CaptureV2Response::Captured {
+            capture: CaptureResponse {
+                proposals: stored
+                    .entries
+                    .into_iter()
+                    .map(|entry| entry.response)
+                    .collect(),
+            },
+        });
+    }
+
+    // Bind semantic receipts, collision discovery, and operation preparation to
+    // one graph snapshot. Persist the resulting intent before any graph write.
+    let proposal_guard = state.lock_proposal_writes()?;
+    reconciliation::authorize_capture(state, &request)?;
+    let mut collisions = Vec::new();
+    for (proposal_index, proposal) in request.proposals.iter().enumerate() {
+        let candidate_iris = graph::resolve_record_exact_all(state, &proposal.title)
+            .into_iter()
+            .filter_map(|(iri, _)| {
+                (proposal.supersedes.as_ref() != Some(&iri)
+                    && current_status(state, &iri).is_some_and(|status| {
+                        status == "proposed" || graph::in_working_set(&status)
+                    }))
+                .then_some(iri)
+            })
+            .collect::<Vec<_>>();
+        if !candidate_iris.is_empty() {
+            collisions.push(CaptureCollision {
+                proposal_index,
+                candidate_iris,
+            });
+        }
+    }
+    if !collisions.is_empty() {
+        return Ok(CaptureV2Response::ReconciliationRequired { collisions });
+    }
+    let mut operation = prepare(
+        state,
+        capture_request,
+        Some(request.owner_id),
+        request.reconciliation_operation_ids,
+    )
+    .map_err(|error| CaptureInputError(error.to_string()))?;
+    save_operation(&path, &operation)?;
+    drop(proposal_guard);
+    finish_capture(state, &path, &mut operation)?;
+    durable_flush(state)?;
+    Ok(CaptureV2Response::Captured {
+        capture: CaptureResponse {
+            proposals: operation
+                .entries
+                .into_iter()
+                .map(|entry| entry.response)
+                .collect(),
+        },
+    })
+}
+
+fn capture_operation_inner(
+    state: &AppState,
+    request: CaptureRequest,
+    owner_id: Option<String>,
+    reconciliation_operation_ids: Vec<String>,
+) -> anyhow::Result<CaptureResponse> {
     let _guard = OPERATIONS
         .lock()
         .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
@@ -279,10 +408,18 @@ pub fn capture_operation(
             serde_json::to_value(&stored.request)? == serde_json::to_value(&request)?,
             "operation_id was already used for a different capture"
         );
+        anyhow::ensure!(
+            stored.owner_id == owner_id,
+            "operation_id was already used by a different harness owner"
+        );
+        anyhow::ensure!(
+            stored.reconciliation_operation_ids == reconciliation_operation_ids,
+            "operation_id was retried with different reconciliation receipts"
+        );
         stored
     } else {
-        let prepared =
-            prepare(state, request).map_err(|error| CaptureInputError(error.to_string()))?;
+        let prepared = prepare(state, request, owner_id, reconciliation_operation_ids)
+            .map_err(|error| CaptureInputError(error.to_string()))?;
         save_operation(&path, &prepared)?;
         prepared
     };
@@ -293,7 +430,12 @@ pub fn capture_operation(
     })
 }
 
-fn prepare(state: &AppState, request: CaptureRequest) -> anyhow::Result<Operation> {
+fn prepare(
+    state: &AppState,
+    request: CaptureRequest,
+    owner_id: Option<String>,
+    reconciliation_operation_ids: Vec<String>,
+) -> anyhow::Result<Operation> {
     anyhow::ensure!(
         request.proposals.len() <= 32,
         "at most 32 proposals per checkpoint"
@@ -416,6 +558,8 @@ fn prepare(state: &AppState, request: CaptureRequest) -> anyhow::Result<Operatio
     }
     Ok(Operation {
         request,
+        owner_id,
+        reconciliation_operation_ids,
         entries,
         timestamp: Utc::now().to_rfc3339(),
         review: None,
@@ -1028,7 +1172,19 @@ fn operation_path(state: &AppState, id: &str) -> anyhow::Result<PathBuf> {
         .join(format!("{id}.json")))
 }
 
-fn save_operation(path: &Path, operation: &Operation) -> anyhow::Result<()> {
+pub(super) fn validate_owner_id(id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !id.is_empty()
+            && id.len() <= 160
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)),
+        "invalid owner_id"
+    );
+    Ok(())
+}
+
+fn save_operation(path: &Path, operation: &impl Serialize) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("operation path has no parent"))?;

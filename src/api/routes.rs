@@ -60,7 +60,47 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .route("/policy", post(handlers::evaluate_policy))
         .route("/harness/context", post(crate::harness::daemon::context))
         .route("/harness/capture", post(crate::harness::daemon::capture))
+        .route(
+            "/harness/capture/v2",
+            post(crate::harness::daemon::capture_v2),
+        )
+        .route(
+            "/harness/capture/candidates",
+            post(crate::harness::daemon::reconciliation::candidates),
+        )
+        .route(
+            "/harness/capture/reconcile",
+            post(crate::harness::daemon::reconciliation::reconcile),
+        )
+        .route(
+            "/harness/capture/reconcile/review",
+            post(crate::harness::daemon::reconciliation::review),
+        )
         .route("/harness/review", post(crate::harness::daemon::review))
+        .route(
+            "/harness/intent/resolve",
+            post(crate::harness::daemon::intent::resolve),
+        )
+        .route(
+            "/harness/intent/purpose/candidates",
+            post(crate::harness::daemon::intent_candidates::purpose_candidates),
+        )
+        .route(
+            "/harness/intent/candidates",
+            post(crate::harness::daemon::intent_candidates::intent_candidates),
+        )
+        .route(
+            "/harness/intent/link",
+            post(crate::harness::daemon::intent::link),
+        )
+        .route(
+            "/harness/intent/review",
+            post(crate::harness::daemon::intent::review),
+        )
+        .route(
+            "/harness/intent/abandon",
+            post(crate::harness::daemon::intent::abandon),
+        )
         .route(
             "/harness/checkpoint",
             get(crate::harness::daemon::checkpoint)

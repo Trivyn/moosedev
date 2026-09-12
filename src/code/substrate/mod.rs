@@ -19,13 +19,15 @@ pub mod symbols;
 pub(crate) mod treesitter;
 
 pub use churn::{ChurnIndex, FileChurn};
-pub use meta::{ProducerRun, SubstrateIdentity, SubstrateMeta};
+pub use meta::{
+    HistoricalDefinitionProof, HistoricalFileProof, ProducerRun, SubstrateIdentity, SubstrateMeta,
+};
 pub use producer::{
     registry, run_index, IndexReport, ProducerReport, ProducerSpec, ProducerTarget,
 };
 pub use resolver::{
-    DefinitionEntry, FileDefinition, Position, Resolution, ResolutionMode, SourceRange,
-    SourceWindowRequest, Substrate, SubstrateStats, STALE_CHECK_TTL,
+    DefinitionEntry, DefinitionScope, FileDefinition, Position, Resolution, ResolutionMode,
+    SourceRange, SourceWindowRequest, Substrate, SubstrateStats, STALE_CHECK_TTL,
 };
 
 pub const SUBSTRATE_DIR: &str = "substrate";

@@ -50,6 +50,27 @@ class BinaryTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 self.freeze()
 
+    def test_freezes_owned_isolated_target_without_reading_shared_outputs(self):
+        target = self.repo / "target/isolated-build"
+        for role, name in binaries.BINARIES.items():
+            path = target / "release" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"isolated executable {role}".encode())
+            path.chmod(0o700)
+        manifest = binaries.freeze_binaries(self.repo, self.source, artifact_target=target)
+        self.assertEqual(Path(manifest["binaries"]["daemon"]).read_bytes(), b"isolated executable daemon")
+        self.assertEqual(binaries.verify_binaries(Path(manifest["directory"]) / "manifest.json", self.repo), manifest)
+
+    def test_isolated_target_cannot_escape_repository_target(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        with self.assertRaisesRegex(ValueError, "repository's target"):
+            binaries.freeze_binaries(self.repo, self.source, artifact_target=outside)
+        alias = self.repo / "target/alias"
+        alias.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            binaries.freeze_binaries(self.repo, self.source, artifact_target=alias)
+
     def test_rejects_source_binary_and_parent_directory_aliases(self):
         path = self.repo / "target/release/moosedev"
         original = path.read_bytes()

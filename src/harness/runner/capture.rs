@@ -151,7 +151,7 @@ impl Runner {
             // transition. An unproven or externally changed graph stays stale.
             self.task.approved_revision = Some(checkpoint.revision.clone());
         }
-        self.task.knowledge_revision = checkpoint.revision.clone();
+        self.update_knowledge_revision(checkpoint.revision.clone());
         Ok(checkpoint)
     }
 
@@ -163,6 +163,16 @@ impl Runner {
         } else {
             Phase::Working
         }
+    }
+
+    fn capture_reviews_block_progress(&self) -> bool {
+        self.has_governing_reviews()
+            || self
+                .task
+                .reviews
+                .iter()
+                .any(|review| review.capture_resolution.is_some())
+            || (self.awaiting_v2_missing_capture() && !self.task.reviews.is_empty())
     }
 
     pub(super) fn commit_capture_page(&mut self) {
@@ -212,6 +222,43 @@ impl Runner {
     }
 
     pub(super) async fn capture_inner(&mut self) -> Result<()> {
+        // A version-2 assessment batch is journaled before any member is
+        // reconciled. Resume that exact queue without asking the model to
+        // recreate the assessment or minting fresh operation identities.
+        if self.task.capture_request.is_none() && self.task.capture_batch.is_some() {
+            let proposals = self.reconcile_proposals(vec![], Value::Null).await?;
+            if proposals.is_empty() {
+                if self.task.pending_revision.is_some() {
+                    self.task.phase = Phase::AwaitingReview;
+                    return self.persist();
+                }
+                self.task.capture_batch = None;
+                self.commit_capture_page();
+                self.candidate_accepted();
+                self.task.phase = if self.capture_reviews_block_progress() {
+                    Phase::AwaitingReview
+                } else if self.task.capture_due {
+                    self.capture_work_phase()
+                } else if self.awaiting_v2_missing_capture() {
+                    self.persist()?;
+                    if self.finish_v2_missing_capture_if_quiescent().await? {
+                        return Ok(());
+                    }
+                    self.task.after_review
+                } else if !self.task.batch_capture || self.task.final_capture {
+                    Phase::AwaitingReview
+                } else {
+                    self.task.after_review
+                };
+                self.persist()?;
+                return Ok(());
+            }
+            self.task.capture_request = Some(CaptureRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                proposals,
+            });
+            self.persist()?;
+        }
         if self.task.capture_request.is_none() {
             let mut files = self
                 .task
@@ -230,6 +277,7 @@ impl Runner {
                 self.task.capture_files = files.clone();
             }
             let context = self.refresh(&files).await?;
+            self.refresh_intent_choices(&files, false).await?;
             let targets = context.capture_targets.as_ref().context(
                 "daemon lacks typed capture choices; upgrade the project daemon to this harness build and retry (capture remains pending)",
             )?;
@@ -240,15 +288,17 @@ impl Runner {
                 .get_or_insert(self.task.events.len());
             let mut prompt = format!("You are the knowledge-capture sensor for a coding task. The harness requires this review independently of your coding actions. Extract only durable decisions, requirements, constraints, lessons, patterns, antipatterns supported by the supplied contemporaneous evidence. Do not invent rationale. Compare existing knowledge first. Return proposals (possibly empty) and a reason. Each proposal needs kind,title,description,evidence_ids (select supporting evidence IDs),files,components (component choice IDs),requirement (requirement choice ID or null),supersedes (same-kind record choice ID or null),retracts (record choice ID or null). Never accept knowledge.\nObjective: {}\nExisting knowledge:\n{}\n", self.task.objective, context.context);
             prompt.push_str(&format!("\nCurrent human guidance (instructions; select facts only from the evidence page): {}\n",self.task.guidance));
-            if let Some(feedback) = self.task.events.iter().rev().find(|e| {
-                e.message.starts_with("Step rejected or interrupted:")
-                    || e.message
-                        .starts_with("Capture rejected before persistence;")
-            }) {
-                prompt.push_str(&format!(
-                    "Last validation feedback (not evidence): {}\n",
-                    observation_preview(&feedback.message, 1000)
-                ));
+            if !self.capture_v2() {
+                if let Some(feedback) = self.task.events.iter().rev().find(|e| {
+                    e.message.starts_with("Step rejected or interrupted:")
+                        || e.message
+                            .starts_with("Capture rejected before persistence;")
+                }) {
+                    prompt.push_str(&format!(
+                        "Last validation feedback (not evidence): {}\n",
+                        observation_preview(&feedback.message, 1000)
+                    ));
+                }
             }
             if self.task.batch_capture {
                 let pending: Vec<_> = self
@@ -287,23 +337,41 @@ impl Runner {
                     capture_schema(&evidence, &choices, &files),
                 )
                 .await?;
-            let proposals = assessment
+            let mut proposals = assessment
                 .resolve(&evidence, &choices, &files, &self.task.id)
                 .context(InvalidModelOutput)?;
+            if self.capture_v2() && !proposals.is_empty() {
+                proposals = self
+                    .reconcile_proposals(proposals, serde_json::to_value(&evidence)?)
+                    .await?;
+            }
             self.task.capture_reason = Some(assessment.reason.clone());
             self.task.capture_end = Some(page_end);
             self.task.capture_end_offset = page_offset;
             self.event(format!("Capture assessment: {}", assessment.reason));
             if proposals.is_empty() {
+                if self.task.pending_revision.is_some() {
+                    self.task.phase = Phase::AwaitingReview;
+                    return self.persist();
+                }
+                self.task.capture_batch = None;
                 self.commit_capture_page();
-                self.task.phase = if self.task.capture_due {
+                self.candidate_accepted();
+                self.task.phase = if self.capture_reviews_block_progress() {
+                    Phase::AwaitingReview
+                } else if self.task.capture_due {
                     self.capture_work_phase()
+                } else if self.awaiting_v2_missing_capture() {
+                    self.persist()?;
+                    if self.finish_v2_missing_capture_if_quiescent().await? {
+                        return Ok(());
+                    }
+                    self.task.after_review
                 } else if !self.task.batch_capture || self.task.final_capture {
                     Phase::AwaitingReview
                 } else {
                     self.task.after_review
                 };
-                self.candidate_accepted();
                 self.persist()?;
                 return Ok(());
             }
@@ -319,7 +387,16 @@ impl Runner {
             .as_ref()
             .context("missing capture request")?
             .clone();
-        let response: CaptureResponse = match self.post("capture", &request).await {
+        let response_result: Result<CaptureResponse> = if self.capture_v2() {
+            match self.post("capture/v2", &json!({"operation_id":request.operation_id,"owner_id":self.task.id,"proposals":request.proposals,"reconciliation_operation_ids":self.task.capture_batch.as_ref().map(|batch|batch.reconciliation_operations.clone()).unwrap_or_default()})).await {
+                Ok(crate::harness::protocol::CaptureV2Response::Captured { capture }) => Ok(capture),
+                Ok(crate::harness::protocol::CaptureV2Response::ReconciliationRequired { collisions }) => Err(anyhow::anyhow!("capture reconciliation remained unresolved for candidate collisions: {collisions:?}")),
+                Err(error) => Err(error),
+            }
+        } else {
+            self.post("capture", &request).await
+        };
+        let response: CaptureResponse = match response_result {
             Ok(response) => response,
             Err(error)
                 if error
@@ -339,6 +416,7 @@ impl Runner {
                     });
                 }
                 self.task.capture_request = None;
+                self.task.capture_batch = None;
                 self.task.capture_end = None;
                 self.task.capture_due = true;
                 self.event(format!("Capture rejected before persistence; revise the proposal using this validation result: {error}"));
@@ -351,6 +429,7 @@ impl Runner {
             response.proposals.len() == request.proposals.len(),
             "daemon omitted capture proposals"
         );
+        self.task.capture_batch = None;
         if !self.task.capture_operations.contains(&request.operation_id) {
             self.task
                 .capture_operations
@@ -359,8 +438,12 @@ impl Runner {
         self.task.capture_due = false;
         if self.task.batch_capture {
             self.commit_capture_page();
-            let governing = has_governing_proposals(&request);
+            let governing = has_governing_proposals(&request)
+                || self.plan_needs_intent()
+                || self.awaiting_v2_missing_capture();
             self.task.reviews.push(ReviewItem {
+                intent_links: None,
+                capture_resolution: None,
                 request,
                 response,
                 reason: self.task.capture_reason.clone().unwrap_or_default(),
@@ -393,13 +476,33 @@ impl Runner {
     }
 
     pub async fn review_operation(&mut self, id: &str, accept: bool) -> Result<()> {
-        anyhow::ensure!(self.task.batch_capture, "interactive review is not enabled");
+        self.review_operation_with_interaction(id, accept, true)
+            .await
+    }
+
+    async fn review_operation_with_interaction(
+        &mut self,
+        id: &str,
+        accept: bool,
+        emit_interaction: bool,
+    ) -> Result<()> {
         let position = self
             .task
             .reviews
             .iter()
             .position(|r| r.request.operation_id == id)
             .context("unknown pending review")?;
+        if self.task.reviews[position].intent_links.is_some() {
+            return self
+                .review_intent_links(position, accept, emit_interaction)
+                .await;
+        }
+        if self.task.reviews[position].capture_resolution.is_some() {
+            return self
+                .review_capture_resolution(position, accept, emit_interaction)
+                .await;
+        }
+        anyhow::ensure!(self.task.batch_capture, "interactive review is not enabled");
         let request = self.task.reviews[position].request.clone();
         let result = self.resolve_capture(&request, accept).await?;
         anyhow::ensure!(
@@ -407,17 +510,88 @@ impl Runner {
             "knowledge review is not durably resolved"
         );
         let item = self.task.reviews.remove(position);
+        if emit_interaction {
+            self.emit_review_interaction(accept, id);
+        }
+        self.emit_capture_review_events(id, &item.response, accept);
         self.event(format!(
             "Human {} captured knowledge.\n{}",
             if accept { "accepted" } else { "rejected" },
             serde_json::to_string(&item.request)?
         ));
+        if let Some(revision) = self
+            .task
+            .pending_revision
+            .clone()
+            .filter(|revision| revision.origin_operation_id == id)
+        {
+            self.task.pending_revision = None;
+            self.task.capture_resolution = None;
+            if accept {
+                // The original proposal won ratification. The proposed revision
+                // is no longer grounded against a pending candidate and must be
+                // assessed again from the unchanged evidence page.
+                self.task.capture_batch = None;
+                self.task.capture_request = None;
+                self.task.capture_end = None;
+                self.task.capture_due = true;
+                self.task.phase = self.capture_work_phase();
+                self.event("Accepted the originating capture batch; discarded the paused revision and reopened semantic assessment.");
+            } else {
+                let batch = self
+                    .task
+                    .capture_batch
+                    .as_mut()
+                    .context("missing durable revision batch")?;
+                batch.outgoing.push(revision.replacement);
+                if !batch
+                    .reconciliation_operations
+                    .contains(&revision.reconciliation_operation_id)
+                {
+                    batch
+                        .reconciliation_operations
+                        .push(revision.reconciliation_operation_id);
+                }
+                self.task.capture_request = Some(CaptureRequest {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    proposals: batch.outgoing.clone(),
+                });
+                self.task.phase = self.capture_work_phase();
+                self.event("Rejected the complete originating capture batch; the already-durable replacement is ready for capture.");
+            }
+            return self.persist();
+        }
+        if self.awaiting_v2_missing_capture() {
+            if !self.task.reviews.is_empty() {
+                self.task.phase = Phase::AwaitingReview;
+                return self.persist();
+            }
+            if self.task.capture_due {
+                self.task.phase = self.capture_work_phase();
+                return self.persist();
+            }
+            self.persist()?;
+            if self.finish_v2_missing_capture_if_quiescent().await? {
+                return Ok(());
+            }
+        }
+        if self.plan_needs_intent() && !self.task.capture_due && self.task.reviews.is_empty() {
+            self.replan_missing_intent(if accept {
+                "Proposed intent was accepted. Select its current record handle in a revised plan before edits."
+            } else {
+                "Proposed intent was rejected. Revise the purpose using existing knowledge or ask for human guidance."
+            });
+            return self.persist();
+        }
+
         if self.task.reviews.is_empty() && self.task.phase == Phase::AwaitingReview {
             if self.task.capture_due {
                 self.task.phase = self.capture_work_phase();
                 return self.persist();
             }
             if self.task.final_capture {
+                self.task.phase = Phase::Verifying;
+                self.persist()?;
                 return self.finish().await;
             }
             self.task.phase = self
@@ -434,21 +608,24 @@ impl Runner {
                     .as_ref()
                     .map(|p| p.files.clone())
                     .unwrap_or_default();
-                self.refresh(&files).await?;
+                self.task.intent_refresh_pending = files;
+                self.persist()?;
+                return self.resume_intent_refresh().await;
             }
         }
         self.persist()
     }
 
     pub(super) fn has_governing_reviews(&self) -> bool {
-        self.task
-            .reviews
-            .iter()
-            .any(|review| has_governing_proposals(&review.request))
+        self.task.reviews.iter().any(|review| {
+            review.intent_links.is_some()
+                || has_governing_proposals(&review.request)
+                || self.plan_needs_intent()
+        })
     }
 
     pub async fn review(&mut self, accept: bool) -> Result<()> {
-        if self.task.batch_capture {
+        if self.task.batch_capture || self.task.reviews.iter().any(|r| r.intent_links.is_some()) {
             anyhow::ensure!(
                 !self.task.reviews.is_empty(),
                 "no captured proposals awaiting review"
@@ -459,8 +636,18 @@ impl Runner {
                 .iter()
                 .map(|r| r.request.operation_id.clone())
                 .collect();
+            self.intent_event(
+                "review_interaction",
+                &format!(
+                    "{} batch [{}]",
+                    if accept { "accepted" } else { "rejected" },
+                    ids.join(",")
+                ),
+            );
+            self.persist()?;
             for id in ids {
-                self.review_operation(&id, accept).await?;
+                self.review_operation_with_interaction(&id, accept, false)
+                    .await?;
             }
             return Ok(());
         }
@@ -483,6 +670,20 @@ impl Runner {
             if accept { "accepted" } else { "rejected" },
             serde_json::to_string(&self.task.capture_request)?
         ));
+        self.intent_event(
+            "review_interaction",
+            &format!(
+                "{} {}",
+                if accept { "accepted" } else { "rejected" },
+                request.operation_id
+            ),
+        );
+        let pending = self
+            .task
+            .pending_capture
+            .clone()
+            .context("missing persisted capture response")?;
+        self.emit_capture_review_events(&request.operation_id, &pending, accept);
         self.task.pending_capture = None;
         self.task.capture_request = None;
         self.commit_capture_page();
@@ -491,8 +692,20 @@ impl Runner {
             self.task.phase = self.capture_work_phase();
             return self.persist();
         }
+        if self.awaiting_v2_missing_capture() {
+            self.persist()?;
+            if self.finish_v2_missing_capture_if_quiescent().await? {
+                return Ok(());
+            }
+        }
         if self.task.final_capture {
+            self.task.phase = Phase::Verifying;
+            self.persist()?;
             return self.finish().await;
+        }
+        if self.plan_needs_intent() {
+            self.replan_missing_intent(if accept { "Intent review accepted. Propose a revised plan selecting the newly accepted record." } else { "Intent review rejected. Revise the plan or ask for human guidance." });
+            return self.persist();
         }
         self.task.phase = self.task.after_review;
         // Ratification can change governing knowledge; fresh_approval checks it before work.
@@ -520,6 +733,13 @@ impl Runner {
         if self.task.capture_due {
             self.task.phase = self.capture_work_phase();
             self.persist()
+        } else if self.awaiting_v2_missing_capture() {
+            self.persist()?;
+            if self.finish_v2_missing_capture_if_quiescent().await? {
+                Ok(())
+            } else {
+                self.persist()
+            }
         } else if self.task.final_capture {
             self.finish().await
         } else {
@@ -529,6 +749,40 @@ impl Runner {
                 .take()
                 .unwrap_or(self.task.after_review);
             self.persist()
+        }
+    }
+}
+
+impl Runner {
+    pub(super) fn emit_review_interaction(&mut self, accept: bool, operation_id: &str) {
+        self.intent_event(
+            "review_interaction",
+            &format!(
+                "{} {}",
+                if accept { "accepted" } else { "rejected" },
+                operation_id
+            ),
+        );
+    }
+
+    fn emit_capture_review_events(
+        &mut self,
+        operation_id: &str,
+        response: &CaptureResponse,
+        accept: bool,
+    ) {
+        let disposition = if accept { "accepted" } else { "rejected" };
+        for proposal in &response.proposals {
+            self.intent_event(
+                "record_review",
+                &format!("{disposition} {} in {operation_id}", proposal.iri),
+            );
+            for link in &proposal.links {
+                self.intent_event(
+                    "link_review",
+                    &format!("{disposition} {link} in {operation_id}"),
+                );
+            }
         }
     }
 }
@@ -880,6 +1134,8 @@ mod tests {
         }
         async fn context(State(state): State<Arc<(PathBuf, bool)>>) -> Json<ContextResponse> {
             Json(ContextResponse {
+                capture_contracts: Some(vec![1, 2]),
+                intent_contracts: Some(vec![1, 2]),
                 project_root: state.0.to_string_lossy().into_owned(),
                 revision: "fixture".into(),
                 context: String::new(),
@@ -948,6 +1204,9 @@ mod tests {
                 None,
             );
             runner.task.batch_capture = true;
+            // This regression freezes the original capture contract's page/repair
+            // atomicity; version-2 semantic reconciliation is covered separately.
+            runner.task.capture_contract = 1;
             runner.task.events.push(Event {
                 message: "Observed behavior\n".repeat(20_000),
             });

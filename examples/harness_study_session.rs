@@ -32,7 +32,64 @@ The driver supplies a controlled environment. MOOSEDEV_LLM_API_KEY,
 MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS, and MOOSEDEV_LLM_STRUCTURED_OUTPUT configure
 the provider; explicit --model and --endpoint always override environment values.
 MOOSEDEV_DATA_DIR and executor settings retain their ordinary harness semantics.
+
+Neutral contract preflight (no project, daemon, or coding actions):
+harness_study_session --probe-intent-contracts --model ID --endpoint URL
+Emits complete native purpose/association probe receipts as JSON. A failed
+contract emits its retained receipt before exiting unsuccessfully.
 ";
+
+fn explicit_arguments(
+    args: impl IntoIterator<Item = String>,
+    allowed: &[&str],
+) -> Result<BTreeMap<String, String>> {
+    let mut args = args.into_iter();
+    let mut values = BTreeMap::new();
+    while let Some(key) = args.next() {
+        ensure!(allowed.contains(&key.as_str()), "unknown argument: {key}");
+        let value = args
+            .next()
+            .with_context(|| format!("{key} needs a value"))?;
+        ensure!(
+            !value.trim().is_empty() && !value.starts_with("--"),
+            "{key} needs a nonempty value"
+        );
+        ensure!(
+            values.insert(key.clone(), value).is_none(),
+            "duplicate {key}"
+        );
+    }
+    for key in allowed {
+        ensure!(values.contains_key(*key), "missing {key}");
+    }
+    Ok(values)
+}
+
+fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
+    let mut provider = ProviderSettings {
+        response_policy: moosedev::harness::response::ResponsePolicy::from_env()?
+            .unwrap_or_default(),
+        config: LlmConfig::from_env()?,
+    };
+    provider.select(Some(endpoint), model)?;
+    Ok(provider)
+}
+
+async fn run_contract_probe(args: impl IntoIterator<Item = String>) -> Result<()> {
+    let values = explicit_arguments(args, &["--model", "--endpoint"])?;
+    let provider = provider_settings(&values["--model"], &values["--endpoint"])?;
+    let receipt = moosedev::harness::runner::probe_intent_contracts(
+        &provider.config,
+        provider.response_policy,
+    )
+    .await?;
+    emit(&mut std::io::stdout(), &serde_json::to_value(&receipt)?)?;
+    ensure!(
+        receipt.passed,
+        "native intent contract probe failed; see retained JSON receipt"
+    );
+    Ok(())
+}
 
 struct Options {
     project: PathBuf,
@@ -53,27 +110,16 @@ impl Options {
             ensure!(args.next().is_none(), "--help takes no other arguments");
             return Ok(None);
         }
-        let mut values = BTreeMap::new();
-        while let Some(key) = args.next() {
-            ensure!(
-                matches!(
-                    key.as_str(),
-                    "--project" | "--daemon" | "--daemon-exe" | "--model" | "--endpoint"
-                ),
-                "unknown argument: {key}"
-            );
-            let value = args
-                .next()
-                .with_context(|| format!("{key} needs a value"))?;
-            ensure!(
-                !value.trim().is_empty() && !value.starts_with("--"),
-                "{key} needs a nonempty value"
-            );
-            ensure!(
-                values.insert(key.clone(), value).is_none(),
-                "duplicate {key}"
-            );
-        }
+        let mut values = explicit_arguments(
+            args,
+            &[
+                "--project",
+                "--daemon",
+                "--daemon-exe",
+                "--model",
+                "--endpoint",
+            ],
+        )?;
         let mut required = |key: &str| values.remove(key).with_context(|| format!("missing {key}"));
         Ok(Some(Self {
             project: required("--project")?.into(),
@@ -105,13 +151,7 @@ impl Options {
     }
 
     fn provider(&self) -> Result<ProviderSettings> {
-        let mut provider = ProviderSettings {
-            response_policy: moosedev::harness::response::ResponsePolicy::from_env()?
-                .unwrap_or_default(),
-            config: LlmConfig::from_env()?,
-        };
-        provider.select(Some(&self.endpoint), &self.model)?;
-        Ok(provider)
+        provider_settings(&self.model, &self.endpoint)
     }
 }
 
@@ -231,13 +271,21 @@ async fn run(options: Options) -> Result<()> {
 
 #[tokio::main]
 async fn main() {
-    let result = match Options::parse(std::env::args().skip(1)) {
-        Ok(Some(options)) => run(options).await,
-        Ok(None) => {
-            print!("{HELP}");
-            Ok(())
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let result = if args
+        .first()
+        .is_some_and(|arg| arg == "--probe-intent-contracts")
+    {
+        run_contract_probe(args.into_iter().skip(1)).await
+    } else {
+        match Options::parse(args) {
+            Ok(Some(options)) => run(options).await,
+            Ok(None) => {
+                print!("{HELP}");
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
-        Err(error) => Err(error),
     };
     if let Err(error) = result {
         let _ = emit(
@@ -287,6 +335,30 @@ mod tests {
         duplicate.extend(["--model".into(), "replacement".into()]);
         assert!(Options::parse(duplicate).is_err());
         assert!(Options::parse(["--help".into()]).unwrap().is_none());
+    }
+
+    #[test]
+    fn neutral_probe_requires_exact_provider_without_project_options() {
+        let args = [
+            "--model",
+            "exact/model",
+            "--endpoint",
+            "http://127.0.0.1:1234/v1",
+        ];
+        let parsed =
+            explicit_arguments(args.map(str::to_owned), &["--model", "--endpoint"]).unwrap();
+        assert_eq!(parsed["--model"], "exact/model");
+        for invalid in [
+            vec!["--model", "x"],
+            vec!["--model", "x", "--model", "y"],
+            vec!["--project", "/tmp"],
+        ] {
+            assert!(explicit_arguments(
+                invalid.into_iter().map(str::to_owned),
+                &["--model", "--endpoint"]
+            )
+            .is_err());
+        }
     }
 
     #[test]

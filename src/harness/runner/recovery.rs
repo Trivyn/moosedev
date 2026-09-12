@@ -95,10 +95,13 @@ impl Runner {
         } else {
             RecoveryStatus::Retrying
         };
-        let stage = if repair.purpose == "harness_capture" {
-            "capture"
-        } else {
-            "action"
+        let stage = match repair.purpose.as_str() {
+            "harness_capture" => "capture",
+            "harness_action" => "action",
+            "harness_purpose_selection" => "purpose selection",
+            "harness_association_selection" => "association selection",
+            "harness_capture_resolution" => "capture resolution",
+            other => other,
         };
         let message = if exhausted {
             format!("{stage} failed validation after three attempts. Provide human guidance before retrying; pending work is preserved. {}", repair.diagnostic)
@@ -112,6 +115,8 @@ impl Runner {
         if exhausted {
             self.task.phase = Phase::AwaitingInput;
             self.task.last_response = message.clone();
+            let purpose = repair.purpose.clone();
+            self.intent_event("repair_exhausted", &purpose);
         }
         self.event(message.clone());
         if let Some(progress) = &self.progress {

@@ -14,7 +14,7 @@ from .artifacts import ArtifactStore, canonical_json, sha256_file
 from .binaries import REPO, verify_binaries
 from .clients import verify_client
 from .client_archive import archive_clients
-from .config import configuration_hash, inventory, model_associations, required_clients, verify_approval
+from .config import configuration_hash, inventory, model_associations, required_clients, schedule, verify_approval
 from .daemon import OwnedDaemon
 from .isolation import sandbox_command
 from .process import observe
@@ -25,11 +25,50 @@ from .scenario import SCENARIOS, load_scenario, relative_file, tree_manifest
 from .seed import episode_prompt, prepare_workspace
 from .validation import execute_check
 from .usage import UsageLedger, resource_metrics
+from . import intent
+from . import evolution
 
 
-def snapshot(store, run, source, prefix, *, runtime=False, credentials=None):
+def _only_deadline_downstream_disconnects(proxies, result):
+    """True only for downstream writes canceled by this episode's deadline."""
+    cutoff = result.get("_deadline_shutdown_monotonic")
+    details = [detail for proxy in proxies for detail in proxy.failure_details]
+    failures = [failure for proxy in proxies for failure in proxy.failures]
+    if not result.get("timed_out") or not isinstance(cutoff, (int, float)) or not failures:
+        return False
+    if len(details) != 1 or len(failures) != 1:
+        return False
+    allowed = {"BrokenPipeError", "ConnectionResetError", "ConnectionAbortedError"}
+    return all(detail.get("error_type") in allowed
+               and detail.get("failure_origin") == "downstream"
+               and detail.get("response_started") is True
+               and detail.get("response_body_complete") is False
+               and isinstance(detail.get("occurred_at_monotonic"), (int, float))
+               and detail["occurred_at_monotonic"] >= cutoff
+               for detail in details)
+
+
+def _proxy_failure_evidence(proxies, result):
+    """Make in-process failure timing replayable without exporting clock values."""
+    cutoff = result.get("_deadline_shutdown_monotonic")
+    evidence = []
+    for proxy in proxies:
+        for detail in proxy.failure_details:
+            item = {key: value for key, value in detail.items()
+                    if key != "occurred_at_monotonic"}
+            occurred = detail.get("occurred_at_monotonic")
+            item["seconds_from_episode_deadline"] = (
+                occurred - cutoff if isinstance(occurred, (int, float))
+                and isinstance(cutoff, (int, float)) else None)
+            evidence.append(item)
+    return evidence
+
+
+def snapshot(store, run, source, prefix, *, runtime=False, credentials=None, include_dependencies=False):
     """Archive source/notes/durable evidence; never traverse agent-created aliases."""
     excluded = {".git", "__pycache__", ".cache", "node_modules", "target", "scratch"}
+    if include_dependencies:
+        excluded.remove("node_modules")
     for parent, directories, files in os.walk(source, followlinks=False):
         directories[:] = sorted(name for name in directories if name not in excluded)
         for name in list(directories):
@@ -129,17 +168,49 @@ def load_models(config, cell, record, *, executable=None):
             raise ValueError("LM Studio did not load the exact requested identity/context")
 
 
+def planned_episodes(scenario, limit=None):
+    """Split the frozen episode sequence into attempted and limit-excluded episodes."""
+    episodes = scenario["episodes"]
+    if limit is None:
+        return episodes, []
+    if type(limit) is not int or limit < 1:
+        raise ValueError("episode_limit must be a positive integer")
+    return episodes[:limit], episodes[limit:]
+
+
+def pad_unattempted(outcome, scenario, limit=None):
+    """Retain every frozen episode; those beyond the limit say why they never ran."""
+    attempted = {episode["id"] for episode in outcome["episodes"]}
+    excluded = {episode["id"] for episode in planned_episodes(scenario, limit)[1]}
+    outcome["episodes"].extend(
+        {"id": episode["id"], "status": "unattempted",
+         **({"reason": "episode_limit"} if episode["id"] in excluded else {}), "checks": [], "metrics": {}}
+        for episode in scenario["episodes"] if episode["id"] not in attempted)
+
+
 def run_cell(store_root, frozen, cell, *, replacement_for=None):
     config = frozen["config"]
-    if config.get("evaluation_mode") == "local-harness-development":
+    mode = config.get("evaluation_mode", "pilot")
+    experimental = mode == intent.MODE or mode in evolution.MODES
+    # The three-arm baseline runs its native arm through the same frozen schedule;
+    # every other local mode admits only harness cells.
+    harness_cell = experimental and cell["backend"] == "harness"
+    if mode in ("local-harness-development", intent.MODE, *evolution.MODES):
         if Path(store_root).resolve() == (REPO / "target/harness-study/evidence").resolve():
             raise ValueError("development reruns require a separate evidence store; preserve the pilot store")
-        if cell["backend"] != "harness" or cell["condition"] != "harness":
+        if mode != evolution.STAGE2_BASELINE_MODE and (cell["backend"] != "harness" or cell["condition"] != "harness"):
             raise ValueError("development reruns are limited to local harness cells")
+    if experimental and cell not in frozen["schedule"]:
+        raise ValueError("intent run must select an exact frozen schedule cell")
+    if experimental and frozen["schedule"] != schedule(config):
+        raise ValueError("intent schedule differs from its deterministic frozen configuration")
     scenario = load_scenario(cell["scenario_id"])
+    planned, _ = planned_episodes(scenario, config.get("episode_limit"))
+    binaries = verify_binaries(Path(config["binary_manifest"]))
     store = ArtifactStore(Path(store_root).resolve())
     run = store.create_run({"schema_version": 1, "study_id": config["study_id"], **cell,
                             "evaluation_mode": config.get("evaluation_mode", "pilot"),
+                            "build_id": binaries["build_id"],
                             "parent_pilot": config.get("parent_pilot"),
                             "config_sha256": configuration_hash(config),
                             "scenario_gold_sha256": scenario["gold_sha256"],
@@ -170,6 +241,8 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
         lease = open(lease_path, "a+b")
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         store.put_bytes(run, "preflight.json", canonical_json(frozen))
+        if config.get("evaluation_mode") in evolution.MODES:
+            store.put_bytes(run, "evolution-design.json", canonical_json(evolution.design_identity(config["evaluation_mode"])))
         store.put_bytes(run, "scenario.json", canonical_json(scenario))
         snapshot(store, run, SCENARIOS / scenario["id"], "scenario")
         snapshot(store, run, REPO / "bench/harness_study", "driver")
@@ -177,16 +250,30 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
         if config.get("evaluation_mode") == "local-harness-development":
             store.put_bytes(run, "development-protocol.md",
                             (REPO / "bench/harness_study/DEVELOPMENT.md").read_bytes())
+        if harness_cell:
+            store.put_bytes(run, "intent-protocol.md", (REPO / "spec/harness_intent_pilot.md").read_bytes())
+            store.put_bytes(run, "intent-design.json", canonical_json(intent.design_identity()))
         if not frozen.get("ready") or frozen["config_sha256"] != configuration_hash(config):
             raise ValueError("run requires a successful frozen preflight")
         if "driver_files" in frozen and tree_manifest(REPO / "bench/harness_study") != frozen["driver_files"]:
             raise ValueError("study driver changed after preflight")
         if "model_associations" in frozen and model_associations(config) != frozen["model_associations"]:
             raise ValueError("LM Studio model-to-weight mapping changed after preflight")
-        verify_approval(Path(config["gold_approval"]))
-        binaries = verify_binaries(Path(config["binary_manifest"]))
+        verify_approval(Path(config["gold_approval"]), config=config)
         if binaries != frozen["binaries"]:
             raise ValueError("binary selection changed after preflight")
+        indexer = None
+        if harness_cell:
+            from .indexing import verify_indexer, apply_overlay, index_workspace, ready_dossiers, system_python_identity
+            indexer = verify_indexer(config["indexer_manifest"])
+            if indexer != frozen["indexer"] or indexer != binaries.get("indexer"):
+                raise ValueError("indexer changed after intent preflight")
+            if frozen.get("intent_design") != intent.design_identity() or not frozen.get("indexer_probe"):
+                raise ValueError("intent run requires matched design and confined dossier canary")
+            if not frozen.get("indexer_system_python"):
+                raise ValueError("intent run requires the frozen system Python interpreter identity")
+            record("indexer_system_python", system_python_identity(frozen["indexer_system_python"]))
+            snapshot(store, run, Path(indexer["directory"]), "indexer", include_dependencies=True)
         for role in required_clients(config):
             if "runtime_root" in frozen[role]:
                 verify_client(frozen[role])
@@ -215,13 +302,23 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
         shutil.copytree(SCENARIOS / scenario["id"] / "project", workspace)
         subprocess.run(["/usr/bin/git", "init", "-q", str(workspace)], check=True, capture_output=True)
         prepare_workspace(workspace, scenario, cell["condition"])
+        if harness_cell:
+            apply_overlay(workspace)
         snapshot(store, run, workspace, "initial")
         load_models(config, cell, record, executable=frozen["lms"]["path"])
         outcome["status"] = "infrastructure_failure"
-        for episode in scenario["episodes"]:
+        for episode in planned:
             episode_id = episode["id"]
             runtime = execution / episode_id
             runtime.mkdir()
+            if harness_cell:
+                try:
+                    indexed = index_workspace(indexer, binaries["binaries"]["daemon"], workspace, runtime / "index")
+                finally:
+                    receipt = runtime / "index/index-receipt.json"
+                    if receipt.is_file():
+                        store.put_bytes(run, f"episodes/{episode_id}/index-receipt.json", receipt.read_bytes())
+                record("index_setup", dict(indexed, episode=episode_id))
             prompt = episode_prompt(episode, cell["condition"])
             store.put_bytes(run, f"episodes/{episode_id}/prompt.txt", prompt.encode())
             daemon = None
@@ -247,8 +344,15 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                         executable=Path(binaries["binaries"]["daemon"]), expected_sha256=binaries["binary_hashes"]["daemon"],
                         workspace=workspace, runtime=runtime, assets=Path(frozen["assets"]["directory"]),
                         helper_model=config["helper_model"], helper_endpoint=helper.url,
-                        helper_context_tokens=config["context_tokens"], log_path=run / f"episodes/{episode_id}/daemon.log"))
+                        helper_context_tokens=config["context_tokens"], log_path=run / f"episodes/{episode_id}/daemon.log",
+                        **({"indexer": indexer} if harness_cell else {})))
                     record("daemon", dict(daemon.identity, episode=episode_id))
+                    if harness_cell:
+                        first = episode_id == scenario["episodes"][0]["id"]
+                        readiness = ready_dossiers(daemon, scenario, seed=first,
+                            require_empty=first and scenario["id"] == "retry_ledger")
+                        record("index_readiness", dict(readiness, episode=episode_id))
+                        snapshot(store, run, workspace, f"episodes/{episode_id}/prepared")
                 executable = Path(binaries["binaries"]["session"] if cell["backend"] == "harness"
                                   else frozen["codex" if cell["backend"].startswith("codex") else "opencode"]["path"])
                 command, environment = build_command(cell["backend"], executable=executable,
@@ -257,6 +361,9 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                     daemon_exe=Path(binaries["binaries"]["daemon"]),
                     daemon_socket=daemon.socket if daemon else None, context_tokens=config["context_tokens"],
                     harness_response_policy=config.get("harness_response_policy", "auto"),
+                    **({"harness_intent_policy": cell["intent_policy"]} if harness_cell else {}),
+                    postedit_association_contract=evolution.postedit_association_contract(
+                        config.get("evaluation_mode")),
                     ca_bundle=ca_bundle if cell["backend"].startswith("codex") else None)
                 grants = [executable] if cell["backend"] == "harness" else runtime_assets(executable)
                 network = [endpoint] if endpoint else [hosted.url]
@@ -272,10 +379,13 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                     (runtime / "codex/auth.json").chmod(0o600)
                 search_path = "/usr/bin:/bin:/usr/sbin:/sbin"
                 if cell["backend"] != "harness":
-                    node_bin = Path(frozen["codex"].get("runtime_root", Path(config["codex"]).parent)) / "bin"
+                    role = "codex" if cell["backend"].startswith("codex") else "opencode"
+                    node_bin = Path(frozen[role].get("runtime_root", Path(config[role]).parent)) / "bin"
                     search_path = str(node_bin) + ":" + search_path
                 environment.update({"PATH": search_path,
                                     "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"})
+                if harness_cell:
+                    environment["MOOSEDEV_HARNESS_ENTITY_LINKS"] = "1"
                 if hosted:
                     environment.update({"HTTPS_PROXY": hosted.url, "HTTP_PROXY": hosted.url,
                                         "ALL_PROXY": hosted.url, "NO_PROXY": "127.0.0.1,localhost,::1"})
@@ -290,12 +400,32 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                 result = observe(command, backend=cell["backend"], workspace=workspace, environment=environment,
                                  prompt=prompt, episode=episode,
                                  record=lambda channel, event: record(channel, dict(event, episode=episode_id)),
-                                 seconds=config["episode_seconds"], expected_model=cell["model"])
+                                 seconds=config["episode_seconds"], expected_model=cell["model"],
+                                 evidence_byte_limit=config.get("evidence_byte_limit"),
+                                 reject_loop_limit=config.get("reject_loop_limit", 5))
                 observation_complete = True
                 if daemon:
                     record("checkpoint", dict(daemon.checkpoint(), episode=episode_id))
-                if any(proxy.failures for proxy in proxies):
+                    if harness_cell:
+                        try:
+                            final_index = daemon._request("/api/v1/harness/intent/resolve", {
+                                "files": sorted({p.relative_to(workspace).as_posix() for p in workspace.rglob("*.py")
+                                                 if ".moosedev" not in p.parts}), "refresh_index": True})
+                            record("index_final", {"episode": episode_id, "response": final_index})
+                        except Exception as error:
+                            # A broken submission can fail to index. Preserve its native outcome;
+                            # post-run observation must not relabel that as setup failure.
+                            result["final_index_error"] = f"{type(error).__name__}: {error}"
+                            record("index_final", {"episode": episode_id, "error": result["final_index_error"]})
+                        snapshot(store, run, workspace / ".moosedev/substrate", f"episodes/{episode_id}/substrate")
+                proxy_failures = [failure for proxy in proxies for failure in proxy.failures]
+                if proxy_failures:
+                    result["proxy_failure_evidence"] = _proxy_failure_evidence(proxies, result)
+                if proxy_failures and not _only_deadline_downstream_disconnects(proxies, result):
                     result.update(status="infrastructure_failure", error="model proxy recorded request/provider failure")
+                elif proxy_failures:
+                    result["proxy_failure_classification"] = "deadline_downstream_cancellation"
+                result.pop("_deadline_shutdown_monotonic", None)
             result["request_usage"] = token_usage.report(episode_id)
             result["metrics"].update(resource_metrics(result["request_usage"]))
             # Gold is first consulted after the native agent and its daemon stop.
@@ -309,6 +439,10 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
             result.update(id=episode_id, checks=[check])
             if result["status"] == "success" and not check["passed"]:
                 result["status"] = check["status"]
+            if harness_cell and scenario["id"] == intent.MAINTENANCE:
+                result["intent_primary"] = intent.primary_outcome(result)
+            if config.get("evaluation_mode") in evolution.MODES:
+                result["evolution_constituents"] = evolution.outcome_constituents(result)
             outcome["episodes"].append(result)
             outcome["status"] = result["status"]
             store.put_bytes(run, f"episodes/{episode_id}/outcome.json", canonical_json(result))
@@ -316,9 +450,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
             if result["status"] != "success":
                 break
             reset_episode(workspace)
-        attempted = {episode["id"] for episode in outcome["episodes"]}
-        outcome["episodes"].extend({"id": episode["id"], "status": "unattempted", "checks": [], "metrics": {}}
-                                   for episode in scenario["episodes"] if episode["id"] not in attempted)
+        pad_unattempted(outcome, scenario, config.get("episode_limit"))
         capture_complete = True
     except BaseException as error:
         if outcome["status"] != "preflight_failure":
@@ -343,9 +475,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
         try:
             if not capture_complete:
                 outcome["retained_execution"] = str(execution)
-            attempted = {episode["id"] for episode in outcome["episodes"]}
-            outcome["episodes"].extend({"id": episode["id"], "status": "unattempted", "checks": [], "metrics": {}}
-                                       for episode in scenario["episodes"] if episode["id"] not in attempted)
+            pad_unattempted(outcome, scenario, config.get("episode_limit"))
             outcome["request_usage"] = token_usage.report()
             store.put_bytes(run, "outcome.json", canonical_json(credentials.event(outcome)))
             store.seal_run(run)

@@ -45,7 +45,7 @@ class OwnedDaemon:
     def __init__(self, *, executable: Path, expected_sha256: str, workspace: Path,
                  runtime: Path, assets: Path, helper_model: str, helper_endpoint: str,
                  helper_context_tokens: int = 32768, log_path: Path,
-                 timeout_seconds: int = 90):
+                 timeout_seconds: int = 90, indexer=None):
         self.executable = _checked_path(executable)
         if not self.executable.is_file() or not os.access(self.executable, os.X_OK):
             raise ValueError("study daemon must be an executable regular file")
@@ -85,6 +85,10 @@ class OwnedDaemon:
         self._stopped = False
         self._entered = False
         self._http = build_opener(ProxyHandler({}), _NoRedirect())
+        self.indexer = indexer
+        if indexer is not None:
+            from .indexing import verify_indexer
+            verify_indexer(indexer)
 
     def _check_binary(self):
         if sha256_file(self.executable) != self.expected_sha256:
@@ -95,7 +99,7 @@ class OwnedDaemon:
         for path in (home, temporary):
             path.mkdir(mode=0o700, exist_ok=True)
             _checked_path(path, directory=True)
-        return {
+        environment = {
             "HOME": str(home), "TMPDIR": str(temporary), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
             "XDG_CONFIG_HOME": str(home / ".config"), "XDG_CACHE_HOME": str(home / ".cache"),
@@ -113,6 +117,9 @@ class OwnedDaemon:
             "MOOSEDEV_LLM_STRUCTURED_OUTPUT": "auto",
             "RUST_LOG": "moosedev=info,moose=warn,rmcp=warn",
         }
+        if self.indexer is not None:
+            environment["MOOSEDEV_SCIP_PYTHON"] = self.indexer["launcher"]["path"]
+        return environment
 
     def __enter__(self):
         if self._entered:
@@ -134,7 +141,8 @@ class OwnedDaemon:
             self.command = sandbox_command(
                 [str(self.executable), "--serve", str(self.socket)],
                 workspace=self.workspace, runtime=self.runtime,
-                readable_paths=[self.executable, self.assets],
+                readable_paths=[self.executable, self.assets]
+                + ([Path(self.indexer["directory"])] if self.indexer is not None else []),
                 network_endpoints=[self.helper_endpoint],
                 listening_endpoints=[self.url, f"unix://{self.socket}"],
             )
@@ -190,7 +198,7 @@ class OwnedDaemon:
         request = Request(self.url + path,
                           data=None if body is None else json.dumps(body).encode(),
                           headers={"Content-Type": "application/json"})
-        with self._http.open(request, timeout=5) as response:
+        with self._http.open(request, timeout=180 if path.startswith("/api/v1/harness/intent/") else 5) as response:
             if response.status != 200:
                 raise ValueError("daemon returned a non-success status")
             payload = response.read(4 * 1024 * 1024 + 1)

@@ -9,6 +9,7 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use super::meta::SubstrateMeta;
 use super::scip::{self, IngestedIndex, OccurrenceEntry, SymbolData};
@@ -121,6 +122,15 @@ pub struct FileDefinition {
     pub range: SourceRange,
 }
 
+/// A definition occurrence plus the producer's enclosing-range provenance.
+/// This projection is for deterministic change-scope discovery; exact position
+/// resolution deliberately continues to use the definition token alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionScope {
+    pub definition: FileDefinition,
+    pub enclosing_range: Option<SourceRange>,
+}
+
 #[derive(Debug)]
 pub struct Substrate {
     index: IngestedIndex,
@@ -137,6 +147,9 @@ pub struct Substrate {
     /// Lazy normalized symbol → definition, so a caller resolving many symbols
     /// pays one normalization pass over the index instead of one per lookup.
     definitions_by_symbol: std::sync::OnceLock<std::collections::HashMap<String, FileDefinition>>,
+    /// In-process cache for legacy/synthetic indexes without durable generation
+    /// digests. Published generations retain the same proof in metadata.
+    indexed_source_digests: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// Canonical repository root, resolved once. Containment checks compare
     /// against it on every source read, and the root cannot move underneath a
     /// loaded substrate.
@@ -199,6 +212,7 @@ impl Substrate {
             churn,
             reference_counts: std::sync::OnceLock::new(),
             definitions_by_symbol: std::sync::OnceLock::new(),
+            indexed_source_digests: std::sync::Mutex::new(std::collections::HashMap::new()),
             canonical_root: std::sync::OnceLock::new(),
         })
     }
@@ -306,12 +320,42 @@ impl Substrate {
     /// Read a source baseline only when filesystem evidence proves it did not
     /// change during or after this generation's producer run.
     pub fn read_indexed_source(&self, relative_path: &str) -> Option<String> {
-        self.read_proven(relative_path, |mut reader| {
+        let source = self.read_proven(relative_path, |mut reader| {
             let mut text = String::new();
             reader.read_to_string(&mut text).ok()?;
             let read_bytes = text.len() as u64;
             Some((text, read_bytes))
-        })
+        })?;
+        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        self.indexed_source_digests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(relative_path.to_string(), digest);
+        Some(source)
+    }
+
+    /// Return a digest this substrate independently proved against its indexed
+    /// source snapshot. Published metadata survives deletion and daemon restart;
+    /// the cache covers a legacy index only for the current daemon lifetime.
+    pub fn indexed_source_digest(&self, relative_path: &str) -> Option<String> {
+        if let Some(digest) = self
+            .indexed_source_digests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(relative_path)
+            .cloned()
+        {
+            return Some(digest);
+        }
+        if let Some(digest) = self.meta.source_digests.get(relative_path) {
+            return Some(digest.clone());
+        }
+        self.read_indexed_source(relative_path)?;
+        self.indexed_source_digests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(relative_path)
+            .cloned()
     }
 
     /// Read only the requested WINDOWS of a provably-indexed file, plus its
@@ -454,32 +498,47 @@ impl Substrate {
     }
 
     pub fn definitions_in_file(&self, relative_path: &str) -> Vec<FileDefinition> {
+        self.definition_scopes_in_file(relative_path)
+            .into_iter()
+            .map(|scope| scope.definition)
+            .collect()
+    }
+
+    pub fn definition_scopes_in_file(&self, relative_path: &str) -> Vec<DefinitionScope> {
         let Some(file) = self.index.files.get(relative_path) else {
             return Vec::new();
         };
-
-        let mut definitions = file
+        let mut scopes = file
             .occurrences
             .iter()
-            .filter(|entry| scip::is_definition_role(entry.symbol_roles))
-            .filter_map(|entry| {
-                let symbol = &self.index.symbols[entry.symbol_id];
-                if symbol.is_local || is_synthetic_whole_file_marker(symbol, entry.range) {
+            .filter(|occurrence| scip::is_definition_role(occurrence.symbol_roles))
+            .filter_map(|occurrence| {
+                let symbol = self.index.symbols.get(occurrence.symbol_id)?;
+                if symbol.is_local || is_synthetic_whole_file_marker(symbol, occurrence.range) {
                     return None;
                 }
-                Some(FileDefinition {
-                    entry: definition_entry(symbol)?,
-                    range: entry.range,
+                Some(DefinitionScope {
+                    definition: FileDefinition {
+                        entry: definition_entry(symbol)?,
+                        range: occurrence.range,
+                    },
+                    enclosing_range: occurrence.enclosing_range,
                 })
             })
             .collect::<Vec<_>>();
-        definitions.sort_by(|a, b| {
-            a.range
+        scopes.sort_by(|a, b| {
+            a.definition
+                .range
                 .start
-                .cmp(&b.range.start)
-                .then_with(|| a.entry.normalized_symbol.cmp(&b.entry.normalized_symbol))
+                .cmp(&b.definition.range.start)
+                .then_with(|| {
+                    a.definition
+                        .entry
+                        .normalized_symbol
+                        .cmp(&b.definition.entry.normalized_symbol)
+                })
         });
-        definitions
+        scopes
     }
 
     /// Returns whether the merged substrate contains an ingested document at
@@ -713,6 +772,7 @@ impl Substrate {
             churn: None,
             reference_counts: std::sync::OnceLock::new(),
             definitions_by_symbol: std::sync::OnceLock::new(),
+            indexed_source_digests: std::sync::Mutex::new(std::collections::HashMap::new()),
             canonical_root: std::sync::OnceLock::new(),
         })
     }
@@ -1874,6 +1934,45 @@ mod tests {
     }
 
     #[test]
+    fn definition_scopes_expose_enclosing_provenance_without_changing_definition_location() {
+        let symbol = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            symbol,
+            "build_server",
+            symbol_information::Kind::Function,
+            "fn build_server()",
+        ));
+        let mut occurrence = occ(symbol, vec![4, 3, 15], 1);
+        occurrence.enclosing_range = vec![3, 0, 8, 1];
+        document.occurrences.push(occurrence);
+        index.documents.push(document);
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        let scopes = substrate.definition_scopes_in_file("src/runtime.rs");
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(
+            scopes[0].definition.range,
+            SourceRange {
+                start: Position { line: 4, col: 3 },
+                end: Position { line: 4, col: 15 }
+            }
+        );
+        assert_eq!(
+            scopes[0].enclosing_range,
+            Some(SourceRange {
+                start: Position { line: 3, col: 0 },
+                end: Position { line: 8, col: 1 }
+            })
+        );
+        assert_eq!(
+            substrate.definition_location(symbol).unwrap().range,
+            scopes[0].definition.range
+        );
+    }
+
+    #[test]
     fn utf16_document_errors() {
         let mut index = Index::new();
         let mut document = doc("src/lib.rs");
@@ -2316,6 +2415,8 @@ mod tests {
             indexed_started_at: None,
             generation: None,
             producers,
+            source_digests: std::collections::BTreeMap::new(),
+            historical_files: std::collections::BTreeMap::new(),
         }
     }
 

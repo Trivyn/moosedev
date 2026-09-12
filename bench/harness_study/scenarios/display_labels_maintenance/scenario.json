@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "id": "display_labels_maintenance",
+  "track": "inherited",
+  "title": "Shared display-name normalization maintenance",
+  "review_status": "draft_pending_human_approval",
+  "initial_facts": [
+    {
+      "id": "label-normalization",
+      "kind": "Requirement",
+      "title": "Display names retain text while normalizing surrounding whitespace",
+      "description": "For string input, render_name and each render_names item trim surrounding whitespace using str.strip(), preserve internal whitespace and letter case, and use \"(unnamed)\" when the trimmed name is empty.",
+      "component": "Display labels",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#label-normalization"
+      ]
+    },
+    {
+      "id": "label-maintenance-contract",
+      "kind": "Constraint",
+      "title": "Maintenance shares normalization without changing public behavior",
+      "description": "Preserve render_name(name) and render_names(names). Batch accepts any iterable of strings, returns a list preserving order and duplicates, does not mutate input collections, and propagates iterator errors when encountered. Refactor duplicated normalization into one private module-level helper used once per name by both public entry points; the helper name is not prescribed. This is an internal maintenance change with no new user-facing behavior.",
+      "component": "Display labels",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#label-maintenance-contract"
+      ]
+    }
+  ],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "In labels.py, extract the duplicated display-name normalization in render_name(name) and render_names(names) into one private module-level helper used once per name by both public entry points. Choose a sensible helper name. Preserve public signatures and all documented behavior. Add regression tests. This is an internal maintenance refactor; no new user-facing capability is requested.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Inputs are strings; preserve all documented behavior. Add or update visible tests as needed.",
+        "knowledge": "All required intent is already in the supplied project knowledge. Reuse it when appropriate and preserve useful understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "label-normalization",
+        "label-maintenance-contract"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ]
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "no-extraction",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/no_extraction",
+      "expected": "fail"
+    },
+    {
+      "id": "no-trim",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/no_trim",
+      "expected": "fail"
+    },
+    {
+      "id": "deduplicate",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/deduplicate",
+      "expected": "fail"
+    },
+    {
+      "id": "swallow-iterator-error",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/swallow_iterator_error",
+      "expected": "fail"
+    },
+    {
+      "id": "empty-returns-none",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/empty_returns_none",
+      "expected": "fail"
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md"
+}

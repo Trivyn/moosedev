@@ -177,6 +177,8 @@ fn write_generation(
                 .sum(),
             path_prefix: None,
         }],
+        source_digests: Default::default(),
+        historical_files: Default::default(),
     }
 }
 

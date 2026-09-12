@@ -41,6 +41,7 @@ class ModelProxy:
         self._port = address.port
         self.model, self.record, self.role = model, record, role
         self.failures = []
+        self.failure_details = []
         self._state = threading.Lock()
         self._record_lock = threading.Lock()
         self._stopping = threading.Event()
@@ -77,10 +78,15 @@ class ModelProxy:
                 upstream_connection = None
                 response = None
                 stage = "request"
+                failure_origin = "request"
                 started = None
+                response_body_complete = False
+                request_metadata = {}
 
                 def forward(data, content_type, status=200):
-                    nonlocal sent_headers
+                    nonlocal sent_headers, failure_origin
+                    previous_origin = failure_origin
+                    failure_origin = "downstream"
                     if not sent_headers:
                         self.send_response(status)
                         self.send_header("Content-Type", content_type)
@@ -88,6 +94,7 @@ class ModelProxy:
                         sent_headers = True
                     self.wfile.write(data)
                     self.wfile.flush()
+                    failure_origin = previous_origin
 
                 try:
                     if self.path != "/v1/chat/completions":
@@ -112,6 +119,7 @@ class ModelProxy:
                     owner.emit({"id": request_id, "event": "request", "body": body,
                                 "raw_base64": base64.b64encode(raw).decode(),
                                 "usage_metadata": usage_metadata(self.headers)})
+                    request_metadata = usage_metadata(self.headers)
                     temperature = body.get("temperature")
                     if owner.expected_temperature is not None and (
                             type(temperature) not in (int, float)
@@ -119,6 +127,7 @@ class ModelProxy:
                         raise ValueError("native client temperature differs from the frozen generation policy")
                     started = time.monotonic()
                     stage = "upstream"
+                    failure_origin = "upstream"
                     upstream_connection = HTTPConnection("127.0.0.1", owner._port, timeout=2)
                     upstream_connection.connect()
                     upstream_connection.sock.settimeout(1200)
@@ -181,6 +190,7 @@ class ModelProxy:
                                     prelude += event_wire
                                 event_wire = b""
                     owner.emit({"id": request_id, "event": "response_body_complete"})
+                    response_body_complete = True
                     if usage_option_rejection(response.status, body, pending):
                         owner.emit({"id": request_id, "event": "error", "compatibility_rejection": True,
                                     "error": "provider explicitly rejected stream usage reporting",
@@ -199,9 +209,22 @@ class ModelProxy:
                     owner.emit({"id": request_id, "event": "complete", "elapsed_seconds": time.monotonic() - started})
                 except Exception as error:
                     if not owner._stopping.is_set():
+                        occurred_at = time.monotonic()
                         with owner._state:
                             owner.failures.append(str(error))
+                            owner.failure_details.append({
+                                "request_id": request_id,
+                                "client_request_id": request_metadata.get("client_request_id"),
+                                "purpose": request_metadata.get("purpose"),
+                                "error_type": type(error).__name__, "error": str(error),
+                                "stage": stage, "failure_origin": failure_origin,
+                                "occurred_at_monotonic": occurred_at,
+                                "response_started": sent_headers,
+                                "response_body_complete": response_body_complete,
+                            })
                         owner.emit({"id": request_id, "event": "error", "error": str(error),
+                                    "error_type": type(error).__name__,
+                                    "failure_origin": failure_origin,
                                     "elapsed_seconds": time.monotonic() - started if started is not None else None})
                         if not sent_headers:
                             try:

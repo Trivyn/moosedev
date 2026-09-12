@@ -10,6 +10,7 @@ import time
 
 from .artifacts import canonical_json
 from .adapters import normalize_event
+from .cause import classify
 from .reviewer import review_input
 from .usage import UsageLedger, resource_metrics
 
@@ -21,6 +22,7 @@ def _gate_key(event, decision):
               "capture_request", "reviews", "capture_cursor", "capture_offset",
               "capture_end", "capture_end_offset", "capture_checkpoint_end",
               "last_response", "turn_finished")
+    fields += ("intent_policy", "intent_cycle")
     return hashlib.sha256(canonical_json({"gate": {key: task.get(key) for key in fields},
                                           "input": decision["input"]})).hexdigest()
 
@@ -54,8 +56,63 @@ def _group_exited(process):
         return False
 
 
+def _journal_metrics(outcome, task):
+    """Derive intent/evolution/recovery metrics once from the final state snapshot."""
+    if task is None:
+        return
+    if "intent_events" in task:
+        from .intent import gate_metrics, activity_metrics
+        from .evolution import review_metrics
+        outcome["intent_gates"] = gate_metrics(task["intent_events"])
+        for field in ("plan_approval_attempts", "record_dispositions", "link_dispositions",
+                      "gate_decisions", "approval_cycles", "accepted_revision_changes"):
+            outcome["metrics"]["intent_" + field] = outcome["intent_gates"][field]
+        outcome["intent_activity"] = activity_metrics(task.get("events", []))
+        for field, value in outcome["intent_activity"].items():
+            if isinstance(value, int):
+                outcome["metrics"]["intent_" + field] = value
+        if task.get("capture_contract", 1) >= 2 or task.get("intent_policy") == "change-level-v2":
+            outcome["evolution_reviews"] = review_metrics(task["intent_events"])
+            for field in ("record_dispositions", "attached_link_dispositions", "reuse_dispositions",
+                          "individual_dispositions", "plan_approval_attempts", "gate_decisions",
+                          "review_interactions", "approval_cycles"):
+                outcome["metrics"]["evolution_" + field] = outcome["evolution_reviews"][field]
+    requests = task.get("model_requests") or []
+    purposes = {}
+    decisions = {}
+    for request in requests:
+        purpose = request.get("purpose", "unknown") if isinstance(request, dict) else "unknown"
+        purposes[purpose] = purposes.get(purpose, 0) + 1
+        if purpose in {"harness_action", "harness_capture", "harness_capture_resolution",
+                       "harness_purpose_selection", "harness_association_selection"} and request.get("decision_id"):
+            decision = decisions.setdefault(request["decision_id"], {"purpose": purpose, "attempts": []})
+            decision["attempts"].append(request.get("attempt"))
+    candidates = [request for request in requests if isinstance(request, dict)
+                  and request.get("purpose") in {"harness_action", "harness_capture",
+                      "harness_capture_resolution", "harness_purpose_selection",
+                      "harness_association_selection"}]
+    outcome["harness_recovery"] = {"last_state": task.get("recovery"), "model_requests_by_purpose": purposes,
+        "decisions": decisions,
+        "repair_generations": sum(request["attempt"] > 1 for request in candidates)
+        if candidates and all(type(request.get("attempt")) is int for request in candidates) else None}
+
+
+def _reject_target(task, decision):
+    """The reuse candidate a /reject decision refuses, or None for any other input."""
+    if not decision["input"].startswith("/reject"):
+        return None
+    reviews = task.get("reviews") or []
+    outer = reviews[0] if reviews and isinstance(reviews[0], dict) else {}
+    resolution = outer.get("capture_resolution")
+    return resolution.get("candidate_iri") if isinstance(resolution, dict) else None
+
+
 def observe(command, *, backend, workspace, environment, prompt, episode,
-            record, seconds=1200, expected_model=None):
+            record, seconds=1200, expected_model=None, evidence_byte_limit=None,
+            reject_loop_limit=5):
+    """Guards: `evidence_byte_limit` bounds the bytes recorded across channels;
+    `reject_loop_limit` bounds consecutive rejections of one reuse candidate.
+    Either guard is disabled by None."""
     if seconds <= 0:
         raise ValueError("episode deadline must be positive")
     started = time.monotonic()
@@ -77,6 +134,11 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
     native_events = 0
     last_recovery_observation = None
     last_response_receipt = None
+    last_task = first_edit_monotonic = last_suppressed_phase = None
+    suppressed_gate_repeats = 0
+    evidence_bytes = 0
+    reject_streak_candidate = None
+    reject_streak = reject_loop_max_streak = 0
 
     def send(text=None, kind="input", reason=None):
         value = {"type": kind}
@@ -105,8 +167,16 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
         nonlocal final, clarification_count, completion_seen, closed_seen
         nonlocal fatal_error, native_events
         nonlocal last_recovery_observation, last_response_receipt
+        nonlocal last_task, first_edit_monotonic, last_suppressed_phase, suppressed_gate_repeats
+        nonlocal evidence_bytes, reject_streak_candidate, reject_streak, reject_loop_max_streak
         record(channel, {"raw_base64": base64.b64encode(line).decode(),
                          "text": line.decode(errors="replace")})
+        evidence_bytes += len(line)
+        if (evidence_byte_limit is not None and evidence_bytes > evidence_byte_limit
+                and shutdown_deadline is None):
+            outcome.update(error="evidence volume limit exceeded", evidence_limit_exceeded=True,
+                           evidence_bytes=evidence_bytes)
+            begin_shutdown("evidence volume limit", interrupt=True)
         try:
             event = json.loads(line)
         except (ValueError, UnicodeError):
@@ -120,6 +190,8 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
         observation = normalize_event(backend, event)
         record("native", {**observation, "channel": channel})
         native_events += 1
+        if backend != "harness" and first_edit_monotonic is None and "edit" in observation:
+            first_edit_monotonic = time.monotonic()
         event_type = event.get("type")
         token_usage.native(event)
         if observation.get("error"):
@@ -137,7 +209,9 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
         if backend != "harness" or event_type != "state":
             return
         task = event.get("task") or {}
-        requests = task.get("model_requests") or []
+        last_task = task
+        if first_edit_monotonic is None and task.get("edits"):
+            first_edit_monotonic = time.monotonic()
         recovery = task.get("recovery")
         receipt = task.get("response_receipt")
         if receipt is not None:
@@ -145,25 +219,12 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
             if receipt != last_response_receipt:
                 record("harness_response_compatibility", {"task_id": task.get("id"), "receipt": receipt})
                 last_response_receipt = receipt
-        observation = {"task_id": task.get("id"), "model_request_count": len(requests),
+        observation = {"task_id": task.get("id"),
+                       "model_request_count": len(task.get("model_requests") or []),
                        "recovery": recovery}
         if observation != last_recovery_observation:
             record("harness_recovery", observation)
             last_recovery_observation = observation
-        purposes = {}
-        decisions = {}
-        for request in requests:
-            purpose = request.get("purpose", "unknown") if isinstance(request, dict) else "unknown"
-            purposes[purpose] = purposes.get(purpose, 0) + 1
-            if purpose in {"harness_action", "harness_capture"} and request.get("decision_id"):
-                decision = decisions.setdefault(request["decision_id"], {"purpose": purpose, "attempts": []})
-                decision["attempts"].append(request.get("attempt"))
-        candidates = [request for request in requests if isinstance(request, dict)
-                      and request.get("purpose") in {"harness_action", "harness_capture"}]
-        outcome["harness_recovery"] = {"last_state": recovery, "model_requests_by_purpose": purposes,
-            "decisions": decisions,
-            "repair_generations": sum(request["attempt"] > 1 for request in candidates)
-            if candidates and all(type(request.get("attempt")) is int for request in candidates) else None}
         if expected_model is not None and event.get("model") != expected_model:
             outcome.update(status="preflight_failure", error="harness state model differs from frozen model",
                            expected_model=expected_model, observed_model=event.get("model"))
@@ -180,6 +241,8 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
             return
         key = _gate_key(event, decision)
         if key in seen_reviews:
+            suppressed_gate_repeats += 1
+            last_suppressed_phase = task.get("phase")
             return
         seen_reviews.add(key)
         if decision["input"].startswith("/"):
@@ -187,10 +250,23 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
         else:
             clarification_count += 1
             if clarification_count > 3:
-                final = {"terminal": "agent_failure", "reason": "exhausted frozen clarification responses"}
+                final = {"terminal": "agent_failure", "reason": "exhausted frozen clarification responses",
+                         "cause": "clarification_cap"}
                 begin_shutdown(final["reason"])
                 return
         send(decision["input"], reason=decision["reason"])
+        candidate = _reject_target(task, decision)
+        if candidate is None:
+            reject_streak_candidate, reject_streak = None, 0
+        elif candidate == reject_streak_candidate:
+            reject_streak += 1
+        else:
+            reject_streak_candidate, reject_streak = candidate, 1
+        reject_loop_max_streak = max(reject_loop_max_streak, reject_streak)
+        if reject_loop_limit is not None and reject_streak >= reject_loop_limit:
+            final = {"terminal": "agent_failure", "cause": "reviewer_reject_loop",
+                     "reason": f"reviewer rejected the same reuse candidate {reject_streak} consecutive times"}
+            begin_shutdown(final["reason"])
 
     def drain(channel, *, eof=False):
         while b"\n" in buffers[channel]:
@@ -225,7 +301,8 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
                     outcome["drain_incomplete"] = True
                     break
             if shutdown_deadline is None and now - started >= seconds:
-                outcome.update(error="episode wall-clock budget exhausted", timed_out=True)
+                outcome.update(error="episode wall-clock budget exhausted", timed_out=True,
+                               _deadline_shutdown_monotonic=now)
                 begin_shutdown("frozen episode deadline", interrupt=True)
             if shutdown_deadline is not None and now >= shutdown_deadline:
                 outcome["shutdown_incomplete"] = True
@@ -291,18 +368,32 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
             process.stdin.close()
         selector.close()
         outcome["metrics"]["elapsed_seconds"] = time.monotonic() - started
+    try:
+        _journal_metrics(outcome, last_task)
+    except (ValueError, KeyError, TypeError) as error:
+        outcome.update(status="infrastructure_failure", error=str(error))
     outcome["request_usage"] = token_usage.report()
     outcome["metrics"].update(resource_metrics(outcome["request_usage"]))
-    if outcome["status"] in {"preflight_failure", "infrastructure_failure"}:
-        return outcome
-    complete = bool(final and final["terminal"] == "success" and closed_seen) if backend == "harness" else completion_seen
-    if (complete and outcome["returncode"] == 0 and not fatal_error
-            and not any(outcome.get(key) for key in ("timed_out", "drain_incomplete", "shutdown_incomplete"))):
-        outcome["status"] = "success"
-    if final and final.get("reason"):
-        outcome["reason"] = final["reason"]
-    if not native_events:
-        outcome["reason"] = "process produced no native protocol events"
-    elif not complete and not outcome.get("reason"):
-        outcome["reason"] = "native protocol did not confirm completion"
+    if outcome["status"] not in {"preflight_failure", "infrastructure_failure"}:
+        complete = bool(final and final["terminal"] == "success" and closed_seen) if backend == "harness" else completion_seen
+        if (complete and outcome["returncode"] == 0 and not fatal_error
+                and not any(outcome.get(key) for key in ("timed_out", "drain_incomplete", "shutdown_incomplete"))):
+            outcome["status"] = "success"
+        if final and final.get("reason"):
+            outcome["reason"] = final["reason"]
+        if not native_events:
+            outcome["reason"] = "process produced no native protocol events"
+        elif not complete and not outcome.get("reason"):
+            outcome["reason"] = "native protocol did not confirm completion"
+    # Guard totals include the drained tail; classification reports the same numbers.
+    outcome.update(evidence_byte_limit=evidence_byte_limit, evidence_bytes=evidence_bytes,
+                   reject_loop_limit=reject_loop_limit, reject_loop_max_streak=reject_loop_max_streak)
+    cause, detail = classify(outcome, last_task, final, {
+        "backend": backend, "completion_seen": completion_seen,
+        "fatal_error": fatal_error, "closed_seen": closed_seen,
+        "suppressed_gate_repeats": suppressed_gate_repeats, "last_suppressed_phase": last_suppressed_phase})
+    outcome.update(terminal_cause=cause, terminal_detail=detail,
+                   first_edit_reached=first_edit_monotonic is not None,
+                   first_edit_seconds=None if first_edit_monotonic is None else first_edit_monotonic - started,
+                   suppressed_gate_repeats=suppressed_gate_repeats, last_suppressed_phase=last_suppressed_phase)
     return outcome

@@ -124,6 +124,20 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(metrics["input_tokens"], 30)
         self.assertEqual(metrics["helper_input_tokens"], 10)
 
+    def test_evolution_purposes_keep_complete_separate_request_accounting(self):
+        purposes = ("harness_capture_resolution", "harness_purpose_selection",
+                    "harness_association_selection")
+        for index, purpose in enumerate(purposes):
+            identifier = f"evolution-{index}"
+            self.start(identifier, stream=False, metadata={"purpose": purpose, "candidate_attempt": 1})
+            self.response({"prompt_tokens": 10 + index, "completion_tokens": 2}, identifier, stream=False)
+            self.finish(identifier, stream=False)
+        by_purpose = self.proxy()["by_purpose"]
+        self.assertEqual(set(purposes), set(by_purpose) & set(purposes))
+        self.assertTrue(all(by_purpose[purpose]["fields"]["total_tokens"]["total"] is None
+                            for purpose in purposes))
+        self.assertEqual(self.proxy()["summary"]["fields"]["input_tokens"]["total"], 33)
+
     def test_repeated_harness_snapshots_enrich_not_double_count(self):
         self.start(metadata={"client_request_id": "client1", "purpose": "harness_action"})
         self.response({"prompt_tokens": 10})

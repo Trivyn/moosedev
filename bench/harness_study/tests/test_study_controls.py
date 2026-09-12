@@ -364,7 +364,8 @@ class ReviewerControls(unittest.TestCase):
         self.assertIn("completeness unassessed", choice["reason"])
 
     def test_terminal_failure_and_fixed_clarification(self):
-        self.assertEqual(reviewer.review_input(self.state("Complete"), self.episode), {"terminal": "success"})
+        self.assertEqual(reviewer.review_input(self.state("Complete"), self.episode),
+                         {"terminal": "success", "cause": "success"})
         self.assertEqual(reviewer.review_input(self.state("Cancelled"), self.episode)["terminal"], "agent_failure")
         errored = self.state("AwaitingInput", last_error="capture unavailable")
         self.assertEqual(reviewer.review_input(errored, self.episode)["reason"], "capture unavailable")

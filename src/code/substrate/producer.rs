@@ -4,7 +4,7 @@
 //! validate and sync every artifact before atomically publishing `meta.json`, so
 //! readers see either the previous complete generation or the next one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -13,8 +13,12 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 
-use super::meta::{sync_directory, ProducerRun, SubstrateMeta, CURRENT_SCHEMA_VERSION};
+use super::meta::{
+    sync_directory, HistoricalDefinitionProof, HistoricalFileProof, ProducerRun, SubstrateMeta,
+    CURRENT_SCHEMA_VERSION,
+};
 use super::scip::{ingest, producer_info, read_index};
 use super::{
     generation_dir, generations_dir, index_lock_path, index_log_path, index_path, index_tmp_path,
@@ -133,6 +137,7 @@ pub fn run_index_with(
     // is still strictly older after publication did not change during this
     // build and can safely serve as the generation's LSP mapping baseline.
     let indexed_started_at = Utc::now();
+    let prior_substrate = super::Substrate::load(data_dir, repo_root).ok();
 
     let mut runs = Vec::new();
     let mut reports = Vec::new();
@@ -182,6 +187,9 @@ pub fn run_index_with(
             }
         };
 
+    let source_digests =
+        generation_source_digests(repo_root, &artifact_root, &runs, indexed_started_at);
+    let historical_files = generation_historical_files(prior_substrate.as_ref(), &source_digests);
     let meta = SubstrateMeta {
         schema_version: CURRENT_SCHEMA_VERSION,
         indexed_commit: commit.clone(),
@@ -189,6 +197,8 @@ pub fn run_index_with(
         indexed_started_at: Some(indexed_started_at),
         generation: Some(generation.clone()),
         producers: runs,
+        source_digests,
+        historical_files,
     };
     sync_generation(&artifact_root)?;
     meta.save(data_dir)
@@ -210,6 +220,52 @@ pub fn run_index_with(
         churn_files,
         warnings,
     })
+}
+
+fn generation_historical_files(
+    prior: Option<&super::Substrate>,
+    current: &BTreeMap<String, String>,
+) -> BTreeMap<String, HistoricalFileProof> {
+    let Some(prior) = prior else {
+        return BTreeMap::new();
+    };
+    let mut history = prior.meta().historical_files.clone();
+    for current_path in current.keys() {
+        history.remove(current_path);
+    }
+    for (path, source_digest) in &prior.meta().source_digests {
+        if current.contains_key(path) {
+            continue;
+        }
+        let definitions = prior
+            .definition_scopes_in_file(path)
+            .into_iter()
+            .map(|scope| HistoricalDefinitionProof {
+                symbol: scope.definition.entry.normalized_symbol,
+                name: scope.definition.entry.display_name,
+                definition_range: range_array(scope.definition.range),
+                enclosing_range: scope.enclosing_range.map(range_array),
+            })
+            .collect();
+        history.insert(
+            path.clone(),
+            HistoricalFileProof {
+                source_digest: source_digest.clone(),
+                index_generation: prior.meta().generation.clone(),
+                definitions,
+            },
+        );
+    }
+    history
+}
+
+fn range_array(range: super::SourceRange) -> [u32; 4] {
+    [
+        range.start.line,
+        range.start.col,
+        range.end.line,
+        range.end.col,
+    ]
 }
 
 fn run_producer(
@@ -285,6 +341,81 @@ fn run_producer(
             index_bytes,
         },
     ))
+}
+
+/// Hash only source files whose stable metadata proves they predate the whole
+/// producer run. Omitted entries remain an honest lack of durable source proof.
+fn generation_source_digests(
+    repo_root: &Path,
+    artifact_root: &Path,
+    runs: &[ProducerRun],
+    indexed_started_at: chrono::DateTime<Utc>,
+) -> BTreeMap<String, String> {
+    let Some(canonical_root) = repo_root.canonicalize().ok() else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for run in runs {
+        let Ok(index) = read_index(&producer_index_path_in(artifact_root, &run.name)) else {
+            continue;
+        };
+        for document in index.documents {
+            let relative = match run.path_prefix.as_deref() {
+                Some(prefix) => format!("{prefix}{}", document.relative_path),
+                None => document.relative_path,
+            };
+            if !Path::new(&relative)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let Ok(path) = canonical_root.join(&relative).canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(&canonical_root) {
+                continue;
+            }
+            let (Ok(before), Ok(mut file)) = (fs::metadata(&path), fs::File::open(&path)) else {
+                continue;
+            };
+            let Ok(modified) = before.modified() else {
+                continue;
+            };
+            if chrono::DateTime::<Utc>::from(modified) >= indexed_started_at {
+                continue;
+            }
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 64 * 1024];
+            let mut bytes = 0u64;
+            let mut failed = false;
+            loop {
+                match std::io::Read::read(&mut file, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        hasher.update(&buffer[..n]);
+                        bytes = bytes.saturating_add(n as u64)
+                    }
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            let Ok(after) = fs::metadata(&path) else {
+                continue;
+            };
+            if failed
+                || bytes != before.len()
+                || after.len() != before.len()
+                || after.modified().ok() != Some(modified)
+            {
+                continue;
+            }
+            out.insert(relative, format!("{:x}", hasher.finalize()));
+        }
+    }
+    out
 }
 
 fn exclude_failed_producer(
@@ -520,7 +651,7 @@ mod tests {
     use std::sync::Mutex;
 
     use protobuf::{EnumOrUnknown, Message};
-    use scip::types::{Document, Index, Occurrence, PositionEncoding};
+    use scip::types::{Document, Index, Occurrence, PositionEncoding, SymbolInformation};
 
     use super::*;
 
@@ -769,6 +900,67 @@ mod tests {
 
         let _ = fs::remove_dir_all(repo_root);
         let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn generation_metadata_authenticates_indexed_source_for_restart_recovery() {
+        let repo_root = unique_temp_dir("source-proof-repo");
+        let artifact_root = unique_temp_dir("source-proof-artifact");
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        let source = b"fn retained() {}\n";
+        fs::write(repo_root.join("src/lib.rs"), source).unwrap();
+        std::fs::File::open(repo_root.join("src/lib.rs"))
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+        write_prepared(
+            &producer_index_path_in(&artifact_root, "test"),
+            "src/lib.rs",
+            "retained",
+        );
+        let runs = vec![ProducerRun {
+            name: "test".into(),
+            producer: "test".into(),
+            producer_version: "1".into(),
+            mode: "scip".into(),
+            documents: 1,
+            occurrences: 1,
+            path_prefix: None,
+        }];
+        let proofs = generation_source_digests(&repo_root, &artifact_root, &runs, Utc::now());
+        assert_eq!(
+            proofs.get("src/lib.rs"),
+            Some(&format!("{:x}", Sha256::digest(source)))
+        );
+        let _ = fs::remove_dir_all(repo_root);
+        let _ = fs::remove_dir_all(artifact_root);
+    }
+
+    #[test]
+    fn next_generation_retains_deleted_definition_proof() {
+        let artifact_root = unique_temp_dir("historical-scope-artifact");
+        let path = producer_index_path_in(&artifact_root, "test");
+        let symbol = "rust-analyzer cargo sample 1 src/deleted/retained().";
+        write_prepared(&path, "src/deleted.rs", symbol);
+        let mut index = read_index(&path).unwrap();
+        let mut info = SymbolInformation::new();
+        info.symbol = symbol.into();
+        info.display_name = "retained".into();
+        index.documents[0].symbols.push(info);
+        let mut meta = SubstrateMeta::single("test", "old", Utc::now(), 1, 1);
+        meta.generation = Some("old-generation".into());
+        meta.source_digests
+            .insert("src/deleted.rs".into(), "abc123".into());
+        let prior = crate::code::substrate::Substrate::from_index(index, meta, false).unwrap();
+        let history = generation_historical_files(Some(&prior), &BTreeMap::new());
+        let proof = history.get("src/deleted.rs").unwrap();
+        assert_eq!(proof.source_digest, "abc123");
+        assert_eq!(proof.index_generation.as_deref(), Some("old-generation"));
+        assert_eq!(proof.definitions.len(), 1);
+        let _ = fs::remove_dir_all(artifact_root);
     }
 
     #[test]

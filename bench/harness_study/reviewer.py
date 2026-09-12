@@ -27,17 +27,17 @@ def review_input(state, episode):
         return None
     phase = task["phase"]
     if phase == "Complete":
-        return {"terminal": "success"}
+        return {"terminal": "success", "cause": "success"}
     if phase == "Cancelled":
-        return {"terminal": "agent_failure", "reason": "task cancelled"}
+        return {"terminal": "agent_failure", "reason": "task cancelled", "cause": "cancelled"}
     recovery = task.get("recovery") or {}
     if recovery.get("status") in {"generating", "retrying"}:
         return None
     if recovery.get("status") == "awaiting_guidance":
         return {"terminal": "agent_failure", "reason": "native harness exhausted its repair budget: "
-                + recovery.get("diagnostic", "human guidance required")}
+                + recovery.get("diagnostic", "human guidance required"), "cause": "model_repair_exhausted"}
     if task.get("last_error"):
-        return {"terminal": "agent_failure", "reason": task["last_error"]}
+        return {"terminal": "agent_failure", "reason": task["last_error"], "cause": "runner_error"}
     if phase in ("AwaitingPlan", "AwaitingPolicy"):
         if phase == "AwaitingPlan":
             plan = task.get("plan") or {}
@@ -49,9 +49,57 @@ def review_input(state, episode):
             valid = bool(edit)
         if valid and all(in_scope(path, episode["allowed_paths"]) for path in paths):
             return {"input": "/approve", "reason": "simulated in-scope approval"}
-        return {"terminal": "agent_failure", "reason": "reviewed scope is outside frozen episode allowance"}
+        return {"terminal": "agent_failure", "reason": "reviewed scope is outside frozen episode allowance",
+                "cause": "reviewer_scope_rejection"}
     if phase == "AwaitingReview":
         reviews = task.get("reviews", [])
+        if reviews and reviews[0].get("capture_resolution"):
+            outer = reviews[0]
+            reuse = outer["capture_resolution"]
+            proposal = reuse.get("original_proposal") or {}
+            evidence_page = reuse.get("evidence_page")
+            candidate_pages = reuse.get("candidate_pages")
+            operation_id = reuse.get("operation_id")
+            candidate_iri = reuse.get("candidate_iri")
+            candidates = [candidate for page in candidate_pages or []
+                          for candidate in page.get("candidates", [])
+                          if isinstance(page, dict) and isinstance(page.get("candidates"), list)
+                          and isinstance(candidate, dict) and candidate.get("iri") == candidate_iri]
+            selected = candidates[0] if len(candidates) == 1 else {}
+            revisions = {page.get("revision") for page in candidate_pages or []
+                         if isinstance(page, dict)}
+            files = proposal.get("files")
+            valid_proposal = (proposal.get("kind") in KINDS and bool(proposal.get("title"))
+                              and bool(proposal.get("description"))
+                              and isinstance(proposal.get("evidence"), list)
+                              and bool(proposal["evidence"])
+                              and isinstance(files, list)
+                              and all(in_scope(path, episode["allowed_paths"]) for path in files))
+            valid_candidate = (len(candidates) == 1 and len(revisions) == 1
+                               and all(revisions) and selected.get("title") == reuse.get("candidate_title")
+                               and bool(selected.get("assertion_digest"))
+                               and (selected.get("status") == "accepted"
+                                    or (selected.get("status") == "proposed"
+                                        and selected.get("owned_by_requester") is True)))
+            valid = (bool(operation_id) and outer.get("request", {}).get("operation_id") == operation_id
+                     and bool(candidate_iri) and bool(reuse.get("candidate_title"))
+                     and bool(reuse.get("original_claim"))
+                     and bool(reuse.get("existing_claim")) and bool(reuse.get("rationale"))
+                     and reuse.get("recommendation_source") == "model"
+                     and reuse.get("reuse_unchanged") is True
+                     and isinstance(evidence_page, (dict, list))
+                     and isinstance(candidate_pages, list) and bool(candidate_pages)
+                     and valid_proposal and valid_candidate)
+            return {"input": ("/accept" if valid else "/reject") + " " + str(operation_id or ""),
+                    "reason": "simulated structural reuse review; semantic equivalence unassessed"}
+        if reviews and reviews[0].get("intent_links"):
+            links = reviews[0]["intent_links"]
+            bindings = links.get("bindings", [])
+            valid = bool(bindings) and all(binding.get("record_iri")
+                and (binding.get("symbol") or binding.get("planned_name"))
+                and in_scope(binding.get("file", ""), episode["allowed_paths"]) for binding in bindings)
+            return {"input": ("/accept" if valid else "/reject") + " " + links["operation_id"],
+                    "reason": "simulated structural link review; semantic relevance unassessed"}
         request = reviews[0]["request"] if reviews else task.get("capture_request")
         if request:
             proposals = request.get("proposals", [])

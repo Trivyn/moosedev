@@ -63,15 +63,28 @@ def _read_json(path):
         return json.load(stream)
 
 
-def _read_lines(path):
+def _iter_lines(path):
+    """Yield one decoded record at a time; a streamed log is never materialised."""
     try:
-        with os.fdopen(_regular_open(path), "rb") as stream:
-            data = stream.read()
+        stream = os.fdopen(_regular_open(path), "rb")
     except FileNotFoundError:
-        return []
-    if data and not data.endswith(b"\n"):
-        raise ValueError(f"interrupted append retained in {path}; manual recovery required")
-    return [json.loads(line) for line in data.splitlines()]
+        return
+    with stream:
+        # Check the tail first so an interrupted append is reported before any
+        # record is decoded, exactly as the whole-file reader did.
+        stream.seek(0, os.SEEK_END)
+        position = stream.tell()
+        if position:
+            stream.seek(position - 1)
+            if stream.read(1) != b"\n":
+                raise ValueError(f"interrupted append retained in {path}; manual recovery required")
+        stream.seek(0)
+        for line in stream:
+            yield json.loads(line)
+
+
+def _read_lines(path):
+    return list(_iter_lines(path))
 
 
 def _append(path, value):
@@ -242,7 +255,7 @@ class ArtifactStore:
         manifest = _read_json(run / "manifest.json")
         if manifest.get("run_id") != run.name:
             raise ValueError("manifest identity does not match run")
-        entries = [entry for entry in _read_lines(self.root / "run_index.jsonl")
+        entries = [entry for entry in _iter_lines(self.root / "run_index.jsonl")
                    if entry.get("run_id") == run.name]
         created = [entry for entry in entries if entry.get("event") == "created"]
         sealed = [entry for entry in entries if entry.get("event") == "sealed"]
@@ -287,10 +300,10 @@ class ArtifactStore:
             manifest = _read_json(run / "manifest.json")
             if manifest.get("run_id") != run.name:
                 raise ValueError("manifest identity does not match run")
-            events = _read_lines(run / "events.jsonl")
-            if any(not isinstance(event, dict) or event.get("sequence") != index
-                   for index, event in enumerate(events, 1)):
-                raise ValueError("event sequence is corrupt")
+            # Streamed: an event log can exceed memory; hold one record at a time.
+            for index, event in enumerate(_iter_lines(run / "events.jsonl"), 1):
+                if not isinstance(event, dict) or event.get("sequence") != index:
+                    raise ValueError("event sequence is corrupt")
             files = self._inventory(run)
             seal = {"schema_version": 1, "run_id": run.name, "sealed_at": _now(),
                     "files": files, "evidence_sha256": hashlib.sha256(canonical_json(files)).hexdigest()}

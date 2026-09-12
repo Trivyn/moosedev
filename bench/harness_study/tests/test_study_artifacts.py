@@ -102,6 +102,44 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.seal_run(self.run)
 
+    def test_seal_streams_the_event_log_and_matches_the_whole_file_digest(self):
+        from bench.harness_study.artifacts import _iter_lines
+        for number in range(3):
+            self.store.append_event(self.run, "stdout", {"number": number, "text": "λ" * 900})
+        self.store.put_bytes(self.run, "outcome.json", canonical_json({"status": "success"}))
+        # The seal format is unchanged: the digest of the sorted per-file inventory.
+        files = {path.relative_to(self.run).as_posix(): {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                                          "size": path.stat().st_size}
+                 for path in sorted(self.run.rglob("*")) if path.is_file()}
+        expected = hashlib.sha256(canonical_json(files)).hexdigest()
+        with patch("bench.harness_study.artifacts._read_lines", side_effect=AssertionError("whole-file read")):
+            seal = self.store.seal_run(self.run)
+            self.assertEqual(self.store.verify_run(self.run), seal)
+        self.assertEqual(seal["files"], files)
+        self.assertEqual(seal["evidence_sha256"], expected)
+        # The reader is lazy: records before a corrupt line are yielded before it fails.
+        path = self.run / "events.jsonl"
+        lazy = _iter_lines(path)
+        self.assertEqual(next(lazy)["sequence"], 1)
+        lazy.close()
+        self.assertEqual(list(_iter_lines(self.run / "missing.jsonl")), [])
+
+    def test_streaming_seal_reports_corrupt_or_interrupted_events_unchanged(self):
+        self.store.append_event(self.run, "stdout", {"text": "first"})
+        path = self.run / "events.jsonl"
+        good = path.read_bytes()
+        for tail, message in ((b'{"sequence":3,"channel":"stdout","payload":{}}\n', "event sequence is corrupt"),
+                              (b"[]\n", "event sequence is corrupt"),
+                              (b'{"sequence":2', "interrupted append")):
+            with self.subTest(tail=tail):
+                path.write_bytes(good + tail)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.store.seal_run(self.run)
+                self.assertFalse((self.run / "seal.json").exists())
+        path.write_bytes(good)
+        self.store.seal_run(self.run)
+        self.store.verify_run(self.run)
+
     def test_concurrent_appends_preserve_all_complete_records(self):
         def append(number):
             ArtifactStore(self.store.root).append_event(self.run, "stdout", {"number": number, "text": "λ" * 9000})

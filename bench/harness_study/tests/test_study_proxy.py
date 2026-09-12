@@ -189,6 +189,10 @@ class ProxyTests(unittest.TestCase):
             status, _ = request(proxy, {"model": "exact"})
             self.assertEqual(status, 502)
             self.assertTrue(any("307" in failure for failure in proxy.failures))
+            self.assertEqual(proxy.failure_details[0]["error_type"], "ValueError")
+            self.assertEqual(proxy.failure_details[0]["stage"], "upstream")
+            self.assertEqual(proxy.failure_details[0]["failure_origin"], "upstream")
+            self.assertTrue(proxy.failure_details[0]["response_started"] is False)
         self.assertEqual(calls, ["/v1/chat/completions"])
 
     def test_malformed_or_wrong_model_requests_get_400_without_upstream_calls(self):

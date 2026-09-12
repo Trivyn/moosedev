@@ -49,6 +49,8 @@ async fn context(
     Json(request): Json<ContextRequest>,
 ) -> Json<ContextResponse> {
     Json(ContextResponse {
+        capture_contracts: Some(vec![1, 2]),
+        intent_contracts: Some(vec![1, 2]),
         capture_targets: Some(Default::default()),
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),

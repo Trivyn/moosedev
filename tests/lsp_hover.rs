@@ -243,6 +243,8 @@ fn publish_disk_substrate(data_dir: &Path, index: &Index) {
                 .sum(),
             path_prefix: None,
         }],
+        source_digests: Default::default(),
+        historical_files: Default::default(),
     }
     .save(data_dir)
     .expect("publish substrate manifest");

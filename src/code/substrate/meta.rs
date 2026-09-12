@@ -4,6 +4,7 @@
 //! completion marker for an index build: `producer::run_index` writes and syncs
 //! an immutable generation first, then atomically replaces this manifest.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,21 @@ pub struct ProducerRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalDefinitionProof {
+    pub symbol: String,
+    pub name: Option<String>,
+    pub definition_range: [u32; 4],
+    pub enclosing_range: Option<[u32; 4]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalFileProof {
+    pub source_digest: String,
+    pub index_generation: Option<String>,
+    pub definitions: Vec<HistoricalDefinitionProof>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubstrateMeta {
     /// Version of this metadata schema, not the SCIP schema.
     pub schema_version: u32,
@@ -60,6 +76,13 @@ pub struct SubstrateMeta {
     pub generation: Option<String>,
     /// Successfully completed producer runs included in this substrate.
     pub producers: Vec<ProducerRun>,
+    /// Repository-relative source digests authenticated while this immutable
+    /// index generation was produced. Missing entries mean no durable proof.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_digests: BTreeMap<String, String>,
+    /// Authenticated definition scopes removed by file deletion.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub historical_files: BTreeMap<String, HistoricalFileProof>,
 }
 
 /// Stable manifest identity used to avoid retrying the same broken generation
@@ -99,6 +122,8 @@ impl SubstrateMeta {
                 occurrences,
                 path_prefix: None,
             }],
+            source_digests: BTreeMap::new(),
+            historical_files: BTreeMap::new(),
         }
     }
 
@@ -311,6 +336,8 @@ mod tests {
             indexed_started_at: Some(Utc::now()),
             generation: Some(generation.clone()),
             producers: Vec::new(),
+            source_digests: BTreeMap::new(),
+            historical_files: BTreeMap::new(),
         };
 
         meta.save(&data_dir).unwrap();

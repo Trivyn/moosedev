@@ -10,6 +10,16 @@ use std::sync::{Arc, Mutex};
 
 const MAX_CONTEXT: usize = 100_000;
 const REPAIR_RESERVE: usize = 1024;
+pub(super) const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
+
+pub(super) fn json_request_bytes(prompt: &str, schema: &Value) -> Result<usize> {
+    let schema = serde_json::to_vec(schema)?;
+    prompt
+        .len()
+        .checked_add(JSON_SCHEMA_MARKER.len())
+        .and_then(|size| size.checked_add(schema.len()))
+        .context("model JSON request byte count overflow")
+}
 
 #[derive(Debug)]
 pub(super) struct InvalidModelOutput;
@@ -19,6 +29,18 @@ impl std::fmt::Display for InvalidModelOutput {
     }
 }
 impl std::error::Error for InvalidModelOutput {}
+
+/// Marks a failure of the controller's own durable state, as opposed to model
+/// output that failed validation. Attached as error context so the runner can
+/// classify `last_error` without matching on message text.
+#[derive(Debug)]
+pub(super) struct ControllerInvariant;
+impl std::fmt::Display for ControllerInvariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("controller invariant violated")
+    }
+}
+impl std::error::Error for ControllerInvariant {}
 pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     const NOTICE: &str =
         "\n[observation shortened; complete evidence is retained in the task journal]\n";
@@ -128,12 +150,14 @@ impl Runner {
                 .saturating_mul(3),
         );
         anyhow::ensure!(prompt.len() <= limit, "required context is {} bytes (budget {limit}); narrow the working set or increase the configured context window", prompt.len());
+        let base_request_bytes = json_request_bytes(prompt, &schema)?;
         let base_request = format!(
-            "{prompt}\nRequired JSON schema:\n{}",
+            "{prompt}{JSON_SCHEMA_MARKER}{}",
             serde_json::to_string(&schema)?
         );
+        debug_assert_eq!(base_request.len(), base_request_bytes);
         anyhow::ensure!(
-            base_request.len() <= limit.saturating_sub(REPAIR_RESERVE),
+            base_request_bytes <= limit.saturating_sub(REPAIR_RESERVE),
             "prompt plus output schema exceeds configured context budget"
         );
         let client = self.response_client(&config).await?;
@@ -277,12 +301,17 @@ impl Runner {
         // Count the complete mandatory prompt and output schema first. Discovery
         // and historical prose spend only the remainder; governing claims and
         // file dossiers are never clipped to accommodate a directory listing.
-        let schema = if self.task.batch_capture {
-            conversational_schema(self.task.mode)
-        } else {
-            action_schema()
-        };
+        let schema = self.action_schema();
         let limit = self.prompt_budget()?;
+        let intent_budget = limit
+            .saturating_sub(
+                prompt.len()
+                    + "\nRequired JSON schema:\n".len()
+                    + serde_json::to_string(&schema)?.len()
+                    + 1024,
+            )
+            .min(12_000);
+        prompt.push_str(&self.intent_prompt(intent_budget)?);
         let required = prompt.len()
             + "\nRequired JSON schema:\n".len()
             + serde_json::to_string(&schema)?.len();
@@ -349,10 +378,15 @@ pub(super) enum Action {
     Search {
         query: String,
     },
+    Associate {
+        targets: Vec<super::ChangeTarget>,
+    },
     Plan {
         summary: String,
         files: Vec<String>,
         checks: Vec<String>,
+        #[serde(default)]
+        change_intent: Option<super::ChangeIntent>,
     },
     Edit {
         file: String,

@@ -26,7 +26,7 @@ class ObserverTests(unittest.TestCase):
                 mock.patch("bench.harness_study.process.subprocess.check_output", side_effect=PermissionError):
             self.assertFalse(_group_exited(process))
 
-    def run_client(self, source, *, backend="codex", seconds=3, expected_model=None):
+    def run_client(self, source, *, backend="codex", seconds=3, expected_model=None, **guards):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary).resolve()
             script = workspace / "fake_client.py"
@@ -37,7 +37,7 @@ class ObserverTests(unittest.TestCase):
                              environment={"PATH": "/usr/bin:/bin", "HOME": str(workspace)},
                              prompt="fixed prompt", episode={"allowed_paths": ["*.py"]},
                              record=lambda kind, value: records.append((kind, value)),
-                             seconds=seconds, expected_model=expected_model)
+                             seconds=seconds, expected_model=expected_model, **guards)
             return result, records
 
     def test_zero_exit_empty_or_unframed_output_is_not_success(self):
@@ -85,6 +85,34 @@ sys.exit(2)''',
         ''', backend="opencode")
         self.assertEqual(result["status"], "success")
         self.assertIn("test failed before repair", result["observed_errors"])
+
+    def test_opencode_edit_marks_first_edit_and_stop_reason_is_native_success(self):
+        result, records = self.run_client('''
+            import json
+            print(json.dumps({"type":"tool_use", "part":{"tool":"read", "state":{"status":"completed"}}}))
+            print(json.dumps({"type":"tool_use", "part":{"tool":"edit",
+                "state":{"status":"completed", "input":{"filePath":"cache.py"}}}}))
+            print(json.dumps({"type":"step_finish", "part":{"id":"finished", "reason":"stop",
+                "tokens":{"input":9,"output":4}}}))
+        ''', backend="opencode")
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["first_edit_reached"])
+        self.assertIsInstance(result["first_edit_seconds"], float)
+        self.assertLessEqual(result["first_edit_seconds"], result["metrics"]["elapsed_seconds"])
+        self.assertEqual((result["terminal_cause"], result["terminal_detail"]), ("success", "complete"))
+        self.assertEqual(sum(kind == "native" and "edit" in value for kind, value in records), 1)
+        self.assertEqual(sum(kind == "input" for kind, _ in records), 0)
+
+    def test_opencode_exit_without_stop_reason_is_native_no_completion(self):
+        result, _ = self.run_client('''
+            import json
+            print(json.dumps({"type":"tool_use", "part":{"tool":"bash", "state":{"status":"completed"}}}))
+        ''', backend="opencode")
+        self.assertEqual(result["status"], "agent_failure")
+        self.assertEqual(result["returncode"], 0)
+        self.assertFalse(result["first_edit_reached"])
+        self.assertEqual(result["terminal_cause"], "native_no_completion")
+        self.assertEqual(result["terminal_detail"], "native protocol did not confirm completion")
 
     def test_native_harness_final_state_and_closed_are_preserved(self):
         result, records = self.run_client('''
@@ -203,6 +231,212 @@ sys.exit(2)''',
         raw = b"".join(base64.b64decode(value["raw_base64"]) for kind, value in records if kind == "stdout")
         self.assertIn(b'"Cancelled"', raw)
         self.assertIn(b'"closed"', raw)
+
+
+    def test_idle_deadline_counts_suppressed_repeat_and_classifies_reviewer_idle(self):
+        result, records = self.run_client("""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            task = {"id":"one", "phase":"AwaitingPlan", "steps":1, "edits":[],
+                    "plan":{"summary":"small change", "files":["cache.py"], "checks":["python -m unittest"]}}
+            state = {"type":"state", "model":"frozen-model", "busy":False, "task":task}
+            print(json.dumps(state), flush=True)
+            print(json.dumps(state), flush=True)
+            while json.loads(sys.stdin.readline())["type"] != "quit":
+                pass
+            print(json.dumps({"type":"closed"}))
+        """, backend="harness", seconds=0.3, expected_model="frozen-model")
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["metrics"]["simulated_approvals"], 1)
+        self.assertEqual(result["suppressed_gate_repeats"], 1)
+        self.assertEqual(result["last_suppressed_phase"], "AwaitingPlan")
+        self.assertEqual(result["terminal_cause"], "reviewer_idle_deadline")
+        self.assertEqual(result["terminal_detail"], "AwaitingPlan")
+        self.assertFalse(result["first_edit_reached"])
+        self.assertIsNone(result["first_edit_seconds"])
+        self.assertEqual(sum(kind == "input" and value.get("text") == "/approve" for kind, value in records), 1)
+
+    def test_first_applied_edit_is_timed_relative_to_episode_start(self):
+        result, _ = self.run_client("""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            task = {"id":"one", "phase":"Working", "edits":[]}
+            state = {"type":"state", "model":"model", "busy":True, "task":task}
+            print(json.dumps(state), flush=True)
+            task.update(edits=[{"file":"cache.py"}])
+            print(json.dumps(state), flush=True)
+            task.update(phase="Complete")
+            state["busy"] = False
+            print(json.dumps(state), flush=True)
+            assert json.loads(sys.stdin.readline())["type"] == "quit"
+            print(json.dumps({"type":"closed"}))
+        """, backend="harness", expected_model="model")
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["first_edit_reached"])
+        self.assertIsInstance(result["first_edit_seconds"], float)
+        self.assertGreaterEqual(result["first_edit_seconds"], 0)
+        self.assertLessEqual(result["first_edit_seconds"], result["metrics"]["elapsed_seconds"])
+        self.assertEqual((result["terminal_cause"], result["terminal_detail"]), ("success", "complete"))
+        self.assertEqual(result["suppressed_gate_repeats"], 0)
+
+    def test_clarification_cap_is_a_typed_terminal_cause(self):
+        result, records = self.run_client("""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            for step in range(4):
+                print(json.dumps({"type":"state", "model":"model", "busy":False,
+                    "task":{"id":"one", "phase":"AwaitingInput", "steps":step,
+                            "last_error":None, "last_error_kind":None}}), flush=True)
+                if json.loads(sys.stdin.readline())["type"] == "quit":
+                    break
+            print(json.dumps({"type":"closed"}))
+        """, backend="harness", expected_model="model")
+        self.assertEqual(result["status"], "agent_failure")
+        self.assertEqual(result["reason"], "exhausted frozen clarification responses")
+        self.assertEqual(result["terminal_cause"], "clarification_cap")
+        self.assertEqual(result["terminal_detail"], result["reason"])
+        # The frozen prompt plus exactly three clarification responses; the fourth gate quits.
+        self.assertEqual(sum(kind == "input" and value.get("type") == "input" for kind, value in records), 4)
+        self.assertEqual(sum(kind == "input" and value.get("type") == "quit" for kind, value in records), 1)
+
+    def test_evidence_volume_guard_interrupts_and_classifies_evidence_limit(self):
+        result, records = self.run_client("""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            for step in range(5):
+                print(json.dumps({"type":"progress", "kind":"status", "text":"x" * 4000}), flush=True)
+            assert json.loads(sys.stdin.readline())["type"] == "interrupt"
+            assert json.loads(sys.stdin.readline())["type"] == "quit"
+            print(json.dumps({"type":"closed"}))
+        """, backend="harness", expected_model="model", evidence_byte_limit=10_000)
+        self.assertEqual(result["status"], "agent_failure")
+        self.assertTrue(result["evidence_limit_exceeded"])
+        self.assertEqual(result["error"], "evidence volume limit exceeded")
+        self.assertEqual(result["evidence_byte_limit"], 10_000)
+        self.assertGreater(result["evidence_bytes"], 10_000)
+        self.assertEqual(result["terminal_cause"], "evidence_limit")
+        self.assertEqual(result["terminal_detail"], f"{result['evidence_bytes']} bytes")
+        self.assertFalse(result.get("timed_out"))
+        inputs = [value["type"] for kind, value in records if kind == "input"]
+        self.assertEqual(inputs, ["input", "interrupt", "quit"])
+        # Every recorded raw line counts toward the guard, including the drained tail.
+        recorded = sum(len(base64.b64decode(value["raw_base64"])) for kind, value in records
+                       if kind in {"stdout", "stderr"})
+        self.assertEqual(result["evidence_bytes"], recorded)
+
+    def test_evidence_guard_is_disabled_by_default_and_volume_is_still_reported(self):
+        result, _ = self.run_client('''
+            import json
+            print(json.dumps({"type": "turn.completed", "turn_id": "one"}))
+        ''')
+        self.assertEqual(result["status"], "success")
+        self.assertIsNone(result["evidence_byte_limit"])
+        self.assertNotIn("evidence_limit_exceeded", result)
+        self.assertGreater(result["evidence_bytes"], 0)
+        self.assertEqual((result["reject_loop_limit"], result["reject_loop_max_streak"]), (5, 0))
+
+    REJECT_LOOP_CLIENT = """
+        import json, sys
+        json.loads(sys.stdin.readline())
+        candidates = {candidates!r}
+        operation = 0
+        while True:
+            operation += 1
+            if operation > len(candidates):
+                task = {{"id":"one", "phase":"Complete", "last_error":None, "last_error_kind":None}}
+            else:
+                reuse = {{"operation_id": f"op-{{operation}}", "candidate_iri": candidates[operation - 1],
+                         "candidate_title": "Existing", "recommendation_source": "human_required"}}
+                task = {{"id":"one", "phase":"AwaitingReview", "last_error":None, "last_error_kind":None,
+                        "reviews":[{{"capture_resolution": reuse,
+                                    "request": {{"operation_id": f"op-{{operation}}", "proposals": []}}}}]}}
+            print(json.dumps({{"type":"state", "model":"model", "busy":False, "task":task}}), flush=True)
+            command = json.loads(sys.stdin.readline())
+            if command["type"] == "quit":
+                break
+            assert command["text"] == f"/reject op-{{operation}}", command
+        print(json.dumps({{"type":"closed"}}))
+    """
+
+    def test_reviewer_reject_loop_guard_stops_repeated_rejection_of_one_candidate(self):
+        # The runner keeps minting fresh cards for one candidate the reviewer must refuse.
+        result, records = self.run_client(self.REJECT_LOOP_CLIENT.format(candidates=["urn:existing"] * 50),
+                                          backend="harness", expected_model="model")
+        self.assertEqual(result["status"], "agent_failure")
+        self.assertEqual(result["reason"], "reviewer rejected the same reuse candidate 5 consecutive times")
+        self.assertEqual(result["terminal_cause"], "reviewer_reject_loop")
+        self.assertEqual(result["terminal_detail"], result["reason"])
+        self.assertEqual(result["reject_loop_max_streak"], 5)
+        self.assertEqual(result["reject_loop_limit"], 5)
+        self.assertFalse(result.get("timed_out"))
+        rejects = [value["text"] for kind, value in records if kind == "input" and value.get("type") == "input"
+                   and value.get("text", "").startswith("/reject")]
+        self.assertEqual(rejects, [f"/reject op-{n}" for n in range(1, 6)])
+        self.assertEqual(sum(kind == "input" and value["type"] == "quit" for kind, value in records), 1)
+
+    def test_reject_streak_resets_when_the_candidate_changes(self):
+        candidates = ["urn:a", "urn:b"] * 3
+        result, records = self.run_client(self.REJECT_LOOP_CLIENT.format(candidates=candidates),
+                                          backend="harness", expected_model="model")
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["reject_loop_max_streak"], 1)
+        self.assertEqual(result["terminal_cause"], "success")
+        self.assertEqual(sum(kind == "input" and value.get("text", "").startswith("/reject")
+                             for kind, value in records), 6)
+        # The same run with a limit of two stops at the second candidate change-free streak.
+        result, _ = self.run_client(self.REJECT_LOOP_CLIENT.format(candidates=["urn:a", "urn:a", "urn:b"]),
+                                    backend="harness", expected_model="model", reject_loop_limit=2)
+        self.assertEqual(result["terminal_cause"], "reviewer_reject_loop")
+        self.assertEqual(result["reject_loop_max_streak"], 2)
+        self.assertEqual(result["reason"], "reviewer rejected the same reuse candidate 2 consecutive times")
+        # None disables the guard entirely.
+        result, _ = self.run_client(self.REJECT_LOOP_CLIENT.format(candidates=["urn:a"] * 7),
+                                    backend="harness", expected_model="model", reject_loop_limit=None)
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["reject_loop_max_streak"], 7)
+        self.assertIsNone(result["reject_loop_limit"])
+
+    def test_journal_metrics_are_computed_once_from_the_final_snapshot(self):
+        import json
+        from bench.harness_study.evolution import review_metrics
+        from bench.harness_study.intent import activity_metrics, gate_metrics
+        final_task = {"id": "one", "phase": "Complete", "capture_contract": 2, "intent_policy": "change-level-v2",
+                      "recovery": None, "response_receipt": {"requested": "auto", "resolved": "reasoning-off"},
+                      "intent_events": [
+                          {"id": "a", "cycle": "c1", "kind": "plan_approval_attempt", "detail": "1"},
+                          {"id": "b", "cycle": "c1", "kind": "record_review", "detail": "accepted", "interaction": "r1"},
+                          {"id": "c", "cycle": "c1", "kind": "reuse_review", "detail": "accepted op", "interaction": "r1"},
+                          {"id": "d", "cycle": "c1", "kind": "edit_applied", "detail": "cache.py"}],
+                      "events": [{"message": "Read cache.py: source"}, {"message": "Read cache.py: source"},
+                                 {"message": "Model action: {\"action\": \"command\", \"command\": \"pytest\"}"}],
+                      "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
+                                         {"purpose": "harness_action", "attempt": 2, "decision_id": "d1"},
+                                         {"purpose": "harness_capture", "attempt": 1, "decision_id": "d2"}]}
+        early = dict(final_task, phase="Working", intent_events=final_task["intent_events"][:1],
+                     events=final_task["events"][:1], model_requests=final_task["model_requests"][:1],
+                     recovery={"status": "retrying", "attempts": 1})
+        result, records = self.run_client(f"""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            for task in ({json.dumps(early)!r}, {json.dumps(final_task)!r}):
+                print(json.dumps({{"type":"state", "model":"model", "busy":False, "task":json.loads(task)}}), flush=True)
+            assert json.loads(sys.stdin.readline())["type"] == "quit"
+            print(json.dumps({{"type":"closed"}}))
+        """, backend="harness", expected_model="model")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["intent_gates"], gate_metrics(final_task["intent_events"]))
+        self.assertEqual(result["intent_activity"], activity_metrics(final_task["events"]))
+        self.assertEqual(result["evolution_reviews"], review_metrics(final_task["intent_events"]))
+        self.assertEqual(result["metrics"]["intent_gate_decisions"], 2)
+        self.assertEqual(result["metrics"]["evolution_review_interactions"], 1)
+        self.assertEqual(result["metrics"]["intent_source_rereads_unchanged"], 1)
+        self.assertEqual(result["harness_recovery"], {
+            "last_state": None, "model_requests_by_purpose": {"harness_action": 2, "harness_capture": 1},
+            "decisions": {"d1": {"purpose": "harness_action", "attempts": [1, 2]},
+                          "d2": {"purpose": "harness_capture", "attempts": [1]}},
+            "repair_generations": 1})
+        self.assertEqual(sum(kind == "harness_recovery" for kind, _ in records), 2)
+        self.assertEqual(sum(kind == "harness_response_compatibility" for kind, _ in records), 1)
 
 
 if __name__ == "__main__":

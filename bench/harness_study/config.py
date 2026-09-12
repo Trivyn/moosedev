@@ -14,7 +14,9 @@ from urllib.request import urlopen
 
 from .artifacts import canonical_json, sha256_file
 from .binaries import REPO, verify_binaries
-from .scenario import list_scenarios, load_scenario, tree_manifest
+from .scenario import MAINTENANCE, list_scenarios, load_scenario, tree_manifest
+from . import intent
+from . import evolution
 
 
 def read_json_url(url):
@@ -61,6 +63,36 @@ def configuration_hash(config):
 
 
 def schedule(config):
+    if config.get("evaluation_mode") in evolution.MODES:
+        stage = config["evaluation_mode"]
+        scenarios = config.get("scenario_ids")
+        models = [model["id"] for model in config["local_models"]]
+        policies = config.get("intent_policies", list(evolution.POLICIES[stage]))
+        if (scenarios != list(intent.SCENARIOS) or models != list(intent.MODELS)
+                or policies != list(evolution.POLICIES[stage])):
+            raise ValueError("evolution study requires the frozen ordered models, policies, and scenarios")
+        arms = evolution.ARMS.get(stage) or tuple(("harness", "harness", policy) for policy in policies)
+        cells = [{"model": model, "backend": backend, "condition": condition,
+                  "scenario_id": scenario, "intent_policy": policy}
+                 for scenario in scenarios for model in models for backend, condition, policy in arms]
+        expected = {evolution.STAGE1_MODE: 6, evolution.STAGE2_BASELINE_MODE: 18}.get(stage, 12)
+        identities = {(c["model"], c["backend"], c["condition"], c["intent_policy"], c["scenario_id"]) for c in cells}
+        if len(cells) != expected or len(identities) != expected:
+            raise ValueError("evolution schedule has duplicated or missing cells")
+        random.Random(config["seed"]).shuffle(cells)
+        return [dict(cell, schedule_index=index) for index, cell in enumerate(cells)]
+    if config.get("evaluation_mode") == intent.MODE:
+        scenarios = config.get("scenario_ids")
+        models = [model["id"] for model in config["local_models"]]
+        policies = config.get("intent_policies", list(intent.POLICIES))
+        if (not isinstance(scenarios, list) or len(scenarios) != 3 or set(scenarios) != set(intent.SCENARIOS)
+                or len(models) != 2 or set(models) != set(intent.MODELS)
+                or len(policies) != 2 or set(policies) != set(intent.POLICIES)):
+            raise ValueError("intent pilot requires the approved two models, two policies, and three scenarios")
+        cells = [{"model": model, "backend": "harness", "condition": "harness", "scenario_id": scenario,
+                  "intent_policy": policy} for scenario in scenarios for model in models for policy in policies]
+        random.Random(config["seed"]).shuffle(cells)
+        return [dict(cell, schedule_index=index) for index, cell in enumerate(cells)]
     development = config.get("evaluation_mode", "pilot") == "local-harness-development"
     if config.get("evaluation_mode", "pilot") not in {"pilot", "local-harness-development"}:
         raise ValueError("unknown evaluation_mode")
@@ -71,7 +103,7 @@ def schedule(config):
             setups.append((model["id"], "opencode", "without"))
         setups.append((model["id"], "harness", "harness"))
     cells = [{"model": model, "backend": backend, "condition": condition, "scenario_id": scenario}
-             for scenario in list_scenarios() for model, backend, condition in setups]
+             for scenario in list_scenarios() if scenario != MAINTENANCE for model, backend, condition in setups]
     if development and (len(cells) != 6 or len({(c["model"], c["scenario_id"]) for c in cells}) != 6):
         raise ValueError("local harness development requires exactly six distinct model/scenario cells")
     random.Random(config["seed"]).shuffle(cells)
@@ -79,7 +111,52 @@ def schedule(config):
 
 
 def required_clients(config):
-    return ("lms",) if config.get("evaluation_mode") == "local-harness-development" else ("codex", "opencode", "lms")
+    mode = config.get("evaluation_mode")
+    if mode == evolution.STAGE2_BASELINE_MODE:
+        return ("opencode", "lms")
+    return ("lms",) if mode in ("local-harness-development", intent.MODE, *evolution.MODES) else ("codex", "opencode", "lms")
+
+
+def evolution_config(parent, binary_manifest, study_id, stage):
+    """Derive a new six-, twelve- or eighteen-cell evolution study from sealed parent inputs."""
+    if stage not in evolution.MODES:
+        raise ValueError("unknown harness evolution stage")
+    original = parent.get("config")
+    if not parent.get("ready") or not isinstance(original, dict) or parent.get("config_sha256") != configuration_hash(original):
+        raise ValueError("evolution configuration requires an intact successful parent preflight")
+    single_episode = stage in (evolution.STAGE2_RECOVERY_MODE, evolution.STAGE2_BASELINE_MODE)
+    parents = {evolution.STAGE2_RECOVERY_MODE: (intent.MODE, evolution.STAGE2_MODE),
+               evolution.STAGE2_BASELINE_MODE: (intent.MODE, evolution.STAGE2_MODE, evolution.STAGE2_RECOVERY_MODE),
+               }.get(stage, (intent.MODE,))
+    if original.get("evaluation_mode") not in parents:
+        raise ValueError("evolution configuration must descend from the frozen intent pilot")
+    if not study_id.strip() or study_id == original.get("study_id"):
+        raise ValueError("evolution study requires a distinct nonempty study_id")
+    build = verify_binaries(Path(binary_manifest))
+    if build["build_id"] == parent["binaries"]["build_id"]:
+        raise ValueError("evolution study requires a newly frozen build")
+    if single_episode and build["build_id"] in evolution.SEALED_PREDECESSORS:
+        raise ValueError(f"{stage} refuses a sealed predecessor build")
+    verify_approval(Path(original["gold_approval"]), config=original)
+    result = deepcopy(original)
+    result.update(study_id=study_id, evaluation_mode=stage,
+                  binary_manifest=str(Path(binary_manifest).resolve()),
+                  local_models=[model for model in original["local_models"] if model["id"] in intent.MODELS],
+                  scenario_ids=list(intent.SCENARIOS), intent_policies=list(evolution.POLICIES[stage]),
+                  episode_seconds=1200, context_tokens=32768,
+                  generation_policy={**original.get("generation_policy", {}), "local_temperature": 0.0},
+                  evolution_design=evolution.design_identity(stage),
+                  **({"episode_limit": 1} if single_episode else {}),
+                  **({"evidence_byte_limit": evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
+                      "reject_loop_limit": evolution.BASELINE_REJECT_LOOP_LIMIT}
+                     if stage == evolution.STAGE2_BASELINE_MODE else {}),
+                  parent_pilot={"study_id": original["study_id"], "config_sha256": parent["config_sha256"],
+                                "build_id": parent["binaries"]["build_id"],
+                                "intent_design": intent.design_identity()})
+    if "opencode" in required_clients(result) and not result.get("opencode"):
+        raise ValueError("baseline stage requires the parent configuration's opencode client path")
+    schedule(result)
+    return result
 
 
 def development_config(parent, binary_manifest, study_id):
@@ -237,25 +314,67 @@ def preflight(config, *, fingerprint=True):
             check(f"local_model_{index}", lambda model=model: fingerprint_model(model, result["lmstudio"]))
     else:
         checks.append({"check": "weight_fingerprints", "passed": False, "error": "not fingerprinted"})
-    check("gold_approval", lambda: verify_approval(Path(config["gold_approval"])))
+    check("gold_approval", lambda: verify_approval(Path(config["gold_approval"]), config=config))
+    if config.get("evaluation_mode") == intent.MODE or config.get("evaluation_mode") in evolution.MODES:
+        from .indexing import verify_indexer, probe_indexer, system_python_identity
+        check("indexer", lambda: verify_indexer(config["indexer_manifest"]))
+        check("indexer_system_python", system_python_identity)
+        def matched_indexer():
+            if result["binaries"].get("indexer") != result["indexer"]:
+                raise ValueError("intent indexer identity must be included in the frozen binary manifest")
+            return intent.design_identity()
+        check("intent_design", matched_indexer)
+        if config.get("evaluation_mode") in evolution.MODES:
+            check("evolution_design", lambda: evolution.design_identity(config["evaluation_mode"])
+                  if config.get("evolution_design") == evolution.design_identity(config["evaluation_mode"])
+                  else (_ for _ in ()).throw(ValueError("evolution design identity changed")))
+        check("indexer_probe", lambda: probe_indexer(result["indexer"], result["binaries"], result["assets"],
+              evolution_contract=evolution.postedit_association_contract(config.get("evaluation_mode"))))
+        if evolution.postedit_association_contract(config.get("evaluation_mode")):
+            from .native_contracts import probe_native_contracts
+            check("native_intent_contracts", lambda: probe_native_contracts(config, result["binaries"]))
     result["ready"] = all(item["passed"] for item in checks)
     return result
 
 
-def approval_payload(reviewer):
+def approval_payload(reviewer, *, config=None):
     if not reviewer.strip():
         raise ValueError("named human reviewer required")
-    return {"schema_version": 1, "reviewer": reviewer, "approved_at": datetime.now(timezone.utc).isoformat(),
+    experimental = config is not None and config.get("evaluation_mode") == intent.MODE
+    selected = config["scenario_ids"] if experimental else [name for name in list_scenarios() if name != MAINTENANCE]
+    if experimental:
+        schedule(config)
+    result = {"schema_version": 2 if experimental else 1, "reviewer": reviewer, "approved_at": datetime.now(timezone.utc).isoformat(),
             "scope": "synthetic reference behavior and claim rubric; not pilot outcomes",
             "scenarios": {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
-                          for name in list_scenarios()}}
+                          for name in selected}}
+    if experimental:
+        result["intent_design"] = intent.design_identity()
+    return result
 
 
-def verify_approval(path):
+def verify_approval(path, *, config=None):
     value = json.loads(path.read_text())
-    if value.get("schema_version") != 1 or not value.get("reviewer") or not value.get("approved_at"):
+    if value.get("schema_version") not in (1, 2) or not value.get("reviewer") or not value.get("approved_at"):
         raise ValueError("invalid human gold approval")
-    current = approval_payload(value["reviewer"])["scenarios"]
+    evolution_run = config is not None and config.get("evaluation_mode") in evolution.MODES
+    if value["schema_version"] == 2:
+        if value.get("intent_design") != intent.design_identity():
+            raise ValueError("intent approval does not match current design hash")
+        selected = list(value["scenarios"])
+        if set(selected) != set(intent.SCENARIOS):
+            raise ValueError("intent approval must bind the selected scenario set")
+        current = {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
+                   for name in selected}
+    else:
+        current = approval_payload(value["reviewer"])["scenarios"]
+    if config is not None and config.get("evaluation_mode") == intent.MODE:
+        if value["schema_version"] != 2 or set(config["scenario_ids"]) != set(value["scenarios"]):
+            raise ValueError("intent pilot requires its explicitly scoped design and gold approval")
+    if evolution_run and (value["schema_version"] != 2
+            or set(config["scenario_ids"]) != set(value["scenarios"])
+            or config.get("evolution_design") != evolution.design_identity(config["evaluation_mode"])):
+        raise ValueError("evolution study requires original approved fixtures and its frozen new design")
     if value.get("scenarios") != current:
         raise ValueError("gold approval does not match current scenario package hashes")
     return value

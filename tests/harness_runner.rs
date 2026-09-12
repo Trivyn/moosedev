@@ -11,9 +11,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use moosedev::harness::protocol::*;
-use moosedev::harness::runner::{CheckResult, Mode, Phase, Runner};
+use moosedev::harness::runner::{CheckResult, Mode, Phase, ReviewItem, Runner};
 use moosedev::policy::{GateDisposition, PolicyDecision};
 use serde_json::{json, Value};
+
+#[path = "harness_runner/intent.rs"]
+mod intent;
 
 static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -72,6 +75,22 @@ struct Script {
     fail_global_checkpoint_once: bool,
     mutation_during_model: Option<String>,
     held_response: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    intent_records: Vec<CaptureTarget>,
+    intent_stale_source: bool,
+    capture_candidates: Vec<CaptureCandidate>,
+    reconciliation_requests: Vec<ReconcileCaptureRequest>,
+    intent_link_requests: Vec<moosedev::harness::daemon::intent::IntentLinkRequest>,
+    intent_accepted: Vec<moosedev::harness::daemon::intent::IntentBinding>,
+    capture_links_per_proposal: usize,
+    purpose_scoped_entities: bool,
+    purpose_scoped_name: Option<String>,
+    postedit_symbol_name: Option<String>,
+    postedit_conservative: bool,
+    malformed_intent_response: bool,
+    purpose_retrieval_override: Option<PurposeRetrieval>,
+    fail_reconcile_once: bool,
+    reject_stale_candidates: bool,
+    purpose_candidates_status: Option<u16>,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -186,6 +205,8 @@ async fn context(
     (
         status,
         Json(ContextResponse {
+            capture_contracts: Some(vec![1, 2]),
+            intent_contracts: Some(vec![1, 2]),
             capture_targets: (!script.missing_capture_targets).then(Default::default),
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
@@ -249,7 +270,14 @@ async fn capture(
             ),
             title: proposal.title.clone(),
             kind: proposal.kind.clone(),
-            links: vec![],
+            links: (0..script.capture_links_per_proposal)
+                .map(|link| {
+                    format!(
+                        "https://moosedev.dev/kg/ProposedLink/{}-{index}-{link}",
+                        request.operation_id
+                    )
+                })
+                .collect(),
             unanchored: vec![],
         })
         .collect();
@@ -257,6 +285,120 @@ async fn capture(
         StatusCode::OK,
         Json(serde_json::to_value(CaptureResponse { proposals }).unwrap()),
     )
+}
+
+async fn capture_v2(
+    state: State<Shared>,
+    Json(request): Json<CaptureV2Request>,
+) -> (StatusCode, Json<Value>) {
+    let (status, Json(value)) = capture(
+        state,
+        Json(CaptureRequest {
+            operation_id: request.operation_id,
+            proposals: request.proposals,
+        }),
+    )
+    .await;
+    if status.is_success() {
+        (status, Json(json!({"status":"captured","capture":value})))
+    } else {
+        (status, Json(value))
+    }
+}
+
+async fn capture_candidates(
+    State(state): State<Shared>,
+    Json(request): Json<CaptureCandidateRequest>,
+) -> Json<CaptureCandidatePage> {
+    let mut script = state.lock().unwrap();
+    let revision = script.revision.clone();
+    script.requests.push(
+        json!({"kind":"capture_candidates","proposal":request.proposal.title,"revision":revision}),
+    );
+    Json(CaptureCandidatePage {
+        // The page carries the project revision it was taken at, so the
+        // fixture can tell a reconciliation against a stale page apart.
+        revision,
+        proposal_digest: format!("{}:{}", request.proposal.kind, request.proposal.title),
+        candidates: script.capture_candidates.clone(),
+        next_cursor: None,
+    })
+}
+
+async fn reconcile_capture(
+    State(state): State<Shared>,
+    Json(request): Json<ReconcileCaptureRequest>,
+) -> (StatusCode, Json<Value>) {
+    let mut script = state.lock().unwrap();
+    let pending_capture_operation = script
+        .capture_candidates
+        .iter()
+        .find(|candidate| candidate.iri == request.candidate_iri)
+        .and_then(|candidate| {
+            candidate
+                .origin
+                .as_ref()
+                .map(|origin| origin.operation_id.clone())
+        });
+    // Record the request before any failure so a retry can be compared
+    // byte-for-byte with the interrupted attempt.
+    script.reconciliation_requests.push(request.clone());
+    if std::mem::take(&mut script.fail_reconcile_once) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"simulated lost reconciliation acknowledgment"})),
+        );
+    }
+    if script.reject_stale_candidates && request.candidate_revision != script.revision {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"candidate snapshot is stale"})),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(ReconcileCaptureResponse {
+                operation_id: request.operation_id,
+                disposition: request.disposition,
+                candidate_iri: request.candidate_iri,
+                requires_human_review: true,
+                pending_capture_operation,
+                review: None,
+            })
+            .unwrap(),
+        ),
+    )
+}
+
+async fn review_reconciliation(
+    State(state): State<Shared>,
+    Json(request): Json<ReconcileReviewRequest>,
+) -> Json<ReconcileCaptureResponse> {
+    let script = state.lock().unwrap();
+    let original = script
+        .reconciliation_requests
+        .iter()
+        .find(|original| original.operation_id == request.operation_id)
+        .expect("reviewed reconciliation operation must exist");
+    let pending_capture_operation = script
+        .capture_candidates
+        .iter()
+        .find(|candidate| candidate.iri == original.candidate_iri)
+        .and_then(|candidate| {
+            candidate
+                .origin
+                .as_ref()
+                .map(|origin| origin.operation_id.clone())
+        });
+    Json(ReconcileCaptureResponse {
+        operation_id: request.operation_id,
+        disposition: original.disposition.clone(),
+        candidate_iri: original.candidate_iri.clone(),
+        requires_human_review: false,
+        pending_capture_operation,
+        review: Some(request.accept),
+    })
 }
 
 fn checked(revision: &str, durable: bool, pending: Vec<String>) -> CheckpointResponse {
@@ -286,6 +428,14 @@ async fn review(
         );
     }
     if request.accept {
+        if let Some(linked) = script
+            .intent_link_requests
+            .iter()
+            .find(|linked| linked.operation_id == request.operation_id)
+            .cloned()
+        {
+            script.intent_accepted.extend(linked.bindings);
+        }
         if let Some(revision) = script.revision_on_accept.take() {
             script.revision = revision;
         }
@@ -360,8 +510,30 @@ impl Fixture {
             .route("/v1/chat/completions", post(model))
             .route("/api/v1/harness/context", post(context))
             .route("/api/v1/harness/capture", post(capture))
+            .route("/api/v1/harness/capture/v2", post(capture_v2))
+            .route(
+                "/api/v1/harness/capture/candidates",
+                post(capture_candidates),
+            )
+            .route("/api/v1/harness/capture/reconcile", post(reconcile_capture))
+            .route(
+                "/api/v1/harness/capture/reconcile/review",
+                post(review_reconciliation),
+            )
             .route("/api/v1/harness/review", post(review))
             .route("/api/v1/harness/checkpoint", post(checkpoint))
+            .route("/api/v1/harness/intent/resolve", post(intent::resolve))
+            .route(
+                "/api/v1/harness/intent/purpose/candidates",
+                post(intent::purpose_candidates),
+            )
+            .route(
+                "/api/v1/harness/intent/candidates",
+                post(intent::postedit_candidates),
+            )
+            .route("/api/v1/harness/intent/link", post(intent::link))
+            .route("/api/v1/harness/intent/review", post(review))
+            .route("/api/v1/harness/intent/abandon", post(review))
             .with_state(shared.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -409,9 +581,78 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
+async fn one_batch_review_interaction_emits_each_capture_link_disposition_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for ordinal in 0..2 {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        runner.task.reviews.push(ReviewItem {
+            intent_links: None,
+            capture_resolution: None,
+            request: CaptureRequest {
+                operation_id: operation_id.clone(),
+                proposals: vec![KnowledgeProposal {
+                    kind: "Lesson".into(),
+                    title: format!("lesson {ordinal}"),
+                    description: "claim".into(),
+                    evidence: vec!["evidence".into()],
+                    files: vec![],
+                    components: vec![],
+                    requirement: None,
+                    supersedes: None,
+                    retracts: None,
+                }],
+            },
+            response: CaptureResponse {
+                proposals: vec![CapturedProposal {
+                    iri: format!("urn:record:{ordinal}"),
+                    title: format!("lesson {ordinal}"),
+                    kind: "Lesson".into(),
+                    links: vec![format!("urn:link:{ordinal}")],
+                    unanchored: vec![],
+                }],
+            },
+            reason: "review fixture".into(),
+        });
+    }
+    runner.task.phase = Phase::AwaitingReview;
+    runner.review(false).await.unwrap();
+    assert_eq!(
+        runner
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "review_interaction")
+            .count(),
+        1
+    );
+    assert_eq!(
+        runner
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "record_review")
+            .count(),
+        2
+    );
+    assert_eq!(
+        runner
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "link_review")
+            .count(),
+        2
+    );
+    assert!(runner.task.reviews.is_empty());
+}
+
+#[tokio::test]
 async fn runner_enforces_reading_capture_review_and_recovery_without_memory_tool_calls() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().capture_links_per_proposal = 2;
     let _env = Env::configure(&fixture.url);
     let mut runner = Runner::create(
         fixture.root.clone(),
@@ -480,6 +721,25 @@ async fn runner_enforces_reading_capture_review_and_recovery_without_memory_tool
         "pending capture must precede plan approval"
     );
     runner.review(false).await.unwrap();
+    let link_events: Vec<_> = runner
+        .task
+        .intent_events
+        .iter()
+        .filter(|event| event.kind == "link_review")
+        .collect();
+    assert_eq!(link_events.len(), 2);
+    assert!(link_events.iter().all(|event| event
+        .detail
+        .contains("rejected https://moosedev.dev/kg/ProposedLink/")));
+    assert_eq!(
+        runner
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "review_interaction")
+            .count(),
+        1
+    );
     runner.approve_plan().await.unwrap();
 
     fixture.edit();
@@ -1006,6 +1266,210 @@ async fn interactive_reply_needs_no_modification_plan_or_checks() {
     runner.advance().await.unwrap();
     assert!(runner.task.turn_finished);
     assert!(fixture.shared.lock().unwrap().replies.is_empty());
+}
+
+#[tokio::test]
+async fn semantic_reuse_is_reviewed_without_creating_a_duplicate_record() {
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().capture_candidates = vec![CaptureCandidate {
+        iri: "urn:existing".into(),
+        title: "Observed behavior".into(),
+        kind: "Lesson".into(),
+        status: "accepted".into(),
+        assertion_digest: "digest-1".into(),
+        literals: vec![CandidateLiteral {
+            predicate: "hasDescription".into(),
+            value: "Keep this evidenced implementation knowledge.".into(),
+            datatype: None,
+            language: None,
+        }],
+        relations: vec![],
+        origin: None,
+        owned_by_requester: false,
+        exact_title: true,
+        legal_relations: vec![],
+    }];
+    let mut runner = fixture.interactive().await;
+    fixture
+        .conversational(json!({"action":"reply","message":"The behavior is already documented."}));
+    fixture.reply("harness_capture", json!({"reason":"The explanation repeats durable knowledge.","proposals":[{
+        "kind":"Lesson","title":"Observed behavior","description":"Keep this evidenced implementation knowledge.",
+        "evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    fixture.reply("harness_capture_resolution", json!({"disposition":"reuse_unchanged","candidate_id":"c0","rationale":"The claim and links are unchanged.","revised_title":null,"revised_description":null}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert!(
+        runner.task.reviews[0]
+            .capture_resolution
+            .as_ref()
+            .unwrap()
+            .reuse_unchanged
+    );
+    assert!(fixture.shared.lock().unwrap().capture_requests.is_empty());
+    let operation = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&operation, true).await.unwrap();
+    assert!(runner.task.reviews.is_empty());
+    assert!(fixture.shared.lock().unwrap().capture_requests.is_empty());
+}
+
+#[tokio::test]
+async fn changed_claim_is_never_merged_into_an_existing_candidate() {
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().capture_candidates = vec![CaptureCandidate {
+        iri: "urn:existing".into(),
+        title: "Observed behavior".into(),
+        kind: "Lesson".into(),
+        status: "accepted".into(),
+        assertion_digest: "digest-1".into(),
+        literals: vec![CandidateLiteral {
+            predicate: "hasDescription".into(),
+            value: "The behavior was observed.".into(),
+            datatype: None,
+            language: None,
+        }],
+        relations: vec![],
+        origin: None,
+        owned_by_requester: false,
+        exact_title: true,
+        legal_relations: vec![],
+    }];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(
+        json!({"action":"reply","message":"The behavior was observed; tests were added."}),
+    );
+    fixture.reply("harness_capture", json!({"reason":"A changed claim requires separate review.","proposals":[{
+        "kind":"Lesson","title":"Observed behavior","description":"The behavior was observed and tests were added.",
+        "evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    fixture.reply("harness_capture_resolution", json!({"disposition":"distinct_knowledge","candidate_id":"c0","rationale":"The tests-added assertion is absent from the candidate.","revised_title":"Observed behavior test coverage","revised_description":"The behavior was observed and tests were added."}));
+    runner.advance().await.unwrap();
+    let captures = fixture.shared.lock().unwrap().capture_requests.clone();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(
+        captures[0].proposals[0].title,
+        "Observed behavior test coverage"
+    );
+    assert!(captures[0].proposals[0]
+        .description
+        .contains("tests were added"));
+    assert_eq!(
+        runner.task.reviews.len(),
+        1,
+        "changed text remains a normal human-reviewed graph proposal"
+    );
+}
+
+#[tokio::test]
+async fn owned_pending_revision_survives_restart_and_requires_origin_rejection() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"reply","message":"First observation."}));
+    fixture.reply("harness_capture", json!({"reason":"First pending lesson.","proposals":[{
+        "kind":"Lesson","title":"Pending lesson","description":"Original pending claim.","evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    runner.advance().await.unwrap();
+    let origin = runner.task.reviews[0].request.operation_id.clone();
+    let candidate_iri = runner.task.reviews[0].response.proposals[0].iri.clone();
+    fixture.shared.lock().unwrap().capture_candidates = vec![CaptureCandidate {
+        iri: candidate_iri,
+        title: "Pending lesson".into(),
+        kind: "Lesson".into(),
+        status: "proposed".into(),
+        assertion_digest: "pending-digest".into(),
+        literals: vec![CandidateLiteral {
+            predicate: "hasDescription".into(),
+            value: "Original pending claim.".into(),
+            datatype: None,
+            language: None,
+        }],
+        relations: vec![],
+        origin: Some(CandidateOrigin {
+            operation_id: origin.clone(),
+            owner_id: runner.task.id.clone(),
+        }),
+        owned_by_requester: true,
+        exact_title: true,
+        legal_relations: vec![],
+    }];
+    runner
+        .submit_message("Revise the pending lesson.".into())
+        .await
+        .unwrap();
+    fixture.conversational(json!({"action":"reply","message":"The claim needs correction."}));
+    fixture.reply("harness_capture", json!({"reason":"Correct the pending claim.","proposals":[{
+        "kind":"Lesson","title":"Pending lesson","description":"Corrected pending claim.","evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    fixture.reply("harness_capture_resolution", json!({"disposition":"revise_proposal","candidate_id":"c0","rationale":"The owned pending claim is inaccurate.","revised_title":"Pending lesson","revised_description":"Corrected pending claim."}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner
+            .task
+            .pending_revision
+            .as_ref()
+            .unwrap()
+            .origin_operation_id,
+        origin
+    );
+    let id = runner.task.id.clone();
+    drop(runner);
+    let journal = fixture
+        .root
+        .join(".moosedev/harness/tasks")
+        .join(format!("{id}.json"));
+    let mut persisted: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+    persisted["intent_policy"] = json!("change-level-v2");
+    persisted["postedit_association_contract"] = json!(1);
+    persisted["purpose_selection"] = json!({
+        "version":1,
+        "request":{"objective":"Repair code.txt while preserving behavior","files":["code.txt"],"cursor":null,"limit":8},
+        "revision":"accepted-v1",
+        "plan_scope_digest":"pending-revision-checkpoint",
+        "current_page":{"revision":"accepted-v1","retrieval":"page","candidates":[{
+            "handle":"r0","iri":"urn:governing","kind":"Requirement","title":"Preserve behavior",
+            "claim":{"literals":[]},"lifecycle":"accepted","assertion_digest":"governing-digest","relations":[],"legal_predicates":[]
+        }],"next_cursor":null},
+        "pages":[],"cursor":null,"selected":[],"rejected_iris":[],
+        "status":"awaiting_missing_capture","attempts":0
+    });
+    std::fs::write(&journal, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    let paused = runner.task.clone();
+    let calls = fixture.model_calls();
+    runner.review_operation(&origin, false).await.unwrap();
+    assert_eq!(
+        fixture.model_calls(),
+        calls,
+        "rejecting the origin resumes the durable replacement without generation"
+    );
+    assert_eq!(
+        runner.task.capture_request.as_ref().unwrap().proposals[0].description,
+        "Corrected pending claim."
+    );
+    assert_eq!(
+        runner.task.purpose_selection.as_ref().unwrap().status,
+        "awaiting_missing_capture",
+        "rejecting the origin resumes the durable replacement without consuming the checkpoint"
+    );
+    runner.task = paused;
+    runner.review_operation(&origin, true).await.unwrap();
+    assert!(runner.task.pending_revision.is_none());
+    assert!(runner.task.capture_batch.is_none());
+    assert!(runner.task.capture_request.is_none());
+    let accepted = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(accepted["capture_due"], true);
+    assert!(accepted["capture_end"].is_null());
+    assert_eq!(
+        runner.task.purpose_selection.as_ref().unwrap().status,
+        "awaiting_missing_capture",
+        "accepting the origin reopens assessment without consuming the checkpoint"
+    );
+    assert_eq!(
+        fixture.model_calls(),
+        calls,
+        "accepting the origin discards the paused replacement without generation"
+    );
 }
 
 #[tokio::test]
@@ -2445,4 +2909,451 @@ async fn invented_capture_target_is_repaired_before_any_daemon_operation() {
         .is_empty());
     assert!(script.capture_requests[0].proposals[0].evidence[0].contains("Task "));
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
+}
+
+fn existing_lesson_candidate() -> CaptureCandidate {
+    CaptureCandidate {
+        iri: "urn:existing".into(),
+        title: "Observed behavior".into(),
+        kind: "Lesson".into(),
+        status: "accepted".into(),
+        assertion_digest: "digest-1".into(),
+        literals: vec![CandidateLiteral {
+            predicate: "hasDescription".into(),
+            value: "Keep this evidenced implementation knowledge.".into(),
+            datatype: None,
+            language: None,
+        }],
+        relations: vec![],
+        origin: None,
+        owned_by_requester: false,
+        exact_title: true,
+        legal_relations: vec![],
+    }
+}
+
+fn candidate_lookups(fixture: &Fixture) -> usize {
+    fixture
+        .shared
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|request| request["kind"] == "capture_candidates")
+        .count()
+}
+
+fn resolution_judgments(runner: &Runner) -> usize {
+    runner
+        .task
+        .model_requests
+        .iter()
+        .filter(|request| request["purpose"] == "harness_capture_resolution")
+        .count()
+}
+
+#[tokio::test]
+async fn rejected_reuse_refetches_candidates_at_current_revision() {
+    let fixture = Fixture::new().await;
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.capture_candidates = vec![existing_lesson_candidate()];
+        // The fixture daemon refuses a reconciliation against a page taken at
+        // a superseded revision, as the real daemon does.
+        script.reject_stale_candidates = true;
+    }
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"reply","message":"The behavior is documented; a second detail was also observed."}));
+    fixture.reply("harness_capture", json!({"reason":"One claim repeats durable knowledge; one is new.","proposals":[
+        {"kind":"Lesson","title":"Observed behavior","description":"Keep this evidenced implementation knowledge.",
+         "evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null},
+        {"kind":"Lesson","title":"Second observation","description":"A separate implementation detail was observed.",
+         "evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null}
+    ]}));
+    fixture.reply("harness_capture_resolution", json!({"disposition":"reuse_unchanged","candidate_id":"c0","rationale":"The claim and links are unchanged.","revised_title":null,"revised_description":null}));
+    fixture.reply("harness_capture_resolution", json!({"disposition":"distinct_knowledge","candidate_id":"c0","rationale":"The second detail is absent from the candidate.","revised_title":"Second observation","revised_description":"A separate implementation detail was observed."}));
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(runner.task.reviews.len(), 2);
+    assert_eq!(candidate_lookups(&fixture), 2);
+    let reuse = runner
+        .task
+        .reviews
+        .iter()
+        .find(|review| review.capture_resolution.is_some())
+        .unwrap()
+        .request
+        .operation_id
+        .clone();
+    let capture = runner
+        .task
+        .reviews
+        .iter()
+        .find(|review| review.capture_resolution.is_none())
+        .unwrap()
+        .request
+        .operation_id
+        .clone();
+
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-v2".into());
+    runner.review_operation(&capture, true).await.unwrap();
+    assert_eq!(runner.task.knowledge_revision, "accepted-v2");
+    fixture.reply("harness_capture_resolution", json!({"disposition":"distinct_knowledge","candidate_id":"c0","rationale":"The human rejected reuse; the observation stays distinct.","revised_title":"Observed behavior clarification","revised_description":"Keep this evidenced implementation knowledge."}));
+    runner.review_operation(&reuse, false).await.unwrap();
+    let reseeded = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(
+        reseeded["capture_resolution"]["candidate_pages"],
+        json!([]),
+        "the rejected reuse must not carry the judged pages forward"
+    );
+    assert_eq!(reseeded["capture_due"], true);
+
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(
+        candidate_lookups(&fixture),
+        3,
+        "rejected reuse must refetch candidates at the current revision"
+    );
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.contains("candidate snapshot is stale")));
+    let script = fixture.shared.lock().unwrap();
+    assert_eq!(
+        script
+            .reconciliation_requests
+            .last()
+            .unwrap()
+            .candidate_revision,
+        "accepted-v2"
+    );
+    assert_eq!(script.capture_requests.len(), 2);
+    assert_eq!(
+        script.capture_requests[1].proposals[0].title,
+        "Observed behavior clarification"
+    );
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert!(runner.task.reviews[0].capture_resolution.is_none());
+    assert!(script.replies.is_empty());
+}
+
+#[tokio::test]
+async fn persisted_reconciliation_disposition_replays_without_second_model_call() {
+    let fixture = Fixture::new().await;
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.capture_candidates = vec![existing_lesson_candidate()];
+        script.fail_reconcile_once = true;
+    }
+    let mut runner = fixture.interactive().await;
+    fixture
+        .conversational(json!({"action":"reply","message":"The behavior is already documented."}));
+    fixture.reply("harness_capture", json!({"reason":"The explanation repeats durable knowledge.","proposals":[{
+        "kind":"Lesson","title":"Observed behavior","description":"Keep this evidenced implementation knowledge.",
+        "evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+    fixture.reply("harness_capture_resolution", json!({"disposition":"reuse_unchanged","candidate_id":"c0","rationale":"The claim and links are unchanged.","revised_title":null,"revised_description":null}));
+    let error = format!("{:#}", runner.advance().await.unwrap_err());
+    assert!(
+        error.contains("daemon HTTP 500") && error.contains("capture/reconcile"),
+        "{error}"
+    );
+    assert_eq!(runner.task.last_error_kind.as_deref(), Some("service"));
+    assert_eq!(resolution_judgments(&runner), 1);
+    let interrupted = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(
+        interrupted["capture_resolution"]["disposition"]["choice"], "reuse_unchanged",
+        "the judged disposition is durable before the daemon call"
+    );
+    assert!(runner.task.reviews.is_empty());
+    let id = runner.task.id.clone();
+    drop(runner);
+
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    runner.resume().await.unwrap();
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(
+        resolution_judgments(&runner),
+        1,
+        "the persisted disposition replays without a second judgment"
+    );
+    assert_eq!(
+        fixture
+            .shared
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|request| request["schema"] == "harness_capture_resolution")
+            .count(),
+        1
+    );
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .contains("Replaying the persisted reconciliation disposition")));
+    let script = fixture.shared.lock().unwrap();
+    assert_eq!(script.reconciliation_requests.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&script.reconciliation_requests[0]).unwrap(),
+        serde_json::to_value(&script.reconciliation_requests[1]).unwrap(),
+        "the retried reconciliation must be byte-identical to the interrupted one"
+    );
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert!(
+        runner.task.reviews[0]
+            .capture_resolution
+            .as_ref()
+            .unwrap()
+            .reuse_unchanged
+    );
+    assert!(serde_json::to_value(&runner.task).unwrap()["capture_resolution"].is_null());
+    assert!(script.capture_requests.is_empty());
+    assert!(script.replies.is_empty());
+}
+
+/// The same accepted candidate, but with a claim larger than the whole prompt
+/// budget (84,992 bytes at the fixture's 32,768-token window), so semantic
+/// reconciliation can never reach the model and must fall back to the
+/// human-required card.
+fn oversized_lesson_candidate() -> CaptureCandidate {
+    let mut candidate = existing_lesson_candidate();
+    candidate.literals[0].value = format!(
+        "Keep this evidenced implementation knowledge. {}",
+        "x".repeat(100_000)
+    );
+    candidate
+}
+
+fn reconcile_posts(fixture: &Fixture) -> usize {
+    fixture.shared.lock().unwrap().reconciliation_requests.len()
+}
+
+fn intent_details(runner: &Runner, kind: &str) -> Vec<String> {
+    runner
+        .task
+        .intent_events
+        .iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| event.detail.clone())
+        .collect()
+}
+
+fn reuse_proposal_reply(fixture: &Fixture) {
+    fixture
+        .conversational(json!({"action":"reply","message":"The behavior is already documented."}));
+    fixture.reply("harness_capture", json!({"reason":"The explanation repeats durable knowledge.","proposals":[{
+        "kind":"Lesson","title":"Observed behavior","description":"Keep this evidenced implementation knowledge.",
+        "evidence":["Model action:"],"files":[],"components":[],"requirement":null,"supersedes":null,"retracts":null
+    }]}));
+}
+
+#[tokio::test]
+async fn rejected_human_required_reuse_card_keeps_observation_unresolved() {
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().capture_candidates = vec![oversized_lesson_candidate()];
+    let mut runner = fixture.interactive().await;
+    // No harness_capture_resolution reply is scripted: the oversized candidate
+    // must never be judged by the model.
+    reuse_proposal_reply(&fixture);
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(runner.task.reviews.len(), 1);
+    let card = runner.task.reviews[0].capture_resolution.clone().unwrap();
+    assert_eq!(card.recommendation_source, "human_required");
+    assert!(card.reuse_unchanged);
+    assert_eq!(card.candidate_iri, "urn:existing");
+    assert_eq!(resolution_judgments(&runner), 0);
+    assert_eq!(candidate_lookups(&fixture), 1);
+    assert_eq!(
+        reconcile_posts(&fixture),
+        1,
+        "the runner posts capture/reconcile before pushing the card"
+    );
+    assert!(runner.task.capture_resolution.is_none());
+    let operation = runner.task.reviews[0].request.operation_id.clone();
+
+    runner.review_operation(&operation, false).await.unwrap();
+    assert!(runner.task.reviews.is_empty());
+    assert!(runner.task.capture_resolution.is_none());
+    assert!(runner.task.capture_batch.is_none());
+    assert_eq!(
+        candidate_lookups(&fixture),
+        1,
+        "rejecting the oversized card must not refetch candidates"
+    );
+    assert_eq!(reconcile_posts(&fixture), 1);
+    assert_eq!(
+        intent_details(&runner, "reuse_unresolved"),
+        vec![operation.clone()]
+    );
+    assert_eq!(
+        intent_details(&runner, "reuse_review"),
+        vec![format!("rejected {operation}")]
+    );
+    assert!(runner.task.events.iter().any(|event| event.message
+        == "Observation retained unresolved after the human rejected the oversized reuse candidate urn:existing."));
+    let journal = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(journal["capture_due"], false);
+    assert_ne!(runner.task.phase, Phase::AwaitingReview);
+    assert_ne!(runner.task.phase, Phase::Planning);
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingInput,
+        "the task continues exactly as after an accepted card"
+    );
+
+    // Before the fix each rejection reseeded reconciliation, refetched the
+    // same oversized candidate and minted a fresh human-required card. Now
+    // the turn is over: further advances wait for the human and never post.
+    for _ in 0..3 {
+        let error = runner.advance().await.unwrap_err().to_string();
+        assert!(error.contains("waiting for a human action"), "{error}");
+        assert!(runner.task.reviews.is_empty());
+        assert!(runner.task.capture_resolution.is_none());
+    }
+    assert_eq!(reconcile_posts(&fixture), 1);
+    assert_eq!(candidate_lookups(&fixture), 1);
+    assert_eq!(intent_details(&runner, "reuse_unresolved").len(), 1);
+
+    // The conversation proceeds normally on the next human turn.
+    runner
+        .submit_message("Thanks; continue.".into())
+        .await
+        .unwrap();
+    fixture.conversational(json!({"action":"reply","message":"Continuing."}));
+    fixture.no_capture();
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert!(runner.task.turn_finished);
+    assert!(runner.task.reviews.is_empty());
+    assert_eq!(reconcile_posts(&fixture), 1);
+    assert_eq!(candidate_lookups(&fixture), 1);
+    assert_eq!(intent_details(&runner, "reuse_unresolved").len(), 1);
+    let script = fixture.shared.lock().unwrap();
+    assert!(script.capture_requests.is_empty());
+    assert!(script.replies.is_empty());
+}
+
+#[tokio::test]
+async fn oversized_candidate_already_rejected_is_not_re_presented() {
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().capture_candidates = vec![existing_lesson_candidate()];
+    let mut runner = fixture.interactive().await;
+    reuse_proposal_reply(&fixture);
+    fixture.reply("harness_capture_resolution", json!({"disposition":"reuse_unchanged","candidate_id":"c0","rationale":"The claim and links are unchanged.","revised_title":null,"revised_description":null}));
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(runner.task.reviews.len(), 1);
+    let card = runner.task.reviews[0].capture_resolution.clone().unwrap();
+    assert_eq!(card.recommendation_source, "model");
+    assert_eq!(card.candidate_iri, "urn:existing");
+    assert_eq!(candidate_lookups(&fixture), 1);
+    assert_eq!(reconcile_posts(&fixture), 1);
+    let operation = runner.task.reviews[0].request.operation_id.clone();
+
+    // A rejected model-path reuse still restarts reconciliation, seeded with
+    // the rejected candidate IRI, and refetches at the current revision.
+    runner.review_operation(&operation, false).await.unwrap();
+    let reseeded = runner.task.capture_resolution.clone().unwrap();
+    assert_eq!(reseeded.rejected_candidate_iris, vec!["urn:existing"]);
+    assert!(reseeded.candidate_pages.is_empty());
+    assert_ne!(reseeded.operation_id, operation);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(
+        serde_json::to_value(&runner.task).unwrap()["capture_due"],
+        true
+    );
+    // The refetched page now carries the same record grown past the model
+    // context, so the only route left is the human-required card the human
+    // has already declined for this pairing.
+    fixture.shared.lock().unwrap().capture_candidates = vec![oversized_lesson_candidate()];
+
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(
+        candidate_lookups(&fixture),
+        2,
+        "the restarted reconciliation refetches candidates once"
+    );
+    assert!(runner.task.reviews.is_empty(), "no new review card");
+    assert!(runner.task.capture_resolution.is_none());
+    assert!(runner.task.capture_batch.is_none(), "the batch completed");
+    assert_eq!(
+        reconcile_posts(&fixture),
+        1,
+        "capture/reconcile is not posted for the already-rejected pairing"
+    );
+    assert_eq!(
+        resolution_judgments(&runner),
+        1,
+        "the oversized candidate never reaches the model"
+    );
+    let unresolved = intent_details(&runner, "reuse_unresolved");
+    assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+    assert!(unresolved[0].contains("urn:existing"), "{unresolved:?}");
+    assert!(
+        unresolved[0].contains(&reseeded.operation_id),
+        "{unresolved:?}"
+    );
+    assert!(runner.task.events.iter().any(|event| event.message
+        == "Observation retained unresolved: the only reuse candidate urn:existing exceeds the model context and was already rejected."));
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let script = fixture.shared.lock().unwrap();
+    assert!(
+        script.capture_requests.is_empty(),
+        "the unresolved proposal is absent from the outgoing capture"
+    );
+    assert!(script.replies.is_empty());
+}
+
+#[tokio::test]
+async fn journal_without_last_error_kind_deserializes() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let fresh = serde_json::to_value(&runner.task).unwrap();
+    assert!(
+        fresh.get("last_error_kind").is_none(),
+        "an absent kind is not serialized"
+    );
+    runner.task.last_error = Some("fixture failure".into());
+    runner.task.last_error_kind = Some("service".into());
+    let mut journal = serde_json::to_value(&runner.task).unwrap();
+    assert_eq!(journal["last_error_kind"], "service");
+    journal.as_object_mut().unwrap().remove("last_error_kind");
+    let legacy: moosedev::harness::runner::Task = serde_json::from_value(journal).unwrap();
+    assert_eq!(legacy.last_error.as_deref(), Some("fixture failure"));
+    assert!(legacy.last_error_kind.is_none());
 }

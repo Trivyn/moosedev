@@ -1,12 +1,23 @@
 # Change-level intent pilot
 
-Status: implementation requested; the two new Requirement records below and the
-maintenance rubric await explicit approval under AGENTS.md:140–147. This document
-is a review proposal, not an accepted graph record or completed implementation.
+Status: explicitly approved by the maintainer on 2026-09-09, including both exact
+Requirement descriptions and maintenance rubric v2. Requirements captured as
+accepted before implementation; the graph is authoritative:
 
-## Requirements proposed for the project graph
+- Change-level intent: `https://moosedev.dev/kg/Requirement/e5c5b8bc-8f32-4079-864a-057ad9f3753f`.
+- Controlled pilot: `https://moosedev.dev/kg/Requirement/59378083-19c8-4814-a63c-8256342f6fac`.
+- Implementation decision: `https://moosedev.dev/kg/ArchitecturalDecision/492707a9-256a-42cd-90eb-6b32d5c4bd4a`.
 
-| Kind / title | Exact proposed description |
+Frozen pre-approval descriptions and rubric remain in private-evidence review v2.
+Implementation and all twelve scored runs completed on 2026-09-10. Results are
+retained in `bench/private-evidence/harness-intent-pilot-v1/README.md`. The gate
+remains default-off. This document preserves that pilot's approved contract; the
+subsequently approved evolution and superseding Requirement are described in
+`spec/harness_evolution.md`.
+
+## Approved requirements
+
+| Kind / title | Exact accepted description |
 | --- | --- |
 | Requirement — Change-level intent precedes experimental harness edits | Provide an experimental, default-off harness policy requiring an approved change-level intent mapping before source mutations. This mapping is plan metadata persisted in the task journal: it assigns purpose and obligation roles to record references and identifies affected existing or planned code entities and verification. It is distinct from graph intent links (realizes, satisfies, embodies); neither the mapping nor its roles introduces an ontology class or predicate, and graph writes use only existing validated predicates with their existing meanings. Reuse relevant current typed knowledge; related entities and helpers may share one justification. When required intent is genuinely missing, present grounded proposed knowledge during plan review and require its acceptance before execution. Keep entity identity resolution, minting, and validated link plumbing in MOOSEDev. Knowledge/source/scope changes invalidate affected approval; interruption and resume preserve the obligation. Structural approval and a valid reference do not establish semantic correctness. |
 | Requirement — Controlled local intent-enforcement pilot | Compare current and change-level policies in one frozen local harness using Qwen3.8-27B and Gemma E4B on the existing cache and ledger scenarios plus one approved synthetic maintenance-helper scenario: twelve runs, at most twenty-eight episodes, one run per cell. On approval, place the maintenance package in the committed scenarios directory, bind approval to its package digest, and allow its single episode explicitly in the loader without a private-path exception. Keep functioning indexing, initial knowledge, runtime settings, task budgets, and simulated review rules matched across policies. Preserve the ledger's empty initial knowledge. Measure correctness, semantic knowledge and link quality, progress, repeated work, complete resource usage, and approval overhead separately; do not reward record count or link density. Pre-register the primary outcome and count approval overhead in gate decisions and approval cycles. Retain all attempts and replayable evidence under new identities. This diagnostic protocol measures friction, blockage, and link quality under scope-only simulated auto-acceptance, not semantic protection or statistically established benefit. |
@@ -21,9 +32,12 @@ harness. Existing accepted requirements for current knowledge delivery
 ## Implementation proposal
 
 - Persist the experimental policy with each task and expose it in study identity.
-  Existing journals and default operation use the current policy. Treatment-only
-  schema/prompt additions expose bounded record/entity choices; models do not
-  generate graph IRIs or a separate specification for each helper.
+  Existing journals and default operation use the current policy. Both study arms
+  receive the same optional existing-record association action and bounded
+  record/entity choices. This shared plumbing makes helper links achievable in
+  the control without minting duplicate knowledge. Only treatment requires the
+  pre-edit plan mapping; models generate neither graph IRIs nor a separate
+  specification for each helper.
 - Extend the approved plan with one coherent intent mapping. Reuse the existing
   planning → capture → review → approval sequence. Any proposed record supplying
   intent must be accepted before execution, including decisions ordinarily left
@@ -84,8 +98,7 @@ whitespace stripping and `"(unnamed)"` for empty names. Preserve signatures,
 iteration order, duplicates, Unicode, empty-input behavior, input immutability,
 and propagation of iterator errors. Input names are strings. Existing seeded
 knowledge supplies this intent. No new Requirement or ArchitecturalDecision is
-required; meaningful
-links to existing knowledge suffice. Judge supported, useful new discoveries on
+required; meaningful links to existing knowledge suffice. Judge supported, useful new discoveries on
 their merits rather than applying an arbitrary zero-record quota. The concrete
 review package is `bench/private-evidence/harness-intent-study-review-v2/maintenance/`.
 The extraction check intentionally requires the helper's result to pass through

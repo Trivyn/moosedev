@@ -93,6 +93,8 @@ def build_command(
     daemon_exe: Path | None = None, daemon_socket: Path | None = None,
     context_tokens: int = 32768, ca_bundle: Path | None = None,
     harness_response_policy: str = "auto",
+    harness_intent_policy: str = "current",
+    postedit_association_contract: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     """Build argv and controlled env additions; write only runtime configuration.
 
@@ -109,6 +111,10 @@ def build_command(
         raise ValueError(f"unknown backend: {backend}")
     if harness_response_policy not in {"auto", "provider-default", "reasoning-off"}:
         raise ValueError("unknown harness response policy")
+    if harness_intent_policy not in {"current", "change-level", "change-level-v2"}:
+        raise ValueError("unknown harness intent policy")
+    if type(postedit_association_contract) is not bool:
+        raise ValueError("post-edit association contract flag must be Boolean")
     if not isinstance(model, str) or not model.strip() or model.startswith("-"):
         raise ValueError("an exact nonempty model identifier is required")
     if isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or context_tokens < 4096:
@@ -202,7 +208,10 @@ def build_command(
                 "MOOSEDEV_LLM_BASE_URL": endpoint, "MOOSEDEV_LLM_MODEL": model,
                 "MOOSEDEV_LLM_API_KEY": "local-study",
                 "MOOSEDEV_HARNESS_RESPONSE_POLICY": harness_response_policy,
+                "MOOSEDEV_HARNESS_INTENT_POLICY": harness_intent_policy,
                 "MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS": str(context_tokens)})
+    if postedit_association_contract:
+        env["MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS"] = "1"
     return [str(binary), "--project", str(workspace), "--daemon", daemon_url,
             "--daemon-exe", str(daemon), "--model", model, "--endpoint", endpoint], env
 
@@ -266,6 +275,8 @@ def normalize_event(backend: str, event: dict) -> dict:
                 result["read"] = part
             elif tool == "bash":
                 result["command"] = part
+            elif tool in {"edit", "write", "patch", "multiedit"}:
+                result["edit"] = part
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             if state.get("status") == "error":
                 result["error"] = state.get("error")

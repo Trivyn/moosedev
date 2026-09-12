@@ -253,14 +253,188 @@ fn visible(value: &str) -> String {
 
 fn gate(task: &Task) -> String {
     match task.phase {
-        Phase::AwaitingPlan => task.plan.as_ref().map(|plan|format!("PLAN · human approval required\n{}\nFiles: {}\nChecks:\n{}\n/approve to execute · send feedback to revise",plan.summary,plan.files.join(", "),plan.checks.join("\n"))).unwrap_or_default(),
-        Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
+        Phase::AwaitingPlan => task.plan.as_ref().map(|plan| {
+            let mut text = format!("PLAN · human approval required\n{}\nFiles: {}\nChecks:\n{}", plan.summary, plan.files.join(", "), plan.checks.join("\n"));
+            if let Some(mapping) = &plan.change_intent {
+                text.push_str(&format!("\nPurpose records: {}\nObligation records: {}\n", mapping.purpose.join(", "), mapping.obligations.join(", ")));
+                if let Some(missing) = &mapping.missing {
+                    text.push_str(&format!("Missing intent: {missing}\n"));
+                }
+                for target in &mapping.targets {
+                    text.push_str(&format!("{} · {}{}\nRecords: {}\n", target.file, if target.planned { "planned " } else { "" }, target.entity, target.records.join(", ")));
+                }
+            }
+            if let Some(selection) = &task.purpose_selection {
+                text.push_str("\nChange-level-v2 purpose metadata:\n");
+                for selected in &selection.selected {
+                    text.push_str(&format!("{} · {}\nRationale: {}\n", selected.role, selected.iri, selected.rationale));
+                }
+                text.push_str(&format!("Purpose status: {}\nView Knowledge (Tab) for complete selected claims and scope.\n", selection.status));
+            }
+            text.push_str("\n/approve to execute · send feedback to revise");
+            text
+        }).unwrap_or_default(),
+        Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Knowledge (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
         Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Knowledge (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
         Phase::AwaitingInput => if task.turn_finished { "Your turn. Ask a follow-up or describe the next change.".into() } else { "Your input is needed. Reply below.".into() },
         Phase::Cancelled => "Interrupted; obligations are saved. /continue resumes, or send follow-up guidance.".into(),
         Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
         _ => String::new(),
     }
+}
+
+fn record_claim(record: &super::protocol::PurposeCandidate) -> String {
+    let mut text = format!(
+        "{} · {} · {}\n{}\n",
+        record.kind, record.title, record.lifecycle, record.iri
+    );
+    for literal in &record.claim.literals {
+        text.push_str(&format!("{}: {}", literal.predicate, literal.value));
+        if let Some(language) = &literal.language {
+            text.push_str(&format!(" [language: {language}]"));
+        }
+        if let Some(datatype) = &literal.datatype {
+            text.push_str(&format!(" [datatype: {datatype}]"));
+        }
+        text.push('\n');
+    }
+    for relation in &record.relations {
+        text.push_str(&format!(
+            "{} {} {}\n",
+            if relation.incoming {
+                "Incoming"
+            } else {
+                "Outgoing"
+            },
+            relation.predicate,
+            relation.target_iri
+        ));
+    }
+    text
+}
+
+fn purpose_review(task: &Task) -> String {
+    let Some(selection) = &task.purpose_selection else {
+        return String::new();
+    };
+    let mut text = format!("CHANGE PURPOSE · {}\n", selection.status);
+    for selected in &selection.selected {
+        text.push_str(&format!(
+            "\nRole: {} · journal metadata\nRationale: {}\n",
+            selected.role, selected.rationale
+        ));
+        if let Some(record) = selection
+            .pages
+            .iter()
+            .flat_map(|page| &page.candidates)
+            .find(|record| {
+                record.iri == selected.iri && record.assertion_digest == selected.assertion_digest
+            })
+        {
+            text.push_str(&record_claim(record));
+        } else {
+            text.push_str(&format!(
+                "{} · matching claim snapshot unavailable\n",
+                selected.iri
+            ));
+        }
+    }
+    if let Some(scope) = &task.approved_change_scope {
+        text.push_str("\nApproved definition scopes\n");
+        for definition in &scope.definition_scopes {
+            text.push_str(&format!("{} · {}\n", definition.file, definition.symbol));
+        }
+    }
+    text.push_str(
+        "\nPurpose roles do not exempt applicable Constraints or establish code correctness.\n\n",
+    );
+    text
+}
+
+fn association_claim(task: &Task, binding: &super::daemon::intent::IntentBinding) -> String {
+    let Some(state) = &task.postedit_association else {
+        return String::new();
+    };
+    let snapshot = state.decisions.iter().find_map(|decision| {
+        if !decision.selected_record_iris.contains(&binding.record_iri) {
+            return None;
+        }
+        let assertion_digest = decision
+            .selected_assertion_digests
+            .get(&binding.record_iri)?;
+        let candidate = state
+            .pages
+            .iter()
+            .flat_map(|page| &page.candidates)
+            .find(|candidate| {
+                candidate.candidate_digest == decision.candidate_digest
+                    && candidate.file == binding.file
+                    && candidate.symbol == binding.symbol
+                    && binding.source_digest.as_deref() == Some(candidate.source_digest.as_str())
+            })?;
+        let record = candidate.record_choices.iter().find(|record| {
+            record.iri == binding.record_iri && &record.assertion_digest == assertion_digest
+        })?;
+        Some((decision, record))
+    });
+    match snapshot {
+        Some((decision, record)) => format!(
+            "Recommendation rationale: {}\n{}",
+            decision.rationale,
+            record_claim(record)
+        ),
+        None => "Matching recommendation and claim snapshot unavailable.\n".into(),
+    }
+}
+
+fn pending_scope_review(task: &Task) -> String {
+    let Some(edit) = &task.pending_edit else {
+        return String::new();
+    };
+    let Some(assessment) = task.scope_assessments.iter().rev().find(|assessment| {
+        assessment.matches_edit(edit) && assessment.disposition == "awaiting_scope_approval"
+    }) else {
+        return String::new();
+    };
+    let mut text = format!(
+        "AFFECTED CODE SCOPE · approval required\n{}\nThe pending diff touches code outside the previously approved definition scope. Review this scope with the selected purpose above and the exact edit in Diff.\n",
+        assessment.file
+    );
+    let mut shown_claims = std::collections::BTreeSet::new();
+    for candidate in assessment.pages.iter().flat_map(|page| &page.candidates) {
+        let basis = match candidate.scope_basis {
+            super::protocol::IntentScopeBasis::ChangedDefinition => {
+                "definition touched by the diff"
+            }
+            super::protocol::IntentScopeBasis::EnclosingDefinition => {
+                "definition enclosing the diff"
+            }
+            super::protocol::IntentScopeBasis::ConservativeFile => {
+                "conservative file scope; no entity proof"
+            }
+        };
+        text.push_str(&format!("\n{} · {basis}\n", candidate.file));
+        if let Some(symbol) = &candidate.symbol {
+            text.push_str(&format!("{symbol}\n"));
+        }
+        if let Some(range) = candidate
+            .enclosing_range
+            .as_ref()
+            .or(candidate.definition_range.as_ref())
+        {
+            text.push_str(&format!(
+                "Definition starts on line {}\n",
+                range.start.line.saturating_add(1)
+            ));
+        }
+        for record in &candidate.record_choices {
+            if shown_claims.insert((&record.iri, &record.assertion_digest)) {
+                text.push_str(&record_claim(record));
+            }
+        }
+    }
+    text.push_str("\n/approve accepts this exact affected scope and edit under the selected rationale. No graph association is implied.\n\n");
+    text
 }
 
 fn body(snapshot: &Snapshot, view: &View) -> String {
@@ -321,8 +495,56 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
         }
         3 => {
             if let Some(task) = &snapshot.task {
+                text.push_str(&purpose_review(task));
+                text.push_str(&pending_scope_review(task));
                 for (index, review) in task.reviews.iter().enumerate() {
                     text.push_str(&format!("REVIEW {}\n{}\n", index + 1, review.reason));
+                    if task.pending_revision.as_ref().is_some_and(|revision| {
+                        revision.origin_operation_id == review.request.operation_id
+                    }) {
+                        text.push_str("\nA revised proposal is paused behind this complete originating capture batch. Reject this operation to continue with the durable replacement; accepting it discards the replacement and reopens assessment.\n");
+                    }
+                    if let Some(resolution) = &review.capture_resolution {
+                        text.push_str(&format!(
+                            "\nSEMANTIC REUSE · unchanged: {} · recommendation: {}\nOriginal proposed claim · kind {}\n{}\n\nExisting claim · {} · kind {}{}\n{}\n\nRationale\n{}\nRejected additions and differences remain in the original evidence and candidate payload in Journal.\n",
+                            resolution.reuse_unchanged,
+                            resolution.recommendation_source,
+                            resolution.original_kind,
+                            resolution.original_claim,
+                            resolution.candidate_title,
+                            resolution.candidate_kind,
+                            if !resolution.original_kind.is_empty()
+                                && !resolution.candidate_kind.is_empty()
+                                && resolution.original_kind != resolution.candidate_kind
+                            {
+                                " · KIND MISMATCH"
+                            } else {
+                                ""
+                            },
+                            resolution.existing_claim,
+                            resolution.rationale
+                        ));
+                    }
+                    if let Some(associations) = &review.intent_links {
+                        text.push_str(&format!(
+                            "\nCode associations · {}\n",
+                            associations.operation_id
+                        ));
+                        for binding in &associations.bindings {
+                            text.push_str(&format!(
+                                "{}\n{} · {}\n\n",
+                                binding.record_iri,
+                                binding.file,
+                                binding
+                                    .symbol
+                                    .as_deref()
+                                    .or(binding.planned_name.as_deref())
+                                    .unwrap_or("unresolved entity")
+                            ));
+                            text.push_str(&association_claim(task, binding));
+                        }
+                        text.push_str("Review each record's relevance to its target; acceptance is not proof of correctness.\n");
+                    }
                     for proposal in &review.request.proposals {
                         text.push_str(&format!(
                             "\n{} · {}\n{}\n\nEvidence\n{}\n",

@@ -92,7 +92,7 @@ def _source_archive(repo, identity, destination):
         os.fsync(raw.fileno())
 
 
-def build_and_freeze(repo: Path = REPO) -> dict:
+def build_and_freeze(repo: Path = REPO, *, indexer_manifest=None) -> dict:
     """Own the build and retain complete private inputs, even on build failure."""
     repo = _directory(repo)
     target = _directory(repo / "target", create=True)
@@ -130,15 +130,19 @@ def build_and_freeze(repo: Path = REPO) -> dict:
     if before != source_identity(repo) or (dependency and dependency != source_identity(engine)):
         raise RuntimeError(f"source changed during the build; evidence retained at {attempt}")
     evidence = {path.name: path for path in sorted(attempt.iterdir())}
-    return freeze_binaries(repo, before, dependency, evidence=evidence)
+    return freeze_binaries(repo, before, dependency, evidence=evidence, indexer_manifest=indexer_manifest)
 
 
-def freeze_binaries(repo: Path, source: dict, dependency: dict | None = None, *, evidence=None) -> dict:
+def freeze_binaries(repo: Path, source: dict, dependency: dict | None = None, *, evidence=None,
+                    indexer_manifest=None, artifact_target=None) -> dict:
     repo = _directory(repo)
     target = _directory(repo / "target")
+    built_target = _directory(artifact_target) if artifact_target is not None else target
+    if built_target != target and not built_target.is_relative_to(target):
+        raise ValueError("build artifacts must come from this repository's target directory")
     source_paths, hashes = {}, {}
     for role, name in BINARIES.items():
-        path = target / "release" / name
+        path = built_target / "release" / name
         _directory(path.parent)
         if not stat.S_ISREG(path.lstat().st_mode) or not os.access(path, os.X_OK):
             raise ValueError(f"missing real executable repository artifact: {path}")
@@ -152,6 +156,9 @@ def freeze_binaries(repo: Path, source: dict, dependency: dict | None = None, *,
     receipt = {"schema_version": 1, "files": receipt_files} if evidence else None
     identity = {"schema_version": 1, "profile": "release", "features": ["harness"],
                 "source": source, "engine_source": dependency, "binary_hashes": hashes, "build_receipt": receipt}
+    if indexer_manifest is not None:
+        from .indexing import verify_indexer
+        identity["indexer"] = verify_indexer(indexer_manifest)
     build_id = hashlib.sha256(canonical_json(identity)).hexdigest()
     parent = _directory(target / "harness-study" / "bin", create=True)
     destination = parent / build_id
@@ -193,6 +200,9 @@ def verify_binaries(manifest_path: Path, repo: Path = REPO) -> dict:
         raise ValueError("frozen binaries must be direct children of repository target/harness-study/bin")
     _directory(directory)
     identity = {key: manifest[key] for key in IDENTITY_FIELDS}
+    if "indexer" in manifest:
+        from .indexing import verify_indexer
+        identity["indexer"] = verify_indexer(manifest["indexer"])
     if identity["schema_version"] != 1 or identity["profile"] != "release" or identity["features"] != ["harness"]:
         raise ValueError("unexpected binary build configuration")
     if hashlib.sha256(canonical_json(identity)).hexdigest() != manifest["build_id"]:

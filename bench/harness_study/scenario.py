@@ -8,6 +8,7 @@ from .artifacts import sha256_file
 
 
 SCENARIOS = Path(__file__).parent / "scenarios"
+MAINTENANCE = "display_labels_maintenance"
 
 
 def relative_file(root: Path, name: str) -> Path:
@@ -49,8 +50,9 @@ def load_scenario(name: str, directory: Path = SCENARIOS) -> dict:
     if scenario.get("track") not in ("inherited", "accumulation"):
         raise ValueError("unknown study track")
     episodes = scenario.get("episodes", [])
-    if len(episodes) != 3 or len({e["id"] for e in episodes}) != 3:
-        raise ValueError("pilot scenarios require three uniquely identified episodes")
+    expected_episodes = 1 if name == MAINTENANCE else 3
+    if len(episodes) != expected_episodes or len({e["id"] for e in episodes}) != expected_episodes:
+        raise ValueError(f"scenario requires {expected_episodes} uniquely identified episodes")
     relative_file(root, "project")
     gold = json.loads(relative_file(root, "gold.json").read_text())
     if gold.get("scenario_id") != name or gold.get("schema_version") != 1:

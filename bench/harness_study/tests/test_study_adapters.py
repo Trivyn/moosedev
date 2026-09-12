@@ -152,6 +152,19 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "response policy"):
             self.build("harness", harness_response_policy="unknown")
 
+    def test_postedit_association_contract_is_explicit_and_opt_in(self):
+        _, old = self.build("harness", executable=self.daemon, daemon_exe=self.daemon,
+                            daemon_url="http://127.0.0.1:8000",
+                            endpoint="http://127.0.0.1:1234/v1")
+        self.assertNotIn("MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS", old)
+        _, stage2 = self.build("harness", executable=self.daemon, daemon_exe=self.daemon,
+                               daemon_url="http://127.0.0.1:8000",
+                               endpoint="http://127.0.0.1:1234/v1",
+                               postedit_association_contract=True)
+        self.assertEqual(stage2["MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS"], "1")
+        with self.assertRaisesRegex(ValueError, "Boolean"):
+            self.build("harness", postedit_association_contract=1)
+
     def test_rejects_mutated_config_and_symlinks(self):
         self.build("codex")
         with self.assertRaises(ValueError):
@@ -209,6 +222,20 @@ class EventTests(unittest.TestCase):
         failure = adapters.normalize_event("opencode", {"type": "tool_use", "part": {
             "tool": "bash", "state": {"status": "error", "error": "failed"}}})
         self.assertEqual(failure["error"], "failed")
+
+    def test_opencode_edit_tools_are_observed_as_edits(self):
+        for tool in ("edit", "write", "patch", "multiedit"):
+            with self.subTest(tool=tool):
+                part = {"tool": tool, "state": {"status": "completed", "input": {"filePath": "cache.py"}}}
+                result = adapters.normalize_event("opencode", {"type": "tool_use", "part": part})
+                self.assertEqual(result["edit"], part)
+                self.assertIsNone(result["read"])
+                self.assertIsNone(result["command"])
+        for tool in ("read", "bash", "glob"):
+            with self.subTest(tool=tool):
+                result = adapters.normalize_event("opencode", {"type": "tool_use", "part": {"tool": tool}})
+                self.assertNotIn("edit", result)
+        self.assertNotIn("edit", adapters.normalize_event("opencode", {"type": "text", "part": {"text": "edit"}}))
 
     def test_bridge_deltas_do_not_count_repeated_task_snapshots(self):
         state = adapters.normalize_event("harness", {"type": "state", "task": {"events": ["read"]}})

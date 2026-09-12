@@ -154,7 +154,7 @@ def execute_check(workspace: Path, hidden_test: Path, *, timeout_seconds: int = 
     return _execute(workspace, hidden_test=hidden_test, timeout_seconds=timeout_seconds)
 
 
-def validate_fixtures() -> dict:
+def validate_fixtures(scenarios=None) -> dict:
     """Validate each reference and negative overlay; retain every check's outputs."""
     cases = []
 
@@ -165,7 +165,8 @@ def validate_fixtures() -> dict:
         cases.append({"scenario_id": scenario_id, "id": case_id, "kind": kind,
                       "expected": expected, "passed": passed, "result": result})
 
-    for name in list_scenarios():
+    from .scenario import MAINTENANCE
+    for name in scenarios if scenarios is not None else [name for name in list_scenarios() if name != MAINTENANCE]:
         scenario = load_scenario(name)
         package = SCENARIOS / name
         episodes = {episode["id"]: episode for episode in scenario["episodes"]}

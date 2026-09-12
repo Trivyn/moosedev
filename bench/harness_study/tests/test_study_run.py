@@ -9,6 +9,7 @@ from unittest.mock import patch
 from bench.harness_study import run as runner
 from bench.harness_study.artifacts import ArtifactStore, sha256_file
 from bench.harness_study.grading import report
+from bench.harness_study.scenario import tree_manifest
 
 
 class RunTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class RunTests(unittest.TestCase):
             path.write_text(f"fixture {role}")
             binaries[role] = str(path)
         (self.build / "engine-source.tar.gz").write_bytes(b"private engine archive")
-        self.binary_manifest = {"directory": str(self.build), "binaries": binaries,
+        self.binary_manifest = {"directory": str(self.build), "binaries": binaries, "build_id": "fixture-build",
                                 "binary_hashes": {role: sha256_file(Path(path)) for role, path in binaries.items()}}
         self.assets = self.root / "assets"
         self.assets.mkdir()
@@ -63,6 +64,7 @@ class RunTests(unittest.TestCase):
         self.cell = {"scenario_id": "fixture", "model": "agent-exact", "backend": "harness",
                      "condition": "harness", "repetition": 1}
         self.executions, self.grants, self.observed = [], [], []
+        self.observed_guards = []
         self.archive_calls = 0
         self.model_load_calls = 0
         self.command_arguments = []
@@ -172,6 +174,7 @@ class RunTests(unittest.TestCase):
                 self.assertEqual((workspace / "PROJECT_NOTES.md").read_text(), f"remember episode {number - 1}\n")
                 self.assertIn(f"graph episode {number - 1}", (workspace / ".moosedev/kg.nq").read_text())
             self.observed.append(episode["id"])
+            self.observed_guards.append((kwargs["evidence_byte_limit"], kwargs["reject_loop_limit"]))
             (workspace / "service.py").write_text(f"EPISODE = {number}\n")
             (workspace / "PROJECT_NOTES.md").write_text(f"remember episode {number}\n")
             (workspace / ".moosedev").mkdir(exist_ok=True)
@@ -211,6 +214,57 @@ class RunTests(unittest.TestCase):
             result = runner.run_cell(self.root / "evidence", self.frozen, self.cell)
         ArtifactStore(self.root / "evidence").verify_run(Path(result["path"]))
         return result
+
+    def test_baseline_native_cell_runs_without_overlay_index_or_daemon(self):
+        from bench.harness_study import evolution, intent
+        self.config.update(evaluation_mode=evolution.STAGE2_BASELINE_MODE, episode_limit=1,
+                           scenario_ids=list(intent.SCENARIOS), intent_policies=["current", "change-level-v2"],
+                           local_models=[{"id": model} for model in intent.MODELS],
+                           evidence_byte_limit=evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
+                           reject_loop_limit=evolution.BASELINE_REJECT_LOOP_LIMIT,
+                           seed=1, evolution_design=evolution.design_identity(evolution.STAGE2_BASELINE_MODE))
+        # A baseline preflight fingerprints opencode and lms only; no codex identity exists.
+        self.config.pop("codex")
+        self.frozen.pop("codex")
+        for index in range(len(self.config["local_models"])):
+            weights = self.root / f"weights-{index}"
+            weights.mkdir()
+            (weights / "model.safetensors").write_text("fixture weights")
+            self.frozen[f"local_model_{index}"] = {"weights": str(weights), "files": tree_manifest(weights)}
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        self.frozen["schedule"] = runner.schedule(self.config)
+        self.cell = next(cell for cell in self.frozen["schedule"] if cell["backend"] == "opencode")
+        self.assertEqual((self.cell["condition"], self.cell["intent_policy"]), ("without", None))
+        self.scenario["id"] = self.cell["scenario_id"]
+        (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        for name in ("verify_indexer", "apply_overlay", "index_workspace", "ready_dossiers"):
+            self.assertNotIn(name, dir(runner))
+        with patch.dict("sys.modules", {"bench.harness_study.indexing": None}):
+            result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(self.observed, ["e1"])
+        # The frozen baseline guards reach the observer from the configuration.
+        self.assertEqual(self.observed_guards, [(8 * 1024 ** 3, 5)])
+        self.assertEqual([(episode["status"], episode.get("reason")) for episode in result["episodes"]],
+                         [("success", None), ("unattempted", "episode_limit"), ("unattempted", "episode_limit")])
+        self.assertIn("evolution_constituents", result["episodes"][0])
+        self.assertNotIn("intent_primary", result["episodes"][0])
+        backend, arguments = self.command_arguments[0]
+        self.assertEqual(backend, "opencode")
+        self.assertNotIn("harness_intent_policy", arguments)
+        self.assertTrue(arguments["postedit_association_contract"])
+        self.assertEqual(len(self.grants), 1)
+        saved = Path(result["path"])
+        self.assertTrue((saved / "evolution-design.json").is_file())
+        self.assertFalse((saved / "intent-design.json").exists())
+        self.assertFalse((saved / "episodes/e1/prepared").exists())
+        self.assertFalse((saved / "episodes/e1/daemon.log").exists())
+        self.assertIn("PROJECT_NOTES.md", {path.name for path in (saved / "initial").iterdir()})
+        manifest = json.loads((saved / "manifest.json").read_text())
+        self.assertIsNone(manifest["intent_policy"])
+        self.assertEqual(manifest["evaluation_mode"], evolution.STAGE2_BASELINE_MODE)
+        with self.assertRaisesRegex(ValueError, "exact frozen schedule cell"):
+            runner.run_cell(self.root / "other", self.frozen, dict(self.cell, model="substitute"))
 
     def test_pending_approval_is_a_retained_preflight_attempt(self):
         result = self._run(approval_error=ValueError("scenario rubric approval is pending"))
@@ -261,6 +315,8 @@ class RunTests(unittest.TestCase):
         result = self._run()
         self.assertEqual(result["status"], "success", result)
         self.assertEqual(self.observed, ["e1", "e2", "e3"])
+        # Without frozen guard keys the evidence guard is off and the reject loop keeps its default.
+        self.assertEqual(self.observed_guards, [(None, 5)] * 3)
         self.assertEqual(self.archive_calls, 1)
         self.assertEqual([episode["status"] for episode in result["episodes"]], ["success"] * 3)
         run = Path(result["path"])
@@ -271,6 +327,17 @@ class RunTests(unittest.TestCase):
             self.assertIn(f"graph episode {number}", (saved / ".moosedev/kg.nq").read_text())
             self.assertTrue((saved / ".moosedev/harness/conversations/session.json").is_file())
         self.assertTrue(all(not execution.exists() for execution in self.executions))
+
+    def test_episode_limit_attempts_one_episode_and_manifest_binds_build(self):
+        self.config["episode_limit"] = 1
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertEqual([(episode["status"], episode.get("reason")) for episode in result["episodes"]],
+                         [("success", None), ("unattempted", "episode_limit"), ("unattempted", "episode_limit")])
+        manifest = json.loads((Path(result["path"]) / "manifest.json").read_text())
+        self.assertEqual(manifest["build_id"], "fixture-build")
 
     def test_agent_failure_keeps_dependent_episodes_unattempted(self):
         result = self._run(fail_episode="e1")

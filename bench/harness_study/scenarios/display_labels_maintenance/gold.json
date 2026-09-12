@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "scenario_id": "display_labels_maintenance",
+  "facts": [
+    {
+      "id": "label-normalization",
+      "claim": "For string input, render_name and each render_names item trim surrounding whitespace using str.strip(), preserve internal whitespace and letter case, and use \"(unnamed)\" when the trimmed name is empty.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#label-normalization"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "label-maintenance-contract",
+      "claim": "Preserve render_name(name) and render_names(names). Batch accepts any iterable of strings, returns a list preserving order and duplicates, does not mutate input collections, and propagates iterator errors when encountered. Refactor duplicated normalization into one private module-level helper used once per name by both public entry points; the helper name is not prescribed. This is an internal maintenance change with no new user-facing behavior.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#label-maintenance-contract"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    }
+  ],
+  "forbidden_claims": [
+    "The public API or user-facing normalization semantics changed.",
+    "Batch output may discard duplicates, sort input, or silently swallow iterator failures.",
+    "Every helper requires a separate new Requirement or ArchitecturalDecision."
+  ],
+  "review_status": "pending",
+  "grading_notes": [
+    "No new Requirement or ArchitecturalDecision is necessary for full credit.",
+    "Grade semantic completeness and support, not record count or lexical similarity.",
+    "Penalize duplicate, unsupported, or obsolete knowledge; do not automatically penalize a justified nonduplicate discovery.",
+    "Existing accepted facts may be reused unchanged; meaningful entity links are sufficient and redundant link density is not a benefit.",
+    "The baseline passes behavioral checks and deliberately fails the extraction objective; report those outcomes separately.",
+    "Pre-registered primary outcome per model/policy: completion within frozen budget, passing behavior and extraction, correct links from the new helper to both existing seed records, and no redundant or unsupported accepted knowledge. Preserve constituent results.",
+    "Zero-new-record completion is secondary; a supported useful discovery does not fail the primary outcome.",
+    "The extraction check intentionally requires helper results to pass through unchanged; behavior-preserving post-processing refactors are outside this narrow extraction contract.",
+    "One run per cell with a scope-only simulated auto-accepting reviewer cannot establish semantic protective value or statistical benefit."
+  ]
+}
