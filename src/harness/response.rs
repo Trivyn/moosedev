@@ -574,8 +574,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires the three installed study models and explicit neutral usage probe opt-in"]
     async fn native_usage_receipts() {
+        use crate::harness::digest::sha256_hex;
         use crate::llm::RequestStatus;
-        use sha2::{Digest, Sha256};
         assert_eq!(
             std::env::var("MOOSEDEV_RUN_HARNESS_USAGE_PROBES").as_deref(),
             Ok("1")
@@ -591,15 +591,7 @@ mod tests {
             "src/harness/response.rs",
         ]
         .into_iter()
-        .map(|path| {
-            (
-                path,
-                format!(
-                    "{:x}",
-                    Sha256::digest(std::fs::read(root.join(path)).unwrap())
-                ),
-            )
-        })
+        .map(|path| (path, sha256_hex(std::fs::read(root.join(path)).unwrap())))
         .collect();
         let mut observations = Vec::new();
         for model in [
@@ -659,7 +651,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires the three installed study models and a running LM Studio"]
     async fn native_neutral_contracts() {
-        use sha2::{Digest, Sha256};
+        use crate::harness::digest::sha256_hex;
         assert_eq!(
             std::env::var("MOOSEDEV_RUN_HARNESS_RESPONSE_PROBES").as_deref(),
             Ok("1")
@@ -679,7 +671,7 @@ mod tests {
                 let bytes =
                     std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
                         .unwrap();
-                (path, format!("{:x}", Sha256::digest(bytes)))
+                (path, sha256_hex(bytes))
             })
             .collect();
         let mut observations = Vec::new();

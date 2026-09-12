@@ -1,16 +1,18 @@
-//! Programmatic memory boundary for the harness. The model never calls these routes.
+//! Programmatic memory boundary for the harness. The model never calls these
+//! routes: the runner asks for context, submits typed captures (`capture/v2`),
+//! has a human review them, and reads checkpoints; `intent`, `associate` and
+//! `capture_type` derive associations and typed proposals symbolically.
 use std::collections::{BTreeSet, HashSet};
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crate::harness::digest::sha256_hex;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use chrono::Utc;
 use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Quad, Term};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::protocol::*;
 use crate::api::error::ApiError;
@@ -21,12 +23,13 @@ pub mod associate;
 pub mod capture_type;
 pub mod intent;
 pub mod intent_candidates;
+mod journal;
 pub mod reconcile_score;
 pub mod reconciliation;
+mod revision;
 
-// Serializes operation-journal transitions, including retried HTTP requests.
-// Graph lifecycle primitives separately serialize the shared ratification queue.
-static OPERATIONS: Mutex<()> = Mutex::new(());
+use journal::{journal_path, load, lock_operations, save_operation, validate_id};
+
 const AUTHOR: &str = "moosedev-harness";
 const REVIEWER: &str = "moosedev-harness-human";
 
@@ -234,10 +237,7 @@ fn accepted_revision_masked(state: &AppState, masked: &HashSet<String>) -> anyho
         .map(ToString::to_string)
         .collect();
     canonical.sort();
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(canonical.join("\n").as_bytes())
-    ))
+    Ok(sha256_hex(canonical.join("\n")))
 }
 
 pub async fn capture_v2(
@@ -283,17 +283,14 @@ pub fn capture_v2_operation(
     state: &AppState,
     request: CaptureV2Request,
 ) -> anyhow::Result<CaptureV2Response> {
-    validate_owner_id(&request.owner_id)?;
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
-    let path = operation_path(state, &request.operation_id)?;
+    validate_id(&request.owner_id, "owner_id")?;
+    let _guard = lock_operations()?;
+    let path = journal_path(state, &request.operation_id, "json")?;
     let capture_request = CaptureRequest {
         operation_id: request.operation_id.clone(),
         proposals: request.proposals.clone(),
     };
-    if path.exists() {
-        let mut stored: Operation = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if let Some(mut stored) = load::<Operation>(&path)? {
         anyhow::ensure!(
             serde_json::to_value(&stored.request)? == serde_json::to_value(&capture_request)?,
             "operation_id was already used for a different capture"
@@ -324,9 +321,8 @@ pub fn capture_v2_operation(
             .into_iter()
             .filter_map(|(iri, _)| {
                 (proposal.supersedes.as_ref() != Some(&iri)
-                    && current_status(state, &iri).is_some_and(|status| {
-                        status == "proposed" || graph::in_working_set(&status)
-                    }))
+                    && current_status(state, &iri)
+                        .is_some_and(|status| graph::is_current_or_proposed(&status)))
                 .then_some(iri)
             })
             .collect::<Vec<_>>();
@@ -633,11 +629,7 @@ fn finish_capture(state: &AppState, path: &Path, operation: &mut Operation) -> a
                 None => graph::propose_link_unlocked(
                     state,
                     &entry.response.iri,
-                    if proposal.kind == "Constraint" {
-                        "constrains"
-                    } else {
-                        "concerns"
-                    },
+                    graph::link_predicate_for_kind(&proposal.kind),
                     symbol,
                     file,
                     "file identified in harness capture evidence",
@@ -695,10 +687,8 @@ fn review_operation_checked(
     request: &ReviewRequest,
     expected_revision: Option<&str>,
 ) -> anyhow::Result<ReviewResult> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
-    let path = operation_path(state, &request.operation_id)?;
+    let _guard = lock_operations()?;
+    let path = journal_path(state, &request.operation_id, "json")?;
     let mut operation: Operation = serde_json::from_slice(&std::fs::read(&path)?)?;
     finish_capture(state, &path, &mut operation)?;
     let proposal_guard = state.lock_proposal_writes()?;
@@ -830,11 +820,7 @@ fn review_operation_checked(
                     .iter()
                     .find(|p| &p.iri == iri)
                     .ok_or_else(|| anyhow::anyhow!("queued code link disappeared after capture"))?;
-                let expected_predicate = if proposal.kind == "Constraint" {
-                    "constrains"
-                } else {
-                    "concerns"
-                };
+                let expected_predicate = graph::link_predicate_for_kind(&proposal.kind);
                 anyhow::ensure!(
                     link.subject_iri == entry.response.iri
                         && link.predicate_local == expected_predicate
@@ -1006,9 +992,7 @@ pub async fn checkpoint(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CheckpointQuery>,
 ) -> Result<Json<CheckpointResponse>, ApiError> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| ApiError::internal("harness operation lock poisoned"))?;
+    let _guard = lock_operations()?;
     // A legacy browser can issue an Origin-less GET without Fetch Metadata.
     // Reading status must never enrich the graph or publish the canonical file.
     Ok(Json(checkpoint_status(
@@ -1022,9 +1006,7 @@ pub async fn publish_checkpoint(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CheckpointQuery>,
 ) -> Result<Json<CheckpointResponse>, ApiError> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| ApiError::internal("harness operation lock poisoned"))?;
+    let _guard = lock_operations()?;
     Ok(Json(checkpoint_snapshot(
         &state,
         query.operation_id.as_deref(),
@@ -1047,7 +1029,7 @@ fn checkpoint_status(
     let mut pending = BTreeSet::new();
     if let Some(id) = operation_id {
         let operation: Operation =
-            serde_json::from_slice(&std::fs::read(operation_path(state, id)?)?)?;
+            serde_json::from_slice(&std::fs::read(journal_path(state, id, "json")?)?)?;
         if !operation.captured || !operation.reviewed {
             pending.insert(format!("operation:{id}"));
         }
@@ -1101,51 +1083,6 @@ fn validate_path(file: &str) -> anyhow::Result<()> {
                 .all(|p| matches!(p, Component::Normal(_))),
         "expected a repository-relative file path"
     );
-    Ok(())
-}
-
-fn operation_path(state: &AppState, id: &str) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(
-        !id.is_empty()
-            && id.len() <= 160
-            && id
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)),
-        "invalid operation_id"
-    );
-    Ok(state
-        .data_dir
-        .join("harness/operations")
-        .join(format!("{id}.json")))
-}
-
-pub(super) fn validate_owner_id(id: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !id.is_empty()
-            && id.len() <= 160
-            && id
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)),
-        "invalid owner_id"
-    );
-    Ok(())
-}
-
-fn save_operation(path: &Path, operation: &impl Serialize) -> anyhow::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("operation path has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("tmp");
-    let mut file = std::fs::File::create(&temporary)?;
-    file.write_all(&serde_json::to_vec_pretty(operation)?)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)?;
-    // Also persist newly created harness/operations directory entries before
-    // allowing a graph write whose retry identity lives in this journal.
-    for directory in parent.ancestors().take(3) {
-        std::fs::File::open(directory)?.sync_all()?;
-    }
     Ok(())
 }
 

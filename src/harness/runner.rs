@@ -5,6 +5,7 @@ use super::{
     protocol::*,
     response::{ResponseKey, ResponsePolicy, ResponseReceipt},
 };
+use crate::harness::digest::sha256_hex;
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::policy::{GateDisposition, PolicyDecision};
 use anyhow::{bail, Context, Result};
@@ -25,10 +26,13 @@ mod intent_v2;
 mod model;
 mod recovery;
 mod symbolic;
+#[cfg(test)]
+mod test_support;
 mod usage;
+use actions::Step;
 pub use change_intent::IntentEvent;
 pub use intent_v2::{ApprovedChangeScope, ApprovedDefinitionScope};
-use model::{action_schema, conversational_schema, Action, ModelOutput, StreamedMessage};
+use model::{action_schema, conversational_schema, ModelOutput, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
 pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
 pub use usage::UsageLedger;
@@ -231,11 +235,8 @@ fn error_kind(error: &anyhow::Error) -> &'static str {
     }
 }
 
-fn hash(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
-}
 fn fingerprint(value: &Option<String>) -> Option<String> {
-    value.as_deref().map(hash)
+    value.as_deref().map(sha256_hex)
 }
 fn bounded(s: &str, limit: usize) -> String {
     if s.len() <= limit {
@@ -608,6 +609,7 @@ impl Runner {
             self.discard_pending_edit("source or accepted knowledge changed")?;
             self.abandon_pending_intent("source or accepted knowledge changed")
                 .await?;
+            self.invalidate_capture_typing("source or accepted knowledge changed");
             self.intent_event("intent_invalidated", "source or accepted knowledge changed");
             self.start_intent_cycle();
             self.event("Source or accepted knowledge changed. Refreshed evidence; review and approve the plan again.");
@@ -689,10 +691,10 @@ impl Runner {
             return self.persist();
         };
         self.validate_permission(&action)?;
-        let action = match self.validate_action(action) {
-            Ok(action) => action,
+        let step = match self.validate_action(action) {
+            Ok(step) => step,
             Err(error) => match self.symbolic_noop_continuation(&error) {
-                Some(action) => action,
+                Some(step) => step,
                 None => return Err(error.context(model::InvalidModelOutput)),
             },
         };
@@ -702,20 +704,15 @@ impl Runner {
             self.event(format!("Assistant: {message}"));
         }
         self.task.steps += 1;
-        self.event(format!("Model action: {}", serde_json::to_string(&action)?));
+        self.event(format!("Model action: {}", serde_json::to_string(&step)?));
         self.persist()?;
-        match action {
-            Action::Inspect { event, offset } => {
+        match step {
+            Step::Inspect { event, offset } => {
                 let observation = self
                     .task
                     .events
                     .get(event)
                     .context("unknown journal event")?;
-                anyhow::ensure!(
-                    offset <= observation.message.len()
-                        && observation.message.is_char_boundary(offset),
-                    "invalid observation byte offset"
-                );
                 let mut end = offset.saturating_add(2000).min(observation.message.len());
                 while !observation.message.is_char_boundary(end) {
                     end -= 1;
@@ -726,7 +723,7 @@ impl Runner {
                     &observation.message[offset..end]
                 );
             }
-            Action::Read { file } => {
+            Step::Read { file } => {
                 self.refresh(std::slice::from_ref(&file)).await?;
                 let source = self.workspace.read(&file)?;
                 if !self.task.read_files.contains(&file) {
@@ -743,8 +740,7 @@ impl Runner {
                 self.task.last_response = format!("Read {file} with its governing knowledge.");
                 self.task.source.insert(file, source);
             }
-            Action::Search { query } => {
-                anyhow::ensure!(!query.is_empty(), "search is empty");
+            Step::Search { query } => {
                 let mut hits = String::new();
                 for file in &files {
                     if file.contains(&query) {
@@ -781,30 +777,11 @@ impl Runner {
                 };
                 self.event(self.task.last_response.clone());
             }
-            Action::Plan {
+            Step::Plan {
                 summary,
                 files,
                 checks,
             } => {
-                anyhow::ensure!(
-                    self.task.mode == Mode::Plan,
-                    "switch to Plan before changing the approved approach"
-                );
-                anyhow::ensure!(
-                    !summary.trim().is_empty()
-                        && summary.len() <= MAX_PLAN_SUMMARY
-                        && !files.is_empty()
-                        && files.len() <= MAX_FILES,
-                    "plan requires a summary of at most 4000 bytes and 1..100 explicit file paths"
-                );
-                anyhow::ensure!(
-                    !checks.is_empty()
-                        && checks.len() <= 20
-                        && checks
-                            .iter()
-                            .all(|c| !c.trim().is_empty() && c.len() <= 4000),
-                    "plan requires 1..20 verification commands"
-                );
                 self.refresh(&files).await?;
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
@@ -826,28 +803,11 @@ impl Runner {
                 self.task.capture_due = true;
                 self.capture().await?;
             }
-            Action::Edit {
+            Step::Edit {
                 file,
                 before,
                 after,
             } => {
-                anyhow::ensure!(self.task.mode == Mode::Auto, "Plan mode cannot edit code");
-                anyhow::ensure!(
-                    self.task
-                        .plan
-                        .as_ref()
-                        .is_some_and(|p| p.files.contains(&file)),
-                    "edit is outside approved file scope; return to Plan"
-                );
-                if !self.task.read_files.contains(&file) {
-                    self.refresh(std::slice::from_ref(&file)).await?;
-                    self.task
-                        .source
-                        .insert(file.clone(), self.workspace.read(&file)?);
-                    self.task.read_files.push(file.clone());
-                    self.event(format!("First-edit guard: delivered source and dossier for {file}; ask model for a fresh proposal next step."));
-                    return Ok(());
-                }
                 if !self.fresh_approval().await? {
                     return Ok(());
                 }
@@ -892,11 +852,7 @@ impl Runner {
                     self.apply_edit(edit)?;
                 }
             }
-            Action::Command { command } => {
-                anyhow::ensure!(
-                    self.task.mode == Mode::Auto,
-                    "Plan mode uses read/search, not shell commands"
-                );
+            Step::Command { command } => {
                 if !self.fresh_approval().await? {
                     return Ok(());
                 }
@@ -906,16 +862,12 @@ impl Runner {
                 self.task.after_review = Phase::Working;
                 self.task.intent = None;
             }
-            Action::Replace { .. } | Action::Write { .. } => {
-                unreachable!("edits materialized before dispatch")
-            }
-            Action::Question { question } => {
+            Step::Question { question } => {
                 self.event(format!("Assistant: {question}"));
                 self.task.last_response = question;
                 self.task.phase = Phase::AwaitingInput;
             }
-            Action::Reply { message: reply } => {
-                anyhow::ensure!(!reply.trim().is_empty(), "reply is empty");
+            Step::Reply { message: reply } => {
                 if reply != message {
                     self.event(format!("Assistant: {reply}"));
                 }
@@ -925,7 +877,7 @@ impl Runner {
                 self.task.after_review = Phase::AwaitingInput;
                 self.capture().await?;
             }
-            Action::Replan { reason } => {
+            Step::Replan { reason } => {
                 self.end_intent_cycle("model replan");
                 self.task.mode = Mode::Plan;
                 self.task.phase = Phase::Planning;
@@ -936,11 +888,7 @@ impl Runner {
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Planning;
             }
-            Action::Finish { summary } => {
-                anyhow::ensure!(
-                    self.task.mode == Mode::Auto,
-                    "approve and execute a plan before completion"
-                );
+            Step::Finish { summary } => {
                 self.task.last_response = summary;
                 if self.prepare_symbolic_associations().await? {
                     return Ok(());
@@ -1454,43 +1402,13 @@ impl Runner {
 
 #[cfg(test)]
 mod recovery_tests {
+    use super::test_support::{context_router, serve, Project};
     use super::*;
-    use axum::extract::State;
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-
-    struct Project(PathBuf);
-    impl Drop for Project {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[tokio::test]
     async fn command_observation_keeps_durable_intent_until_caller_commits_outcome() {
-        async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
-            Json(ContextResponse {
-                capture_contracts: vec![2],
-                intent_contracts: vec![2],
-                project_root: root.to_string_lossy().into_owned(),
-                revision: "fixture".into(),
-                context: String::new(),
-                files: vec![],
-            })
-        }
-        let project = Project(
-            std::env::temp_dir().join(format!("moosedev-command-commit-{}", uuid::Uuid::new_v4())),
-        );
-        std::fs::create_dir_all(&project.0).unwrap();
-        let router = Router::new()
-            .route("/api/v1/harness/context", post(context))
-            .with_state(Arc::new(project.0.canonicalize().unwrap()));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let daemon = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
+        let project = Project::new("command-commit");
+        let (daemon, server) = serve(context_router(), &project).await;
         let mut runner = Runner::create(
             project.0.clone(),
             daemon.clone(),

@@ -335,13 +335,7 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
                         for binding in &associations.bindings {
                             text.push_str(&format!(
                                 "{}\n{} · {}\n\n",
-                                binding.record_iri,
-                                binding.file,
-                                binding
-                                    .symbol
-                                    .as_deref()
-                                    .or(binding.planned_name.as_deref())
-                                    .unwrap_or("unresolved entity")
+                                binding.record_iri, binding.file, binding.symbol
                             ));
                         }
                         text.push_str("Review each record's relevance to its target; acceptance is not proof of correctness.\n");

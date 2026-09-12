@@ -848,7 +848,18 @@ async fn completed_verification_requires_human_confirmation_and_durable_checkpoi
     assert_eq!(
         fixture.note_calls(),
         1,
-        "the stored note and typing serve the repeated final checkpoint"
+        "the stored note serves the repeated final checkpoint without a model call"
+    );
+    let typing = fixture.typing_ids();
+    assert_eq!(
+        typing.len(),
+        2,
+        "typing stored before the knowledge change is stale; the note is typed again at the new revision"
+    );
+    assert_ne!(typing[0], typing[1]);
+    assert_eq!(
+        intent_details(&runner, "capture_note_invalidated"),
+        vec!["source or accepted knowledge changed".to_string()]
     );
     runner.confirm_no_knowledge().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Complete);

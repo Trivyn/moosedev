@@ -108,6 +108,11 @@ fn record(state: &AppState, kind: &str, title: &str) -> String {
     .unwrap()
 }
 
+/// Normalized (versionless) symbols: the one definition the fixture index
+/// contains, and one it does not.
+const RENDER_NAME: &str = "scip-python python sample . labels/render_name().";
+const NORMALIZE_NAME: &str = "scip-python python sample . labels/_normalize_name().";
+
 fn install_intent_index(fixture: &Fixture, state: &AppState) {
     install_intent_index_as(fixture, state, "scip-python")
 }
@@ -180,8 +185,7 @@ fn intent_bindings_are_proven_reviewed_and_idempotent() {
         bindings: vec![IntentBinding {
             record_iri: record_iri.clone(),
             file: "labels.py".into(),
-            symbol: Some(choices.entities[0].symbol.clone()),
-            planned_name: None,
+            symbol: choices.entities[0].symbol.clone(),
             source_digest: Some(choices.entities[0].source_digest.clone()),
         }],
     };
@@ -219,8 +223,7 @@ fn intent_review_rejects_changed_source_and_allows_human_rejection() {
         bindings: vec![IntentBinding {
             record_iri,
             file: "labels.py".into(),
-            symbol: None,
-            planned_name: Some("render_name".into()),
+            symbol: RENDER_NAME.into(),
             source_digest: None,
         }],
     };
@@ -239,7 +242,7 @@ fn intent_review_rejects_changed_source_and_allows_human_rejection() {
 }
 
 #[test]
-fn intent_resolver_distinguishes_missing_index_and_unresolved_planned_target() {
+fn intent_resolver_distinguishes_missing_index_and_unindexed_target() {
     use daemon::intent::*;
     let fixture = Fixture::new();
     let state = fixture.state();
@@ -262,8 +265,7 @@ fn intent_resolver_distinguishes_missing_index_and_unresolved_planned_target() {
             bindings: vec![IntentBinding {
                 record_iri: record_iri.clone(),
                 file: "labels.py".into(),
-                symbol: None,
-                planned_name: Some("_normalize_name".into()),
+                symbol: NORMALIZE_NAME.into(),
                 source_digest: None,
             }],
         },
@@ -273,7 +275,7 @@ fn intent_resolver_distinguishes_missing_index_and_unresolved_planned_target() {
     assert_eq!(response.unresolved.len(), 1);
 
     // The unresolved response is a durable assessment, not a permanent ban on
-    // a target. A subsequent plan uses a new operation with the current name.
+    // a target. A subsequent plan uses a new operation with an indexed symbol.
     let next = link_operation(
         &state,
         IntentLinkRequest {
@@ -282,8 +284,7 @@ fn intent_resolver_distinguishes_missing_index_and_unresolved_planned_target() {
             bindings: vec![IntentBinding {
                 record_iri,
                 file: "labels.py".into(),
-                symbol: None,
-                planned_name: Some("render_name".into()),
+                symbol: RENDER_NAME.into(),
                 source_digest: None,
             }],
         },
@@ -308,8 +309,7 @@ fn intent_review_rejects_truncated_journal_associations() {
             bindings: vec![IntentBinding {
                 record_iri,
                 file: "labels.py".into(),
-                symbol: None,
-                planned_name: Some("render_name".into()),
+                symbol: RENDER_NAME.into(),
                 source_digest: None,
             }],
         },
@@ -352,8 +352,7 @@ fn abandoning_uncertain_intent_rejects_unacknowledged_links_and_blocks_late_requ
         bindings: vec![IntentBinding {
             record_iri: record_iri.clone(),
             file: "labels.py".into(),
-            symbol: None,
-            planned_name: Some("render_name".into()),
+            symbol: RENDER_NAME.into(),
             source_digest: None,
         }],
     };
@@ -409,13 +408,12 @@ fn intent_batch_with_one_unresolved_target_has_no_partial_graph_effects() {
         IntentLinkRequest {
             operation_id: "atomic-unresolved".into(),
             revision: daemon::accepted_revision(&state).unwrap(),
-            bindings: ["render_name", "not_created_yet"]
+            bindings: [RENDER_NAME, NORMALIZE_NAME]
                 .into_iter()
-                .map(|name| IntentBinding {
+                .map(|symbol| IntentBinding {
                     record_iri: record_iri.clone(),
                     file: "labels.py".into(),
-                    symbol: None,
-                    planned_name: Some(name.into()),
+                    symbol: symbol.into(),
                     source_digest: None,
                 })
                 .collect(),
@@ -1610,8 +1608,7 @@ fn symbolic_association_filters_kinds_and_binds_by_legal_predicate() {
             bindings: vec![IntentBinding {
                 record_iri: requirement.clone(),
                 file: "labels.py".into(),
-                symbol: Some(render.symbol.clone()),
-                planned_name: None,
+                symbol: render.symbol.clone(),
                 source_digest: Some(render.source_digest.clone()),
             }],
         },

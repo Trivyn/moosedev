@@ -1,14 +1,14 @@
-//! Snapshot-bound candidate retrieval for capture reconciliation: the records
-//! a fresh proposal may restate or refine, with their complete assertions.
+//! Snapshot-bound candidate retrieval for `reconcile_score`: the records a
+//! fresh proposal may restate or refine, with their complete assertions.
 //! Retrieval nominates; it never asserts semantic equivalence.
 
 use std::collections::{BTreeSet, HashMap};
 
+use crate::harness::digest::{sha256_hex, sha256_json};
 use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 
-use super::{current_status, validate_owner_id, Operation};
+use super::journal::validate_id;
+use super::{current_status, Operation};
 use crate::graph::{self, AppState, EdgeDirection, PROJECT_KG_GRAPH_IRI};
 use crate::harness::protocol::*;
 
@@ -24,7 +24,7 @@ pub fn candidate_page(
     state: &AppState,
     request: &CaptureCandidateRequest,
 ) -> anyhow::Result<CaptureCandidatePage> {
-    validate_owner_id(&request.owner_id)?;
+    validate_id(&request.owner_id, "owner_id")?;
     anyhow::ensure!(
         !request.proposal.title.trim().is_empty(),
         "candidate lookup needs a proposal title"
@@ -122,7 +122,7 @@ pub fn candidate_page(
     );
     Ok(CaptureCandidatePage {
         revision,
-        proposal_digest: json_digest(&request.proposal)?,
+        proposal_digest: sha256_json(&request.proposal)?,
         candidates,
         next_cursor,
     })
@@ -218,12 +218,7 @@ pub(super) fn candidate_assertions(
         (&a.predicate, &a.target_iri, a.incoming).cmp(&(&b.predicate, &b.target_iri, b.incoming))
     });
     canonical.sort();
-    Ok((
-        title,
-        literals,
-        relations,
-        format!("{:x}", Sha256::digest(canonical.join("\n").as_bytes())),
-    ))
+    Ok((title, literals, relations, sha256_hex(canonical.join("\n"))))
 }
 
 fn capture_origins(state: &AppState) -> anyhow::Result<HashMap<String, CandidateOrigin>> {
@@ -281,12 +276,5 @@ fn project_assertion_revision(state: &AppState) -> anyhow::Result<String> {
         .map(|quad| quad.to_string())
         .collect::<Vec<_>>();
     assertions.sort();
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(assertions.join("\n").as_bytes())
-    ))
-}
-
-fn json_digest(value: &impl Serialize) -> anyhow::Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+    Ok(sha256_hex(assertions.join("\n")))
 }

@@ -4,7 +4,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
+use crate::harness::digest::{sha256_hex, sha256_json};
 
 use super::validate_path;
 use crate::code::substrate::{DefinitionScope, SourceRange, Substrate};
@@ -55,14 +55,12 @@ pub(super) fn index_revision(
         .map(|file| {
             (
                 file.file.as_str(),
-                substrate
-                    .read_indexed_source(&file.file)
-                    .map(|source| format!("{:x}", Sha256::digest(source.as_bytes()))),
+                substrate.read_indexed_source(&file.file).map(sha256_hex),
             )
         })
         .collect::<Vec<_>>();
     let meta = substrate.meta();
-    digest(&(
+    sha256_json(&(
         meta.schema_version,
         &meta.indexed_commit,
         meta.indexed_at,
@@ -96,7 +94,7 @@ pub(super) fn index_status(substrate: &Substrate, files: &[ChangedFile]) -> Inte
         Some(expected) => {
             substrate
                 .read_indexed_source(&changed.file)
-                .map(|source| format!("{:x}", Sha256::digest(source.as_bytes())))
+                .map(sha256_hex)
                 .as_ref()
                 != Some(expected)
         }
@@ -117,12 +115,12 @@ pub(super) fn entity_record_context(
         graph::get_entity_dossier(state, &graph::DossierTarget::Symbol(symbol.into()))?
     {
         for record in dossier.direct_records {
-            if accepted_status(&record.status) && !direct.contains(&record.iri) {
+            if graph::is_accepted(&record.status) && !direct.contains(&record.iri) {
                 direct.push(record.iri)
             }
         }
         for record in dossier.component_records {
-            if accepted_status(&record.status) && !component.contains(&record.iri) {
+            if graph::is_accepted(&record.status) && !component.contains(&record.iri) {
                 component.push(record.iri)
             }
         }
@@ -130,10 +128,6 @@ pub(super) fn entity_record_context(
     direct.truncate(16);
     component.truncate(16);
     Ok((direct, component))
-}
-
-pub(super) fn accepted_status(status: &str) -> bool {
-    status.is_empty() || status.eq_ignore_ascii_case("accepted")
 }
 
 pub(super) fn prove_changed_source(
@@ -165,7 +159,7 @@ pub(super) fn prove_changed_source(
                     && before.modified()? == after.modified()?,
                 "current source changed while proving its digest"
             );
-            let actual = format!("{:x}", Sha256::digest(&bytes));
+            let actual = sha256_hex(&bytes);
             anyhow::ensure!(
                 &actual == expected,
                 "after_digest does not match current source"
@@ -253,9 +247,6 @@ pub(super) fn validate_files(files: &[String]) -> anyhow::Result<()> {
 }
 pub(super) fn intersects(a: SourceRange, b: SourceRange) -> bool {
     a.start < b.end && b.start < a.end
-}
-pub(super) fn digest<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
 impl From<HarnessSourceRange> for SourceRange {
     fn from(r: HarnessSourceRange) -> Self {

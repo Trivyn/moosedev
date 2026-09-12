@@ -219,16 +219,19 @@ impl Runner {
         self.persist()
     }
 
+    /// One human decision on one card; journaled as one interaction.
     pub async fn review_operation(&mut self, id: &str, accept: bool) -> Result<()> {
-        self.review_operation_with_interaction(id, accept, true)
-            .await
+        self.settle_review(id, accept, true).await
     }
 
-    async fn review_operation_with_interaction(
+    /// Resolve one pending card. `journal_interaction` is false when the card
+    /// is settled as part of a batch whose single interaction is journaled by
+    /// the caller: the study counts human decisions, not cards.
+    async fn settle_review(
         &mut self,
         id: &str,
         accept: bool,
-        emit_interaction: bool,
+        journal_interaction: bool,
     ) -> Result<()> {
         let position = self
             .task
@@ -238,7 +241,7 @@ impl Runner {
             .context("unknown pending review")?;
         if self.task.reviews[position].intent_links.is_some() {
             return self
-                .review_intent_links(position, accept, emit_interaction)
+                .review_intent_links(position, accept, journal_interaction)
                 .await;
         }
         anyhow::ensure!(self.task.batch_capture, "interactive review is not enabled");
@@ -249,7 +252,7 @@ impl Runner {
             "knowledge review is not durably resolved"
         );
         let item = self.task.reviews.remove(position);
-        if emit_interaction {
+        if journal_interaction {
             self.emit_review_interaction(accept, id);
         }
         self.emit_capture_review_events(id, &item.response, accept);
@@ -292,6 +295,7 @@ impl Runner {
             .any(|review| review.intent_links.is_some() || review.request.has_governing())
     }
 
+    /// Headless review: every pending card takes the same disposition.
     pub async fn review(&mut self, accept: bool) -> Result<()> {
         if self.task.batch_capture || self.task.reviews.iter().any(|r| r.intent_links.is_some()) {
             anyhow::ensure!(
@@ -314,8 +318,7 @@ impl Runner {
             );
             self.persist()?;
             for id in ids {
-                self.review_operation_with_interaction(&id, accept, false)
-                    .await?;
+                self.settle_review(&id, accept, false).await?;
             }
             return Ok(());
         }
@@ -412,32 +415,16 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{context_router, serve, Project};
     use super::*;
     use crate::harness::protocol::{
-        CaptureTypeRequest, CaptureTypeResponse, ContextResponse, KnowledgeProposal,
-        ProposalOrigin, ReconcileThresholds, TypedDisposition, TypedProposal, TypingMode,
+        CaptureTypeRequest, CaptureTypeResponse, KnowledgeProposal, ProposalOrigin,
+        ReconcileThresholds, TypedDisposition, TypedProposal, TypingMode,
     };
     use crate::llm::{LlmConfig, StructuredOutputMode};
-    use axum::{extract::State, routing::post, Json, Router};
+    use axum::{routing::post, Json};
     use serde_json::{json, Value};
-    use std::{path::PathBuf, sync::Arc};
 
-    struct Project(PathBuf);
-    impl Drop for Project {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
-        Json(ContextResponse {
-            capture_contracts: vec![2],
-            intent_contracts: vec![2],
-            project_root: root.to_string_lossy().into_owned(),
-            revision: "fixture".into(),
-            context: String::new(),
-            files: vec![],
-        })
-    }
     async fn model(Json(body): Json<Value>) -> Json<Value> {
         let name = body["response_format"]["json_schema"]["name"]
             .as_str()
@@ -489,22 +476,13 @@ mod tests {
     /// repair budget reset; a restart must not re-charge the finished note.
     #[tokio::test]
     async fn capture_note_commits_with_its_repair_reset_atomically() {
-        let project = Project(
-            std::env::temp_dir().join(format!("moosedev-capture-commit-{}", uuid::Uuid::new_v4())),
-        );
-        std::fs::create_dir_all(&project.0).unwrap();
-        let root = project.0.canonicalize().unwrap();
-        let router = Router::new()
-            .route("/api/v1/harness/context", post(context))
+        let project = Project::new("capture-commit");
+        let root = project.0.clone();
+        let router = context_router()
             .route("/api/v1/harness/capture/type", post(capture_type))
             .route("/api/v1/harness/capture/v2", post(capture_v2))
-            .route("/v1/chat/completions", post(model))
-            .with_state(Arc::new(root.clone()));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let daemon = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
+            .route("/v1/chat/completions", post(model));
+        let (daemon, server) = serve(router, &project).await;
         let mut runner = Runner::create(root.clone(), daemon.clone(), "Preserve behavior".into())
             .await
             .unwrap();

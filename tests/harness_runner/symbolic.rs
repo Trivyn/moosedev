@@ -53,9 +53,7 @@ pub(super) async fn associate(
             let existing: Vec<_> = script
                 .intent_accepted
                 .iter()
-                .filter(|binding| {
-                    binding.file == changed.file && binding.symbol.as_deref() == Some(&symbol)
-                })
+                .filter(|binding| binding.file == changed.file && binding.symbol == symbol)
                 .map(|binding| binding.record_iri.clone())
                 .collect();
             for (ordinal, iri) in governing.iter().enumerate() {
@@ -229,8 +227,7 @@ pub(super) async fn symbolic_fixture() -> Fixture {
     script.intent_accepted = vec![moosedev::harness::daemon::intent::IntentBinding {
         record_iri: PRESERVE.into(),
         file: "labels.py".into(),
-        symbol: Some(RENDER_NAME.into()),
-        planned_name: None,
+        symbol: RENDER_NAME.into(),
         source_digest: None,
     }];
     drop(script);
@@ -373,8 +370,7 @@ async fn symbolic_replan_rederives_obligations_and_keeps_task_counters() {
         moosedev::harness::daemon::intent::IntentBinding {
             record_iri: UNLINKED.into(),
             file: "labels.py".into(),
-            symbol: Some(RENDER_NAME.into()),
-            planned_name: None,
+            symbol: RENDER_NAME.into(),
             source_digest: None,
         },
     );
@@ -562,7 +558,7 @@ async fn symbolic_associations_are_derived_and_ratified_without_a_model() {
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].bindings.len(), 1);
     assert_eq!(links[0].bindings[0].record_iri, PRESERVE);
-    assert_eq!(links[0].bindings[0].symbol.as_deref(), Some(NORMALIZE));
+    assert_eq!(links[0].bindings[0].symbol, NORMALIZE);
     let derived = symbolic_events(&runner, "association_derived");
     assert_eq!(derived.len(), 1);
     assert!(derived[0].contains("normalize") && derived[0].contains("concerns"));

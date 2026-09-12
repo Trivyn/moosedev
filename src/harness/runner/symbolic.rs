@@ -2,13 +2,15 @@
 //! and one final `harness_capture_note`; obligations, associations and capture
 //! typing are derived by the daemon from the approved plan, the resolved
 //! definition scopes and the graph.
+use super::actions::Step;
 use super::intent_v2::changed_files;
-use super::intent_v2::{digest_json, ApprovedChangeScope, ApprovedDefinitionScope};
+use super::intent_v2::{ApprovedChangeScope, ApprovedDefinitionScope};
 use super::model::{observation_preview, Action, NoopEdit};
 use super::{ContextResponse, Mode, PendingEdit, Phase, Progress, Runner};
 use crate::harness::daemon::intent::{
     IntentBinding, IntentLinkRequest, IntentResolveRequest, IntentResolveResponse,
 };
+use crate::harness::digest::sha256_json;
 use crate::harness::protocol::{
     AssociatePage, AssociateRequest, CaptureRequest, CaptureTypeRequest, CaptureTypeResponse,
     CheckOutcome, IntentIndexStatus, IntentRefreshPolicy, KnowledgeProposal, TypedDisposition,
@@ -24,6 +26,8 @@ pub const MAX_SCOPE_ESCAPES: usize = 3;
 /// A rejected typed capture is retyped under fresh ids this many times per
 /// task; the next rejection parks for human guidance.
 pub const MAX_RETYPES: usize = 3;
+
+const CAPTURE_NOTE_QUESTION: &str = "The coding work is done and its required checks passed. Answer one plain question in prose, no JSON structure beyond the single note field: what should a future engineer know about this change that the diff alone does not say? Name the decision you made and why, any rule you discovered, and anything that surprised you. Say \"nothing beyond the diff\" if there is nothing durable. Do not restate the objective.";
 
 /// Durable derived state. Obligations are re-derived at every plan approval;
 /// the counters bound autonomous recoveries for the whole task.
@@ -153,7 +157,7 @@ impl Runner {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let obligations_digest = digest_json(&obligations)?;
+        let obligations_digest = sha256_json(&obligations)?;
         self.task.approved_change_scope = Some(ApprovedChangeScope {
             version: 2,
             knowledge_revision: context.revision.clone(),
@@ -245,7 +249,7 @@ impl Runner {
 
     /// The first no-op edit of a task means the source already matches: run
     /// the required checks instead of spending the repair budget.
-    pub(super) fn symbolic_noop_continuation(&mut self, error: &anyhow::Error) -> Option<Action> {
+    pub(super) fn symbolic_noop_continuation(&mut self, error: &anyhow::Error) -> Option<Step> {
         if !error.is::<NoopEdit>() {
             return None;
         }
@@ -262,7 +266,7 @@ impl Runner {
             "No-op edit: the source already matches the proposal; running required checks instead of repairing."
                 .to_string(),
         );
-        Some(Action::Finish {
+        Some(Step::Finish {
             summary: "The source already satisfies the requested change; running required checks."
                 .into(),
         })
@@ -356,13 +360,7 @@ impl Runner {
             "derived" => {
                 let mut bindings: Vec<IntentBinding> = Vec::new();
                 for derived in &association.page.bindings {
-                    let binding = IntentBinding {
-                        record_iri: derived.record_iri.clone(),
-                        file: derived.file.clone(),
-                        symbol: Some(derived.symbol.clone()),
-                        planned_name: None,
-                        source_digest: Some(derived.source_digest.clone()),
-                    };
+                    let binding = IntentBinding::from_derived(derived);
                     if !bindings.contains(&binding) {
                         bindings.push(binding);
                     }
@@ -589,13 +587,15 @@ impl Runner {
     /// note, discard the typing, and let the daemon type it again under fresh
     /// ids (it qualifies colliding titles on the next call). Bounded per task.
     pub(super) async fn retype_capture_note(&mut self, reason: &str) -> Result<()> {
+        // The rejected request is gone either way; an exhausted budget parks
+        // with the note and the checkpoint intact.
         self.task.capture_request = None;
         self.task.capture_end = None;
         self.task.capture_due = true;
         let state = self.symbolic_state_mut();
-        let Some(note) = state.capture_note.as_mut() else {
+        if state.capture_note.is_none() {
             bail!("capture rejected before persistence without a note to retype: {reason}");
-        };
+        }
         state.retypes += 1;
         let retypes = state.retypes;
         if retypes > MAX_RETYPES {
@@ -611,10 +611,7 @@ impl Runner {
             self.event(message);
             return self.persist();
         }
-        note.status = "asked".into();
-        note.response = None;
-        note.operation_id = uuid::Uuid::new_v4().to_string();
-        note.capture_operation_id = uuid::Uuid::new_v4().to_string();
+        self.discard_capture_typing();
         self.intent_event(
             "capture_retyped",
             &format!("{retypes} of {MAX_RETYPES}: {reason}"),
@@ -623,6 +620,40 @@ impl Runner {
             "Capture rejected before persistence; retyping the same note under fresh identities ({retypes} of {MAX_RETYPES}): {reason}"
         ));
         self.persist()
+    }
+
+    /// Typing stored before source or accepted knowledge changed is stale:
+    /// keep the note, let the daemon type it again at the current revision.
+    /// No model call and no retype budget; the change was not a rejection.
+    pub(super) fn invalidate_capture_typing(&mut self, reason: &str) {
+        let typed = self
+            .task
+            .symbolic
+            .as_ref()
+            .and_then(|state| state.capture_note.as_ref())
+            .is_some_and(|note| note.status == "typed");
+        if typed {
+            self.discard_capture_typing();
+            self.intent_event("capture_note_invalidated", reason);
+        }
+    }
+
+    /// Drop the stored typing and any request built from it; the note text
+    /// and its journal position survive under fresh operation identities.
+    fn discard_capture_typing(&mut self) {
+        self.task.capture_request = None;
+        self.task.capture_end = None;
+        if let Some(note) = self
+            .task
+            .symbolic
+            .as_mut()
+            .and_then(|state| state.capture_note.as_mut())
+        {
+            note.status = "asked".into();
+            note.response = None;
+            note.operation_id = uuid::Uuid::new_v4().to_string();
+            note.capture_operation_id = uuid::Uuid::new_v4().to_string();
+        }
     }
 
     fn changed_file_names(&self) -> Vec<String> {
@@ -672,7 +703,7 @@ impl Runner {
             .rev()
             .collect();
         format!(
-            "The coding work is done and its required checks passed. Answer one plain question in prose, no JSON structure beyond the single note field: what should a future engineer know about this change that the diff alone does not say? Name the decision you made and why, any rule you discovered, and anything that surprised you. Say \"nothing beyond the diff\" if there is nothing durable. Do not restate the objective.\n\nObjective: {}\nApproved plan: {}\nFiles edited: {}\nChecks: {}\n\nRecent journal:\n{}",
+            "{CAPTURE_NOTE_QUESTION}\n\nObjective: {}\nApproved plan: {}\nFiles edited: {}\nChecks: {}\n\nRecent journal:\n{}",
             self.task.objective,
             plan.map(|p| p.summary.as_str()).unwrap_or(""),
             self.changed_file_names().join(", "),

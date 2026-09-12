@@ -112,7 +112,9 @@ impl Runner {
         self.task.phase = Phase::AwaitingReview;
         self.task.mode = Mode::Plan;
         self.task.approved_revision = None;
-        self.task.review_continuation = Some(Phase::AwaitingPlan);
+        // Set only by human steering during the review; an unsteered review
+        // resumes verification.
+        self.task.review_continuation = None;
         self.task.after_review = Phase::AwaitingPlan;
         self.task.final_capture = false;
         self.start_intent_cycle();
@@ -157,7 +159,7 @@ impl Runner {
         &mut self,
         position: usize,
         accept: bool,
-        emit_interaction: bool,
+        journal_interaction: bool,
     ) -> Result<()> {
         let request = self.task.reviews[position]
             .intent_links
@@ -189,7 +191,7 @@ impl Runner {
             "intent review is not durably resolved"
         );
         self.task.reviews.remove(position);
-        if emit_interaction {
+        if journal_interaction {
             self.emit_review_interaction(accept, &request.operation_id);
         }
         for (binding, link_iri) in request.bindings.iter().zip(&link_iris) {
@@ -200,7 +202,7 @@ impl Runner {
                     if accept { "accepted" } else { "rejected" },
                     link_iri,
                     binding.record_iri,
-                    binding.symbol.as_deref().unwrap_or_default(),
+                    binding.symbol,
                     request.operation_id
                 ),
             );
@@ -210,16 +212,24 @@ impl Runner {
         }
         self.resolve_symbolic_association(&request.operation_id);
         self.update_knowledge_revision(response.revision);
-        // This task's association disposition changes the graph revision but
-        // does not invalidate its approved scope or owned source chain.
-        self.task.approved_revision = Some(self.task.knowledge_revision.clone());
-        if let Some(scope) = self.task.approved_change_scope.as_mut() {
-            scope.knowledge_revision = self.task.knowledge_revision.clone();
-        }
         if self.task.reviews.is_empty() {
-            self.task.mode = Mode::Auto;
-            self.task.phase = Phase::Verifying;
-            self.task.review_continuation = None;
+            match self.task.review_continuation.take() {
+                // Human steering during the review already returned the task
+                // to Plan; the disposition is journaled and planning resumes
+                // with that guidance instead of the pre-review approval.
+                Some(phase) => self.task.phase = phase,
+                None => {
+                    // This task's association disposition changes the graph
+                    // revision but does not invalidate its approved scope or
+                    // owned source chain.
+                    self.task.approved_revision = Some(self.task.knowledge_revision.clone());
+                    if let Some(scope) = self.task.approved_change_scope.as_mut() {
+                        scope.knowledge_revision = self.task.knowledge_revision.clone();
+                    }
+                    self.task.mode = Mode::Auto;
+                    self.task.phase = Phase::Verifying;
+                }
+            }
             let files = self.task.plan.as_ref().context("no plan")?.files.clone();
             self.task.intent_refresh_pending = files;
         }

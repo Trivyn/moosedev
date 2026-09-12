@@ -53,9 +53,7 @@ pub(super) async fn resolve(
                 dossier_records: script
                     .intent_accepted
                     .iter()
-                    .filter(|binding| {
-                        &binding.file == file && binding.symbol.as_ref() == Some(&symbol)
-                    })
+                    .filter(|binding| &binding.file == file && binding.symbol == symbol)
                     .map(|binding| binding.record_iri.clone())
                     .collect(),
             });
@@ -163,8 +161,7 @@ async fn malformed_link_response_never_becomes_a_review_card() {
         moosedev::harness::daemon::intent::IntentBinding {
             record_iri: UNLINKED.into(),
             file: "labels.py".into(),
-            symbol: Some(RENDER_NAME.into()),
-            planned_name: None,
+            symbol: RENDER_NAME.into(),
             source_digest: None,
         },
     );
@@ -322,6 +319,69 @@ async fn steering_during_link_review_rederives_associations() {
     runner.confirm_no_knowledge().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Complete);
     assert_eq!(link_operation_ids(&fixture).len(), 2);
+    assert!(fixture.shared.lock().unwrap().replies.is_empty());
+}
+
+#[tokio::test]
+async fn steering_during_link_review_keeps_the_guidance_after_the_review() {
+    let _lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = edited_symbolic_runner(&fixture).await;
+    finish(&fixture);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    let operation = runner.task.reviews[0]
+        .intent_links
+        .clone()
+        .unwrap()
+        .operation_id;
+
+    // Steering while the derived associations await review holds the review
+    // and returns the task to Plan; the review must not undo that.
+    let guidance = "Also trim trailing dots in the helper.";
+    runner.submit_message(guidance.into()).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert!(journal_value(&runner)["approved_revision"].is_null());
+
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
+    runner.review(true).await.unwrap();
+    assert!(runner.task.reviews.is_empty());
+    assert_eq!(
+        runner.task.phase,
+        Phase::Planning,
+        "the accepted review resumes planning with the guidance, not verification"
+    );
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert!(
+        journal_value(&runner)["approved_revision"].is_null(),
+        "a link disposition never re-approves a plan the human steered away from"
+    );
+    assert_eq!(journal_value(&runner)["guidance"], guidance);
+    let reviews = intent_details(&runner, "link_review");
+    assert_eq!(reviews.len(), 1);
+    assert!(reviews[0].starts_with("accepted") && reviews[0].contains(&operation));
+    assert_eq!(
+        runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .association
+            .as_ref()
+            .unwrap()
+            .status,
+        "resolved"
+    );
+
+    // The next model step plans against the guidance.
+    fixture.conversational(json!({"action":"plan","summary":"Trim trailing dots in the helper","files":["labels.py"],"checks":["fixture-required-check"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains(&format!("Current human guidance: {guidance}")));
     assert!(fixture.shared.lock().unwrap().replies.is_empty());
 }
 
@@ -535,8 +595,23 @@ async fn no_persisted_state_is_awaiting_plan_with_capture_due() {
     assert_journal_invariant(&fixture, "resume with link review");
     fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
     runner.review(true).await.unwrap();
-    assert_eq!(runner.task.phase, Phase::Verifying);
+    // Steering is never implicit approval: the accepted review resumes the
+    // planning the steering started, and the human approves the plan again.
+    assert_eq!(runner.task.phase, Phase::Planning);
     assert_journal_invariant(&fixture, "link review accepted");
+    fixture.conversational(json!({"action":"plan","summary":"Keep the helper name as implemented","files":["labels.py"],"checks":["fixture-required-check"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_journal_invariant(&fixture, "replan after steering");
+    runner.approve_plan().await.unwrap();
+    assert_journal_invariant(&fixture, "second approval");
+    finish(&fixture);
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.phase,
+        Phase::Verifying,
+        "the resolved association batch is not derived again for unchanged edits"
+    );
     runner.task.check_results = vec![passed_check()];
     fixture.note("nothing beyond the diff");
     fixture.typed(vec![]);

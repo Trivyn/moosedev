@@ -1,4 +1,4 @@
-//! Deterministic post-edit associations for the symbolic policy. The runner
+//! Deterministic post-edit associations. The runner
 //! supplies the changed files and the governing records it derived at plan
 //! approval; the daemon binds the kind-filtered changed definitions to those
 //! records with the predicate the ontology catalogue allows. No model, no
@@ -10,15 +10,16 @@ use axum::extract::State;
 use axum::Json;
 use oxigraph::model::NamedNode;
 
+use super::current_status;
 use super::intent_candidates::{
-    accepted_status, changed_scopes, digest, entity_record_context, index_revision, index_status,
-    intersects, maybe_refresh, producer_label, prove_changed_source, validate_files,
-    validate_source_ranges,
+    changed_scopes, entity_record_context, index_revision, index_status, intersects, maybe_refresh,
+    producer_label, prove_changed_source, validate_files, validate_source_ranges,
 };
-use super::{accepted_revision, current_status};
+use super::revision::ensure_unchanged;
 use crate::api::error::ApiError;
 use crate::code::substrate::{is_test_path, DefinitionEntry, DefinitionScope, SourceRange};
 use crate::graph::{self, AppState};
+use crate::harness::digest::sha256_json;
 use crate::harness::protocol::*;
 
 const MAX_RANGES: usize = 256;
@@ -68,11 +69,12 @@ pub fn associate_page(
             );
         }
     }
-    let knowledge_revision = accepted_revision(state)?;
-    anyhow::ensure!(
-        knowledge_revision == request.knowledge_revision,
-        "knowledge changed before association; refresh context and retry"
-    );
+    ensure_unchanged(
+        state,
+        &request.knowledge_revision,
+        "knowledge changed before association; refresh context and retry",
+    )?;
+    let knowledge_revision = request.knowledge_revision.clone();
     let refresh_action = maybe_refresh(state, &request.refresh_policy);
     let Some(substrate) = state.substrate() else {
         return Ok(AssociatePage {
@@ -83,7 +85,7 @@ pub fn associate_page(
                 status: IntentIndexStatus::Unavailable,
                 refresh_action,
             },
-            scope_digest: digest(&request.files)?,
+            scope_digest: sha256_json(&request.files)?,
             bindings: Vec::new(),
             skipped: Vec::new(),
             ungoverned: Vec::new(),
@@ -99,7 +101,7 @@ pub fn associate_page(
     };
     let index_revision = index_revision(&substrate, &request.files)?;
     let status = index_status(&substrate, &request.files);
-    let scope_digest = digest(&(&request.files, &index_revision, &knowledge_revision))?;
+    let scope_digest = sha256_json(&(&request.files, &index_revision, &knowledge_revision))?;
     let code_class = state.resolve_code_class("CodeEntity")?;
     let mut bindings = Vec::new();
     let mut skipped = Vec::new();
@@ -218,7 +220,7 @@ pub fn associate_page(
                 }
                 if !current_status(state, iri)
                     .as_deref()
-                    .is_none_or(accepted_status)
+                    .is_none_or(graph::is_accepted)
                 {
                     skipped.push(skip(
                         &changed.file,
@@ -230,11 +232,7 @@ pub fn associate_page(
                 }
                 let class = graph::require_information_record(state, &NamedNode::new(iri)?)?;
                 let record_kind = graph::local_name(&class).to_string();
-                let predicate = if record_kind == "Constraint" {
-                    "constrains"
-                } else {
-                    "concerns"
-                };
+                let predicate = graph::link_predicate_for_kind(&record_kind);
                 let legal = state
                     .catalogue
                     .legal_predicates(&state.store, &class, &code_class)
@@ -255,7 +253,7 @@ pub fn associate_page(
                 let (_, _, _, assertion_digest) =
                     super::reconciliation::candidate_assertions(state, iri)?;
                 let definition_range: HarnessSourceRange = scope.definition.range.into();
-                let candidate_digest = digest(&(
+                let candidate_digest = sha256_json(&(
                     &changed.file,
                     symbol,
                     &source_digest,
@@ -293,10 +291,11 @@ pub fn associate_page(
             &b.record_iri,
         ))
     });
-    anyhow::ensure!(
-        accepted_revision(state)? == knowledge_revision,
-        "knowledge changed during association; retry"
-    );
+    ensure_unchanged(
+        state,
+        &knowledge_revision,
+        "knowledge changed during association; retry",
+    )?;
     Ok(AssociatePage {
         knowledge_revision,
         index: IntentIndexSnapshot {

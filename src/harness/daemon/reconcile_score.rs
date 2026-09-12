@@ -1,4 +1,4 @@
-//! Pure symbolic reconciliation scoring for the symbolic policy. A fresh
+//! Pure symbolic reconciliation scoring for capture typing. A fresh
 //! proposal is compared with same-kind accepted records by title, hybrid
 //! recall rank and token overlap; the disposition is a threshold decision with
 //! frozen defaults (Constraint "Reconciliation thresholds are frozen defaults,
@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::journal::{journal_path, load, load_or_store, validate_id};
 use super::reconciliation::candidate_page;
-use super::{operation_path, save_operation, validate_owner_id};
 use crate::graph::{self, AppState};
 use crate::harness::protocol::*;
 
@@ -157,7 +157,7 @@ pub fn score_proposal(
     proposal: &KnowledgeProposal,
     thresholds: ReconcileThresholds,
 ) -> anyhow::Result<ScoredProposal> {
-    validate_owner_id(owner_id)?;
+    validate_id(owner_id, "owner_id")?;
     let page = candidate_page(
         state,
         &CaptureCandidateRequest {
@@ -286,30 +286,25 @@ pub fn score_proposal(
 }
 
 fn receipt_path(state: &AppState, id: &str) -> anyhow::Result<PathBuf> {
-    Ok(operation_path(state, id)?.with_extension("score.json"))
+    journal_path(state, id, "score.json")
 }
 
 /// Persist a receipt once; a replay with the same id must carry the same
 /// receipt. Returns the stored receipt.
 pub fn record_receipt(state: &AppState, receipt: ScoreReceipt) -> anyhow::Result<ScoreReceipt> {
-    validate_owner_id(&receipt.owner_id)?;
+    validate_id(&receipt.owner_id, "owner_id")?;
     let path = receipt_path(state, &receipt.operation_id)?;
-    if path.exists() {
-        let stored: ScoreReceipt = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let check = |stored: &ScoreReceipt| {
         anyhow::ensure!(
-            stored == receipt,
+            stored == &receipt,
             "operation_id was already used for a different reconciliation receipt"
         );
-        return Ok(stored);
-    }
-    save_operation(&path, &receipt)?;
-    Ok(receipt)
+        Ok(())
+    };
+    let (stored, _) = load_or_store(&path, check, || Ok(receipt.clone()))?;
+    Ok(stored)
 }
 
 pub fn load_receipt(state: &AppState, id: &str) -> anyhow::Result<Option<ScoreReceipt>> {
-    let path = receipt_path(state, id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    Ok(Some(serde_json::from_slice(&std::fs::read(&path)?)?))
+    load(&receipt_path(state, id)?)
 }

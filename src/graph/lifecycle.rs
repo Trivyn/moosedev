@@ -129,6 +129,20 @@ pub fn in_working_set(status: &str) -> bool {
         || is_retired(status))
 }
 
+/// Whether a record is live for title collisions: in the working set, or
+/// still `proposed` and therefore able to enter it.
+pub fn is_current_or_proposed(status: &str) -> bool {
+    status.eq_ignore_ascii_case("proposed") || in_working_set(status)
+}
+
+/// Whether a record may govern code. Narrower than `in_working_set`: a
+/// record with no status literal (pre-lifecycle legacy) counts as accepted,
+/// but `proposed`, `rejected` and retired (`superseded`/`deprecated`) records
+/// do not, so unratified or replaced knowledge never binds an edit.
+pub fn is_accepted(status: &str) -> bool {
+    status.is_empty() || status.eq_ignore_ascii_case("accepted")
+}
+
 /// A decision change: the replacement to record, the decision it supersedes, and
 /// the rationale (the *why*) for the change.
 pub struct SupersedeInput {

@@ -1,6 +1,9 @@
 //! Derived code associations use existing graph predicates and ratification.
 //! A symbol is usable only while filesystem evidence proves its indexed source.
+use super::journal::{journal_path, load, load_or_store, lock_operations, save_operation};
+use super::revision::ensure_unchanged;
 use super::*;
+use crate::harness::digest::sha256_hex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,12 +36,22 @@ pub struct IntentResolveResponse {
 pub struct IntentBinding {
     pub record_iri: String,
     pub file: String,
-    #[serde(default)]
-    pub symbol: Option<String>,
-    #[serde(default)]
-    pub planned_name: Option<String>,
+    pub symbol: String,
     #[serde(default)]
     pub source_digest: Option<String>,
+}
+
+impl IntentBinding {
+    /// The reviewable binding a derived association proposes: the resolved
+    /// symbol with the source proof the daemon derived it from.
+    pub fn from_derived(derived: &DerivedBinding) -> Self {
+        Self {
+            record_iri: derived.record_iri.clone(),
+            file: derived.file.clone(),
+            symbol: derived.symbol.clone(),
+            source_digest: Some(derived.source_digest.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +149,7 @@ pub fn resolve_entities(
             ));
             continue;
         };
-        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let digest = sha256_hex(&source);
         let definitions = substrate.definitions_in_file(file);
         if definitions.is_empty() {
             response
@@ -170,10 +183,11 @@ pub fn resolve_entities(
             });
         }
     }
-    anyhow::ensure!(
-        accepted_revision(state)? == response.revision,
-        "knowledge changed during intent resolution; retry"
-    );
+    ensure_unchanged(
+        state,
+        &response.revision,
+        "knowledge changed during intent resolution; retry",
+    )?;
     Ok(response)
 }
 
@@ -185,20 +199,16 @@ pub async fn link(
 }
 
 fn link_path(state: &AppState, id: &str) -> anyhow::Result<PathBuf> {
-    // Separate namespace prevents a capture and a link operation sharing an ID.
-    Ok(operation_path(state, id)?.with_extension("intent.json"))
+    journal_path(state, id, "intent.json")
 }
 
 pub fn link_operation(
     state: &AppState,
     request: IntentLinkRequest,
 ) -> anyhow::Result<IntentLinkResponse> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
+    let _guard = lock_operations()?;
     let path = link_path(state, &request.operation_id)?;
-    let mut operation = if path.exists() {
-        let operation: LinkOperation = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let check = |operation: &LinkOperation| {
         anyhow::ensure!(
             operation.request == request,
             "intent operation ID reused with different request"
@@ -207,16 +217,18 @@ pub fn link_operation(
             operation.review != Some(false),
             "intent operation was abandoned or rejected; use a new plan operation"
         );
-        operation
-    } else {
+        Ok(())
+    };
+    let (mut operation, _) = load_or_store(&path, check, || {
         anyhow::ensure!(
             !request.bindings.is_empty() && request.bindings.len() <= 128,
             "intent links require 1..128 bindings"
         );
-        anyhow::ensure!(
-            accepted_revision(state)? == request.revision,
-            "knowledge changed before intent binding"
-        );
+        ensure_unchanged(
+            state,
+            &request.revision,
+            "knowledge changed before intent binding",
+        )?;
         let files: BTreeSet<_> = request
             .bindings
             .iter()
@@ -236,10 +248,6 @@ pub fn link_operation(
         };
         let mut predicates = Vec::new();
         for binding in &request.bindings {
-            anyhow::ensure!(
-                binding.symbol.is_some() != binding.planned_name.is_some(),
-                "intent target requires exactly one symbol or planned name"
-            );
             // The record is verified directly against the graph; the bounded
             // inventory in `choices.records` is informational only.
             let record_class =
@@ -256,23 +264,12 @@ pub fn link_operation(
             let candidates: Vec<_> = choices
                 .entities
                 .iter()
-                .filter(|entity| {
-                    entity.file == binding.file
-                        && binding.symbol.as_ref().map_or_else(
-                            || binding.planned_name.as_deref() == Some(entity.name.as_str()),
-                            |symbol| symbol == &entity.symbol,
-                        )
-                })
+                .filter(|entity| entity.file == binding.file && entity.symbol == binding.symbol)
                 .collect();
             if candidates.len() != 1 {
                 response.unresolved.push(format!(
                     "{}: target missing, ambiguous, or unindexed: {}",
-                    binding.file,
-                    binding
-                        .symbol
-                        .as_ref()
-                        .or(binding.planned_name.as_ref())
-                        .unwrap()
+                    binding.file, binding.symbol
                 ));
                 continue;
             }
@@ -287,20 +284,13 @@ pub fn link_operation(
             let resolved = IntentBinding {
                 record_iri: binding.record_iri.clone(),
                 file: entity.file.clone(),
-                symbol: Some(entity.symbol.clone()),
-                planned_name: None,
+                symbol: entity.symbol.clone(),
                 source_digest: Some(entity.source_digest.clone()),
             };
             if !response.resolved.contains(&resolved) {
                 response.resolved.push(resolved);
-                predicates.push(
-                    if graph::local_name(&record_class) == "Constraint" {
-                        "constrains"
-                    } else {
-                        "concerns"
-                    }
-                    .into(),
-                );
+                predicates
+                    .push(graph::link_predicate_for_kind(graph::local_name(&record_class)).into());
             }
         }
         // An unresolved batch is an assessment with zero graph side effects.
@@ -310,17 +300,15 @@ pub fn link_operation(
             response.resolved.clear();
             predicates.clear();
         }
-        let operation = LinkOperation {
-            request,
+        Ok(LinkOperation {
+            request: request.clone(),
             response,
             predicates,
             prepared: false,
             review: None,
             reviewed: false,
-        };
-        save_operation(&path, &operation)?;
-        operation
-    };
+        })
+    })?;
     if !operation.prepared {
         let _proposal_guard = state.lock_proposal_writes()?;
         for (binding, predicate) in operation
@@ -332,7 +320,7 @@ pub fn link_operation(
             verify_binding(state, binding)?;
             // The graph primitive deduplicates pending retries; reuse accepted
             // associations too, without multiplying the review queue.
-            let normalized = binding.symbol.as_ref().unwrap();
+            let normalized = &binding.symbol;
             let association_present = association_exists(state, binding, predicate)?;
             let prior = graph::list_proposals(state, None)?
                 .into_iter()
@@ -387,15 +375,14 @@ fn verify_binding(state: &AppState, binding: &IntentBinding) -> anyhow::Result<(
             )
         })?;
     anyhow::ensure!(
-        binding.source_digest.as_deref()
-            == Some(format!("{:x}", Sha256::digest(source.as_bytes())).as_str()),
+        binding.source_digest.as_deref() == Some(sha256_hex(&source).as_str()),
         "intent source changed after binding"
     );
     anyhow::ensure!(
         substrate
             .definitions_in_file(&binding.file)
             .iter()
-            .any(|definition| Some(&definition.entry.normalized_symbol) == binding.symbol.as_ref()),
+            .any(|definition| definition.entry.normalized_symbol == binding.symbol),
         "intent symbol disappeared"
     );
     Ok(())
@@ -406,11 +393,8 @@ fn association_exists(
     binding: &IntentBinding,
     predicate: &str,
 ) -> anyhow::Result<bool> {
-    let Some(entity) = graph::entity_for_symbol(
-        state,
-        &graph::CodeTerms::resolve(state)?,
-        binding.symbol.as_deref().unwrap_or_default(),
-    )?
+    let Some(entity) =
+        graph::entity_for_symbol(state, &graph::CodeTerms::resolve(state)?, &binding.symbol)?
     else {
         return Ok(false);
     };
@@ -462,14 +446,11 @@ pub fn abandon_links(
         !request.accept,
         "abandon only rejects unratified associations"
     );
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
+    let _guard = lock_operations()?;
     let path = link_path(state, &request.operation_id)?;
-    let mut operation: LinkOperation = if path.exists() {
-        serde_json::from_slice(&std::fs::read(&path)?)?
-    } else {
-        LinkOperation {
+    let mut operation: LinkOperation = match load(&path)? {
+        Some(operation) => operation,
+        None => LinkOperation {
             request: IntentLinkRequest {
                 operation_id: request.operation_id.clone(),
                 revision: "abandoned-before-preparation".into(),
@@ -484,7 +465,7 @@ pub fn abandon_links(
             prepared: false,
             review: None,
             reviewed: false,
-        }
+        },
     };
     if operation.review == Some(true) {
         // A lost acknowledgment of a human acceptance must never retract the
@@ -504,7 +485,7 @@ pub fn abandon_links(
             .any(|(binding, predicate)| {
                 binding.record_iri == link.subject_iri
                     && predicate == &link.predicate_local
-                    && binding.symbol.as_deref() == Some(link.target_symbol.as_str())
+                    && binding.symbol == link.target_symbol
                     && binding.file == link.target_path
             });
         if frozen && link.status == "proposed" {
@@ -524,9 +505,7 @@ fn review_links_checked(
     request: &ReviewRequest,
     expected: Option<&str>,
 ) -> anyhow::Result<CheckpointResponse> {
-    let _guard = OPERATIONS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("harness operation lock poisoned"))?;
+    let _guard = lock_operations()?;
     let path = link_path(state, &request.operation_id)?;
     let mut operation: LinkOperation = serde_json::from_slice(&std::fs::read(&path)?)?;
     anyhow::ensure!(
@@ -545,10 +524,11 @@ fn review_links_checked(
             "intent journal association lengths differ"
         );
         if request.accept && operation.review.is_none() {
-            anyhow::ensure!(
-                accepted_revision(state)? == expected.unwrap_or(&operation.request.revision),
-                "knowledge changed before intent review; refresh approval"
-            );
+            ensure_unchanged(
+                state,
+                expected.unwrap_or(&operation.request.revision),
+                "knowledge changed before intent review; refresh approval",
+            )?;
         }
         let links = graph::list_proposals(state, None)?;
         for ((iri, binding), predicate) in operation
@@ -565,7 +545,7 @@ fn review_links_checked(
             anyhow::ensure!(
                 link.subject_iri == binding.record_iri
                     && link.predicate_local == *predicate
-                    && Some(&link.target_symbol) == binding.symbol.as_ref()
+                    && link.target_symbol == binding.symbol
                     && link.target_path == binding.file,
                 "intent proposal changed before review"
             );

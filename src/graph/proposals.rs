@@ -219,6 +219,16 @@ fn judgment_proposal_quads(
     ])
 }
 
+/// The code-link predicate a record kind takes: a `Constraint` `constrains`
+/// the code it governs; every other record `concerns` it.
+pub fn link_predicate_for_kind(record_kind: &str) -> &'static str {
+    if record_kind == "Constraint" {
+        "constrains"
+    } else {
+        "concerns"
+    }
+}
+
 /// Enqueue a proposed link. Writes literals only — no real edge exists until
 /// [`accept_proposal`], which re-resolves `target_symbol` at HEAD. Idempotent
 /// against inbox noise: when an identical (subject, predicate, target symbol)

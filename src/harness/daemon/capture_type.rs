@@ -12,8 +12,10 @@ use moose::types::LlmAssistLevel;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::current_status;
+use super::journal::{journal_path, load, save_operation, validate_id};
 use super::reconcile_score::{record_receipt, score_proposal, ScoreReceipt, ScoredDisposition};
-use super::{accepted_revision, current_status, operation_path, save_operation, validate_owner_id};
+use super::revision::ensure_unchanged;
 use crate::api::error::ApiError;
 use crate::graph::{self, AppState};
 use crate::harness::protocol::*;
@@ -85,21 +87,39 @@ pub async fn capture_type_operation(
     state: &AppState,
     request: CaptureTypeRequest,
 ) -> anyhow::Result<CaptureTypeResponse> {
-    validate_owner_id(&request.owner_id)?;
-    let path = operation_path(state, &request.operation_id)?.with_extension("type.json");
-    if path.exists() {
-        let stored: StoredTyping = serde_json::from_slice(&std::fs::read(&path)?)?;
+    validate_id(&request.owner_id, "owner_id")?;
+    let path = journal_path(state, &request.operation_id, "type.json")?;
+    if let Some(stored) = load::<StoredTyping>(&path)? {
         anyhow::ensure!(
             stored.request == request,
             "operation_id was already used for a different capture typing"
         );
         return Ok(stored.response);
     }
-    let revision = accepted_revision(state)?;
-    anyhow::ensure!(
-        revision == request.knowledge_revision,
-        "knowledge changed before capture typing; refresh context and retry"
-    );
+    // The sensor runs outside the operation lock; see `journal` for the race
+    // this admits on same-id retries.
+    let response = type_note(state, &request).await?;
+    save_operation(
+        &path,
+        &StoredTyping {
+            request,
+            response: response.clone(),
+        },
+    )?;
+    Ok(response)
+}
+
+/// Types one note against the current graph; the caller journals the result.
+async fn type_note(
+    state: &AppState,
+    request: &CaptureTypeRequest,
+) -> anyhow::Result<CaptureTypeResponse> {
+    ensure_unchanged(
+        state,
+        &request.knowledge_revision,
+        "knowledge changed before capture typing; refresh context and retry",
+    )?;
+    let revision = request.knowledge_revision.clone();
     anyhow::ensure!(
         request.note.len() <= 16_000 && request.note_evidence.len() <= 64,
         "capture note or its evidence exceeds the typing bound"
@@ -191,7 +211,7 @@ pub async fn capture_type_operation(
         )
     };
     if sensor_enabled {
-        match sensor_typing(state, &request).await {
+        match sensor_typing(state, request).await {
             Ok(typed) => {
                 let known: Vec<String> = raw.iter().map(|(p, _)| normalized(&p.title)).collect();
                 for proposal in typed.proposals.into_iter().take(MAX_SENSOR_PROPOSALS) {
@@ -372,9 +392,8 @@ pub async fn capture_type_operation(
                 if graph::resolve_record_exact_all(state, &proposal.title)
                     .into_iter()
                     .any(|(iri, _)| {
-                        current_status(state, &iri).is_some_and(|status| {
-                            status == "proposed" || graph::in_working_set(&status)
-                        })
+                        current_status(state, &iri)
+                            .is_some_and(|status| graph::is_current_or_proposed(&status))
                     })
                 {
                     let qualifier = request
@@ -399,25 +418,18 @@ pub async fn capture_type_operation(
             resolved_by,
         });
     }
-    anyhow::ensure!(
-        accepted_revision(state)? == revision,
-        "knowledge changed during capture typing; retry"
-    );
-    let response = CaptureTypeResponse {
+    ensure_unchanged(
+        state,
+        &revision,
+        "knowledge changed during capture typing; retry",
+    )?;
+    Ok(CaptureTypeResponse {
         revision,
         typing_mode,
         typing_note,
         thresholds,
         proposals,
-    };
-    save_operation(
-        &path,
-        &StoredTyping {
-            request,
-            response: response.clone(),
-        },
-    )?;
-    Ok(response)
+    })
 }
 
 #[derive(serde::Serialize, Deserialize)]

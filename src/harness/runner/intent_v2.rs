@@ -22,10 +22,6 @@ pub struct ApprovedDefinitionScope {
     pub source_digest: String,
 }
 
-pub(super) fn digest_json(value: &impl Serialize) -> Result<String> {
-    Ok(hash(&serde_json::to_string(value)?))
-}
-
 impl Runner {
     pub(super) fn validate_daemon_contracts(context: &ContextResponse) -> Result<()> {
         anyhow::ensure!(

@@ -1,6 +1,51 @@
 //! Validate sensor arguments and materialize edits before permission or execution.
 use super::{model::Action, Mode, Runner, MAX_FILES, MAX_PLAN_SUMMARY};
 use anyhow::{ensure, Context, Result};
+use serde::Serialize;
+
+/// A validated action the dispatcher can execute without re-checking its
+/// arguments: bounds hold, the target was read, and `replace`/`write` are
+/// already materialized as one whole-file `Edit`. Serializes exactly like the
+/// corresponding `Action` so the journal records what the model proposed.
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub(super) enum Step {
+    Inspect {
+        event: usize,
+        offset: usize,
+    },
+    Reply {
+        message: String,
+    },
+    Read {
+        file: String,
+    },
+    Search {
+        query: String,
+    },
+    Plan {
+        summary: String,
+        files: Vec<String>,
+        checks: Vec<String>,
+    },
+    Edit {
+        file: String,
+        before: Option<String>,
+        after: Option<String>,
+    },
+    Command {
+        command: String,
+    },
+    Question {
+        question: String,
+    },
+    Replan {
+        reason: String,
+    },
+    Finish {
+        summary: String,
+    },
+}
 
 impl Runner {
     pub(super) fn validate_permission(&self, action: &Action) -> Result<()> {
@@ -33,7 +78,7 @@ impl Runner {
         Ok(())
     }
 
-    pub(super) fn validate_action(&mut self, action: Action) -> Result<Action> {
+    pub(super) fn validate_action(&mut self, action: Action) -> Result<Step> {
         match &action {
             Action::Plan {
                 summary,
@@ -75,17 +120,35 @@ impl Runner {
             }
             _ => {}
         }
-        let file = match &action {
-            Action::Replace { file, .. }
-            | Action::Write { file, .. }
-            | Action::Edit { file, .. } => file,
-            _ => return Ok(action),
+        let file = match action {
+            Action::Replace { ref file, .. }
+            | Action::Write { ref file, .. }
+            | Action::Edit { ref file, .. } => file,
+            Action::Inspect { event, offset } => return Ok(Step::Inspect { event, offset }),
+            Action::Reply { message } => return Ok(Step::Reply { message }),
+            Action::Read { file } => return Ok(Step::Read { file }),
+            Action::Search { query } => return Ok(Step::Search { query }),
+            Action::Plan {
+                summary,
+                files,
+                checks,
+            } => {
+                return Ok(Step::Plan {
+                    summary,
+                    files,
+                    checks,
+                })
+            }
+            Action::Command { command } => return Ok(Step::Command { command }),
+            Action::Question { question } => return Ok(Step::Question { question }),
+            Action::Replan { reason } => return Ok(Step::Replan { reason }),
+            Action::Finish { summary } => return Ok(Step::Finish { summary }),
         };
         if !self.task.read_files.contains(file) {
             // The next generation receives the source and dossier. Never apply a
             // proposal whose author did not see the governing source snapshot.
             self.event(format!("First-edit guard: requesting source and dossier for {file}; the unread edit proposal will not execute."));
-            return Ok(Action::Read { file: file.clone() });
+            return Ok(Step::Read { file: file.clone() });
         }
         let before = self
             .task
@@ -122,12 +185,12 @@ impl Runner {
                 ensure!(supplied == before, "legacy edit.before must equal the entire supplied file; use replace for a unique fragment or write for full content");
                 (file, after)
             }
-            _ => unreachable!(),
+            _ => unreachable!("only edit-shaped actions reach materialization"),
         };
         if before == after {
             return Err(anyhow::Error::new(super::model::NoopEdit));
         }
-        Ok(Action::Edit {
+        Ok(Step::Edit {
             file,
             before,
             after,
