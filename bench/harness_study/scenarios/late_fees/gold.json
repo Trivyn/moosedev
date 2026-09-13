@@ -5,7 +5,7 @@
   "facts": [
     {
       "id": "fees-np7",
-      "claim": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all. Today charity is the only non-profit segment.",
+      "claim": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all.",
       "kind": "Constraint",
       "evidence": [
         "SOURCE_MAPPING.md#seeds"
@@ -85,6 +85,16 @@
       ],
       "introduced_episode": 4,
       "seeded": false
+    },
+    {
+      "id": "fees-collection",
+      "claim": "collection_penalty charges 15% of the amount, at least 500 cents, once an invoice is more than 60 days past due; as a penalty fee it is never charged to a registered non-profit, whatever the due day, because NP-9 replaces NP-7 for late fees only.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
     }
   ],
   "forbidden_claims": [
@@ -106,6 +116,11 @@
     {
       "claim": "NP-9 applies regardless of the invoice due day.",
       "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "NP-9's flat fee applies to the collection penalty.",
+      "applies_from_episode": 4,
       "applies_through_episode": null
     },
     {

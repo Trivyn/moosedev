@@ -8,6 +8,9 @@ NP9_FIRST_DUE_DAY = 1000
 NP9_LATE_FEE = 200
 RETURNED_PAYMENT_RATE = Decimal("0.025")
 MINIMUM_RETURNED_PAYMENT_FEE = 250
+COLLECTION_DAYS = 60
+COLLECTION_RATE = Decimal("0.15")
+MINIMUM_COLLECTION_PENALTY = 500
 
 
 def percent_of(amount_cents, rate):
@@ -31,3 +34,8 @@ class FeePolicy:
 
     def fee_forecast(self, account, invoice, days):
         return [self.late_fee(account, invoice, day) for day in days]
+
+    def collection_penalty(self, account, invoice, today):
+        if today - invoice.due_day <= COLLECTION_DAYS or account.segment in NON_PROFIT_SEGMENTS:
+            return 0
+        return max(MINIMUM_COLLECTION_PENALTY, percent_of(invoice.amount_cents, COLLECTION_RATE))

@@ -34,6 +34,8 @@ class FeePolicy:
         return [self.late_fee(account, invoice, day) for day in days]
 
     def collection_penalty(self, account, invoice, today):
-        if today - invoice.due_day <= COLLECTION_DAYS or account.segment in NON_PROFIT_SEGMENTS:
+        if today - invoice.due_day <= COLLECTION_DAYS:
             return 0
+        if account.segment in NON_PROFIT_SEGMENTS:
+            return NP9_LATE_FEE if invoice.due_day >= NP9_FIRST_DUE_DAY else 0
         return max(MINIMUM_COLLECTION_PENALTY, percent_of(invoice.amount_cents, COLLECTION_RATE))

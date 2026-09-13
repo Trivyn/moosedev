@@ -38,5 +38,20 @@ class AssociationTests(unittest.TestCase):
         self.assertEqual(FeePolicy().returned_payment_fee(Account("a", "association"), 20000), 0)
 
 
+class CollectionTests(unittest.TestCase):
+    def test_collection_penalty_for_retail(self):
+        policy = FeePolicy()
+        account = Account("r", "retail")
+        self.assertEqual(policy.collection_penalty(account, Invoice("INV-1", 10000, 100), 160), 0)
+        self.assertEqual(policy.collection_penalty(account, Invoice("INV-1", 10000, 100), 161), 1500)
+        self.assertEqual(policy.collection_penalty(account, Invoice("INV-2", 1000, 100), 200), 500)
+
+    def test_nonprofits_pay_no_collection_penalty(self):
+        policy = FeePolicy()
+        for segment, due_day in (("charity", 1200), ("foundation", 1200), ("foundation", 900)):
+            invoice = Invoice("INV-1", 10000, due_day)
+            self.assertEqual(policy.collection_penalty(Account("n", segment), invoice, due_day + 70), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

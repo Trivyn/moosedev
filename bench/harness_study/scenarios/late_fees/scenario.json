@@ -9,7 +9,7 @@
       "id": "fees-np7",
       "kind": "Constraint",
       "title": "Regulation NP-7: no late or penalty fees for registered non-profits",
-      "description": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all. Today charity is the only non-profit segment.",
+      "description": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all.",
       "component": "Billing",
       "relations": [],
       "evidence": [
@@ -80,7 +80,8 @@
           "fact_ids": [
             "fees-cents"
           ],
-          "decided_by": "scenario.json#/initial_facts/1"
+          "decided_by": "scenario.json#/initial_facts/1",
+          "measures": "correctness"
         },
         {
           "id": "e1-charity",
@@ -89,7 +90,8 @@
           "fact_ids": [
             "fees-np7"
           ],
-          "decided_by": "scenario.json#/initial_facts/0"
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
         }
       ],
       "retired_tests": []
@@ -147,7 +149,8 @@
             "fees-np7",
             "fees-segments"
           ],
-          "decided_by": "scenario.json#/initial_facts/0"
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
         }
       ],
       "retired_tests": []
@@ -213,9 +216,11 @@
           "kind": "retention",
           "test": "ReturnedPaymentTests.test_nonprofits_pay_no_returned_payment_fee",
           "fact_ids": [
-            "fees-np7"
+            "fees-np7",
+            "fees-segments"
           ],
-          "decided_by": "scenario.json#/initial_facts/0"
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
         },
         {
           "id": "e3-penalty-half-up",
@@ -224,14 +229,15 @@
           "fact_ids": [
             "fees-cents"
           ],
-          "decided_by": "scenario.json#/initial_facts/1"
+          "decided_by": "scenario.json#/initial_facts/1",
+          "measures": "correctness"
         }
       ],
       "retired_tests": []
     },
     {
       "id": "e4",
-      "prompt": "Add the account segment association, displayed as \"Registered association\", for registered non-profit associations. Add FeePolicy.fee_forecast(account, invoice, days), which returns the late fee the invoice would have on each of the given days, as a list in the same order.",
+      "prompt": "Add the account segment association, displayed as \"Registered association\", for registered non-profit associations. Add FeePolicy.fee_forecast(account, invoice, days), which returns the late fee the invoice would have on each of the given days, as a list in the same order. Also add FeePolicy.collection_penalty(account, invoice, today): once today is more than 60 days after invoice.due_day, a collection penalty of 15% of amount_cents, but at least 500 cents; otherwise 0.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
@@ -244,7 +250,8 @@
         "fees-np9",
         "fees-returned-payment",
         "fees-association",
-        "fees-forecast"
+        "fees-forecast",
+        "fees-collection"
       ],
       "stale_fact_ids": [],
       "visible_checks": [
@@ -296,7 +303,28 @@
             "fees-np7",
             "fees-association"
           ],
-          "decided_by": "scenario.json#/initial_facts/0"
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "cost"
+        },
+        {
+          "id": "e4-collection",
+          "kind": "task",
+          "test": "CollectionTests.test_collection_penalty_for_retail",
+          "fact_ids": [
+            "fees-collection"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-collection-exempt",
+          "kind": "retention",
+          "test": "CollectionTests.test_nonprofits_pay_no_collection_penalty",
+          "fact_ids": [
+            "fees-np7",
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
         }
       ],
       "retired_tests": []
@@ -379,6 +407,17 @@
       "visible": "pass",
       "fails_probes": [
         "e4-association-np9"
+      ]
+    },
+    {
+      "id": "collection-like-late-fee",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/collection_like_late_fee",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-collection-exempt"
       ]
     }
   ],
