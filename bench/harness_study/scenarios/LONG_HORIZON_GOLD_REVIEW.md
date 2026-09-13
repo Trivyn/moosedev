@@ -1,62 +1,90 @@
 # Long-horizon scenario review
 
-**Status: draft for maintainer gold review. No approval file exists, no model
-has run on these packages, and no campaign may start until the decisions below
-are settled and the gold is approved.**
+**Status: draft for maintainer gold review, revision 2 after blind reader audit
+round 1. No approval file exists, no model has run on these packages, and no
+campaign may start until the decisions below are settled and the gold is
+approved.**
 
 MOOSEDev's value is judged on long-horizon, multi-turn work. These three
 packages carry code and durable knowledge across four or five episodes. Their
-later episodes are decided by an earlier episode's *reason*, which neither the
-current prompt nor the previous reference code settles. All three are fully
-synthetic; see each package's `SOURCE_MAPPING.md`.
+later episodes are decided by an earlier episode's reason or a seeded record.
+All three are fully synthetic; see each package's `SOURCE_MAPPING.md`.
 
-| Package | Track | Episodes | Probes (task / retained / retention / currency) | Negatives | Validation cases |
+| Package | Track | Episodes | Probes: task / retained / retention / currency | Negatives | Validation cases |
 | --- | --- | --- | --- | --- | --- |
-| `supplier_quotes` | accumulation | 5 | 12 / 4 / 7 / 1 | 8 | 37 |
-| `entity_outbox` | accumulation | 5 | 10 / 4 / 3 / 1 | 4 | 29 |
-| `late_fees` | inherited (2 seeds) | 4 | 6 / 3 / 6 / 1 | 7 | 31 |
+| `supplier_quotes` | accumulation | 5 | 13 / 4 / 8 (5 correctness, 3 cost) / 1 | 9 | 39 |
+| `entity_outbox` | accumulation | 5 | 12 / 4 / 7 (4 correctness, 3 cost) / 1 | 8 | 37 |
+| `late_fees` | inherited (2 seeds) | 4 | 7 / 3 / 7 (6 correctness, 1 cost) / 1 | 8 | 33 |
 
 Per episode, each package's `DEPENDENCY_MAP.md` gives every later probe's
-deciding sentence (JSON pointer and quote), what the previous reference code
-reveals, the default a reader with only that code and the current prompt would
-pick, why the probe is well-posed, the legitimate channels, the expected
-discrimination, the gold record that decides it and how the harness delivers
-that record. Full prompts are in `scenario.json`; claims are in `gold.json`.
+round-1 verdict, what it measures, its deciding sentence (JSON pointer and
+quote), what the previous reference code reveals, the default a reader with
+only that code and the current prompt would pick, why the probe is well-posed,
+the expected discrimination, the gold records that decide it and how the
+harness delivers them. Full prompts are in `scenario.json`; claims are in
+`gold.json`.
 
 ## Design rules
 
-1. **Clear with history, open without it.** For each later probe, a reader of
-   all earlier prompts gives one answer. A reader of only the current prompt
-   and the previous reference code sees two plausible answers or defaults to
-   the wrong one.
+1. **Clear with history.** For each later probe, a reader of all earlier
+   prompts and the seeds gives one answer.
 2. **Extend, don't repeat.** A later task creates a new instance of an earlier
-   rule (a new code path, deletion or compaction, a representation change).
-   Only the earlier reason decides it.
+   rule (a new code path or category, a deletion or compaction, a
+   representation change). Later prompts do not restate the rule.
 3. **No trick questions.** Later prompts never contradict an earlier decision.
-   Early prompts state a rule's scope ("applies to every code path that
-   contacts the supplier"), never "remember this". Wording is identical in
-   both arms.
-4. **Objective, independent probes.** Public API only, injected fakes and
+   Early prompts state a rule's scope ("every code path that contacts the
+   supplier", "every code path that removes an entity"), never "remember
+   this". Wording is identical in both arms.
+4. **Natural code.** Reference code is what a competent developer would write
+   for each episode. It is never obscured to hide a rule and carries no
+   comments explaining reasons.
+5. **Timeless records.** Seed and gold records state rules and reasons, not
+   facts that later episodes change by design (round 1 found a seed that went
+   stale at e2 and forced a wrong answer under graph authority).
+6. **Objective, independent probes.** Public API only, injected fakes and
    clocks, no private names; each hidden test method stands alone.
-5. **Honest about inference.** Reference code carries no comments explaining
-   reasons. Agent-written comments, visible tests and notes are legitimate
-   retention channels, recorded rather than penalised.
 
 ## Probe taxonomy
 
 Every hidden test method is declared in `scenario.json` as one probe:
 
 - **task**: decided by this episode's prompt.
-- **retained**: decided earlier and visible in the previous reference code
-  (regression).
-- **retention**: decided by an earlier reason, or a seed record, that the
-  previous reference code does not decide.
+- **retained**: decided earlier and restated by the current prompt or the
+  immediately visible edit site (regression).
+- **retention**: decided by an earlier reason or a seed record. Each carries
+  `measures`, validated by the loader:
+  - **correctness**: the previous code cannot show the rule, so an arm without
+    the knowledge is expected to get it wrong;
+  - **cost**: the rule is visible in the previous code. A graph-first agent
+    should take it from the graph instead of reading and inferring it from
+    source; the difference is cost, not correctness.
 - **currency**: behaviour under a superseding rule, where stale knowledge
-  predicts a different result.
+  predicts a different result. A reader with no memory is right by design, so
+  blind reader condition A does not apply to currency probes; they
+  discriminate only against stale notes or records.
 
-Every episode has a task probe. Every episode after e1 has a retention or
-currency probe. Every retention and currency probe has at least one negative
-fixture that fails exactly the probes it declares.
+Every episode has a task probe. Every episode after e1 has at least one
+correctness retention probe (currency does not count), and `entity_outbox` has
+one in each of e2 to e5. Every retention and currency probe has at least one
+negative fixture that fails exactly the probes it declares.
+
+## Measurement
+
+- **Correctness probes** are scored pass or fail from per-test hidden results,
+  as planned.
+- **Cost probes** are also scored pass or fail, and are paired with per-episode
+  cost counts:
+  - reads and searches before the first edit;
+  - searches answered from knowledge (the harness journals
+    `knowledge_search` with record and repository hit counts);
+  - reads of files the task never planned or edited;
+  - provider requests and tokens.
+- Harness counts come from the task journal; native counts come from the
+  OpenCode tool log. Cost is reported separately from correctness, per arm,
+  and never summed across arms.
+- A cost probe that passes in both arms is still informative: the graph-first
+  arm should reach the correct edit with fewer reads of source that only
+  re-derive what an accepted record states.
 
 ## Scoring rules
 
@@ -76,9 +104,8 @@ fixture that fails exactly the probes it declares.
   rejected alternative as rejected is valid.
 - Credit semantically equivalent notes and graph records. Judge rationale from
   agent-visible prompts and facts, not from whether code matches a reference.
-- **Probe outcomes** come from per-test hidden results; a hidden test's
-  retired tests (listed in the next episode's `retired_tests`) are excluded
-  from later regression checks.
+- Probe outcomes come from per-test hidden results. Tests listed in an
+  episode's `retired_tests` are excluded from that episode's regression checks.
 
 ## Review attribution
 
@@ -93,8 +120,8 @@ or lacked, the deciding knowledge:
   code), `notes`, `code_comment`, `tests`, `readme`, `none`.
 - `used`, `rationale` and `evidence`.
 
-This separates a capture failure from a retrieval failure. It also measures
-whether the harness acted on supplied graph answers instead of combing source.
+This separates a capture failure from a retrieval failure. For cost probes it
+also shows whether the arm took the rule from the graph or combed source.
 
 ## Defaults assumed while drafting
 
@@ -117,9 +144,9 @@ hashes change.
 2. **Primary outcome.** *Recommended:* an episode passes when it completes, the
    probes it introduces pass, and nothing that passed in the previous attempted
    episode regresses. Horizon reached is the run of leading passing episodes.
-   Retention and currency pass rates are the explanatory breakdown, reported
-   conditionally (episode completed and its task probes passed) and
-   unconditionally.
+   Correctness retention and currency pass rates are the explanatory
+   breakdown, reported conditionally (episode completed and its task probes
+   passed) and unconditionally; cost counts are reported beside them.
 3. **Build.** *Recommended:* a new frozen build carrying the replan
    continuation, the attested own final capture and graph-first search, not
    v3's `1cd75b0b`.
@@ -140,33 +167,43 @@ Scale: 12 cells over two models, two arms and three packages; 14 episodes per
 model and arm, 56 in all; at the 1200-second episode budget, at most about 19
 hours before indexing and model loads.
 
-## Expected discrimination
+## Retention probes: what each measures
 
 Ratings are against a reader with the previous reference code and the current
-prompt. Low-rated probes still matter when an arm's own earlier code differed
-from the reference, or when stored knowledge went stale.
+prompt. Round-1 verdicts are from the blind reader audit below.
 
-| Package | Probe | Kind | Rating |
-| --- | --- | --- | --- |
-| supplier_quotes | e2-refetch | retention | high |
-| supplier_quotes | e2-basket-rounding | retention | medium |
-| supplier_quotes | e2-basket-unknown | retention | medium |
-| supplier_quotes | e3-discount-rounding | retention | medium |
-| supplier_quotes | e4-warm-unknown | retention | medium |
-| supplier_quotes | e4-guarantee | currency | low |
-| supplier_quotes | e5-micro-rounding | retention | high |
-| supplier_quotes | e5-new-perishable | retention | low |
-| entity_outbox | e2-recreate | retention | high |
-| entity_outbox | e3-compaction | retention | medium |
-| entity_outbox | e4-epoch-compaction | retention | medium |
-| entity_outbox | e5-rename-epoch | currency | low |
-| late_fees | e1-charity | retention | high |
-| late_fees | e1-half-up | retention | medium |
-| late_fees | e2-foundation | retention | high |
-| late_fees | e3-penalty-exempt | retention | high |
-| late_fees | e3-penalty-half-up | retention | medium |
-| late_fees | e4-association-np9 | currency | low |
-| late_fees | e4-association-penalty | retention | low |
+| Package | Probe | Measures | Round 1 | Expected discrimination |
+| --- | --- | --- | --- | --- |
+| supplier_quotes | e2-refetch | correctness | INFERABLE (prompt scoped dedupe); prompt revised | high |
+| supplier_quotes | e2-basket-rounding | cost | INFERABLE | low |
+| supplier_quotes | e2-basket-unknown | correctness | PASS | medium |
+| supplier_quotes | e3-discount-rounding | correctness | INFERABLE; discount restated per line | medium |
+| supplier_quotes | e4-warm-unknown | correctness | PASS (weak) | medium |
+| supplier_quotes | e5-orders-unknown | correctness | new | medium to high |
+| supplier_quotes | e5-micro-rounding | cost | INFERABLE | low |
+| supplier_quotes | e5-new-perishable | cost | INFERABLE | low |
+| entity_outbox | e2-delete-event | correctness | new | high |
+| entity_outbox | e2-recreate | cost | INFERABLE | low |
+| entity_outbox | e3-compaction | cost | INFERABLE | low |
+| entity_outbox | e3-delete-many-events | correctness | new | medium |
+| entity_outbox | e4-epoch-compaction | cost | INFERABLE | low |
+| entity_outbox | e4-patch-full | correctness | new | medium to high |
+| entity_outbox | e5-rename-events | correctness | new | medium |
+| late_fees | e1-half-up | correctness | PASS | medium |
+| late_fees | e1-charity | correctness | PASS | high |
+| late_fees | e2-foundation | correctness | PASS | high |
+| late_fees | e3-penalty-exempt | correctness | RECORDS-FAIL; seed clause removed | high |
+| late_fees | e3-penalty-half-up | correctness | PASS (weak) | medium |
+| late_fees | e4-association-penalty | cost | INFERABLE | low |
+| late_fees | e4-collection-exempt | correctness | new | medium to high |
+
+Currency probes, not scored by condition A:
+
+| Package | Probe |
+| --- | --- |
+| supplier_quotes | e4-guarantee |
+| entity_outbox | e5-rename-epoch |
+| late_fees | e4-association-np9 |
 
 ## Validation evidence
 
@@ -185,10 +222,57 @@ definition in `project/` and every reference. The pilot `validate` (no
 
 ## Blind reader audit
 
-To be filled by the parent session before gold approval. Two conditions per
-retention and currency probe, each answered in writing by a fresh reader:
+Two conditions per retention probe, each answered in writing by a fresh
+reader. Condition A: only the episode prompt and the complete previous source.
+Condition B: A plus only the deciding records current at that episode. A
+correctness probe that condition A answers correctly and confidently is
+revised or relabelled cost; a probe that condition B answers wrongly means the
+records do not carry the answer.
 
-1. Only `reference/e(N-1)` and prompt eN. A probe this reader answers
-   correctly is revised or dropped.
-2. The same, plus only the deciding gold records. A probe this reader answers
-   incorrectly is ill-posed: the graph answer does not suffice.
+### Round 1 (2026-09-13)
+
+Readers: fresh Claude Sonnet subagents, one per package episode. Condition A = episode prompt + clarifications + complete previous-state source only; answered and saved first. Condition B = A plus only the deciding accepted records current at that episode. Packets were split per episode so no reader saw later code. Grading compares answers with gold values computed by running each snippet against reference/eN and the matching negative overlay.
+
+Verdicts: PASS = A wrong or not determined, B right and determined. INFERABLE = A right and determined (retention probe fails the audit). RECORDS-FAIL = B wrong (the deciding records do not carry the answer). CURRENCY = no-memory reader is expected to be right by design; the probe discriminates only against stale knowledge.
+
+| Package | Q | Episode | Probe | Kind | A | B | Verdict |
+|---|---|---|---|---|---|---|---|
+| supplier_quotes | Q1 | e2 | e2-refetch | retention | right, determined (prompt scopes dedupe to one call) | right | INFERABLE |
+| supplier_quotes | Q2 | e2 | e2-basket-rounding | retention | right, determined (per-unit to_cents in code) | right | INFERABLE |
+| supplier_quotes | Q3 | e2 | e2-basket-unknown | retention | wrong (one supplier call) | right | PASS |
+| supplier_quotes | Q4 | e3 | e3-discount-rounding | retention | right, determined (per-unit rounding convention) | right | INFERABLE |
+| supplier_quotes | Q5 | e4 | e4-warm-unknown | retention | right, ambiguous | right, determined | PASS (weak) |
+| supplier_quotes | Q6 | e4 | e4-guarantee | currency | right, determined | right | CURRENCY |
+| supplier_quotes | Q7 | e5 | e5-micro-rounding | retention | right, determined (per-unit to_cents in code) | right | INFERABLE |
+| supplier_quotes | Q8 | e5 | e5-new-perishable | retention | right, determined (shelf-life check in code; default equals gold) | right | INFERABLE |
+| entity_outbox | Q1 | e2 | e2-recreate | retention | right, determined (separate persistent sequences table) | right | INFERABLE |
+| entity_outbox | Q2 | e3 | e3-compaction | retention | right, determined (sequences table survives compaction; default equals gold) | right | INFERABLE |
+| entity_outbox | Q3 | e4 | e4-epoch-compaction | retention | right, determined (last_seq in sequences table) | right | INFERABLE |
+| entity_outbox | Q4 | e5 | e5-rename-epoch | currency | right, ambiguous | right, determined | CURRENCY |
+| late_fees | Q1 | e1 | e1-half-up | retention | not determined (no rounding rule) | right | PASS |
+| late_fees | Q2 | e1 | e1-charity | retention | wrong (charity charged) | right | PASS |
+| late_fees | Q3 | e2 | e2-foundation | retention | wrong (foundation charged) | right | PASS |
+| late_fees | Q4 | e3 | e3-penalty-exempt | retention | wrong (all charged) | wrong: foundation charged, because seed NP-7 says "today charity is the only non-profit segment" | RECORDS-FAIL |
+| late_fees | Q5 | e3 | e3-penalty-half-up | retention | right, ambiguous (followed percent_of convention) | right, determined | PASS (weak) |
+| late_fees | Q6 | e4 | e4-association-np9 | currency | right, determined | right | CURRENCY |
+| late_fees | Q7 | e4 | e4-association-penalty | retention | right, determined (prompt wording + NON_PROFIT_SEGMENTS set used by both fee paths) | right | INFERABLE |
+
+Totals over 16 retention probes: PASS 6 (2 weak), INFERABLE 9, RECORDS-FAIL 1. Currency probes: 3, none discriminate against a no-memory reader (by design).
+
+Pattern: a retention probe discriminated only when the previous code could not show the rule, because the rule concerned a code path or category that did not exist yet (unknown SKU on a new batch path, rounding before any half-cent case, an exemption before any exemption code, a new segment before a segment set). Every probe whose rule the reference implemented as a general mechanism (persistent sequence table, per-unit rounding helper, shelf-life check, non-profit set) was recovered by a code reader.
+
+Second finding: a seed record carrying a time-bound clause ("today charity is the only non-profit segment") goes stale by scenario design at e2, and a reader that treats records as authoritative is then forced to a wrong answer even though the code is right.
+
+**Revision 2 response.** Every probe is kept and the reference code stays
+natural. Inferable probes whose rule the previous code shows are labelled
+cost. New correctness instances were added on new code paths or categories
+(`supplier_quotes` e5-orders-unknown; `entity_outbox` e2-delete-event,
+e3-delete-many-events, e4-patch-full, e5-rename-events; `late_fees`
+e4-collection-exempt). Two prompts were rescoped (`supplier_quotes`
+e2-refetch and e3-discount-rounding), and the stale seed clause was removed
+from `late_fees` NP-7.
+
+### Round 2
+
+Pending. Packets cover every new or changed correctness probe and the
+`late_fees` e3 packet with corrected records.
