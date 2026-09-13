@@ -1,7 +1,7 @@
 # Symbolic two-arm baseline: pre-registration
 
-Mode `local-harness-symbolic-baseline`, study `harness-symbolic-baseline-v2` (attempt v1
-is described below).
+Mode `local-harness-symbolic-baseline`, study `harness-symbolic-baseline-v3` (attempts v1
+and v2 are described below).
 Governing records: ArchitecturalDecision `9dcaddeb` (S8: the symbolic policy is
 the only harness) and its consequence `b5a313eb` (the next matched campaign is
 one harness arm beside opencode-without under a new identity), Requirement
@@ -150,7 +150,12 @@ never pooled with this identity:
   first word is not a shell builtin, an installed program or a project file
   (one repair attempt, `plan_check_rejected`), and a required check that exits
   126 or 127 is reported as an invalid check rather than a failed test
-  (`check_unrunnable`).
+  (`check_unrunnable`);
+- a final note whose capture succeeded is marked captured: a later knowledge
+  change never invalidates it and a repeated final checkpoint never submits it
+  again; and a title that collides with an existing record keeps its
+  qualifier inside the 100-character cap (the base is shortened), falling back
+  to the operation prefix when the file-qualified title is taken as well.
 
 ## Smoke run
 
@@ -184,6 +189,24 @@ killed. All five runs and the smoke run are retained unscored and never pooled.
 One instrumentation defect was fixed before v1's cell 0 (the deadline snapshot
 was overwritten by the post-interrupt Cancelled state). Changes for v2: the
 check guard listed above and the block order.
+
+## Attempt v2 (study `harness-symbolic-baseline-v2`, build `a0fcebde…`)
+
+The check guard worked: in every Gemma harness run the first prose check was
+rejected once and the next plan used a runnable test command. The smoke and
+cell 2 (retry ledger) ended at the clarification cap after Gemma replanned
+nineteen times and asked four questions, explained by the model's own choices.
+Cells 7 (maintenance) and 9 (ruleset cache) exposed a harness defect: the model
+solved the task (hidden checks passed), its final note was captured and the
+governing proposals accepted, the accepted knowledge invalidated the approval,
+and the S8 typing invalidation reset the already-captured note. After
+re-verification the same note was typed and submitted again; its symbolic
+decision title, already at the cap, collided with its own accepted record, and
+the collision qualifier was cut off by the cap on every retype until the
+retype budget parked the task. The campaign stopped after the Gemma block under
+the rule above; the Gemma native cells 1, 6 and 10 and all v2 runs are retained
+unscored and never pooled. Changes for v3: the capture fixes listed above.
+Attempt v3 re-runs all twelve cells in the same block order.
 
 ## Rules
 
