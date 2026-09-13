@@ -32,7 +32,7 @@ def main(argv=None):
     command.add_argument("--binary-manifest", type=Path, required=True)
     command.add_argument("--study-id", required=True)
     command.add_argument("--output", type=Path, required=True)
-    command = sub.add_parser("init-evolution", help="derive a frozen six-, twelve- or eighteen-cell harness evolution config")
+    command = sub.add_parser("init-evolution", help="derive a frozen six-, twelve- or eighteen-cell harness evolution or symbolic-baseline config")
     command.add_argument("parent_preflight", type=Path)
     command.add_argument("--binary-manifest", type=Path, required=True)
     command.add_argument("--stage", choices=evolution.MODES, required=True)

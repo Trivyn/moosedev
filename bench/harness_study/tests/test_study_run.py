@@ -266,6 +266,99 @@ class RunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact frozen schedule cell"):
             runner.run_cell(self.root / "other", self.frozen, dict(self.cell, model="substitute"))
 
+    def _symbolic_config(self):
+        from bench.harness_study import evolution, intent
+        self.config.update(evaluation_mode=evolution.SYMBOLIC_BASELINE_MODE, episode_limit=1,
+                           scenario_ids=list(intent.SCENARIOS), intent_policies=["symbolic"],
+                           local_models=[{"id": model} for model in intent.MODELS],
+                           evidence_byte_limit=evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
+                           reject_loop_limit=evolution.BASELINE_REJECT_LOOP_LIMIT,
+                           seed=1, evolution_design=evolution.design_identity(evolution.SYMBOLIC_BASELINE_MODE))
+        self.config.pop("codex")
+        self.frozen.pop("codex")
+        for index in range(len(self.config["local_models"])):
+            weights = self.root / f"weights-{index}"
+            weights.mkdir()
+            (weights / "model.safetensors").write_text("fixture weights")
+            self.frozen[f"local_model_{index}"] = {"weights": str(weights), "files": tree_manifest(weights)}
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        self.frozen["schedule"] = runner.schedule(self.config)
+
+    def test_symbolic_native_cell_runs_without_overlay_index_or_daemon(self):
+        from bench.harness_study import evolution
+        self._symbolic_config()
+        self.cell = next(cell for cell in self.frozen["schedule"] if cell["backend"] == "opencode")
+        self.assertEqual((self.cell["condition"], self.cell["intent_policy"]), ("without", None))
+        self.scenario["id"] = self.cell["scenario_id"]
+        (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        with patch.dict("sys.modules", {"bench.harness_study.indexing": None}):
+            result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertEqual(self.observed_guards, [(8 * 1024 ** 3, 5)])
+        self.assertEqual([(episode["status"], episode.get("reason")) for episode in result["episodes"]],
+                         [("success", None), ("unattempted", "episode_limit"), ("unattempted", "episode_limit")])
+        self.assertIn("evolution_constituents", result["episodes"][0])
+        backend, arguments = self.command_arguments[0]
+        self.assertEqual(backend, "opencode")
+        self.assertNotIn("harness_intent_policy", arguments)
+        # No post-edit probe contract exists under the symbolic harness.
+        self.assertFalse(arguments["postedit_association_contract"])
+        saved = Path(result["path"])
+        self.assertTrue((saved / "evolution-design.json").is_file())
+        self.assertFalse((saved / "intent-design.json").exists())
+        self.assertFalse((saved / "episodes/e1/daemon.log").exists())
+        self.assertIn("PROJECT_NOTES.md", {path.name for path in (saved / "initial").iterdir()})
+        manifest = json.loads((saved / "manifest.json").read_text())
+        self.assertIsNone(manifest["intent_policy"])
+        self.assertEqual(manifest["evaluation_mode"], evolution.SYMBOLIC_BASELINE_MODE)
+        with self.assertRaisesRegex(ValueError, "frozen arms"):
+            runner.run_cell(self.root / "other", dict(self.frozen, schedule=self.frozen["schedule"]
+                            + [dict(self.cell, condition="harness")]), dict(self.cell, condition="harness"))
+
+    def test_symbolic_harness_cell_sends_the_symbolic_policy_without_a_postedit_contract(self):
+        from types import SimpleNamespace
+        from bench.harness_study import evolution, intent
+        self._symbolic_config()
+        self.cell = next(cell for cell in self.frozen["schedule"] if cell["backend"] == "harness")
+        self.assertEqual((self.cell["condition"], self.cell["intent_policy"]), ("harness", "symbolic"))
+        self.scenario["id"] = self.cell["scenario_id"]
+        (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        (self.repo / "spec/harness_intent_pilot.md").write_text("frozen fixture intent protocol\n")
+        indexer_dir = self.root / "indexer"
+        indexer_dir.mkdir()
+        (indexer_dir / "scip-python").write_text("#!/bin/sh\n")
+        indexer = {"directory": str(indexer_dir), "launcher": {"path": str(indexer_dir / "scip-python")}}
+        self.config["indexer_manifest"] = str(indexer_dir / "manifest.json")
+        self.binary_manifest["indexer"] = indexer
+        self.frozen.update(indexer=indexer, intent_design=intent.design_identity(), indexer_probe={"ok": True},
+                           indexer_system_python={"path": "/usr/bin/python3"})
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        self.frozen["schedule"] = runner.schedule(self.config)
+        self.cell = next(cell for cell in self.frozen["schedule"] if cell["backend"] == "harness")
+        calls = []
+        fake_indexing = SimpleNamespace(
+            verify_indexer=lambda manifest: indexer,
+            apply_overlay=lambda workspace: calls.append("overlay"),
+            index_workspace=lambda *args: {"indexed": True},
+            ready_dossiers=lambda daemon, scenario, **kwargs: {"ready": True},
+            system_python_identity=lambda frozen: frozen)
+        with patch.dict("sys.modules", {"bench.harness_study.indexing": fake_indexing}):
+            result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(calls, ["overlay"])
+        backend, arguments = self.command_arguments[0]
+        self.assertEqual(backend, "harness")
+        self.assertEqual(arguments["harness_intent_policy"], "symbolic")
+        self.assertFalse(arguments["postedit_association_contract"])
+        saved = Path(result["path"])
+        self.assertTrue((saved / "evolution-design.json").is_file())
+        self.assertTrue((saved / "intent-design.json").is_file())
+        self.assertTrue((saved / "episodes/e1/daemon.log").is_file())
+        manifest = json.loads((saved / "manifest.json").read_text())
+        self.assertEqual(manifest["intent_policy"], "symbolic")
+        self.assertEqual(manifest["evaluation_mode"], evolution.SYMBOLIC_BASELINE_MODE)
+
     def test_pending_approval_is_a_retained_preflight_attempt(self):
         result = self._run(approval_error=ValueError("scenario rubric approval is pending"))
         self.assertEqual(result["status"], "preflight_failure")

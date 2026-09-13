@@ -192,14 +192,17 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
     config = frozen["config"]
     mode = config.get("evaluation_mode", "pilot")
     experimental = mode == intent.MODE or mode in evolution.MODES
-    # The three-arm baseline runs its native arm through the same frozen schedule;
-    # every other local mode admits only harness cells.
+    # A mode with frozen arms runs its native arm through the same frozen
+    # schedule; every other local mode admits only harness cells.
     harness_cell = experimental and cell["backend"] == "harness"
     if mode in ("local-harness-development", intent.MODE, *evolution.MODES):
         if Path(store_root).resolve() == (REPO / "target/harness-study/evidence").resolve():
             raise ValueError("development reruns require a separate evidence store; preserve the pilot store")
-        if mode != evolution.STAGE2_BASELINE_MODE and (cell["backend"] != "harness" or cell["condition"] != "harness"):
+        arms = evolution.ARMS.get(mode)
+        if arms is None and (cell["backend"] != "harness" or cell["condition"] != "harness"):
             raise ValueError("development reruns are limited to local harness cells")
+        if arms is not None and (cell["backend"], cell["condition"], cell.get("intent_policy")) not in arms:
+            raise ValueError("cell is not one of the frozen arms for this mode")
     if experimental and cell not in frozen["schedule"]:
         raise ValueError("intent run must select an exact frozen schedule cell")
     if experimental and frozen["schedule"] != schedule(config):

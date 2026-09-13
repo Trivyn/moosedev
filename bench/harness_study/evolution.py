@@ -5,20 +5,26 @@ import hashlib
 from pathlib import Path
 
 from .artifacts import canonical_json
-from .cause import CONTROLLER_CLASS, HARNESS_TERMINAL_CAUSES, RECOVERY_CONTROLLER_CLASS, TERMINAL_CAUSES
+from .cause import (CONTROLLER_CLASS, HARNESS_TERMINAL_CAUSES, RECOVERY_CONTROLLER_CLASS, SYMBOLIC_HALT_CAUSES,
+                    SYMBOLIC_TERMINAL_CAUSES, TERMINAL_CAUSES, UNATTENDED_HALT_CLASS)
 from . import intent
 
 STAGE1_MODE = "local-harness-evolution-stage1"
 STAGE2_MODE = "local-harness-evolution-stage2"
 STAGE2_RECOVERY_MODE = "local-harness-evolution-stage2-recovery"
 STAGE2_BASELINE_MODE = "local-harness-evolution-stage2-baseline"
-MODES = (STAGE1_MODE, STAGE2_MODE, STAGE2_RECOVERY_MODE, STAGE2_BASELINE_MODE)
+# S8 made the symbolic policy the only harness; this mode compares it with the
+# native agent under a new identity (AD 9dcaddeb, consequence b5a313eb).
+SYMBOLIC_BASELINE_MODE = "local-harness-symbolic-baseline"
+MODES = (STAGE1_MODE, STAGE2_MODE, STAGE2_RECOVERY_MODE, STAGE2_BASELINE_MODE, SYMBOLIC_BASELINE_MODE)
 POLICIES = {STAGE1_MODE: ("current",), STAGE2_MODE: ("current", "change-level-v2"),
             STAGE2_RECOVERY_MODE: ("current", "change-level-v2"),
-            STAGE2_BASELINE_MODE: ("current", "change-level-v2")}
-# Three-arm cells as (backend, condition, intent_policy); the native arm has no policy.
+            STAGE2_BASELINE_MODE: ("current", "change-level-v2"),
+            SYMBOLIC_BASELINE_MODE: ("symbolic",)}
+# Multi-arm cells as (backend, condition, intent_policy); the native arm has no policy.
 ARMS = {STAGE2_BASELINE_MODE: (("harness", "harness", "current"), ("harness", "harness", "change-level-v2"),
-                               ("opencode", "without", None))}
+                               ("opencode", "without", None)),
+        SYMBOLIC_BASELINE_MODE: (("harness", "harness", "symbolic"), ("opencode", "without", None))}
 # Stage 2 builds whose controller defects motivated the recovery stage; never rerun.
 # The recovery identity (763ccc52...) froze this pair; the recovery build joins the
 # sealed set for the baseline without rewriting that identity.
@@ -37,6 +43,23 @@ SHARED_FIXES = ("association prompt record-choice dedup",
                 "driver computes journal metrics once from the final snapshot")
 REQUIREMENT = "https://moosedev.dev/kg/Requirement/4ff3ef62-c7a9-4494-89d3-a91ea110c52a"
 DECISION = "https://moosedev.dev/kg/ArchitecturalDecision/395c4e78-0413-4cb6-90a8-901f44d062f2"
+# The symbolic baseline: its own sealed set (the three-arm baseline build joins
+# without rewriting SEALED_PREDECESSORS, which the baseline identity hashes),
+# governing records, runner bounds and frozen reconciliation thresholds.
+SEALED_BASELINE = ("abe95d92da7994ec9a801073899e480d58a492f5987e1957fff67fa45a6e1fb6",)
+SEALED_SYMBOLIC_PREDECESSORS = SEALED_PREDECESSORS + SEALED_BASELINE
+SYMBOLIC_REQUIREMENT = "https://moosedev.dev/kg/Requirement/9ae68a19-08c9-4317-aa75-029e08e2c5b6"
+SYMBOLIC_DECISION = "https://moosedev.dev/kg/ArchitecturalDecision/9dcaddeb-4027-4178-90ab-4aee30199d45"
+SYMBOLIC_BOUNDS = {"scope_escapes": 3, "retypes": 3, "noop_continuations": 1}
+RECONCILIATION_THRESHOLDS = {"MOOSEDEV_RECONCILE_RESTATES": 0.80, "MOOSEDEV_RECONCILE_REFINES": 0.55,
+                             "MOOSEDEV_RECONCILE_REFINES_CONTAINMENT": 0.60,
+                             "MOOSEDEV_RECONCILE_TIEBREAK_BAND": 0.08}
+S8_RUNNER_CHANGES = ("symbolic-only harness; task journal schema 2",
+                     "plan-scope escape replans autonomously, three per task, then parks",
+                     "first no-op edit runs the required checks instead of spending repair budget",
+                     "abandoned link review resets the derived association for re-derivation",
+                     "daemon-rejected or colliding typed capture retypes under fresh ids, three per note, then parks",
+                     "typing invalidated on source or knowledge change without a model call")
 
 
 def postedit_association_contract(mode):
@@ -94,6 +117,38 @@ def design_identity(stage):
             "sealed_predecessors": list(SEALED_PREDECESSORS),
             "preregistration_sha256": hashlib.sha256(
                 Path(__file__).with_name("BASELINE.md").read_bytes()).hexdigest(),
+        })
+    if stage == SYMBOLIC_BASELINE_MODE:
+        payload.update({
+            "requirement": SYMBOLIC_REQUIREMENT,
+            "decision": SYMBOLIC_DECISION,
+            "capture_contract": "one prose capture note typed by the daemon; symbolic same-kind "
+                                "reconciliation with durable receipts (restates, refines, distinct)",
+            "postedit_contract": "deterministic kind-filtered associations derived after finish; no post-edit probe",
+            "treatment_difference": None,
+            "arms": [dict(zip(("backend", "condition", "intent_policy"), arm)) for arm in ARMS[stage]],
+            "primary_outcome": {
+                "definition": "per model and package: within-budget completion AND hidden-check pass; "
+                              "harness-symbolic vs opencode-without, six pairs",
+                "halt_count": {
+                    "definition": "number of symbolic runs whose terminal cause is in the unattended halt class",
+                    "classes": sorted(UNATTENDED_HALT_CLASS)},
+                "baseline_knowledge_outcomes": "not applicable",
+                "prompt_rule": "task text and clarifications identical across arms; condition guidance frozen from the pilot"},
+            "terminal_cause_classes": sorted(SYMBOLIC_TERMINAL_CAUSES),
+            "controller_class": sorted(CONTROLLER_CLASS),
+            "native_terminal_causes": ["success", "native_no_completion", "deadline_native", "infrastructure", "unknown"],
+            "reviewer_terminals": sorted(SYMBOLIC_HALT_CAUSES | {"model_repair_exhausted"}),
+            "symbolic_bounds": dict(SYMBOLIC_BOUNDS),
+            "reconciliation_thresholds": dict(RECONCILIATION_THRESHOLDS),
+            "daemon_llm_sensor": "helper model from configuration; MOOSEDEV_LLM_ASSIST_LEVEL unset -> Sensor",
+            "evidence_byte_limit": BASELINE_EVIDENCE_BYTE_LIMIT,
+            "reject_loop_limit": BASELINE_REJECT_LOOP_LIMIT,
+            "episode_limit": 1,
+            "runner_changes": list(S8_RUNNER_CHANGES),
+            "sealed_predecessors": list(SEALED_SYMBOLIC_PREDECESSORS),
+            "preregistration_sha256": hashlib.sha256(
+                Path(__file__).with_name("SYMBOLIC.md").read_bytes()).hexdigest(),
         })
     return {"payload": payload, "sha256": hashlib.sha256(canonical_json(payload)).hexdigest()}
 

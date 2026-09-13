@@ -109,7 +109,8 @@ def _journal_metrics(outcome, task):
         for field, value in outcome["intent_activity"].items():
             if isinstance(value, int):
                 outcome["metrics"]["intent_" + field] = value
-        if task.get("capture_contract", 1) >= 2 or task.get("intent_policy") == "change-level-v2":
+        if (task.get("schema", 1) >= 2 or task.get("capture_contract", 1) >= 2
+                or task.get("intent_policy") == "change-level-v2"):
             outcome["evolution_reviews"] = review_metrics(task["intent_events"])
             for field in ("record_dispositions", "attached_link_dispositions", "reuse_dispositions",
                           "individual_dispositions", "plan_approval_attempts", "gate_decisions",

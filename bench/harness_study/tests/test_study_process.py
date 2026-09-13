@@ -437,6 +437,29 @@ sys.exit(2)''',
         self.assertEqual(result["harness_recovery"]["decisions"]["d2"],
                          {"purpose": "harness_capture_note", "attempts": [1]})
 
+    def test_schema_2_journals_derive_review_metrics_without_a_capture_contract(self):
+        import json
+        from bench.harness_study.evolution import review_metrics
+        events = [{"id": "a", "cycle": "c1", "kind": "plan_approval_attempt", "detail": "1"},
+                  {"id": "b", "cycle": "c1", "kind": "record_review", "detail": "accepted", "interaction": "r1"},
+                  {"id": "c", "cycle": "c1", "kind": "edit_applied", "detail": "cache.py"}]
+        for schema, expected in ((2, True), (1, False)):
+            task = {"id": "one", "schema": schema, "phase": "Complete", "recovery": None, "intent_events": events,
+                    "events": [], "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"}]}
+            result, _ = self.run_client(f"""
+                import json, sys
+                json.loads(sys.stdin.readline())
+                print(json.dumps({{"type":"state", "model":"model", "busy":False, "task":{json.dumps(task)!r} and json.loads({json.dumps(task)!r})}}), flush=True)
+                assert json.loads(sys.stdin.readline())["type"] == "quit"
+                print(json.dumps({{"type":"closed"}}))
+            """, backend="harness", expected_model="model")
+            self.assertEqual(result["status"], "success")
+            self.assertEqual("evolution_reviews" in result, expected, schema)
+            if expected:
+                self.assertEqual(result["evolution_reviews"], review_metrics(events))
+                self.assertEqual(result["metrics"]["evolution_review_interactions"], 1)
+                self.assertEqual(result["metrics"]["symbolic_structured_model_decisions"], 0)
+
     def test_journal_metrics_are_computed_once_from_the_final_snapshot(self):
         import json
         from bench.harness_study.evolution import review_metrics

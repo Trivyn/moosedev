@@ -57,7 +57,8 @@ class EvolutionDesignTests(unittest.TestCase):
             self.assertEqual(payload["historical_baseline"], historical)
 
     def test_postedit_contract_is_stage2_only_for_both_arms(self):
-        for mode in (None, intent.MODE, evolution.STAGE1_MODE, "local-harness-development"):
+        for mode in (None, intent.MODE, evolution.STAGE1_MODE, "local-harness-development",
+                     evolution.SYMBOLIC_BASELINE_MODE):
             self.assertFalse(evolution.postedit_association_contract(mode))
         for cell in config.schedule(specification(evolution.STAGE2_MODE)):
             self.assertTrue(evolution.postedit_association_contract(evolution.STAGE2_MODE))

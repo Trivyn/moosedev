@@ -2,6 +2,8 @@
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 
+from .cause import last_symbolic_halt
+
 KINDS = {"ArchitecturalDecision", "Constraint", "Requirement", "Lesson", "Pattern", "AntiPattern"}
 
 
@@ -36,6 +38,14 @@ def review_input(state, episode):
     if recovery.get("status") == "awaiting_guidance":
         return {"terminal": "agent_failure", "reason": "native harness exhausted its repair budget: "
                 + recovery.get("diagnostic", "human guidance required"), "cause": "model_repair_exhausted"}
+    if phase == "AwaitingInput":
+        # The symbolic harness parked itself after its autonomous bound. A
+        # human would decide here; the reviewer records the halt instead of
+        # supplying that decision with the frozen clarification.
+        halt = last_symbolic_halt(task)
+        if halt is not None:
+            return {"terminal": "agent_failure", "cause": halt["kind"],
+                    "reason": "native harness parked for human guidance: " + str(task.get("last_response", ""))}
     if task.get("last_error"):
         return {"terminal": "agent_failure", "reason": task["last_error"], "cause": "runner_error"}
     if phase in ("AwaitingPlan", "AwaitingPolicy"):

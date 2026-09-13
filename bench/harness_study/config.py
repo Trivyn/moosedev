@@ -75,7 +75,8 @@ def schedule(config):
         cells = [{"model": model, "backend": backend, "condition": condition,
                   "scenario_id": scenario, "intent_policy": policy}
                  for scenario in scenarios for model in models for backend, condition, policy in arms]
-        expected = {evolution.STAGE1_MODE: 6, evolution.STAGE2_BASELINE_MODE: 18}.get(stage, 12)
+        expected = {evolution.STAGE1_MODE: 6, evolution.STAGE2_BASELINE_MODE: 18,
+                    evolution.SYMBOLIC_BASELINE_MODE: 12}.get(stage, 12)
         identities = {(c["model"], c["backend"], c["condition"], c["intent_policy"], c["scenario_id"]) for c in cells}
         if len(cells) != expected or len(identities) != expected:
             raise ValueError("evolution schedule has duplicated or missing cells")
@@ -112,7 +113,7 @@ def schedule(config):
 
 def required_clients(config):
     mode = config.get("evaluation_mode")
-    if mode == evolution.STAGE2_BASELINE_MODE:
+    if any(backend == "opencode" for backend, _, _ in evolution.ARMS.get(mode, ())):
         return ("opencode", "lms")
     return ("lms",) if mode in ("local-harness-development", intent.MODE, *evolution.MODES) else ("codex", "opencode", "lms")
 
@@ -124,10 +125,15 @@ def evolution_config(parent, binary_manifest, study_id, stage):
     original = parent.get("config")
     if not parent.get("ready") or not isinstance(original, dict) or parent.get("config_sha256") != configuration_hash(original):
         raise ValueError("evolution configuration requires an intact successful parent preflight")
-    single_episode = stage in (evolution.STAGE2_RECOVERY_MODE, evolution.STAGE2_BASELINE_MODE)
+    single_episode = stage in (evolution.STAGE2_RECOVERY_MODE, evolution.STAGE2_BASELINE_MODE,
+                               evolution.SYMBOLIC_BASELINE_MODE)
     parents = {evolution.STAGE2_RECOVERY_MODE: (intent.MODE, evolution.STAGE2_MODE),
                evolution.STAGE2_BASELINE_MODE: (intent.MODE, evolution.STAGE2_MODE, evolution.STAGE2_RECOVERY_MODE),
+               evolution.SYMBOLIC_BASELINE_MODE: (intent.MODE, evolution.STAGE2_MODE, evolution.STAGE2_RECOVERY_MODE,
+                                                  evolution.STAGE2_BASELINE_MODE),
                }.get(stage, (intent.MODE,))
+    sealed = (evolution.SEALED_SYMBOLIC_PREDECESSORS if stage == evolution.SYMBOLIC_BASELINE_MODE
+              else evolution.SEALED_PREDECESSORS)
     if original.get("evaluation_mode") not in parents:
         raise ValueError("evolution configuration must descend from the frozen intent pilot")
     if not study_id.strip() or study_id == original.get("study_id"):
@@ -135,7 +141,7 @@ def evolution_config(parent, binary_manifest, study_id, stage):
     build = verify_binaries(Path(binary_manifest))
     if build["build_id"] == parent["binaries"]["build_id"]:
         raise ValueError("evolution study requires a newly frozen build")
-    if single_episode and build["build_id"] in evolution.SEALED_PREDECESSORS:
+    if single_episode and build["build_id"] in sealed:
         raise ValueError(f"{stage} refuses a sealed predecessor build")
     verify_approval(Path(original["gold_approval"]), config=original)
     result = deepcopy(original)
@@ -149,7 +155,7 @@ def evolution_config(parent, binary_manifest, study_id, stage):
                   **({"episode_limit": 1} if single_episode else {}),
                   **({"evidence_byte_limit": evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
                       "reject_loop_limit": evolution.BASELINE_REJECT_LOOP_LIMIT}
-                     if stage == evolution.STAGE2_BASELINE_MODE else {}),
+                     if stage in (evolution.STAGE2_BASELINE_MODE, evolution.SYMBOLIC_BASELINE_MODE) else {}),
                   parent_pilot={"study_id": original["study_id"], "config_sha256": parent["config_sha256"],
                                 "build_id": parent["binaries"]["build_id"],
                                 "intent_design": intent.design_identity()})

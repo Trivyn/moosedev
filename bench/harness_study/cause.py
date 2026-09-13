@@ -6,11 +6,13 @@ The first matching row wins; ordering is part of the frozen study identity.
 Harness rows (backend "harness" or absent): infrastructure, evidence_limit
 (driver evidence-volume guard, any backend), success, model_repair_exhausted,
 typed last_error kinds, reviewer terminals (reviewer_scope_rejection,
-clarification_cap, reviewer_reject_loop), purpose exhaustion, deadlines,
-unknown. Native rows (any other backend) are decided before the harness rows:
-infrastructure -> evidence_limit -> success (completion stop reason and
-success status) -> deadline_native -> native_no_completion (exited without a
-stop reason) -> unknown. Neither native class is controller class.
+clarification_cap, reviewer_reject_loop), purpose exhaustion, symbolic parks
+(scope_escape_exhausted, capture_retype_exhausted: the runner parked itself in
+AwaitingInput after its autonomous bound), deadlines, unknown. Native rows (any
+other backend) are decided before the harness rows: infrastructure ->
+evidence_limit -> success (completion stop reason and success status) ->
+deadline_native -> native_no_completion (exited without a stop reason) ->
+unknown. Neither native class is controller class.
 """
 
 # The recovery identity (763ccc52...) hashes this four-class list; later guard
@@ -30,6 +32,17 @@ HARNESS_TERMINAL_CAUSES = frozenset({
 NATIVE_TERMINAL_CAUSES = frozenset({"native_no_completion", "deadline_native"})
 GUARD_TERMINAL_CAUSES = frozenset({"reviewer_reject_loop", "evidence_limit"})
 TERMINAL_CAUSES = HARNESS_TERMINAL_CAUSES | NATIVE_TERMINAL_CAUSES | GUARD_TERMINAL_CAUSES
+# The symbolic harness parks itself after its autonomous bounds (three plan-scope
+# escapes, three capture retypes). Both are journaled intent events; neither sets
+# recovery or last_error. They join a superset for the symbolic identity; the
+# sealed recovery and baseline identities hash the sets above unchanged.
+SYMBOLIC_HALT_CAUSES = frozenset({"scope_escape_exhausted", "capture_retype_exhausted"})
+# A run that ended because the harness needed a human and none was there. The
+# frozen clarification cap is reported separately: it is a reviewer budget.
+UNATTENDED_HALT_CLASS = SYMBOLIC_HALT_CAUSES | {"model_repair_exhausted", "reviewer_idle_deadline"}
+SYMBOLIC_TERMINAL_CAUSES = TERMINAL_CAUSES | SYMBOLIC_HALT_CAUSES
+# After a park, any of these means a human continued the task.
+SYMBOLIC_RESUME_KINDS = frozenset({"cycle_started", "plan_approved", "obligations_derived", "edit_applied"})
 # Three missing rounds against offered candidates charge the controller; an empty
 # accepted inventory is a scenario/knowledge outcome and is reported separately.
 PURPOSE_EXHAUSTION_KINDS = {"purpose_missing_rounds_exhausted": "purpose_missing_exhausted",
@@ -41,6 +54,13 @@ def _last_purpose_event_kind(task):
     kinds = [event.get("kind") for event in task.get("intent_events") or []
              if isinstance(event, dict) and event.get("kind") in PURPOSE_CYCLE_KINDS]
     return kinds[-1] if kinds else None
+
+
+def last_symbolic_halt(task):
+    """The park event when it is the latest park-or-resume event, else None."""
+    events = [event for event in task.get("intent_events") or []
+              if isinstance(event, dict) and event.get("kind") in SYMBOLIC_HALT_CAUSES | SYMBOLIC_RESUME_KINDS]
+    return events[-1] if events and events[-1]["kind"] in SYMBOLIC_HALT_CAUSES else None
 
 
 def classify(outcome, last_task, final, driver_state):
@@ -87,6 +107,9 @@ def classify(outcome, last_task, final, driver_state):
         kind = _last_purpose_event_kind(task)
         if kind in PURPOSE_EXHAUSTION_KINDS:
             return PURPOSE_EXHAUSTION_KINDS[kind], kind
+        halt = last_symbolic_halt(task)
+        if halt is not None:
+            return halt["kind"], halt.get("detail")
     if outcome.get("timed_out"):
         if driver_state.get("suppressed_gate_repeats", 0) > 0 and driver_state.get("last_suppressed_phase") == phase:
             return "reviewer_idle_deadline", phase
