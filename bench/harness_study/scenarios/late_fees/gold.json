@@ -38,7 +38,7 @@
     },
     {
       "id": "fees-segments",
-      "claim": "Segments foundation (a registered non-profit) and cooperative (member-owned, for-profit) exist; statement lines show display names. NP-7 covers every registered non-profit segment, so foundations pay no late fee and cooperatives do.",
+      "claim": "The foundation segment, displayed as \"Registered foundation\", is for registered non-profit foundations; the cooperative segment, displayed as \"Member cooperative\", is for member-owned for-profit cooperatives. Statement lines show a segment's display name instead of its code.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/1/prompt"
@@ -58,7 +58,7 @@
     },
     {
       "id": "fees-returned-payment",
-      "claim": "returned_payment_fee charges 2.5% of the bounced amount, at least 250 cents, rounded half up; registered non-profits pay none because NP-7 forbids penalty fees.",
+      "claim": "FeePolicy.returned_payment_fee(account, amount_cents) charges a bounced payment 2.5% of amount_cents, but at least 250 cents.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -68,7 +68,7 @@
     },
     {
       "id": "fees-association",
-      "claim": "The association segment is a registered non-profit: NP-9 applies to its late fees on invoices due on or after day 1000, NP-7 to earlier invoices and to penalty fees.",
+      "claim": "The association segment, displayed as \"Registered association\", is for registered non-profit associations.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/3/prompt"
@@ -88,7 +88,7 @@
     },
     {
       "id": "fees-collection",
-      "claim": "collection_penalty charges 15% of the amount, at least 500 cents, once an invoice is more than 60 days past due; as a penalty fee it is never charged to a registered non-profit, whatever the due day, because NP-9 replaces NP-7 for late fees only.",
+      "claim": "FeePolicy.collection_penalty(account, invoice, today) charges 15% of amount_cents, but at least 500 cents, once today is more than 60 days after invoice.due_day; otherwise 0.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/3/prompt"

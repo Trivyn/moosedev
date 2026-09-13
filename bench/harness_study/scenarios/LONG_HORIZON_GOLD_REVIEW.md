@@ -357,3 +357,40 @@ pattern (earlier episodes' code becomes local evidence). With these, every
 episode after e1 in all three packages has an audited correctness probe.
 Recorded as graph Lesson 2f56f4de; the stale seed clause finding is Lesson
 8b72b8ed.
+
+## Gold review
+
+Maintainer walk-through with James, 2026-09-13, one package at a time. Review
+page: generated from the committed `scenario.json` and `gold.json` files.
+
+### `late_fees` (decided)
+
+1. **Seed wording.** `SOURCE_MAPPING.md` still described the `fees-np7` seed
+   as saying charity is today's only non-profit segment, the clause the blind
+   audit removed from the seed record. Agreed: the clause is removed from the
+   source mapping (a57816e).
+2. **NP-9 scope and NP-7's current scope.** The episode 3 task text scopes
+   NP-9 to late fees twice ("replaces NP-7 for late fees on invoices due on or
+   after day 1000"; "Late fees on invoices due before day 1000 still follow
+   NP-7"). Agreed: keep that wording and `fees-np7`'s `current_scope`.
+   Adding "NP-9 covers late fees only" was rejected, because it would state
+   outright the scope that `e4-collection-exempt` tests.
+3. **Facts that bundled a consequence.** `fees-segments`,
+   `fees-returned-payment`, `fees-association` and `fees-collection` each
+   added an exemption their episode's task text does not state. Agreed: each
+   claim is trimmed to what its episode states. The exemptions stay expected
+   through `fees-np7`'s current scope and `fees-np9`, so graded notes are not
+   credited twice for the same knowledge; hidden tests and probes are
+   unchanged.
+
+Supersession coverage after the review: `late_fees` keeps the partial
+supersession NP-7 to NP-9 (task probe `e3-np9`, currency probe
+`e4-association-np9` with the `stale-np7` negative, correctness probe
+`e4-collection-exempt`, and the episode-3 forbidden claims);
+`supplier_quotes` keeps clause 7 to the 600-second guarantee and
+`entity_outbox` keeps lifetime numbering to epochs, both full supersessions
+with a retired test.
+
+### `supplier_quotes` and `entity_outbox`
+
+Pending.
