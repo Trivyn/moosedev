@@ -196,7 +196,9 @@ class OfflineResolutionTests(unittest.TestCase):
 class IsolationTests(unittest.TestCase):
     def test_pilot_consumers_never_see_long_horizon_packages(self):
         self.assertEqual(list_scenarios(), ["display_labels_maintenance", "retry_ledger", "ruleset_cache"])
-        self.assertLessEqual(set(list_scenarios(horizon="long")), set(long_horizon.SCENARIOS))
+        self.assertEqual(list_scenarios(horizon="long"), sorted(long_horizon.SCENARIOS))
+        for name in long_horizon.SCENARIOS:
+            self.assertEqual(load_scenario(name)["horizon"], "long")
         old = {"seed": 1, "frontier_model": "frontier", "local_models": [{"id": m} for m in ("a", "b", "c")]}
         self.assertEqual(len(config.schedule(old)), 16)
         self.assertEqual(len(config.schedule(dict(old, evaluation_mode="local-harness-development"))), 6)
