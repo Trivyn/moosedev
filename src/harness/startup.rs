@@ -208,6 +208,7 @@ async fn verify_daemon(url: &str, root: &Path, data_dir: &Path) -> Result<()> {
         .json(&ContextRequest {
             topic: "harness startup".into(),
             files: vec![],
+            evidence_only: false,
         })
         .send()
         .await?;

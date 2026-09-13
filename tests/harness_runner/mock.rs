@@ -59,6 +59,8 @@ pub(super) struct Script {
     pub(super) root: PathBuf,
     pub(super) usage: Option<Value>,
     pub(super) context: Option<String>,
+    /// Accepted knowledge an evidence-only (search) request returns.
+    pub(super) search_knowledge: Option<String>,
     pub(super) replies: VecDeque<(&'static str, Value)>,
     pub(super) requests: Vec<Value>,
     pub(super) capture_requests: Vec<CaptureV2Request>,
@@ -160,6 +162,27 @@ pub(super) async fn context(
     Json(request): Json<ContextRequest>,
 ) -> (StatusCode, Json<ContextResponse>) {
     let mut script = state.lock().unwrap();
+    if request.evidence_only {
+        script
+            .requests
+            .push(json!({"kind":"knowledge_search","topic":request.topic}));
+        let knowledge = script.search_knowledge.clone();
+        return (
+            StatusCode::OK,
+            Json(ContextResponse {
+                capture_contracts: vec![2],
+                intent_contracts: vec![2],
+                project_root: script.root.to_string_lossy().into_owned(),
+                revision: script.revision.clone(),
+                evidence_iris: knowledge
+                    .iter()
+                    .map(|_| "urn:fixture:search-knowledge".to_string())
+                    .collect(),
+                context: knowledge.unwrap_or_default(),
+                files: vec![],
+            }),
+        );
+    }
     script
         .requests
         .push(json!({"kind":"context","files":request.files}));
@@ -175,6 +198,7 @@ pub(super) async fn context(
             intent_contracts: vec![2],
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
+            evidence_iris: vec![],
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."
                     .into()

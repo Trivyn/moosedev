@@ -160,6 +160,7 @@ impl Runner {
                 self.task.source.insert(file, source);
             }
             Step::Search { query } => {
+                let knowledge = self.search_knowledge(&query).await?;
                 let mut hits = String::new();
                 for file in &files {
                     if file.contains(&query) {
@@ -189,10 +190,25 @@ impl Runner {
                         break;
                     }
                 }
-                self.task.last_response = if hits.is_empty() {
-                    "No matches.".into()
+                let records = knowledge.evidence_iris.len();
+                let repository_matches = hits.lines().count();
+                self.intent_event(
+                    "knowledge_search",
+                    &format!("{records} records, {repository_matches} repository matches: {query}"),
+                );
+                let repository = if hits.is_empty() {
+                    "No matches.".to_string()
                 } else {
                     hits
+                };
+                // Accepted knowledge answers first; repository matches follow.
+                self.task.last_response = match (records, repository_matches) {
+                    (0, 0) => repository,
+                    (0, _) => format!("Repository matches:\n{repository}"),
+                    _ => format!(
+                        "Accepted project knowledge for '{query}' (authoritative):\n{}\n\nRepository matches:\n{repository}",
+                        knowledge.context.trim()
+                    ),
                 };
                 self.event(self.task.last_response.clone());
             }

@@ -429,6 +429,53 @@ fn intent_batch_with_one_unresolved_target_has_no_partial_graph_effects() {
 }
 
 #[tokio::test]
+async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossiers() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let existing = record(&state, "Constraint", "Established coding constraint");
+    let request = |topic: &str, evidence_only: bool, files: Vec<String>| ContextRequest {
+        topic: topic.into(),
+        files,
+        evidence_only,
+    };
+    let full =
+        daemon::context_snapshot(&state, &request("coding constraint", false, vec![])).unwrap();
+    assert!(full.context.contains("Current knowledge inventory:"));
+    assert!(full
+        .context
+        .contains("search with words from a record name returns its complete claims."));
+    assert!(!full
+        .context
+        .contains("retrieve more context when scope expands"));
+    assert!(full.evidence_iris.is_empty());
+
+    let evidence =
+        daemon::context_snapshot(&state, &request("coding constraint", true, vec![])).unwrap();
+    assert_eq!(evidence.evidence_iris, vec![existing.clone()]);
+    assert!(evidence.context.contains(&existing));
+    assert!(evidence
+        .context
+        .contains("hasDescription: Established Established coding constraint"));
+    assert!(!evidence.context.contains("Current knowledge inventory"));
+    assert!(!evidence.context.contains("Recall:"));
+    assert!(evidence.files.is_empty());
+    assert_eq!(evidence.revision, full.revision);
+
+    let unmatched = daemon::context_snapshot(
+        &state,
+        &request("zz_unmatched_inventory_probe", true, vec![]),
+    )
+    .unwrap();
+    assert!(unmatched.evidence_iris.is_empty());
+    assert!(unmatched.context.is_empty(), "{}", unmatched.context);
+    assert!(daemon::context_snapshot(
+        &state,
+        &request("coding constraint", true, vec!["labels.py".into()])
+    )
+    .is_err());
+}
+
+#[tokio::test]
 async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
     let fixture = Fixture::new();
     let state = Arc::new(fixture.state());
@@ -437,6 +484,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
     let body = ContextRequest {
         topic: "coding constraint".into(),
         files: vec![],
+        evidence_only: false,
     };
     let before = server.post("/api/v1/harness/context").json(&body).await;
     before.assert_status_ok();
@@ -450,6 +498,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
         &ContextRequest {
             topic: "zz_unmatched_inventory_probe".into(),
             files: vec![],
+            evidence_only: false,
         },
     )
     .unwrap();
@@ -592,6 +641,7 @@ fn supersession_and_retraction_leave_predecessor_current_until_review() {
     let context = ContextRequest {
         topic: "requirement".into(),
         files: vec![],
+        evidence_only: false,
     };
     assert!(daemon::context_snapshot(&state, &context)
         .unwrap()
@@ -1091,6 +1141,7 @@ async fn simple_review_attests_its_revision_transition_and_retries_keep_that_pai
         &ContextRequest {
             topic: "review".into(),
             files: vec![],
+            evidence_only: false,
         },
     )
     .unwrap()
@@ -1161,6 +1212,7 @@ async fn unrelated_write_before_review_cannot_be_credited_to_acceptance() {
         &ContextRequest {
             topic: "review".into(),
             files: vec![],
+            evidence_only: false,
         },
     )
     .unwrap()

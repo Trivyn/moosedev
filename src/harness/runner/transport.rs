@@ -103,6 +103,7 @@ impl Runner {
                         .trim()
                         .to_owned(),
                     files: files.to_vec(),
+                    evidence_only: false,
                 },
             )
             .await?;
@@ -118,6 +119,28 @@ impl Runner {
         );
         self.update_knowledge_revision(response.revision.clone());
         self.context = Some(response.clone());
+        Ok(response)
+    }
+
+    /// Accepted knowledge for a search query: the complete claims of the
+    /// matching records, without the inventory or file dossiers. The current
+    /// working context is left as it is.
+    pub(super) async fn search_knowledge(&mut self, query: &str) -> Result<ContextResponse> {
+        let response: ContextResponse = self
+            .post(
+                "context",
+                &ContextRequest {
+                    topic: query.to_owned(),
+                    files: vec![],
+                    evidence_only: true,
+                },
+            )
+            .await?;
+        anyhow::ensure!(
+            Path::new(&response.project_root).canonicalize()? == self.workspace.root(),
+            "daemon belongs to a different project"
+        );
+        self.update_knowledge_revision(response.revision.clone());
         Ok(response)
     }
 

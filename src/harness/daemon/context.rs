@@ -21,17 +21,32 @@ pub fn context_snapshot(
         request.files.len() <= 100,
         "at most 100 files per context request"
     );
+    anyhow::ensure!(
+        !request.evidence_only || request.files.is_empty(),
+        "an evidence-only context request takes no files"
+    );
     state.try_ensure_enriched()?;
-    let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
     let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
-    let mut context = String::from("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; retrieve more context when scope expands. Attached file dossiers remain complete.\n\nCurrent knowledge inventory:\n");
-    for record in inventory {
-        context.push_str(&format!(
-            "[{}] {} ({})\n",
-            record.kind, record.label, record.iri
-        ));
+    // An evidence-only request (the model's search) returns just the topic's
+    // records with their complete claims.
+    let evidence_iris = if request.evidence_only {
+        records.iter().map(|record| record.iri.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    let mut context = String::new();
+    if !request.evidence_only {
+        let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
+        context.push_str("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; search with words from a record name returns its complete claims. Attached file dossiers remain complete.\n\nCurrent knowledge inventory:\n");
+        for record in inventory {
+            context.push_str(&format!(
+                "[{}] {} ({})\n",
+                record.kind, record.label, record.iri
+            ));
+        }
+        context
+            .push_str("\nTopic evidence (complete claims; up to six relationships per record):\n");
     }
-    context.push_str("\nTopic evidence (complete claims; up to six relationships per record):\n");
     for record in records {
         context.push_str(&format!(
             "\n[{}] {} ({})\n",
@@ -113,6 +128,7 @@ pub fn context_snapshot(
         revision,
         context,
         files,
+        evidence_iris,
         capture_contracts: vec![2],
         intent_contracts: vec![2],
     })

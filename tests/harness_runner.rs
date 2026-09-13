@@ -1692,3 +1692,60 @@ async fn accepted_governing_capture_is_not_retyped_after_approval_invalidation()
     runner.confirm_no_knowledge().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Complete);
 }
+
+#[tokio::test]
+async fn search_returns_accepted_knowledge_before_repository_matches() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().search_knowledge = Some(
+        "[Constraint] Originals stay original (urn:fixture:search-knowledge)\nhasDescription: Never rename the original marker.\n"
+            .into(),
+    );
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    let response = runner.task.last_response.clone();
+    assert!(
+        response.starts_with("Accepted project knowledge for 'original' (authoritative):\n"),
+        "{response}"
+    );
+    let knowledge = response
+        .find("Never rename the original marker.")
+        .unwrap_or_else(|| panic!("{response}"));
+    let repository = response
+        .find("Repository matches:\ncode.txt:1: original")
+        .unwrap_or_else(|| panic!("{response}"));
+    assert!(knowledge < repository, "{response}");
+    assert_eq!(
+        requests_of_kind(&fixture, "knowledge_search"),
+        vec![json!({"kind":"knowledge_search","topic":"original"})]
+    );
+    assert_eq!(
+        intent_details(&runner, "knowledge_search"),
+        vec!["1 records, 1 repository matches: original"]
+    );
+}
+
+#[tokio::test]
+async fn search_with_no_knowledge_match_returns_repository_matches_only() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.last_response,
+        "Repository matches:\ncode.txt:1: original\n"
+    );
+    fixture.conversational(json!({"action":"search","query":"zz-absent"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.last_response, "No matches.");
+    assert_eq!(requests_of_kind(&fixture, "knowledge_search").len(), 2);
+    assert_eq!(
+        intent_details(&runner, "knowledge_search"),
+        vec![
+            "0 records, 1 repository matches: original",
+            "0 records, 0 repository matches: zz-absent"
+        ]
+    );
+}
