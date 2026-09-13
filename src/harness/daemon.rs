@@ -59,6 +59,11 @@ struct Operation {
     review_result_revision: Option<String>,
     #[serde(default)]
     review_claims: Option<Vec<String>>,
+    /// Normalized symbols of this operation's code links that had no entity
+    /// when the review base was recorded: entities minted for them by this
+    /// acceptance are its own writes.
+    #[serde(default)]
+    review_unminted_symbols: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]

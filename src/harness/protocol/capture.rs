@@ -51,9 +51,13 @@ pub struct KnowledgeProposal {
 impl KnowledgeProposal {
     /// Governing knowledge blocks further work until a human reviews it.
     pub fn is_governing(&self) -> bool {
-        matches!(self.kind.as_str(), "Requirement" | "Constraint")
-            || self.supersedes.is_some()
-            || self.retracts.is_some()
+        matches!(self.kind.as_str(), "Requirement" | "Constraint") || self.changes_lifecycle()
+    }
+
+    /// Supersedes or retracts existing knowledge: its acceptance changes
+    /// another record's lifecycle and is never attested as the task's own.
+    pub fn changes_lifecycle(&self) -> bool {
+        self.supersedes.is_some() || self.retracts.is_some()
     }
 }
 
@@ -76,6 +80,12 @@ pub struct CaptureRequest {
 impl CaptureRequest {
     pub fn has_governing(&self) -> bool {
         self.proposals.iter().any(KnowledgeProposal::is_governing)
+    }
+
+    pub fn has_lifecycle_change(&self) -> bool {
+        self.proposals
+            .iter()
+            .any(KnowledgeProposal::changes_lifecycle)
     }
 }
 

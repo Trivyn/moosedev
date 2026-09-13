@@ -101,21 +101,8 @@ fn review_operation_checked(
             let links = graph::list_proposals(state, None)?;
             // An interrupted review may already have materialized a journaled
             // link. Permit only that exact accepted link and its frozen symbol.
-            for iri in &entry.response.links {
-                if let Some(link) = links.iter().find(|link| &link.iri == iri) {
-                    if operation.review == Some(true) && link.status == "accepted" {
-                        let target = graph::entity_for_symbol(
-                            state,
-                            &graph::CodeTerms::resolve(state)?,
-                            &link.target_symbol,
-                        )?
-                        .ok_or_else(|| anyhow::anyhow!("accepted code link target disappeared"))?;
-                        expected_relations.push((
-                            state.resolve_object_property(&link.predicate_local)?,
-                            target,
-                        ));
-                    }
-                }
+            if operation.review == Some(true) {
+                expected_relations.extend(accepted_link_targets(state, entry, &links)?);
             }
             // Check every domain relation, including fields absent from the
             // claim. Added constrains/violates/etc. are as unseen as supersedes.
@@ -209,9 +196,12 @@ fn review_operation_checked(
             actual == expected,
             "knowledge changed before review; refresh approval before accepting"
         );
-        if request.accept && !operation.request.has_governing() {
+        // Governing records are attestable too; a supersession or retraction
+        // changes another record's lifecycle and never is.
+        if request.accept && !operation.request.has_lifecycle_change() {
             operation.review_base_revision = Some(actual);
             operation.review_claims = Some(review_claims(state, &subjects)?);
+            operation.review_unminted_symbols = unminted_link_symbols(state, &operation)?;
         }
     }
     operation.review = Some(request.accept);
@@ -266,15 +256,30 @@ fn review_operation_checked(
     let generation = state.project_write_generation();
     let checkpoint = checkpoint_snapshot(state, Some(&request.operation_id))?;
     // Do not infer freshness from two separate revision reads. Mask only the
-    // previously unratified subjects, and prove the remaining graph stayed
-    // identical AND the owned claims changed only in lifecycle status. New
-    // code nodes or any other unproven mutation conservatively fail this proof.
+    // previously unratified subjects and the code entities this acceptance
+    // minted for its own links, and prove the remaining graph stayed identical
+    // AND the owned claims changed only in lifecycle status plus this
+    // operation's own record-entity edges. Any other mutation, including a
+    // change to an entity that existed at the base, conservatively fails.
     if operation.review_result_revision.is_none() {
         if let (Some(base), Some(claims)) =
             (&operation.review_base_revision, &operation.review_claims)
         {
-            if accepted_revision_masked(state, &subjects)? == *base
-                && review_claims(state, &subjects)? == *claims
+            let mut masked = subjects.clone();
+            if !operation.review_unminted_symbols.is_empty() {
+                let terms = graph::CodeTerms::resolve(state)?;
+                for symbol in &operation.review_unminted_symbols {
+                    if let Some(entity) = graph::entity_for_symbol(state, &terms, symbol)? {
+                        masked.insert(NamedNode::new(entity)?.to_string());
+                    }
+                }
+            }
+            let mut expected_claims = claims.clone();
+            expected_claims.extend(own_link_edges(state, &operation)?);
+            expected_claims.sort();
+            expected_claims.dedup();
+            if accepted_revision_masked(state, &masked)? == *base
+                && review_claims(state, &subjects)? == expected_claims
                 && generation == state.project_write_generation()
             {
                 operation.review_result_revision = Some(checkpoint.revision.clone());
@@ -286,6 +291,86 @@ fn review_operation_checked(
         .review_base_revision
         .zip(operation.review_result_revision);
     Ok((checkpoint, attestation))
+}
+
+/// The code relations this entry's accepted links materialized, as
+/// (predicate IRI, entity IRI).
+fn accepted_link_targets(
+    state: &AppState,
+    entry: &Entry,
+    links: &[graph::ProposalSummary],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut targets = Vec::new();
+    for iri in &entry.response.links {
+        let Some(link) = links
+            .iter()
+            .find(|link| &link.iri == iri && link.status == "accepted")
+        else {
+            continue;
+        };
+        let entity = graph::entity_for_symbol(
+            state,
+            &graph::CodeTerms::resolve(state)?,
+            &link.target_symbol,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("accepted code link target disappeared"))?;
+        targets.push((
+            state.resolve_object_property(&link.predicate_local)?,
+            entity,
+        ));
+    }
+    Ok(targets)
+}
+
+/// The record-entity edges this operation's own accepted links wrote: the
+/// linked predicate in whichever orientation the ontology gave it, and the
+/// inverse edge the relation writer adds alongside it.
+fn own_link_edges(state: &AppState, operation: &Operation) -> anyhow::Result<Vec<String>> {
+    let project = GraphNameRef::NamedNode(NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?);
+    let links = graph::list_proposals(state, None)?;
+    let mut edges = Vec::new();
+    for entry in &operation.entries {
+        let record = NamedNodeRef::new(&entry.response.iri)?;
+        for (_, entity) in accepted_link_targets(state, entry, &links)? {
+            let entity = NamedNodeRef::new(&entity)?;
+            for (subject, object) in [(record, entity), (entity, record)] {
+                for quad in state.store.quads_for_pattern(
+                    Some(subject.into()),
+                    None,
+                    Some(object.into()),
+                    Some(project),
+                ) {
+                    edges.push(quad?.to_string());
+                }
+            }
+        }
+    }
+    Ok(edges)
+}
+
+/// Target symbols of this operation's code links that have no entity yet.
+fn unminted_link_symbols(state: &AppState, operation: &Operation) -> anyhow::Result<Vec<String>> {
+    let iris: Vec<&String> = operation
+        .entries
+        .iter()
+        .flat_map(|entry| &entry.response.links)
+        .collect();
+    if iris.is_empty() {
+        return Ok(Vec::new());
+    }
+    let terms = graph::CodeTerms::resolve(state)?;
+    let links = graph::list_proposals(state, None)?;
+    let mut symbols: Vec<String> = Vec::new();
+    for iri in iris {
+        if let Some(link) = links.iter().find(|link| &link.iri == iri) {
+            if graph::entity_for_symbol(state, &terms, &link.target_symbol)?.is_none()
+                && !symbols.contains(&link.target_symbol)
+            {
+                symbols.push(link.target_symbol.clone());
+            }
+        }
+    }
+    Ok(symbols)
 }
 
 fn review_claims(state: &AppState, subjects: &HashSet<String>) -> anyhow::Result<Vec<String>> {

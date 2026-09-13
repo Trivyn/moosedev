@@ -113,6 +113,38 @@ fn record(state: &AppState, kind: &str, title: &str) -> String {
 const RENDER_NAME: &str = "scip-python python sample . labels/render_name().";
 const NORMALIZE_NAME: &str = "scip-python python sample . labels/_normalize_name().";
 
+/// A one-module rust-analyzer index for `src/harness.rs`; returns its symbol.
+fn install_module_index(state: &AppState) -> &'static str {
+    use moosedev::code::substrate::{Substrate, SubstrateMeta};
+    use protobuf::EnumOrUnknown;
+    use scip::types::{symbol_information, Document, Index, Occurrence, SymbolInformation};
+    let symbol = "rust-analyzer cargo sample 0.1.0 harness/";
+    let mut info = SymbolInformation::new();
+    info.symbol = symbol.into();
+    info.display_name = "harness".into();
+    info.kind = EnumOrUnknown::new(symbol_information::Kind::Module);
+    let mut occurrence = Occurrence::new();
+    occurrence.symbol = symbol.into();
+    occurrence.symbol_roles = 1;
+    occurrence.range = vec![0, 0, 10];
+    occurrence.enclosing_range = vec![0, 0, 10];
+    let mut document = Document::new();
+    document.relative_path = "src/harness.rs".into();
+    document.symbols.push(info);
+    document.occurrences.push(occurrence);
+    let mut index = Index::new();
+    index.documents.push(document);
+    state.set_substrate(Arc::new(
+        Substrate::from_index(
+            index,
+            SubstrateMeta::single("rust-analyzer", "test", Utc::now(), 1, 1),
+            false,
+        )
+        .unwrap(),
+    ));
+    symbol
+}
+
 fn install_intent_index(fixture: &Fixture, state: &AppState) {
     install_intent_index_as(fixture, state, "scip-python")
 }
@@ -769,35 +801,9 @@ fn concurrent_capture_retries_share_one_operation() {
 
 #[test]
 fn file_links_are_queued_and_materialized_only_after_record_ratification() {
-    use moosedev::code::substrate::{Substrate, SubstrateMeta};
-    use protobuf::EnumOrUnknown;
-    use scip::types::{symbol_information, Document, Index, Occurrence, SymbolInformation};
     let fixture = Fixture::new();
     let state = fixture.state();
-    let symbol = "rust-analyzer cargo sample 0.1.0 harness/";
-    let mut info = SymbolInformation::new();
-    info.symbol = symbol.into();
-    info.display_name = "harness".into();
-    info.kind = EnumOrUnknown::new(symbol_information::Kind::Module);
-    let mut occurrence = Occurrence::new();
-    occurrence.symbol = symbol.into();
-    occurrence.symbol_roles = 1;
-    occurrence.range = vec![0, 0, 10];
-    occurrence.enclosing_range = vec![0, 0, 10];
-    let mut document = Document::new();
-    document.relative_path = "src/harness.rs".into();
-    document.symbols.push(info);
-    document.occurrences.push(occurrence);
-    let mut index = Index::new();
-    index.documents.push(document);
-    state.set_substrate(Arc::new(
-        Substrate::from_index(
-            index,
-            SubstrateMeta::single("rust-analyzer", "test", Utc::now(), 1, 1),
-            false,
-        )
-        .unwrap(),
-    ));
+    let symbol = install_module_index(&state);
     let mut proposed = proposal("Constraint", "Harness entity constraint");
     proposed.files.push("src/harness.rs".into());
     let captured = daemon::capture_operation(&state, request("linked", vec![proposed])).unwrap();
@@ -1203,12 +1209,10 @@ async fn simple_review_attests_its_revision_transition_and_retries_keep_that_pai
     assert_ne!(retry.json::<CheckpointResponse>().revision, frozen_result);
 }
 
-#[tokio::test]
-async fn unrelated_write_before_review_cannot_be_credited_to_acceptance() {
-    let fixture = Fixture::new();
-    let state = Arc::new(fixture.state());
-    let base = daemon::context_snapshot(
-        &state,
+/// The accepted revision the runner holds when it asks for attestation.
+fn review_base(state: &AppState) -> String {
+    daemon::context_snapshot(
+        state,
         &ContextRequest {
             topic: "review".into(),
             files: vec![],
@@ -1216,28 +1220,198 @@ async fn unrelated_write_before_review_cannot_be_credited_to_acceptance() {
         },
     )
     .unwrap()
-    .revision;
-    let captured = daemon::capture_operation(
-        &state,
-        request("stale-base", vec![proposal("Lesson", "Pending learning")]),
-    )
-    .unwrap();
-    record(&state, "Constraint", "A concurrent governing change");
-    state.note_project_write();
+    .revision
+}
+
+struct Reviewed {
+    ok: bool,
+    base: Option<String>,
+    result: Option<String>,
+    revision: Option<String>,
+}
+
+/// Accept `operation_id` over HTTP with the runner's expected-revision header.
+async fn review_expecting(state: &Arc<AppState>, operation_id: &str, expected: &str) -> Reviewed {
     let server = TestServer::new(build_routes(state.clone())).unwrap();
     let response = server
         .post("/api/v1/harness/review")
-        .add_header("x-moosedev-expected-revision", base)
+        .add_header("x-moosedev-expected-revision", expected.to_string())
         .json(&ReviewRequest {
-            operation_id: "stale-base".into(),
+            operation_id: operation_id.into(),
             accept: true,
         })
         .await;
-    assert!(!response.status_code().is_success());
-    assert!(response
-        .headers()
-        .get("x-moosedev-review-result-revision")
-        .is_none());
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().unwrap().to_owned())
+    };
+    let ok = response.status_code().is_success();
+    Reviewed {
+        ok,
+        base: header("x-moosedev-review-base-revision"),
+        result: header("x-moosedev-review-result-revision"),
+        revision: ok.then(|| response.json::<CheckpointResponse>().revision),
+    }
+}
+
+#[tokio::test]
+async fn unrelated_write_before_review_cannot_be_credited_to_acceptance() {
+    for kind in ["Lesson", "Constraint"] {
+        let fixture = Fixture::new();
+        let state = Arc::new(fixture.state());
+        let base = review_base(&state);
+        let captured = daemon::capture_operation(
+            &state,
+            request("stale-base", vec![proposal(kind, "Pending learning")]),
+        )
+        .unwrap();
+        record(&state, "Constraint", "A concurrent governing change");
+        state.note_project_write();
+        let reviewed = review_expecting(&state, "stale-base", &base).await;
+        assert!(!reviewed.ok, "{kind}");
+        assert!(reviewed.result.is_none(), "{kind}");
+        assert_eq!(
+            status_literal(&state, &captured.proposals[0].iri, &state.capture.status).as_deref(),
+            Some("proposed"),
+            "{kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn governing_review_attests_its_own_revision_transition() {
+    for kind in ["Constraint", "Requirement"] {
+        let fixture = Fixture::new();
+        let state = Arc::new(fixture.state());
+        let base = review_base(&state);
+        daemon::capture_operation(
+            &state,
+            request("governing", vec![proposal(kind, &format!("A new {kind}"))]),
+        )
+        .unwrap();
+        let reviewed = review_expecting(&state, "governing", &base).await;
+        assert!(reviewed.ok, "{kind}");
+        let revision = reviewed.revision.unwrap();
+        assert_ne!(
+            revision, base,
+            "{kind}: acceptance changed accepted knowledge"
+        );
+        assert_eq!(reviewed.base.as_deref(), Some(base.as_str()), "{kind}");
+        assert_eq!(
+            reviewed.result.as_deref(),
+            Some(revision.as_str()),
+            "{kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn linked_review_attests_its_own_link_materialization() {
+    for (kind, preexisting) in [
+        ("Lesson", false),
+        ("Lesson", true),
+        ("Constraint", false),
+        ("Constraint", true),
+    ] {
+        let fixture = Fixture::new();
+        let state = Arc::new(fixture.state());
+        let symbol = install_module_index(&state);
+        let target = graph::DossierTarget::Symbol(symbol.into());
+        if preexisting {
+            let earlier = record(&state, "Lesson", "An earlier harness lesson");
+            graph::link_code(
+                &state,
+                &earlier,
+                "concerns",
+                &graph::CodeSelector::Symbol(symbol.into()),
+                "test-human",
+            )
+            .unwrap();
+            state.note_project_write();
+        }
+        let base = review_base(&state);
+        let mut proposed = proposal(kind, "Harness entity knowledge");
+        proposed.files.push("src/harness.rs".into());
+        let captured =
+            daemon::capture_operation(&state, request("linked-attested", vec![proposed])).unwrap();
+        assert_eq!(captured.proposals[0].links.len(), 1);
+        assert_eq!(
+            graph::get_entity_dossier(&state, &target)
+                .unwrap()
+                .is_some(),
+            preexisting,
+            "the entity exists before review only in the pre-existing variant"
+        );
+        let reviewed = review_expecting(&state, "linked-attested", &base).await;
+        assert!(reviewed.ok, "{kind} preexisting {preexisting}");
+        let revision = reviewed.revision.unwrap();
+        assert_ne!(revision, base);
+        assert_eq!(
+            reviewed.base.as_deref(),
+            Some(base.as_str()),
+            "{kind} preexisting {preexisting}"
+        );
+        assert_eq!(
+            reviewed.result.as_deref(),
+            Some(revision.as_str()),
+            "{kind} preexisting {preexisting}: the link materialization is this acceptance's own write"
+        );
+        let dossier = graph::get_entity_dossier(&state, &target).unwrap().unwrap();
+        assert!(dossier
+            .direct_records
+            .iter()
+            .any(|record| record.iri == captured.proposals[0].iri));
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_review_is_never_attested() {
+    for retracts in [false, true] {
+        let fixture = Fixture::new();
+        let state = Arc::new(fixture.state());
+        let existing = record(&state, "Lesson", "Replaceable learning");
+        let base = review_base(&state);
+        let mut proposed = proposal("Lesson", "Replacement learning");
+        if retracts {
+            proposed.retracts = Some(existing.clone());
+        } else {
+            proposed.supersedes = Some(existing.clone());
+        }
+        daemon::capture_operation(&state, request("lifecycle", vec![proposed])).unwrap();
+        let reviewed = review_expecting(&state, "lifecycle", &base).await;
+        assert!(reviewed.ok, "retracts {retracts}");
+        assert!(reviewed.base.is_none(), "retracts {retracts}");
+        assert!(reviewed.result.is_none(), "retracts {retracts}");
+    }
+}
+
+#[tokio::test]
+async fn foreign_entity_mint_before_review_is_not_credited() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let symbol = install_module_index(&state);
+    let other = record(&state, "Lesson", "A concurrent harness lesson");
+    let base = review_base(&state);
+    let mut proposed = proposal("Constraint", "Harness entity constraint");
+    proposed.files.push("src/harness.rs".into());
+    let captured =
+        daemon::capture_operation(&state, request("foreign-mint", vec![proposed])).unwrap();
+    // Another client mints the entity the capture links to after the runner
+    // read its revision.
+    graph::link_code(
+        &state,
+        &other,
+        "concerns",
+        &graph::CodeSelector::Symbol(symbol.into()),
+        "test-human",
+    )
+    .unwrap();
+    state.note_project_write();
+    let reviewed = review_expecting(&state, "foreign-mint", &base).await;
+    assert!(!reviewed.ok);
+    assert!(reviewed.result.is_none());
     assert_eq!(
         status_literal(&state, &captured.proposals[0].iri, &state.capture.status).as_deref(),
         Some("proposed")

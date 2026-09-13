@@ -80,6 +80,8 @@ pub(super) struct Script {
     pub(super) revision_on_accept: Option<String>,
     pub(super) attest_review: bool,
     pub(super) reject_stale_review: bool,
+    /// The expected-revision header of every review request, in order.
+    pub(super) review_headers: Vec<Option<String>>,
     pub(super) fail_global_checkpoint_once: bool,
     pub(super) mutation_during_model: Option<String>,
     pub(super) held_response: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -314,6 +316,7 @@ pub(super) async fn review(
     let expected = headers
         .get("x-moosedev-expected-revision")
         .and_then(|value| value.to_str().ok());
+    script.review_headers.push(expected.map(str::to_owned));
     if script.reject_stale_review && expected.is_some_and(|revision| revision != base) {
         return (
             StatusCode::CONFLICT,

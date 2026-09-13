@@ -29,13 +29,8 @@ impl Runner {
             self.snapshot(&files)? == self.task.snapshots,
             "source changed after verification; return to planning"
         );
-        let expected = &self.task.plan.as_ref().unwrap().checks;
         anyhow::ensure!(
-            expected.len() == self.task.check_results.len()
-                && expected
-                    .iter()
-                    .zip(&self.task.check_results)
-                    .all(|(a, b)| a == &b.command && b.success),
+            self.required_checks_passed(),
             "required checks have not passed"
         );
         for id in &self.task.capture_operations {
@@ -61,6 +56,18 @@ impl Runner {
         self.task.final_capture = false;
         self.event("Complete: required checks passed, human knowledge review resolved, graph validated and durably checkpointed.");
         self.persist()
+    }
+
+    /// Every plan check ran, in order, and passed.
+    pub(super) fn required_checks_passed(&self) -> bool {
+        self.task.plan.as_ref().is_some_and(|plan| {
+            plan.checks.len() == self.task.check_results.len()
+                && plan
+                    .checks
+                    .iter()
+                    .zip(&self.task.check_results)
+                    .all(|(command, result)| command == &result.command && result.success)
+        })
     }
 
     pub async fn cancel(&mut self) -> Result<()> {

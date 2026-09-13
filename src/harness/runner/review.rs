@@ -12,10 +12,14 @@ impl Runner {
         request: &CaptureRequest,
         accept: bool,
     ) -> Result<CheckpointResponse> {
-        let expected = if accept
-            && self.task.final_capture
+        let attestable = accept && self.own_final_capture(request);
+        if attestable {
+            // Never send a stale expected revision: the daemon rejects the
+            // whole acceptance when accepted knowledge moved since the last read.
+            self.refresh(&[]).await?;
+        }
+        let expected = if attestable
             && self.task.approved_revision.as_deref() == Some(&self.task.knowledge_revision)
-            && !request.has_governing()
         {
             self.task.approved_revision.clone()
         } else {
@@ -62,6 +66,18 @@ impl Runner {
             // The daemon proved that this operation alone caused the revision
             // transition. An unproven or externally changed graph stays stale.
             self.task.approved_revision = Some(checkpoint.revision.clone());
+            if let Some(scope) = self.task.approved_change_scope.as_mut() {
+                scope.knowledge_revision = checkpoint.revision.clone();
+            }
+            self.intent_event(
+                "final_review_attested",
+                &format!(
+                    "{}: {} -> {}",
+                    request.operation_id,
+                    expected.as_deref().unwrap_or_default(),
+                    checkpoint.revision
+                ),
+            );
         }
         self.update_knowledge_revision(checkpoint.revision.clone());
         Ok(checkpoint)
@@ -124,6 +140,7 @@ impl Runner {
             return self.persist();
         }
         if self.task.final_capture {
+            self.task.review_continuation = None;
             self.task.phase = Phase::Verifying;
             self.persist()?;
             return self.finish().await;
@@ -134,6 +151,26 @@ impl Runner {
             .take()
             .unwrap_or(self.task.after_review);
         self.persist()
+    }
+
+    /// The task's own final note, captured after every required check passed,
+    /// with nothing else pending: the only acceptance whose revision change
+    /// the daemon may attest. A supersession or retraction always re-gates.
+    fn own_final_capture(&self, request: &CaptureRequest) -> bool {
+        self.task.final_capture
+            && !request.has_lifecycle_change()
+            && self.task.pending_edit.is_none()
+            && self.task.intent.is_none()
+            && self.task.pending_intent_links.is_none()
+            && self.required_checks_passed()
+            && self
+                .task
+                .symbolic
+                .as_ref()
+                .and_then(|state| state.capture_note.as_ref())
+                .is_some_and(|note| {
+                    note.status == "captured" && note.capture_operation_id == request.operation_id
+                })
     }
 
     pub(super) fn has_governing_reviews(&self) -> bool {

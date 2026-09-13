@@ -269,6 +269,7 @@ fn prepare(
         review_base_revision: None,
         review_result_revision: None,
         review_claims: None,
+        review_unminted_symbols: Vec::new(),
     })
 }
 

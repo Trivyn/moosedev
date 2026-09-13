@@ -1195,32 +1195,176 @@ async fn inspect_pages_complete_journal_observations_without_replaying_actions()
 
 #[tokio::test]
 async fn final_review_preserves_checks_only_for_attested_own_knowledge_changes() {
-    for attest in [true, false] {
-        let fixture = Fixture::new().await;
-        let mut runner = fixture.ready_for_final().await;
-        fixture.note("The repair was verified.");
-        fixture.typed_one("Lesson", "Verified repair observation");
-        runner.advance().await.unwrap();
-        assert_eq!(runner.task.phase, Phase::AwaitingReview);
-        {
-            let mut script = fixture.shared.lock().unwrap();
-            script.attest_review = attest;
-            script.revision_on_accept = Some("accepted-v2".into());
-        }
-        let id = runner.task.reviews[0].request.operation_id.clone();
-        runner.review_operation(&id, true).await.unwrap();
-        if attest {
-            assert_eq!(runner.task.phase, Phase::Complete);
-            assert_eq!(runner.task.check_results.len(), 1);
-            assert_eq!(runner.task.knowledge_revision, "accepted-v2");
-        } else {
-            assert_eq!(runner.task.phase, Phase::AwaitingPlan);
-            assert!(
-                runner.task.check_results.is_empty(),
-                "unproven graph changes must invalidate verification"
+    let _env_lock = ENVIRONMENT.lock().await;
+    for kind in ["Lesson", "Constraint", "Requirement"] {
+        for attest in [true, false] {
+            let fixture = Fixture::new().await;
+            let mut runner = fixture.ready_for_final().await;
+            fixture.note("The repair was verified.");
+            fixture.typed_one(kind, "Verified repair observation");
+            runner.advance().await.unwrap();
+            assert_eq!(runner.task.phase, Phase::AwaitingReview);
+            {
+                let mut script = fixture.shared.lock().unwrap();
+                script.attest_review = attest;
+                script.revision_on_accept = Some("accepted-v2".into());
+            }
+            let id = runner.task.reviews[0].request.operation_id.clone();
+            runner.review_operation(&id, true).await.unwrap();
+            assert_eq!(
+                fixture.shared.lock().unwrap().review_headers,
+                vec![Some("accepted-v1".to_string())],
+                "{kind}: the task's own final capture always asks for attestation"
             );
+            if attest {
+                assert_eq!(runner.task.phase, Phase::Complete, "{kind}");
+                assert_eq!(runner.task.check_results.len(), 1, "{kind}");
+                assert_eq!(runner.task.knowledge_revision, "accepted-v2");
+                assert_eq!(intent_details(&runner, "final_review_attested").len(), 1);
+            } else {
+                assert_eq!(runner.task.phase, Phase::AwaitingPlan, "{kind}");
+                assert!(
+                    runner.task.check_results.is_empty(),
+                    "unproven graph changes must invalidate verification"
+                );
+                assert!(intent_details(&runner, "final_review_attested").is_empty());
+            }
         }
     }
+}
+
+#[tokio::test]
+async fn accepted_governing_final_capture_completes_when_attested() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    fixture.note("Display names must never exceed one line.");
+    fixture.typed_one("Requirement", "Display names stay on one line");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert!(runner.task.reviews[0].request.has_governing());
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.revision_on_accept = Some("accepted-v2".into());
+    }
+    let approvals = intent_details(&runner, "plan_approved").len();
+    let id = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Complete);
+    assert_eq!(
+        intent_details(&runner, "plan_approved").len(),
+        approvals,
+        "no second plan approval"
+    );
+    assert_eq!(runner.task.check_results.len(), 1, "no re-verification");
+    assert_eq!(intent_details(&runner, "final_review_attested").len(), 1);
+    assert_eq!(journal_value(&runner)["approved_revision"], "accepted-v2");
+    if let Some(scope) = runner.task.approved_change_scope.as_ref() {
+        assert_eq!(scope.knowledge_revision, "accepted-v2");
+    }
+    assert_eq!(fixture.note_calls(), 1);
+    assert_eq!(fixture.typing_ids().len(), 1);
+}
+
+#[tokio::test]
+async fn external_revision_bump_before_final_accept_is_not_credited() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    fixture.note("The repair was verified.");
+    fixture.typed_one("Lesson", "Verified repair observation");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.reject_stale_review = true;
+        // Another client changed accepted knowledge while the card waited.
+        script.revision = "outside-v2".into();
+        script.revision_on_accept = Some("accepted-v3".into());
+    }
+    let id = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(
+        fixture.shared.lock().unwrap().review_headers,
+        vec![None],
+        "a stale expected revision is never sent"
+    );
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.check_results.is_empty());
+    assert!(intent_details(&runner, "final_review_attested").is_empty());
+}
+
+#[tokio::test]
+async fn lifecycle_final_capture_never_requests_attestation() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    fixture.note("This replaces the earlier repair lesson.");
+    let mut typed = distinct_proposal("Lesson", "Replacement repair lesson");
+    typed.proposal.supersedes = Some("urn:fixture:earlier-lesson".into());
+    fixture.typed(vec![typed]);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.revision_on_accept = Some("accepted-v2".into());
+    }
+    let id = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().review_headers, vec![None]);
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(intent_details(&runner, "final_review_attested").is_empty());
+}
+
+#[tokio::test]
+async fn steered_governing_final_review_still_regates() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    fixture.note("Every caller must preserve the observed contract.");
+    fixture.typed_one("Constraint", "Preserve the observed contract");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.revision_on_accept = Some("accepted-v2".into());
+    }
+    runner
+        .submit_message("Also handle empty names before finishing.".into())
+        .await
+        .unwrap();
+    let id = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().review_headers, vec![None]);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(journal_value(&runner)["approved_revision"].is_null());
+    assert!(intent_details(&runner, "final_review_attested").is_empty());
+}
+
+#[tokio::test]
+async fn final_attestation_requires_passed_plan_checks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    fixture.note("The repair was verified.");
+    fixture.typed_one("Lesson", "Verified repair observation");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    runner.task.check_results[0].success = false;
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.revision_on_accept = Some("accepted-v2".into());
+    }
+    let id = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().review_headers, vec![None]);
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(intent_details(&runner, "final_review_attested").is_empty());
 }
 
 #[tokio::test]
@@ -1659,9 +1803,17 @@ async fn accepted_governing_capture_is_not_retyped_after_approval_invalidation()
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     assert!(runner.task.reviews[0].request.has_governing());
-    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-v2".into());
+    {
+        // An outside write while the card waited: the acceptance cannot be
+        // attested, so the approval is invalidated.
+        let mut script = fixture.shared.lock().unwrap();
+        script.attest_review = true;
+        script.revision = "outside-v2".into();
+        script.revision_on_accept = Some("accepted-v2".into());
+    }
     let id = runner.task.reviews[0].request.operation_id.clone();
     runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().review_headers, vec![None]);
     assert_eq!(
         runner.task.phase,
         Phase::AwaitingPlan,
