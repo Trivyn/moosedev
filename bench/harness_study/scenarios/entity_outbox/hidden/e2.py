@@ -38,7 +38,7 @@ class OutboxTests(Store):
 
 
 class RegistryTests(Store):
-    def test_delete_emits_and_hides(self):
+    def test_delete_removes_entity(self):
         self.registry.create("x", {"v": 1})
         self.registry.delete("x")
         with self.assertRaises(KeyError):
@@ -47,13 +47,18 @@ class RegistryTests(Store):
             self.registry.delete("x")
         with self.assertRaises(KeyError):
             self.registry.delete("never")
-        self.assertEqual([kind for _, _, kind in self.events("x")], ["created", "deleted"])
 
     def test_recreate_after_delete_allowed(self):
         self.registry.create("x", {"v": 1})
         self.registry.delete("x")
         self.registry.create("x", {"v": 2})
         self.assertEqual(self.registry.get("x"), {"v": 2})
+
+    def test_delete_emits_one_deleted_event(self):
+        self.registry.create("x", {"v": 1})
+        self.registry.update("x", {"v": 2})
+        self.registry.delete("x")
+        self.assertEqual(self.events("x"), [("x", 1, "created"), ("x", 2, "updated"), ("x", 3, "deleted")])
 
     def test_recreated_entity_continues_sequence(self):
         self.registry.create("x", {"v": 1})

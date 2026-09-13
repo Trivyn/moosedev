@@ -26,8 +26,28 @@
       "superseded_by": "outbox-epoch"
     },
     {
+      "id": "outbox-full-document",
+      "claim": "Every created or updated event carries the entity's complete current data, on every code path that changes entity data, because the indexer replaces its stored document with each such payload instead of merging.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "outbox-deleted-event",
+      "claim": "Every code path that removes an entity emits exactly one deleted event for it, because the indexer removes a document only when it receives one.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
       "id": "outbox-delete",
-      "claim": "Registry.delete removes the entity, emits a deleted event, and makes get raise KeyError; deleting a missing entity raises KeyError; customer-chosen IDs may be created again.",
+      "claim": "Registry.delete removes the entity so get raises KeyError; deleting a missing entity raises KeyError; customer-chosen IDs may be created again.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/1/prompt"
@@ -46,6 +66,26 @@
       "seeded": false
     },
     {
+      "id": "outbox-delete-many",
+      "claim": "Registry.delete_many removes every listed entity, or raises KeyError and removes none when any listed ID does not exist; each removed entity gets its deleted event.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "outbox-patch",
+      "claim": "Registry.patch merges changes into the entity's data and emits an updated event carrying the complete merged data; patching a missing entity raises KeyError.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
       "id": "outbox-epoch",
       "claim": "Indexer v2 epochs replace lifetime numbering: re-creating a deleted ID starts epoch previous + 1 with seq 1; epoch(id) returns the current epoch or 0; pending events carry epoch; ack defaults to the current epoch; old databases need not be opened.",
       "kind": "ArchitecturalDecision",
@@ -57,7 +97,7 @@
     },
     {
       "id": "outbox-rename",
-      "claim": "Registry.rename emits deleted for the old ID then created for the new ID with the data; renaming onto a live ID raises ValueError and renaming a missing entity raises KeyError; renaming onto a previously deleted ID starts a new epoch for it.",
+      "claim": "Registry.rename makes the new ID hold the data and the old ID missing, emitting a deleted event for the old ID and a created event with the complete data for the new ID; renaming onto a live ID raises ValueError and renaming a missing entity raises KeyError; renaming onto a previously deleted ID starts a new epoch for it.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/4/prompt"
@@ -95,6 +135,16 @@
     {
       "claim": "Existing databases are migrated to epochs.",
       "applies_from_episode": 4,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "A path that removes entities may skip their deleted events.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "An updated event may carry only the changed keys.",
+      "applies_from_episode": 1,
       "applies_through_episode": null
     }
   ]

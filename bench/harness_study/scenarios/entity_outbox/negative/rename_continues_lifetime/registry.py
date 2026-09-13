@@ -31,6 +31,21 @@ class Registry:
             self.connection.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
         return self.outbox.emit(entity_id, "deleted", {})
 
+    def delete_many(self, entity_ids):
+        entity_ids = list(dict.fromkeys(entity_ids))
+        for entity_id in entity_ids:
+            if self._row(entity_id) is None:
+                raise KeyError(entity_id)
+        for entity_id in entity_ids:
+            self.delete(entity_id)
+
+    def patch(self, entity_id, changes):
+        merged = dict(self.get(entity_id), **changes)
+        with self.connection:
+            self.connection.execute("UPDATE entities SET data = ? WHERE id = ?",
+                                    (json.dumps(merged, sort_keys=True), entity_id))
+        return self.outbox.emit(entity_id, "updated", merged)
+
     def rename(self, old_id, new_id):
         data = self.get(old_id)
         if self._row(new_id) is not None:

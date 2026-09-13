@@ -65,5 +65,26 @@ class CompactionTests(Store):
         self.assertEqual(self.events(), [("a", 4, "updated")])
 
 
+class BulkTests(Store):
+    def test_delete_many_is_all_or_nothing(self):
+        self.registry.create("a", {})
+        self.registry.create("b", {})
+        with self.assertRaises(KeyError):
+            self.registry.delete_many(["a", "missing"])
+        self.assertEqual(self.registry.get("a"), {})
+        self.registry.delete_many(["a", "b"])
+        for entity_id in ("a", "b"):
+            with self.assertRaises(KeyError):
+                self.registry.get(entity_id)
+
+    def test_delete_many_emits_deleted_for_each(self):
+        self.registry.create("a", {"v": 1})
+        self.registry.create("b", {"v": 2})
+        with self.assertRaises(KeyError):
+            self.registry.delete_many(["a", "missing"])
+        self.registry.delete_many(["a", "b"])
+        self.assertEqual(sorted(self.events()), [("a", 1, "created"), ("a", 2, "deleted"), ("b", 1, "created"), ("b", 2, "deleted")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

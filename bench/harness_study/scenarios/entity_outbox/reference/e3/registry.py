@@ -31,6 +31,14 @@ class Registry:
             self.connection.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
         return self.outbox.emit(entity_id, "deleted", {})
 
+    def delete_many(self, entity_ids):
+        entity_ids = list(dict.fromkeys(entity_ids))
+        for entity_id in entity_ids:
+            if self._row(entity_id) is None:
+                raise KeyError(entity_id)
+        for entity_id in entity_ids:
+            self.delete(entity_id)
+
     def get(self, entity_id):
         row = self._row(entity_id)
         if row is None:

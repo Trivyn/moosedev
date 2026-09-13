@@ -44,7 +44,7 @@ class Registry:
         with self.connection:
             self.connection.execute("UPDATE entities SET data = ? WHERE id = ?",
                                     (json.dumps(merged, sort_keys=True), entity_id))
-        return self.outbox.emit(entity_id, "updated", merged)
+        return self.outbox.emit(entity_id, "updated", changes)
 
     def get(self, entity_id):
         row = self._row(entity_id)

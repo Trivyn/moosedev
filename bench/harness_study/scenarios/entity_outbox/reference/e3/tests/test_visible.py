@@ -29,6 +29,12 @@ class VisibleTests(unittest.TestCase):
         self.outbox.ack("a", 1)
         self.assertEqual(self.outbox.pending(), [])
 
+    def test_delete_many(self):
+        self.registry.create("x", {})
+        self.registry.delete_many(["x"])
+        with self.assertRaises(KeyError):
+            self.registry.get("x")
+
 
 if __name__ == "__main__":
     unittest.main()

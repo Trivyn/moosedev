@@ -29,9 +29,20 @@ class VisibleTests(unittest.TestCase):
         self.outbox.ack("a", 1)
         self.assertEqual(self.outbox.pending(), [])
 
+    def test_delete_many(self):
+        self.registry.create("x", {})
+        self.registry.delete_many(["x"])
+        with self.assertRaises(KeyError):
+            self.registry.get("x")
+
     def test_first_life_is_epoch_one(self):
         self.registry.create("x", {})
         self.assertEqual(self.outbox.epoch("x"), 1)
+
+    def test_patch(self):
+        self.registry.create("x", {"a": 1})
+        self.registry.patch("x", {"b": 2})
+        self.assertEqual(self.registry.get("x"), {"a": 1, "b": 2})
 
 
 if __name__ == "__main__":

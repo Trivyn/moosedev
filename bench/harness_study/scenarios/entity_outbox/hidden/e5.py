@@ -43,16 +43,12 @@ class EpochTests(Store):
 
 
 class RenameTests(Store):
-    def test_rename_emits_delete_then_create(self):
+    def test_rename_moves_data(self):
         self.registry.create("old", {"v": 1})
         self.registry.rename("old", "new")
         self.assertEqual(self.registry.get("new"), {"v": 1})
         with self.assertRaises(KeyError):
             self.registry.get("old")
-        tail = self.outbox.pending()[-2:]
-        self.assertEqual([(event["entity_id"], event["kind"]) for event in tail], [("old", "deleted"), ("new", "created")])
-        self.assertEqual(tail[1]["payload"], {"v": 1})
-        self.assertEqual((tail[1]["epoch"], tail[1]["seq"]), (1, 1))
 
     def test_rename_errors(self):
         self.registry.create("a", {})
@@ -62,6 +58,13 @@ class RenameTests(Store):
         with self.assertRaises(KeyError):
             self.registry.rename("missing", "c")
         self.assertEqual(self.registry.get("a"), {})
+
+    def test_rename_emits_deleted_and_full_created(self):
+        self.registry.create("old", {"v": 1, "w": 2})
+        self.registry.rename("old", "new")
+        tail = self.outbox.pending()[1:]
+        self.assertEqual(sorted((event["entity_id"], event["kind"]) for event in tail), [("new", "created"), ("old", "deleted")])
+        self.assertEqual([event["payload"] for event in tail if event["entity_id"] == "new"], [{"v": 1, "w": 2}])
 
     def test_rename_onto_deleted_id_starts_new_epoch(self):
         self.registry.create("y", {"v": 1})

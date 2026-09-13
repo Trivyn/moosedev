@@ -64,5 +64,21 @@ class EpochTests(Store):
         self.assertEqual([(event["epoch"], event["seq"]) for event in self.outbox.pending()], [(1, 3)])
 
 
+class PatchTests(Store):
+    def test_patch_merges_data(self):
+        self.registry.create("x", {"a": 1, "b": 2})
+        self.registry.patch("x", {"b": 3, "c": 4})
+        self.assertEqual(self.registry.get("x"), {"a": 1, "b": 3, "c": 4})
+        self.assertEqual(self.outbox.pending()[-1]["kind"], "updated")
+        with self.assertRaises(KeyError):
+            self.registry.patch("missing", {"a": 1})
+
+    def test_patch_event_carries_complete_data(self):
+        self.registry.create("x", {"a": 1, "b": 2})
+        self.registry.patch("x", {"b": 3})
+        last = self.outbox.pending()[-1]
+        self.assertEqual((last["entity_id"], last["kind"], last["payload"]), ("x", "updated", {"a": 1, "b": 3}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

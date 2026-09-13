@@ -46,6 +46,13 @@ class Registry:
                                     (json.dumps(merged, sort_keys=True), entity_id))
         return self.outbox.emit(entity_id, "updated", merged)
 
+    def rename(self, old_id, new_id):
+        data = self.get(old_id)
+        if self._row(new_id) is not None:
+            raise ValueError(f"entity already exists: {new_id}")
+        with self.connection:
+            self.connection.execute("UPDATE entities SET id = ? WHERE id = ?", (new_id, old_id))
+
     def get(self, entity_id):
         row = self._row(entity_id)
         if row is None:

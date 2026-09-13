@@ -8,13 +8,15 @@
   "episodes": [
     {
       "id": "e1",
-      "prompt": "Our search indexer, run by another team, consumes this outbox. Give each entity ID its own sequence numbers: an entity's first event has seq 1 and each next event has seq equal to the previous seq plus 1; emit returns the new seq. The indexer stores the last seq it has seen for every entity ID forever, discards any event whose seq is not greater, and treats any gap as lost events. So an entity ID's seq must stay strictly increasing and contiguous for as long as that ID has ever existed in the outbox, including across restarts (reopening the database). A single global autoincrement was considered and rejected because it leaves gaps in each entity's numbers. pending() lists events in emission order as dicts with entity_id, seq, kind and payload.",
+      "prompt": "Our search indexer, run by another team, consumes this outbox. Give each entity ID its own sequence numbers: an entity's first event has seq 1 and each next event has seq equal to the previous seq plus 1; emit returns the new seq. The indexer stores the last seq it has seen for every entity ID forever, discards any event whose seq is not greater, and treats any gap as lost events. So an entity ID's seq must stay strictly increasing and contiguous for as long as that ID has ever existed in the outbox, including across restarts (reopening the database). A single global autoincrement was considered and rejected because it leaves gaps in each entity's numbers. pending() lists events in emission order as dicts with entity_id, seq, kind and payload. The indexer replaces its stored document with the payload of each \"created\" or \"updated\" event instead of merging, so every such event must carry the entity's complete current data; this applies to every code path that changes entity data. The indexer removes a document only when it receives a \"deleted\" event for that ID, so every code path that removes an entity must emit exactly one \"deleted\" event for it.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
       },
       "expected_fact_ids": [
         "outbox-seq-contiguous",
+        "outbox-full-document",
+        "outbox-deleted-event",
         "outbox-seq-lifetime"
       ],
       "stale_fact_ids": [],
@@ -63,13 +65,15 @@
     },
     {
       "id": "e2",
-      "prompt": "Add Registry.delete(entity_id). It removes the entity and emits a \"deleted\" event for it; get then raises KeyError, and deleting an entity that does not exist raises KeyError. Entity IDs are chosen by customers, so a deleted ID may be created again later with Registry.create.",
+      "prompt": "Add Registry.delete(entity_id). It removes the entity: get then raises KeyError, and deleting an entity that does not exist raises KeyError. Entity IDs are chosen by customers, so a deleted ID may be created again later with Registry.create.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
       },
       "expected_fact_ids": [
         "outbox-seq-contiguous",
+        "outbox-full-document",
+        "outbox-deleted-event",
         "outbox-seq-lifetime",
         "outbox-delete"
       ],
@@ -99,7 +103,7 @@
         {
           "id": "e2-delete",
           "kind": "task",
-          "test": "RegistryTests.test_delete_emits_and_hides",
+          "test": "RegistryTests.test_delete_removes_entity",
           "fact_ids": [
             "outbox-delete"
           ],
@@ -115,29 +119,43 @@
           "decided_by": "scenario.json#/episodes/1/prompt"
         },
         {
+          "id": "e2-delete-event",
+          "kind": "retention",
+          "test": "RegistryTests.test_delete_emits_one_deleted_event",
+          "fact_ids": [
+            "outbox-deleted-event"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        },
+        {
           "id": "e2-recreate",
           "kind": "retention",
           "test": "RegistryTests.test_recreated_entity_continues_sequence",
           "fact_ids": [
             "outbox-seq-lifetime"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
         }
       ],
       "retired_tests": []
     },
     {
       "id": "e3",
-      "prompt": "Add Outbox.ack(entity_id, seq), which marks that event as delivered (an unknown event raises KeyError), and Outbox.compact(), which deletes delivered events from the database. pending() leaves out delivered events, whether or not they have been compacted.",
+      "prompt": "Add Outbox.ack(entity_id, seq), which marks that event as delivered (an unknown event raises KeyError), and Outbox.compact(), which deletes delivered events from the database. pending() leaves out delivered events, whether or not they have been compacted. Also add Registry.delete_many(entity_ids) for bulk removals: it removes every listed entity, and if any listed ID does not exist it raises KeyError and removes none of them.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
       },
       "expected_fact_ids": [
         "outbox-seq-contiguous",
+        "outbox-full-document",
+        "outbox-deleted-event",
         "outbox-seq-lifetime",
         "outbox-delete",
-        "outbox-compaction"
+        "outbox-compaction",
+        "outbox-delete-many"
       ],
       "stale_fact_ids": [],
       "visible_checks": [
@@ -178,23 +196,47 @@
           "fact_ids": [
             "outbox-seq-contiguous"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
+        },
+        {
+          "id": "e3-delete-many",
+          "kind": "task",
+          "test": "BulkTests.test_delete_many_is_all_or_nothing",
+          "fact_ids": [
+            "outbox-delete-many"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-delete-many-events",
+          "kind": "retention",
+          "test": "BulkTests.test_delete_many_emits_deleted_for_each",
+          "fact_ids": [
+            "outbox-deleted-event"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
         }
       ],
       "retired_tests": []
     },
     {
       "id": "e4",
-      "prompt": "The search indexer's version 2 tracks an epoch for each entity ID. When Registry.create creates an ID that has had events before (a deleted ID created again), that ID starts a new epoch: its epoch number is the previous epoch + 1 (an ID's first life is epoch 1) and its seq starts again at 1. The existing sequence rules still apply within an epoch. Events in pending() gain an epoch field. Add Outbox.epoch(entity_id), returning the ID's current epoch, or 0 if it has never had events. Outbox.ack gains an optional keyword argument epoch; when it is omitted, ack refers to the ID's current epoch. This version does not need to open databases written by earlier versions.",
+      "prompt": "The search indexer's version 2 tracks an epoch for each entity ID. When a deleted entity ID starts existing again, it starts a new epoch: its epoch number is the previous epoch + 1 (an ID's first life is epoch 1) and its seq starts again at 1. The existing sequence rules still apply within an epoch. Events in pending() gain an epoch field. Add Outbox.epoch(entity_id), returning the ID's current epoch, or 0 if it has never had events. Outbox.ack gains an optional keyword argument epoch; when it is omitted, ack refers to the ID's current epoch. This version does not need to open databases written by earlier versions. Also add Registry.patch(entity_id, changes), which merges changes into the entity's data (keys in changes replace existing keys) and emits an \"updated\" event; patching an entity that does not exist raises KeyError.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
       },
       "expected_fact_ids": [
         "outbox-seq-contiguous",
+        "outbox-full-document",
+        "outbox-deleted-event",
         "outbox-delete",
         "outbox-compaction",
-        "outbox-epoch"
+        "outbox-delete-many",
+        "outbox-epoch",
+        "outbox-patch"
       ],
       "stale_fact_ids": [
         "outbox-seq-lifetime"
@@ -246,7 +288,27 @@
           "fact_ids": [
             "outbox-seq-contiguous"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
+        },
+        {
+          "id": "e4-patch",
+          "kind": "task",
+          "test": "PatchTests.test_patch_merges_data",
+          "fact_ids": [
+            "outbox-patch"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-patch-full",
+          "kind": "retention",
+          "test": "PatchTests.test_patch_event_carries_complete_data",
+          "fact_ids": [
+            "outbox-full-document"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
         }
       ],
       "retired_tests": [
@@ -255,16 +317,20 @@
     },
     {
       "id": "e5",
-      "prompt": "Add Registry.rename(old_id, new_id). The indexer must see a \"deleted\" event for old_id followed by a \"created\" event for new_id carrying the entity's data, and get(new_id) then returns that data. Renaming onto an ID that currently exists raises ValueError; renaming an entity that does not exist raises KeyError.",
+      "prompt": "Add Registry.rename(old_id, new_id). Afterwards get(new_id) returns the entity's data and get(old_id) raises KeyError. Renaming onto an ID that currently exists raises ValueError; renaming an entity that does not exist raises KeyError.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
       },
       "expected_fact_ids": [
         "outbox-seq-contiguous",
+        "outbox-full-document",
+        "outbox-deleted-event",
         "outbox-delete",
         "outbox-compaction",
+        "outbox-delete-many",
         "outbox-epoch",
+        "outbox-patch",
         "outbox-rename"
       ],
       "stale_fact_ids": [
@@ -295,7 +361,7 @@
         {
           "id": "e5-rename",
           "kind": "task",
-          "test": "RenameTests.test_rename_emits_delete_then_create",
+          "test": "RenameTests.test_rename_moves_data",
           "fact_ids": [
             "outbox-rename"
           ],
@@ -311,6 +377,17 @@
           "decided_by": "scenario.json#/episodes/4/prompt"
         },
         {
+          "id": "e5-rename-events",
+          "kind": "retention",
+          "test": "RenameTests.test_rename_emits_deleted_and_full_created",
+          "fact_ids": [
+            "outbox-deleted-event",
+            "outbox-full-document"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        },
+        {
           "id": "e5-rename-epoch",
           "kind": "currency",
           "test": "RenameTests.test_rename_onto_deleted_id_starts_new_epoch",
@@ -324,6 +401,18 @@
     }
   ],
   "negative_checks": [
+    {
+      "id": "delete-without-event",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/delete_without_event",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-delete-event",
+        "e2-recreate"
+      ]
+    },
     {
       "id": "recreate-restarts",
       "episode": "e2",
@@ -347,6 +436,17 @@
       ]
     },
     {
+      "id": "delete-many-without-events",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/delete_many_without_events",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-delete-many-events"
+      ]
+    },
+    {
       "id": "epoch-reset-after-compact",
       "episode": "e4",
       "base_reference": "reference/e4",
@@ -358,6 +458,17 @@
       ]
     },
     {
+      "id": "patch-partial-payload",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/patch_partial_payload",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-patch-full"
+      ]
+    },
+    {
       "id": "rename-continues-lifetime",
       "episode": "e5",
       "base_reference": "reference/e5",
@@ -365,6 +476,18 @@
       "expected": "fail",
       "visible": "pass",
       "fails_probes": [
+        "e5-rename-epoch"
+      ]
+    },
+    {
+      "id": "rename-in-place",
+      "episode": "e5",
+      "base_reference": "reference/e5",
+      "overlay": "negative/rename_in_place",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e5-rename-events",
         "e5-rename-epoch"
       ]
     }
