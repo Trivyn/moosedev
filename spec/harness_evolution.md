@@ -1,5 +1,10 @@
 # Harness evolution
 
+> Superseded by S8 (2026-09-12): the `change-level-v2` policy and the
+> reconciliation and post-edit candidate facilities it specifies were removed;
+> the symbolic policy is the only harness (see `docs/harness.md`, "How the
+> harness decides"). Kept as the record of the sealed campaigns.
+
 Approved 2026-09-10. This spec is a view of existing graph decisions; the graph
 wins on disagreement. Requirement
 `https://moosedev.dev/kg/Requirement/4ff3ef62-c7a9-4494-89d3-a91ea110c52a`

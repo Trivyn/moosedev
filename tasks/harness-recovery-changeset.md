@@ -1,5 +1,11 @@
 # Harness bounded self-recovery: change set for review
 
+**Closed 2026-09-12 by supersession.** The symbolic policy (Requirement
+`9ae68a19`, S0–S8) removed the purpose gate and the model-decided association
+and reconciliation loops this change set proposed to guard; the surviving
+transitions (scope-escape replan, no-op edit continuation, bounded capture
+retype) are implemented in the symbolic harness. Kept as history.
+
 Draft for James, 2026-09-12 morning. Derived from the terminal causes actually
 observed in the three-arm baseline (`target/harness-evolution-stage2-baseline-v2/`)
 and the two earlier campaigns. Nothing here is implemented or captured in the

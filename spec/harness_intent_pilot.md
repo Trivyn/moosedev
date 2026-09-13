@@ -1,5 +1,9 @@
 # Change-level intent pilot
 
+> Superseded by S8 (2026-09-12): the `change-level` policy and the model
+> association action were removed; the symbolic policy is the only harness
+> (see `docs/harness.md`). Kept as the record of the sealed pilot.
+
 Status: explicitly approved by the maintainer on 2026-09-09, including both exact
 Requirement descriptions and maintenance rubric v2. Requirements captured as
 accepted before implementation; the graph is authoritative:

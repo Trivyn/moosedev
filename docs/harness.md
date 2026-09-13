@@ -62,7 +62,7 @@ assumed to work on every provider. Reasoning text never becomes an executable
 action. A model/endpoint/settings change invalidates the compatibility cache.
 
 Invalid JSON and repairable action/capture arguments share **three candidate
-outputs total** per action decision or evidence page. The runner automatically
+outputs total** per action decision or capture note. The runner automatically
 supplies bounded validation feedback for attempts two and three, then pauses for
 human guidance. Retry progress is visible, and the attempt count survives restart,
 interruption, and `/continue`. New human guidance permits a fresh repair cycle.
@@ -71,48 +71,11 @@ human review; correction never grants approval.
 
 A failed step records `last_error` and a typed `last_error_kind` in the journal:
 `model_output` (validation of model output, spends the repair budget),
-`controller_invariant` (the runner's own durable state disagreed with itself),
 `daemon_rejection` (daemon HTTP 4xx), `service` (daemon 5xx or transport), or
 `other`. The class comes from the error type, never from message text, so study
-tooling can separate controller faults from model faults. Intent events also
-mark `edit_applied` (every applied edit, both policies), `repair_exhausted` (the
-purpose whose third candidate failed), and `purpose_missing_rounds_exhausted`
-(three consecutive missing-purpose cycles under `change-level-v2`).
-
-## Capture reconciliation
-
-New tasks negotiate capture contract 2 with the daemon. Saved tasks without a
-contract version retain the original capture workflow; an incompatible daemon
-must be upgraded before starting a new task.
-
-When a proposed record may already exist, the harness presents its claim,
-relationships, lifecycle and differences for comparison. Retrieval nominates a
-candidate; it does not establish equivalence. The model can recommend reusing the
-record unchanged, revising a task-owned pending proposal, or recording distinct
-knowledge under a noncolliding title. The daemon resolves identities and preserves
-the operation across interruption. Reuse never silently appends new evidence or
-rewrites the existing graph record.
-
-Semantic reuse joins the ordinary human review batch. The Knowledge view shows
-both claims and the recommendation; governing knowledge still needs review before
-dependent edits. Revising a pending proposal pauses behind its original whole-batch
-review: rejecting that batch resumes the saved replacement, while accepting it
-discards the replacement and reopens the evidence assessment. Another task's pending
-records cannot be ratified through this task's review.
-
-When a complete candidate cannot fit the model context, a card may require a human
-semantic decision without a model recommendation. The card identifies that source
-explicitly; a structural-only study reviewer cannot approve it automatically.
-Capture assessments and unresolved reviews remain separate durable obligations,
-so an acknowledged evidence page is not repeatedly regenerated and completion
-cannot bypass its required review.
-
-When the only reuse candidate exceeds the model's remaining prompt budget, the
-runner asks the human to judge it directly. Rejecting that card keeps the
-observation unresolved and moves on; it never restarts reconciliation, and a
-candidate the human has already rejected is never re-presented as an oversized
-card. Model-judged reuse rejections still restart reconciliation with the
-rejected candidate excluded.
+tooling can separate daemon and transport faults from model faults. Intent
+events also mark `edit_applied` (every applied edit) and `repair_exhausted` (the
+purpose whose third candidate failed).
 
 ## Request usage accounting
 
@@ -120,7 +83,7 @@ Task journals expose `token_usage`, with one current receipt per explicit client
 HTTP attempt (internal HTTP redirects are outside this boundary). Receipts
 identify the model and sanitized endpoint, request purpose,
 repair decision and candidate, status, elapsed time, and provider-reported usage.
-Actions, capture assessments, and compatibility probes are separate purposes;
+Actions, capture notes, and compatibility probes are separate purposes;
 schema or optional streaming-usage fallbacks have separate request IDs. Raw usage
 is retained alongside nullable token fields. Missing counts stay unknown, and
 cache/reasoning detail fields must not be added to input/output totals blindly.
@@ -173,15 +136,16 @@ file changes still invalidate approval or fail the executor's exact comparison.
 Deletion continues to require human approval. Legacy whole-file edit requests
 remain readable with their original strict semantics.
 
-Capture prompts supply evidence references and typed choices for existing graph
-targets. The runner resolves those choices into exact journal evidence and graph
-IRIs before daemon submission. Existing knowledge is not contemporaneous evidence,
-and selecting a reference does not establish that a claim is true: proposals still
-require human review. A daemon without the typed-choice capability must be upgraded.
+At the final checkpoint the model answers one plain question about what it
+learned; the daemon types that note into proposals (see "How the harness
+decides"). Existing knowledge is not contemporaneous evidence, and a typed
+proposal does not establish that a claim is true: proposals still require human
+review. A daemon that does not advertise capture and intent contract 2 must be
+upgraded before a new task is created.
 
-Every edit crosses the execution boundary. Capture assessments
-continue during work and accumulate for human review; proposals remain outside
-policy authority until ratified. Completion requires the approved checks to pass,
+Every edit crosses the execution boundary. Intermediate checkpoints only
+journal; the final checkpoint produces the proposals for human review, and
+proposals remain outside policy authority until ratified. Completion requires the approved checks to pass,
 human acceptance/rejection of outstanding capture operations (or consolidated
 no-change confirmation), graph persistence, and validation. Ratification can
 invalidate a prior plan approval and require renewed approval and verification.
@@ -194,81 +158,15 @@ still require renewed plan approval before execution. If review succeeds but the
 final checkpoint fails, `/continue` retries completion without repeating capture
 or claiming that no knowledge changed.
 
-The experimental `change-level-v2` policy is off by default. Set
-`MOOSEDEV_HARNESS_INTENT_POLICY=change-level-v2` before creating a task to enable
-incremental purpose selection and reviewed post-edit associations. The model
-selects purpose and obligation roles from supplied current records; the harness
-retains those choices while it resolves scope and prepares the ordinary plan.
-Roles live in the task journal. Human plan approval binds the selected knowledge,
-file scope, source proofs and checks. Genuinely missing governing knowledge must
-be captured and accepted before the dependent edit.
-
-Purpose responses offer only decisions valid for the current state: a next page
-requires a continuation cursor, completion requires a selected purpose, and a
-missing-knowledge judgment requires retrieval to have reached its last page.
-A missing-purpose checkpoint drains all evidence pages, reviews and pending
-revisions before refreshing accepted knowledge and selecting purpose again.
-An empty accepted inventory or three consecutive unsuccessful missing-purpose
-judgments pauses for human guidance. Resume preserves the checkpoint, and service
-errors do not consume the semantic retry budget.
-
-The harness derives each edit's scope from its exact changes and current source
-evidence. Successive harness-applied edits can share the approved purpose and file
-scope; external source drift or newly implicated governing knowledge requires
-review of the affected approval. All applicable Constraints remain in force.
-When an edit first touches an unlinked definition, the harness presents its exact
-affected scope for human approval under the selected rationale. A pre-existing
-graph link is not required. View the selected claims, rationales and affected
-definitions in Knowledge, and the proposed source change in Diff. Subsequent
-owned edits within that approved scope do not repeat the scope approval.
-After editing, the harness discovers candidates from the refreshed source index.
-The model recommends associations using supplied choices, and the human reviews
-new links through the existing review flow. Existing links are reused. Unsupported
-or stale indexing remains explicit unresolved work; broad file candidates retain
-their conservative scope. The model does not need to predict a new helper's name
-before writing it.
-
-`MOOSEDEV_HARNESS_POSTEDIT_ASSOCIATIONS=1` enables that same post-edit facility with
-the `current` policy, which is how the matched study isolates the pre-edit gate.
-New `change-level-v2` tasks include the facility. Policy and association contracts
-are persisted; changing the environment does not change a resumed task. Older
-journals retain their original behavior. See [the evolution spec](../spec/harness_evolution.md)
-for the approved contract and evaluation limits.
-
-Post-edit discovery records structural outcomes without inference when the current
-index supplies no linkable entity, or a proven entity has no eligible record
-choices. Those outcomes do not assert that governing knowledge is absent or that
-a record is semantically irrelevant. Stale or unresolved index evidence remains
-explicit. Nonempty choices still require semantic selection and ordinary review;
-the controller validates supplied handles and bounded retries before proposing links.
-Association prompts carry each eligible record's complete claims once. Candidate
-identity and source proofs remain separate from those semantic choices.
-
-The earlier experimental policy remains available for existing tasks. Set
-`MOOSEDEV_HARNESS_INTENT_POLICY=change-level` before creating a task to require a
-plan mapping from current knowledge to affected existing or planned code entities.
-`current` retains ordinary plan approval. The policy is persisted with the task;
-changing the environment does not change it on resume. Purpose and obligation
-roles are task-journal metadata, not new graph predicates. Related helpers can
-share existing requirements or decisions rather than creating a record per helper.
-Missing purpose must be captured and accepted before the revised plan can execute.
-
-When the post-edit facility is disabled, `MOOSEDEV_HARNESS_ENTITY_LINKS=1` enables
-the earlier optional association action. The harness supplies bounded record/entity
-choices, resolves identities through the daemon, and submits existing-record links
-for review. Acceptance does not prove semantic correctness, and a changed knowledge
-revision can require renewed plan approval. The controlled pilot enables this
-capability in both arms.
 Automatic index refresh currently supports Python projects with an explicit
 absolute `MOOSEDEV_SCIP_PYTHON` launcher; it refuses registry/PATH fallback and mixed
-producer refreshes. Source must match its indexed evidence before a precise link
-can be reviewed. See [the pilot spec](../spec/harness_intent_pilot.md) for the frozen
-indexer setup, study limits, and gate-count definitions.
+producer refreshes. Source must match its indexed evidence before a derived
+association can be reviewed.
 
 Daemon or model-server outages pause work without consuming the model-repair
 budget. Restore the connection, then use `/continue` (headless `step` or `run`) to
-retry. Pending capture evidence and any already-submitted operation ID remain
-in the journal; a connection failure does not require new model guidance.
+retry. The pending note and any already-submitted operation ID remain in the
+journal; a connection failure does not require new model guidance.
 
 Commands run in a filtered, read-only copy of project source with separate
 writable scratch space. Use project-relative paths. The live project, unrelated
@@ -333,15 +231,13 @@ action schema. Omitted paths are disclosed; `search` examines both paths and
 contents throughout the permitted workspace. The configured model ID is supplied
 as session metadata so the model can answer identity questions without guessing.
 Action observations use bounded previews; `inspect(event,offset)` lets the model
-read detailed journal output without repeating a command. Capture independently
-processes all checkpoint evidence in bounded pages, with persisted event and byte
-positions across interruption. Completing one page does not clear the remaining
-capture obligation. The Journal view displays a compact index; complete requests
-and observations remain in the task JSON. Unchanged checkpoints skip redundant
+read detailed journal output without repeating a command. The final checkpoint
+consumes the whole journal since the last checkpoint in one note; the checkpoint
+position persists across interruption. The Journal view displays a compact
+index; complete requests and observations remain in the task JSON. Unchanged checkpoints skip redundant
 file rewrites; changed checkpoints retain atomic publication and fsync.
-Plan summaries are limited to 4000 UTF-8 bytes. If required capture context leaves
-no room for evidence, increase the configured model window and retry: that
-checkpoint's file set is frozen and cannot be narrowed by replanning.
+Plan summaries are limited to 4000 UTF-8 bytes. If the required context leaves
+no room for the note question, increase the configured model window and retry.
 
 The daemon rejects untrusted browser origins and non-address Host headers across
 all HTTP routes, including review and checkpoint. Native local clients and the
@@ -353,42 +249,54 @@ does not authenticate other programs already running with the user's privileges.
 clients use `POST` to validate and publish a durable checkpoint. This also keeps
 legacy browsers without Fetch Metadata from triggering writes through GET.
 
-## Symbolic policy
+## How the harness decides
 
-`MOOSEDEV_HARNESS_INTENT_POLICY=symbolic` selects the policy in which the coding
-model answers only two questions: `harness_action` while working, and one
-plain-prose `harness_capture_note` at the final checkpoint. Every other decision
-is derived by the daemon and journaled as an intent event, never asked of the
-model:
+The coding model answers two questions and nothing else: `harness_action` while
+working and one plain-prose `harness_capture_note` at the final checkpoint. Every
+other decision is derived by the daemon from the approved plan, the diff and the
+graph, and journaled as an intent event; none is asked of the model. Task
+journals are schema 2. A journal written by an earlier build is refused with
+"start a new task", and a new task requires a daemon advertising capture and
+intent contract 2.
 
-- Plan approval derives the obligations of each plan file from the direct
+- Obligations. `/approve` derives each plan file's obligations from the direct
   dossier records of its resolved definitions and takes the plan summary as the
-  purpose (`obligations_derived`). One human approval; no purpose review.
-- An edit outside the plan files is discarded and the task re-enters Plan mode
-  naming the file (`scope_escape_replan`, three per task; the fourth parks for
-  guidance as `scope_escape_exhausted`). The first no-op edit runs the required
-  checks instead of consuming the repair budget (`noop_edit_continuation`).
-- After `finish`, `POST /api/v1/harness/intent/associate` binds the changed
-  definitions to the governing records with the predicate the ontology allows,
-  skipping parameters, type members, locals and test paths
+  purpose (`obligations_derived`). One human approval; no purpose review. A file
+  without governing records is ungoverned, which is journaled, not parked.
+- Scope. An edit outside the plan files is discarded and the task re-enters Plan
+  mode naming the file (`scope_escape_replan`, three per task; the fourth parks
+  for guidance as `scope_escape_exhausted`). The first no-op edit runs the
+  required checks instead of consuming the repair budget
+  (`noop_edit_continuation`).
+- Associations. After `finish`, `POST /api/v1/harness/intent/associate` binds the
+  changed definitions to their governing records with the predicate the ontology
+  allows, skipping parameters, type members, locals and test paths
   (`association_derived`, `association_none`, `association_skipped`). Bindings
-  enter the existing link review; an unresolved index is journaled, not parked.
-- Intermediate capture checkpoints only journal (`capture_deferred`). At the
+  enter the ordinary link review as `DerivedAssociation` cards; an unresolved or
+  stale index is journaled (`unresolved_binding`), never parked. Steering during
+  that review discards the pending bindings; they are re-derived at the next
+  `finish`.
+- Capture. Intermediate checkpoints only journal (`capture_deferred`). At the
   final checkpoint the note is journaled (`capture_note`) and
   `POST /api/v1/harness/capture/type` types it: a symbolic decision for the
   change, a symbolic lesson for a check that failed then passed, and, when the
   daemon has an LLM sensor, bounded sensor proposals. Each proposal is scored
-  against same-kind accepted records and receives a durable receipt:
-  `restates` (receipt only, no record), `refines` (proposal plus a
-  confidence-annotated edge written at capture) or distinct (plain proposal).
-  Thresholds are frozen defaults (`MOOSEDEV_RECONCILE_RESTATES` 0.80,
-  `MOOSEDEV_RECONCILE_REFINES` 0.55, `MOOSEDEV_RECONCILE_REFINES_CONTAINMENT`
-  0.60, `MOOSEDEV_RECONCILE_TIEBREAK_BAND` 0.08), overridable only by
-  environment and recorded in every receipt.
+  against same-kind accepted records (title 0.5, rank 0.3, overlap 0.2) and
+  receives a durable receipt: `restates` (receipt only, no record), `refines`
+  (proposal plus a confidence-annotated edge written at capture) or distinct
+  (plain proposal). Thresholds are frozen defaults (`MOOSEDEV_RECONCILE_RESTATES`
+  0.80, `MOOSEDEV_RECONCILE_REFINES` 0.55,
+  `MOOSEDEV_RECONCILE_REFINES_CONTAINMENT` 0.60,
+  `MOOSEDEV_RECONCILE_TIEBREAK_BAND` 0.08), overridable only by environment and
+  recorded in every receipt. A title collision or daemon rejection retypes the
+  same note under fresh operation IDs without a model call (`capture_retyped`,
+  three per note, then `capture_retype_exhausted`); a source or knowledge change
+  between typing and capture does the same (`capture_note_invalidated`).
 
 Human review remains only where a new record or a new code link is written.
-The policy is persisted with the task and requires the mandatory post-edit
-association contract. `current` and `change-level-v2` are unchanged.
+Read-only conversations never reach the final checkpoint and therefore capture
+nothing: steering text is journaled and surfaces in the final note of the next
+completed plan.
 
 ## Headless compatibility
 
@@ -406,10 +314,10 @@ moosedev-harness tui TASK_ID
 ```
 
 `step` advances once; `run` advances at most 32 steps and stops at human gates.
-Headless tasks require one no-change confirmation per checkpoint, after all its
-evidence pages have been assessed. They retain individual proposal reviews;
-opening a task in the TUI
-enables conversational batching while preserving its outstanding obligations.
+Headless tasks require one no-change confirmation at the final checkpoint when
+the typed note proposes nothing. They retain individual proposal reviews;
+opening a task in the TUI enables conversational batching while preserving its
+outstanding obligations.
 `approve-policy`, `review ID reject`, `plan`, `cancel`, `resume`, and `answer ID TEXT`
 retain their task semantics. Headless `resume ID` resumes a task; interactive
 `resume-session ID` resumes a conversation. `--help` lists all commands. Options

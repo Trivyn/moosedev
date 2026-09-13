@@ -174,7 +174,29 @@ Mirror of graph Requirement `9ae68a19` (symbolic intent policy), AD `dfc80535`
 - [x] S5 `capture/type`: symbolic decision + lesson, optional LLM sensor, three dispositions; `KnowledgeProposal.reconciled` validated against receipts and annotated at capture.
 - [x] S6 Runner note flow: one `harness_capture_note`, typed proposals into the ordinary review; restart-safe; negative proof (only `harness_action` and `harness_capture_note` reach the model).
 - [x] S7 Bench: `symbolic` accepted; `symbolic_*` metrics; docs.
-- [ ] S8 Cleanup: remove the model-facing structured decisions (separate commit after review).
+- [x] S8 (2026-09-12) The symbolic policy is the only harness. C1 removed every
+  model-decided mechanism (`current`, `change-level`, `change-level-v2`, purpose
+  selection, sensor capture targets, model reconciliation, the `associate` action,
+  the v1 capture route and six candidate/reconcile routes); task journals are
+  schema 2 and older journals are refused. Two latent bugs fixed on the way:
+  abandoning a link review left a dead association (finish could never resolve),
+  and a rejected typed capture resubmitted itself unchanged (now a bounded
+  retype). C2 deduped (shared digest, daemon journal/revision helpers, graph
+  liveness and predicate helpers, `Step` dispatch) and fixed steering during a
+  link review and typing invalidation. C3–C5 split runner, daemon and protocol;
+  C6 consolidated the runner test scaffolding; C7 added the symbolic TUI panels;
+  C8 this note, the docs and the graph (AD "S8: the symbolic policy is the only
+  harness"). Deleted-test ledger, by the invariant each covered: model
+  reconciliation loop (7 runner tests; Lessons `0f673164` / `7f341f01` remain as
+  history), closed-enum sensor targets (2), read-only capture and byte paging
+  (2), unreachable governing-refresh branch (1), two concurrent capture reviews
+  (1), a constant (1), purpose selection / change-level mapping / planned
+  targets / association handles / governing detour (all 22 in `intent.rs`),
+  daemon reconciliation journal (4), purpose candidates (2), capture targets (1),
+  duplicate post-edit candidate test (1), deleted-scope audit projection (2),
+  in-source schema/prompt/paging tests (20). Every surviving invariant was ported
+  to a symbolic-flow test of the same name or a renamed one (see commit
+  `ee83f22`).
 - [ ] Matched campaign: one harness arm (`symbolic`) beside `opencode-without`, new identity.
 
 ## Fixed boundaries
