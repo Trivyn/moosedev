@@ -20,6 +20,24 @@ from .scenario import SCENARIOS, list_scenarios, load_scenario, relative_file
 EXCLUDED = {".git", ".moosedev", "notes", "runtime", "__pycache__", ".cache",
             ".pytest_cache", ".mypy_cache", ".venv", "venv", "node_modules", "target"}
 TEST_COUNT = re.compile(r"^Ran (\d+) tests? in .+$", re.MULTILINE)
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+# Python 3.9: "test_x (__main__.Case) ... ok"; 3.11+: "test_x (__main__.Case.test_x) ... ok".
+TEST_RESULT = re.compile(r"^(test\w*) \(([\w.]+)\) \.\.\. (ok|FAIL|ERROR|skipped\b.*|expected failure|unexpected success)$",
+                         re.MULTILINE)
+
+
+def test_results(output):
+    """Per-test outcomes of a verbosity-2 unittest run, keyed "Case.test_method"."""
+    results = {}
+    for name, owner, status in TEST_RESULT.findall(ANSI_ESCAPE.sub("", output)):
+        owner = owner.removeprefix("__main__.")
+        if owner.endswith("." + name):
+            owner = owner[:-len(name) - 1]
+        key = f"{owner}.{name}"
+        if key in results:
+            raise ValueError(f"duplicate unittest result: {key}")
+        results[key] = "ok" if status == "ok" else status.split()[0]
+    return results
 
 
 def _copy_sources(source, destination):
@@ -154,21 +172,109 @@ def execute_check(workspace: Path, hidden_test: Path, *, timeout_seconds: int = 
     return _execute(workspace, hidden_test=hidden_test, timeout_seconds=timeout_seconds)
 
 
+def _observed(result):
+    try:
+        return test_results(result["stderr"])
+    except ValueError as error:
+        result["error"] = str(error)
+        return None
+
+
+def _long_cases(name, scenario, package, record):
+    """Every probe is observed by name; negatives must fail exactly the probes they declare."""
+    from . import long_horizon
+    from .indexing import resolve_offline
+
+    def offline(case_id, root):
+        targets = long_horizon.RESOLUTION_TARGETS.get(name)
+        for target in targets or [None]:
+            try:
+                if target is None:
+                    raise RuntimeError("no reviewed resolution target")
+                result = {"status": "success", "resolved": resolve_offline(root, target)}
+            except (OSError, SyntaxError, ValueError, RuntimeError) as error:
+                result = {"status": "infrastructure_failure", "error": str(error)}
+            record(name, f"{case_id}/{target and target['name']}", "offline_target", "pass",
+                   result["status"] == "success", result)
+
+    episodes = scenario["episodes"]
+    by_id = {episode["id"]: episode for episode in episodes}
+    project = relative_file(package, "project")
+    offline("project", project)
+    for index, episode in enumerate(episodes):
+        reference = relative_file(package, episode["reference"])
+        declared = {probe["test"] for probe in episode["probes"]}
+        offline(f"{episode['id']}/reference", reference)
+        for number, command in enumerate(episode["visible_checks"]):
+            result = _execute(reference, visible_command=command)
+            record(name, f"{episode['id']}/visible/{number}", "reference_visible", "pass",
+                   result["status"] == "success", result)
+        hidden = relative_file(package, episode["hidden_test"])
+        result = execute_check(reference, hidden)
+        observed = _observed(result)
+        record(name, f"{episode['id']}/hidden", "reference_probes", "pass",
+               result["status"] == "success" and observed is not None and set(observed) == declared
+               and all(value == "ok" for value in observed.values()), result, observed)
+        if index == 0:
+            result = execute_check(project, hidden)
+            observed = _observed(result)
+            record(name, f"{episode['id']}/project", "project_hidden", "fail",
+                   result["status"] == "agent_failure" and not result["timed_out"] and observed is not None
+                   and any(observed.get(test) != "ok" for test in declared), result, observed)
+        else:
+            previous = episodes[index - 1]
+            earlier = {probe["test"] for probe in previous["probes"]}
+            kept = earlier - set(episode["retired_tests"])
+            result = execute_check(reference, relative_file(package, previous["hidden_test"]))
+            observed = _observed(result)
+            record(name, f"{episode['id']}/chain/{previous['id']}", "chain", "pass",
+                   observed is not None and set(observed) == earlier
+                   and all(observed[test] == "ok" for test in kept), result, observed)
+    for negative in scenario["negative_checks"]:
+        episode = by_id[negative["episode"]]
+        probes = {probe["id"]: probe["test"] for probe in episode["probes"]}
+        expected_failures = {probes[probe] for probe in negative["fails_probes"]}
+        with tempfile.TemporaryDirectory(prefix="moosedev-negative-") as temporary:
+            workspace = Path(temporary).resolve() / "workspace"
+            _copy_sources(relative_file(package, negative["base_reference"]), workspace)
+            _copy_sources(relative_file(package, negative["overlay"]), workspace)
+            for number, command in enumerate(episode["visible_checks"]):
+                result = _execute(workspace, visible_command=command)
+                record(name, f"{negative['id']}/visible/{number}", "negative_visible", "pass",
+                       result["status"] == "success", result)
+            result = execute_check(workspace, relative_file(package, episode["hidden_test"]))
+            observed = _observed(result)
+            failing = None if observed is None else {test for test, value in observed.items() if value != "ok"}
+            record(name, negative["id"], "negative_probes", "fail",
+                   result["status"] == "agent_failure" and not result["timed_out"] and observed is not None
+                   and set(observed) == set(probes.values()) and failing == expected_failures,
+                   result, observed)
+
+
 def validate_fixtures(scenarios=None) -> dict:
     """Validate each reference and negative overlay; retain every check's outputs."""
     cases = []
+
+    def record(scenario_id, case_id, kind, expected, passed, result, probes=None):
+        case = {"scenario_id": scenario_id, "id": case_id, "kind": kind,
+                "expected": expected, "passed": passed, "result": result}
+        if probes is not None:
+            case["probes"] = probes
+        cases.append(case)
 
     def add(scenario_id, case_id, kind, expected, result):
         passed = result["status"] == "success" if expected == "pass" else (
             result["status"] == "agent_failure" and (result["tests_run"] or 0) > 0
             and not result["timed_out"])
-        cases.append({"scenario_id": scenario_id, "id": case_id, "kind": kind,
-                      "expected": expected, "passed": passed, "result": result})
+        record(scenario_id, case_id, kind, expected, passed, result)
 
     from .scenario import MAINTENANCE
     for name in scenarios if scenarios is not None else [name for name in list_scenarios() if name != MAINTENANCE]:
         scenario = load_scenario(name)
         package = SCENARIOS / name
+        if scenario["schema_version"] == 2:
+            _long_cases(name, scenario, package, record)
+            continue
         episodes = {episode["id"]: episode for episode in scenario["episodes"]}
         for episode in episodes.values():
             reference = relative_file(package, episode["reference"])

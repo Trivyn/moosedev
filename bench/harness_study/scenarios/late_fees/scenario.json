@@ -1,0 +1,426 @@
+{
+  "schema_version": 2,
+  "id": "late_fees",
+  "track": "inherited",
+  "horizon": "long",
+  "title": "Seeded fee regulations kept current through new segments and a partial supersession",
+  "initial_facts": [
+    {
+      "id": "fees-np7",
+      "kind": "Constraint",
+      "title": "Regulation NP-7: no late or penalty fees for registered non-profits",
+      "description": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ]
+    },
+    {
+      "id": "fees-cents",
+      "kind": "Requirement",
+      "title": "Fees are integer cents rounded half up",
+      "description": "Every fee is an integer number of cents. A percentage fee is rounded half up to the cent, never with banker's rounding.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ]
+    }
+  ],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "Implement FeePolicy.late_fee(account, invoice, today). Days are integers. An invoice is late when today is more than 14 days after invoice.due_day. A late invoice's fee is 5% of amount_cents, but at least 100 cents; an invoice that is not late has no fee (0).",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e1-grace",
+          "kind": "task",
+          "test": "LateFeeTests.test_fee_starts_after_fourteen_days",
+          "fact_ids": [
+            "fees-formula"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-minimum",
+          "kind": "task",
+          "test": "LateFeeTests.test_minimum_fee",
+          "fact_ids": [
+            "fees-formula"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-half-up",
+          "kind": "retention",
+          "test": "LateFeeTests.test_percentage_rounds_half_up",
+          "fact_ids": [
+            "fees-cents"
+          ],
+          "decided_by": "scenario.json#/initial_facts/1",
+          "measures": "correctness"
+        },
+        {
+          "id": "e1-charity",
+          "kind": "retention",
+          "test": "LateFeeTests.test_charity_pays_no_late_fee",
+          "fact_ids": [
+            "fees-np7"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e2",
+      "prompt": "Add two account segments: foundation, displayed as \"Registered foundation\", for registered non-profit foundations; and cooperative, displayed as \"Member cooperative\", for member-owned for-profit cooperatives. Statement lines must show the segment's display name instead of its code.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula",
+        "fees-segments"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e2.py",
+      "reference": "reference/e2",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e2-retained-charity",
+          "kind": "retained",
+          "test": "LateFeeTests.test_charity_pays_no_late_fee",
+          "fact_ids": [
+            "fees-np7"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0"
+        },
+        {
+          "id": "e2-segments",
+          "kind": "task",
+          "test": "SegmentTests.test_new_segments_and_display_names",
+          "fact_ids": [
+            "fees-segments"
+          ],
+          "decided_by": "scenario.json#/episodes/1/prompt"
+        },
+        {
+          "id": "e2-foundation",
+          "kind": "retention",
+          "test": "SegmentTests.test_foundation_exempt_cooperative_charged",
+          "fact_ids": [
+            "fees-np7",
+            "fees-segments"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e3",
+      "prompt": "Regulation NP-9 replaces NP-7 for late fees on invoices due on or after day 1000: a late invoice of a registered non-profit account due on or after day 1000 has a flat late fee of 200 cents. Late fees on invoices due before day 1000 still follow NP-7. Also add FeePolicy.returned_payment_fee(account, amount_cents) for bounced payments: 2.5% of amount_cents, but at least 250 cents.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula",
+        "fees-segments",
+        "fees-np9",
+        "fees-returned-payment"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e3.py",
+      "reference": "reference/e3",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e3-retained-foundation",
+          "kind": "retained",
+          "test": "SegmentTests.test_foundation_exempt_cooperative_charged",
+          "fact_ids": [
+            "fees-np7"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0"
+        },
+        {
+          "id": "e3-np9",
+          "kind": "task",
+          "test": "Np9Tests.test_charity_flat_late_fee_from_day_1000",
+          "fact_ids": [
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-penalty",
+          "kind": "task",
+          "test": "ReturnedPaymentTests.test_returned_payment_fee_for_retail",
+          "fact_ids": [
+            "fees-returned-payment"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-penalty-exempt",
+          "kind": "retention",
+          "test": "ReturnedPaymentTests.test_nonprofits_pay_no_returned_payment_fee",
+          "fact_ids": [
+            "fees-np7",
+            "fees-segments"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
+        },
+        {
+          "id": "e3-penalty-half-up",
+          "kind": "retention",
+          "test": "ReturnedPaymentTests.test_returned_payment_fee_rounds_half_up",
+          "fact_ids": [
+            "fees-cents"
+          ],
+          "decided_by": "scenario.json#/initial_facts/1",
+          "measures": "cost"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e4",
+      "prompt": "Add the account segment association, displayed as \"Registered association\", for registered non-profit associations. Add FeePolicy.fee_forecast(account, invoice, days), which returns the late fee the invoice would have on each of the given days, as a list in the same order. Also add FeePolicy.collection_penalty(account, invoice, today): once today is more than 60 days after invoice.due_day, a collection penalty of 15% of amount_cents, but at least 500 cents; otherwise 0.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula",
+        "fees-segments",
+        "fees-np9",
+        "fees-returned-payment",
+        "fees-association",
+        "fees-forecast",
+        "fees-collection"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e4.py",
+      "reference": "reference/e4",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e4-retained-np9",
+          "kind": "retained",
+          "test": "Np9Tests.test_charity_flat_late_fee_from_day_1000",
+          "fact_ids": [
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e4-forecast",
+          "kind": "task",
+          "test": "ForecastTests.test_forecast_matches_late_fee_by_day",
+          "fact_ids": [
+            "fees-forecast"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-association-np9",
+          "kind": "currency",
+          "test": "AssociationTests.test_association_late_fee_follows_np9",
+          "fact_ids": [
+            "fees-np9",
+            "fees-association"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e4-association-penalty",
+          "kind": "retention",
+          "test": "AssociationTests.test_association_pays_no_returned_payment_fee",
+          "fact_ids": [
+            "fees-np7",
+            "fees-association"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "cost"
+        },
+        {
+          "id": "e4-collection",
+          "kind": "task",
+          "test": "CollectionTests.test_collection_penalty_for_retail",
+          "fact_ids": [
+            "fees-collection"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-collection-exempt",
+          "kind": "retention",
+          "test": "CollectionTests.test_nonprofits_pay_no_collection_penalty",
+          "fact_ids": [
+            "fees-np7",
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/initial_facts/0",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "charity-charged",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/charity_charged",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e1-charity"
+      ]
+    },
+    {
+      "id": "bankers-rounding",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/bankers_rounding",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e1-half-up"
+      ]
+    },
+    {
+      "id": "foundation-charged",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/foundation_charged",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-foundation"
+      ]
+    },
+    {
+      "id": "penalty-charged-to-nonprofits",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/penalty_charged_to_nonprofits",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-penalty-exempt"
+      ]
+    },
+    {
+      "id": "penalty-bankers-rounding",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/penalty_bankers_rounding",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-penalty-half-up"
+      ]
+    },
+    {
+      "id": "association-for-profit",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/association_for_profit",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-association-np9",
+        "e4-association-penalty"
+      ]
+    },
+    {
+      "id": "stale-np7",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/stale_np7",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-association-np9"
+      ]
+    },
+    {
+      "id": "collection-like-late-fee",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/collection_like_late_fee",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-collection-exempt"
+      ]
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md",
+  "dependency_map": "DEPENDENCY_MAP.md"
+}

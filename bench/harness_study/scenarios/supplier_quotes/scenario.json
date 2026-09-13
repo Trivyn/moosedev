@@ -1,0 +1,528 @@
+{
+  "schema_version": 2,
+  "id": "supplier_quotes",
+  "track": "accumulation",
+  "horizon": "long",
+  "title": "Binding supplier quotes through a contract change and a money representation change",
+  "initial_facts": [],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "Fix how quotes handle money and supplier calls. The supplier returns each unit price as a decimal string. Convert it to integer cents per unit, rounding half up; the supplier invoices per unit, so each unit price is rounded once, and rounding the line total instead was considered and rejected because it disagrees with the invoice. total_cents is unit_cents times qty. qty must be a positive integer, otherwise raise ValueError. A request that names an unknown SKU (one not in the catalog) raises KeyError before the supplier is contacted at all, because every supplier call is billed and a failed request must cost nothing; this applies to every code path that contacts the supplier. Quotes are binding under supplier contract clause 7: every quote must use the price the supplier returns at the moment of quoting, so a price cache was considered and rejected. These rules apply to every code path that produces a quote.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "quote-unit-rounding",
+        "quote-quantity",
+        "quote-billed-calls",
+        "quote-live-price"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e1-half-up",
+          "kind": "task",
+          "test": "QuoteTests.test_half_up_per_unit",
+          "fact_ids": [
+            "quote-unit-rounding"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-quantity",
+          "kind": "task",
+          "test": "QuoteTests.test_rejects_non_positive_quantity",
+          "fact_ids": [
+            "quote-quantity"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-unknown",
+          "kind": "task",
+          "test": "QuoteTests.test_unknown_sku_rejected_before_fetch",
+          "fact_ids": [
+            "quote-billed-calls"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-live",
+          "kind": "task",
+          "test": "QuoteTests.test_every_quote_fetches",
+          "fact_ids": [
+            "quote-live-price"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e2",
+      "prompt": "Add QuoteService.quote_many(lines). lines is a list of (sku, qty) pairs. Return {\"lines\": [...], \"total_cents\": ...}, where lines holds the quote for each pair in order, in the same form quote returns, and total_cents is the basket total in cents. An empty list returns {\"lines\": [], \"total_cents\": 0}. The supplier has started rate-limiting us, so avoid redundant supplier fetches.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "quote-unit-rounding",
+        "quote-quantity",
+        "quote-billed-calls",
+        "quote-live-price",
+        "quote-basket"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e2.py",
+      "reference": "reference/e2",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e2-retained-half-up",
+          "kind": "retained",
+          "test": "QuoteTests.test_half_up_per_unit",
+          "fact_ids": [
+            "quote-unit-rounding"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e2-one-fetch",
+          "kind": "task",
+          "test": "BasketTests.test_one_fetch_per_distinct_sku",
+          "fact_ids": [
+            "quote-basket"
+          ],
+          "decided_by": "scenario.json#/episodes/1/prompt"
+        },
+        {
+          "id": "e2-empty",
+          "kind": "task",
+          "test": "BasketTests.test_empty_basket",
+          "fact_ids": [
+            "quote-basket"
+          ],
+          "decided_by": "scenario.json#/episodes/1/prompt"
+        },
+        {
+          "id": "e2-refetch",
+          "kind": "retention",
+          "test": "BasketTests.test_prices_refetched_between_baskets",
+          "fact_ids": [
+            "quote-live-price"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        },
+        {
+          "id": "e2-basket-rounding",
+          "kind": "retention",
+          "test": "BasketTests.test_basket_total_rounds_each_unit",
+          "fact_ids": [
+            "quote-unit-rounding"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
+        },
+        {
+          "id": "e2-basket-unknown",
+          "kind": "retention",
+          "test": "BasketTests.test_unknown_sku_rejected_before_any_fetch",
+          "fact_ids": [
+            "quote-billed-calls"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e3",
+      "prompt": "Supplier contract v2 replaces clause 7: a fetched price is guaranteed for 600 seconds. Give QuoteService(supplier, *, clock=time.monotonic) an optional clock that returns seconds. A price fetched at time t may be reused by quote and quote_many calls made while clock() - t < 600, and must be fetched again after that. The supplier also grants a 5% volume discount: a line of 10 or more units costs 5% less.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "quote-unit-rounding",
+        "quote-quantity",
+        "quote-billed-calls",
+        "quote-basket",
+        "quote-price-guarantee",
+        "quote-volume-discount"
+      ],
+      "stale_fact_ids": [
+        "quote-live-price"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e3.py",
+      "reference": "reference/e3",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e3-retained-unknown",
+          "kind": "retained",
+          "test": "QuoteTests.test_unknown_sku_rejected_before_fetch",
+          "fact_ids": [
+            "quote-billed-calls"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e3-reuse",
+          "kind": "task",
+          "test": "GuaranteeTests.test_reuse_within_600_seconds",
+          "fact_ids": [
+            "quote-price-guarantee"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-discount",
+          "kind": "task",
+          "test": "DiscountTests.test_discount_applies_from_ten_units",
+          "fact_ids": [
+            "quote-volume-discount"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-discount-rounding",
+          "kind": "retention",
+          "test": "DiscountTests.test_discount_rounds_each_unit",
+          "fact_ids": [
+            "quote-unit-rounding"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": [
+        "BasketTests.test_prices_refetched_between_baskets"
+      ]
+    },
+    {
+      "id": "e4",
+      "prompt": "Perishable SKUs are excluded from the price guarantee: the supplier reprices SKUs whose catalog shelf_life_days is under 30 every day, so always fetch them fresh and never reuse their prices. Add QuoteService.warm(skus), which fetches the given SKUs from the supplier now so that later quotes can reuse those prices where the guarantee allows.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "quote-unit-rounding",
+        "quote-quantity",
+        "quote-billed-calls",
+        "quote-basket",
+        "quote-price-guarantee",
+        "quote-volume-discount",
+        "quote-perishable-exception",
+        "quote-warm"
+      ],
+      "stale_fact_ids": [
+        "quote-live-price"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e4.py",
+      "reference": "reference/e4",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e4-retained-discount-rounding",
+          "kind": "retained",
+          "test": "DiscountTests.test_discount_rounds_each_unit",
+          "fact_ids": [
+            "quote-unit-rounding"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e4-perishable",
+          "kind": "task",
+          "test": "WarmTests.test_perishable_always_fetched",
+          "fact_ids": [
+            "quote-perishable-exception"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-warm-reuse",
+          "kind": "task",
+          "test": "WarmTests.test_warm_enables_reuse",
+          "fact_ids": [
+            "quote-warm"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-warm-unknown",
+          "kind": "retention",
+          "test": "WarmTests.test_warm_rejects_unknown_before_any_fetch",
+          "fact_ids": [
+            "quote-billed-calls"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        },
+        {
+          "id": "e4-guarantee",
+          "kind": "currency",
+          "test": "WarmTests.test_guarantee_still_reuses_prices",
+          "fact_ids": [
+            "quote-price-guarantee"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e5",
+      "prompt": "Suppliers now quote unit prices with up to 6 decimal places. Store fetched prices internally as integer micro-units (millionths of a currency unit) to avoid rounding drift; results stay in integer cents. A price with more than 6 decimal places raises ValueError. Add two SKUs to the catalog: flowers with shelf_life_days 5 and frozen_peas with shelf_life_days 180. Also add QuoteService.quote_orders(orders) for the web shop's nightly batch: orders is a list of baskets, each a list of (sku, qty) pairs; return a list holding the quote_many result for each basket, in order.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "quote-unit-rounding",
+        "quote-quantity",
+        "quote-billed-calls",
+        "quote-basket",
+        "quote-price-guarantee",
+        "quote-volume-discount",
+        "quote-perishable-exception",
+        "quote-warm",
+        "quote-micro-units",
+        "quote-new-skus",
+        "quote-orders"
+      ],
+      "stale_fact_ids": [
+        "quote-live-price"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e5.py",
+      "reference": "reference/e5",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e5-retained-guarantee",
+          "kind": "retained",
+          "test": "WarmTests.test_guarantee_still_reuses_prices",
+          "fact_ids": [
+            "quote-price-guarantee"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e5-parse",
+          "kind": "task",
+          "test": "MicroTests.test_six_decimal_prices_parse",
+          "fact_ids": [
+            "quote-micro-units"
+          ],
+          "decided_by": "scenario.json#/episodes/4/prompt"
+        },
+        {
+          "id": "e5-new-skus",
+          "kind": "task",
+          "test": "MicroTests.test_new_skus_are_quotable",
+          "fact_ids": [
+            "quote-new-skus"
+          ],
+          "decided_by": "scenario.json#/episodes/4/prompt"
+        },
+        {
+          "id": "e5-orders",
+          "kind": "task",
+          "test": "OrderTests.test_orders_quote_each_basket",
+          "fact_ids": [
+            "quote-orders"
+          ],
+          "decided_by": "scenario.json#/episodes/4/prompt"
+        },
+        {
+          "id": "e5-orders-unknown",
+          "kind": "retention",
+          "test": "OrderTests.test_orders_reject_unknown_before_any_fetch",
+          "fact_ids": [
+            "quote-billed-calls"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        },
+        {
+          "id": "e5-micro-rounding",
+          "kind": "retention",
+          "test": "MicroTests.test_six_decimal_prices_round_each_unit",
+          "fact_ids": [
+            "quote-unit-rounding"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
+        },
+        {
+          "id": "e5-new-perishable",
+          "kind": "retention",
+          "test": "MicroTests.test_new_short_shelf_life_sku_is_perishable",
+          "fact_ids": [
+            "quote-perishable-exception"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt",
+          "measures": "cost"
+        }
+      ],
+      "retired_tests": []
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "instance-price-cache",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/instance_price_cache",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-refetch"
+      ]
+    },
+    {
+      "id": "basket-round-total",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/basket_round_total",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-basket-rounding"
+      ]
+    },
+    {
+      "id": "basket-fetch-before-validate",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/basket_fetch_before_validate",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-basket-unknown"
+      ]
+    },
+    {
+      "id": "discount-on-line-total",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/discount_on_line_total",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-discount-rounding"
+      ]
+    },
+    {
+      "id": "warm-fetch-before-validate",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/warm_fetch_before_validate",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-warm-unknown"
+      ]
+    },
+    {
+      "id": "stale-always-fetch",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/stale_always_fetch",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-guarantee",
+        "e4-warm-reuse"
+      ]
+    },
+    {
+      "id": "round-after-multiply",
+      "episode": "e5",
+      "base_reference": "reference/e5",
+      "overlay": "negative/round_after_multiply",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e5-micro-rounding"
+      ]
+    },
+    {
+      "id": "orders-loop",
+      "episode": "e5",
+      "base_reference": "reference/e5",
+      "overlay": "negative/orders_loop",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e5-orders-unknown"
+      ]
+    },
+    {
+      "id": "perishable-by-name",
+      "episode": "e5",
+      "base_reference": "reference/e5",
+      "overlay": "negative/perishable_by_name",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e5-new-perishable"
+      ]
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md",
+  "dependency_map": "DEPENDENCY_MAP.md"
+}
