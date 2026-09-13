@@ -142,7 +142,7 @@ hashes change.
    retention miss does not hide later episodes. Today's driver stops on any
    hidden-check failure; the long-horizon mode must implement the new policy.
    Per-test independence makes later probes readable.
-2. **Primary outcome.** *Recommended:* an episode passes when it completes, the
+2. **Primary outcome.** *Decided (maintainer, 2026-09-13):* an episode passes when it completes, the
    probes it introduces pass, and nothing that passed in the previous attempted
    episode regresses. Horizon reached is the run of leading passing episodes.
    Correctness retention and currency pass rates are the explanatory
