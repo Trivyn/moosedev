@@ -41,6 +41,7 @@ impl Runner {
             return self.persist();
         }
         self.derive_symbolic_scope(&context).await?;
+        self.symbolic_state_mut().unchanged_since_approval = true;
         self.task.approved_revision = Some(context.revision);
         self.task.completion_pending = false;
         self.task.mode = Mode::Auto;
@@ -224,6 +225,7 @@ impl Runner {
             "no question awaiting an answer"
         );
         self.event(format!("Human response: {text}"));
+        self.end_unchanged_window();
         self.task.guidance = text.clone();
         self.task.recovery = None;
         self.task.last_response = text;

@@ -118,6 +118,7 @@ impl Runner {
                             .snapshots
                             .insert(edit.file.clone(), fingerprint(&current));
                         self.task.source.insert(edit.file.clone(), current);
+                        self.end_unchanged_window();
                         self.task.intent = None;
                         self.task.capture_due = true;
                         self.task.after_review = Phase::Working;

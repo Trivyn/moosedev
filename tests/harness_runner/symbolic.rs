@@ -101,16 +101,32 @@ async fn symbolic_approval_derives_obligations_from_direct_dossier_records() {
 }
 
 #[tokio::test]
-async fn symbolic_replan_rederives_obligations_and_keeps_task_counters() {
+async fn symbolic_real_replan_keeps_working_set_rederives_obligations_and_counters() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
     runner.task.symbolic.as_mut().unwrap().scope_escapes = 2;
+    // A command result is new evidence, so the replan after it is real.
+    fixture.conversational(json!({"action":"command","command":"true"}));
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
     fixture
         .conversational(json!({"action":"replan","reason":"Narrow the change to the helper only"}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(
+        runner.task.read_files,
+        vec!["labels.py".to_string()],
+        "a real replan keeps the working set"
+    );
+    assert!(journal_value(&runner)["source"].get("labels.py").is_some());
+    assert_eq!(
+        intent_details(&runner, "model_replan"),
+        vec!["Narrow the change to the helper only"]
+    );
+    assert!(intent_details(&runner, "replan_continuation").is_empty());
     let calls = fixture.model_calls();
     runner.advance().await.unwrap();
     assert_eq!(
@@ -136,11 +152,185 @@ async fn symbolic_replan_rederives_obligations_and_keeps_task_counters() {
     assert_eq!(runner.task.phase, Phase::Working);
     let state = runner.task.symbolic.clone().unwrap();
     assert_eq!(state.scope_escapes, 2, "task-wide bounds survive a replan");
+    assert!(
+        state.unchanged_since_approval,
+        "approval opens a new window"
+    );
     assert_eq!(
         state.obligations.get("labels.py").unwrap(),
         &vec![UNLINKED.to_string(), PRESERVE.to_string()]
     );
     assert_eq!(intent_details(&runner, "obligations_derived").len(), 2);
+}
+
+#[tokio::test]
+async fn symbolic_replan_with_nothing_new_continues_the_approved_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let approved = journal_value(&runner)["approved_revision"].clone();
+    assert!(approved.is_string());
+    let cycles = intent_details(&runner, "cycle_ended").len();
+    // Reads do not end the unchanged window.
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"replan","reason":"Reconsider the helper name"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(journal_value(&runner)["approved_revision"], approved);
+    assert!(runner.task.approved_change_scope.is_some());
+    assert_eq!(journal_value(&runner)["capture_due"], false);
+    assert!(
+        runner.task.last_response.starts_with("Replan not needed"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner.task.last_response.contains("labels.py"));
+    assert_eq!(
+        intent_details(&runner, "replan_continuation"),
+        vec!["1: Reconsider the helper name"]
+    );
+    assert!(intent_details(&runner, "model_replan").is_empty());
+    assert_eq!(intent_details(&runner, "cycle_ended").len(), cycles);
+    assert_eq!(runner.task.read_files, vec!["labels.py".to_string()]);
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("A replan with nothing new since approval does not reopen planning."));
+    assert!(prompt.contains(
+        "Use replan when an edit, a check result or a human answer shows the approved files or checks must change."
+    ));
+    fixture.conversational(json!({"action":"replan","reason":"Reconsider again"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().replan_continuations,
+        2
+    );
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    let state = runner.task.symbolic.clone().unwrap();
+    assert!(state.unchanged_since_approval);
+    assert_eq!(state.replan_continuations, 2);
+    fixture.conversational(json!({"action":"replan","reason":"And once more"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(intent_details(&runner, "replan_continuation").len(), 3);
+}
+
+#[tokio::test]
+async fn symbolic_replan_after_an_edit_is_a_real_replan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().intent_accepted.clear();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name.strip()"}));
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert!(
+        !runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .unchanged_since_approval
+    );
+    fixture.conversational(json!({"action":"replan","reason":"The strip belongs in a helper"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(journal_value(&runner)["approved_revision"].is_null());
+    assert_eq!(
+        intent_details(&runner, "model_replan"),
+        vec!["The strip belongs in a helper"]
+    );
+    assert!(intent_details(&runner, "replan_continuation").is_empty());
+    assert_eq!(runner.task.read_files, vec!["labels.py".to_string()]);
+}
+
+#[tokio::test]
+async fn symbolic_replan_after_a_human_answer_or_command_is_a_real_replan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(
+        json!({"action":"question","question":"Should the helper also lower-case?"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    runner.answer("Yes, lower-case too.".into()).await.unwrap();
+    assert!(
+        !runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .unchanged_since_approval
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    fixture.conversational(json!({"action":"replan","reason":"Lower-casing changes the checks"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan, "an answer is new evidence");
+    assert_eq!(intent_details(&runner, "model_replan").len(), 1);
+    assert!(intent_details(&runner, "replan_continuation").is_empty());
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"command","command":"true"}));
+    runner.advance().await.unwrap();
+    assert!(
+        !runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .unchanged_since_approval
+    );
+    runner.advance().await.unwrap();
+    fixture.conversational(
+        json!({"action":"replan","reason":"The command output changes the approach"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.mode,
+        Mode::Plan,
+        "a command result is new evidence"
+    );
+    assert_eq!(intent_details(&runner, "model_replan").len(), 1);
+    assert!(intent_details(&runner, "replan_continuation").is_empty());
+}
+
+#[tokio::test]
+async fn symbolic_replan_in_plan_mode_is_a_noop() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    let cycles = intent_details(&runner, "cycle_ended").len();
+    fixture.conversational(json!({"action":"replan","reason":"Start over"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(journal_value(&runner)["capture_due"], false);
+    assert!(
+        runner.task.last_response.starts_with("Already planning"),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(intent_details(&runner, "replan_noop"), vec!["Start over"]);
+    assert!(intent_details(&runner, "model_replan").is_empty());
+    assert_eq!(intent_details(&runner, "cycle_ended").len(), cycles);
+    assert_eq!(runner.task.read_files, vec!["labels.py".to_string()]);
 }
 
 #[tokio::test]
@@ -170,6 +360,16 @@ async fn symbolic_scope_escape_replans_naming_the_file_then_edits_after_approval
         vec!["other.py: escape 1 of 3"]
     );
     assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 1);
+    assert!(
+        intent_details(&runner, "replan_continuation").is_empty(),
+        "a scope escape is never continued"
+    );
+    assert!(intent_details(&runner, "model_replan").is_empty());
+    assert_eq!(
+        runner.task.read_files,
+        vec!["labels.py".to_string()],
+        "the working set is kept"
+    );
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Planning);
     fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior and update the constant","files":["labels.py","other.py"],"checks":["true"]}));

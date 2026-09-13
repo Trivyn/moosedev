@@ -103,6 +103,9 @@ impl Runner {
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;
         let (message, action) = output.parts();
+        // A scope escape arrives here as a replan too; only the model's own
+        // replan can be continued.
+        let proposed_replan = matches!(action, model::Action::Replan { .. });
         let Some(action) = self.symbolic_intercept(action)? else {
             return self.persist();
         };
@@ -272,6 +275,7 @@ impl Runner {
                 if !self.fresh_approval().await? {
                     return Ok(());
                 }
+                self.end_unchanged_window();
                 let result = self.run_command(&command).await?;
                 self.task.last_response = result.output;
                 self.task.capture_due = true;
@@ -293,14 +297,24 @@ impl Runner {
                 self.task.after_review = Phase::AwaitingInput;
                 self.capture().await?;
             }
+            Step::Replan { reason } if self.task.mode == Mode::Plan => {
+                self.symbolic_replan_noop(&reason);
+            }
+            Step::Replan { reason } if proposed_replan && self.replan_changes_nothing() => {
+                self.symbolic_replan_continuation(&reason);
+            }
             Step::Replan { reason } => {
+                if proposed_replan {
+                    self.intent_event("model_replan", &reason);
+                }
+                self.end_unchanged_window();
                 self.end_intent_cycle("model replan");
                 self.task.mode = Mode::Plan;
                 self.task.phase = Phase::Planning;
                 self.task.approved_revision = None;
                 self.task.last_response = reason;
-                self.task.read_files.clear();
-                self.task.source.clear();
+                // The working set stays: the next plan keeps only its own files,
+                // and a file outside them comes back through the first-edit guard.
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Planning;
             }
@@ -330,6 +344,7 @@ impl Runner {
             .source
             .insert(edit.file.clone(), edit.after.clone());
         self.clear_symbolic_batch_state(&edit);
+        self.end_unchanged_window();
         self.intent_event("edit_applied", &edit.file);
         self.event(format!(
             "Applied edit {}\nBefore:\n{}\nAfter:\n{}",

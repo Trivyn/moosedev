@@ -27,6 +27,15 @@ pub struct SymbolicState {
     pub noop_continuations: usize,
     #[serde(default)]
     pub retypes: usize,
+    /// Model replans answered by continuing the approved plan because nothing
+    /// changed since approval. Unbounded; counted for the study.
+    #[serde(default)]
+    pub replan_continuations: usize,
+    /// True from plan approval until the first applied edit, command, required
+    /// check result or human answer. Reads do not end it. False by default, so
+    /// an older journal never continues a replan it cannot prove unchanged.
+    #[serde(default)]
+    pub unchanged_since_approval: bool,
     /// The association derived for the current edit batch; cleared by each
     /// applied edit so a later batch is derived afresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -136,16 +136,96 @@ impl Runner {
 }
 
 impl Runner {
+    /// An applied edit, a command, a required-check result or a human answer
+    /// is new evidence: a replan after it is a real replan.
+    pub(in crate::harness::runner) fn end_unchanged_window(&mut self) {
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.unchanged_since_approval = false;
+        }
+    }
+
+    /// The model's own replan changes nothing while the approved plan still
+    /// governs and nothing new has arrived since approval.
+    pub(in crate::harness::runner) fn replan_changes_nothing(&self) -> bool {
+        self.task.mode == Mode::Auto
+            && self.task.phase == Phase::Working
+            && self.task.approved_revision.is_some()
+            && self.task.approved_change_scope.is_some()
+            && self.task.pending_edit.is_none()
+            && self
+                .task
+                .symbolic
+                .as_ref()
+                .is_some_and(|state| state.unchanged_since_approval)
+    }
+
+    /// Continue the approved plan instead of reopening planning and approval.
+    pub(in crate::harness::runner) fn symbolic_replan_continuation(&mut self, reason: &str) {
+        let state = self.symbolic_state_mut();
+        state.replan_continuations += 1;
+        let count = state.replan_continuations;
+        let files = self
+            .task
+            .plan
+            .as_ref()
+            .map(|plan| plan.files.join(", "))
+            .unwrap_or_default();
+        self.intent_event("replan_continuation", &format!("{count}: {reason}"));
+        self.event(format!(
+            "Replan continued the approved plan ({count}): {reason}"
+        ));
+        self.task.last_response = format!(
+            "Replan not needed: nothing has changed since the plan was approved (no edit, command, check result or human answer since approval), so the approved plan still governs. Make the change it describes in {files}, or finish to run the required checks. An edit to a file outside the plan returns the task to planning automatically."
+        );
+    }
+
+    /// A replan while already planning changes nothing.
+    pub(in crate::harness::runner) fn symbolic_replan_noop(&mut self, reason: &str) {
+        self.intent_event("replan_noop", reason);
+        self.event(format!("Replan while planning changes nothing: {reason}"));
+        self.task.last_response = "Already planning; replan changes nothing here. Propose the plan with plan(summary, files, checks), or read, search or ask first.".into();
+    }
+
     pub(in crate::harness::runner) fn record_symbolic_check(
         &mut self,
         command: &str,
         success: bool,
     ) {
+        self.end_unchanged_window();
         let after_edit = !self.task.edits.is_empty();
         self.symbolic_state_mut().check_history.push(CheckOutcome {
             command: command.to_string(),
             success,
             after_edit,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{context_router, serve, Project};
+    use super::*;
+
+    #[tokio::test]
+    async fn record_symbolic_check_ends_the_unchanged_window() {
+        let project = Project::new("unchanged-window");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Keep the approved plan".into())
+            .await
+            .unwrap();
+        for success in [true, false] {
+            runner.symbolic_state_mut().unchanged_since_approval = true;
+            runner.record_symbolic_check("true", success);
+            assert!(
+                !runner
+                    .task
+                    .symbolic
+                    .as_ref()
+                    .unwrap()
+                    .unchanged_since_approval,
+                "a check result (success {success}) is new evidence"
+            );
+        }
+        server.abort();
     }
 }
