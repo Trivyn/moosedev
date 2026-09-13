@@ -1,7 +1,7 @@
 # Long-horizon scenario review
 
-**Status: draft for maintainer gold review, revision 2 after blind reader audit
-round 1. No approval file exists, no model has run on these packages, and no
+**Status: draft for maintainer gold review, revision 3 after blind reader audit
+round 2. No approval file exists, no model has run on these packages, and no
 campaign may start until the decisions below are settled and the gold is
 approved.**
 
@@ -13,8 +13,8 @@ All three are fully synthetic; see each package's `SOURCE_MAPPING.md`.
 | Package | Track | Episodes | Probes: task / retained / retention / currency | Negatives | Validation cases |
 | --- | --- | --- | --- | --- | --- |
 | `supplier_quotes` | accumulation | 5 | 13 / 4 / 8 (5 correctness, 3 cost) / 1 | 9 | 39 |
-| `entity_outbox` | accumulation | 5 | 12 / 4 / 7 (4 correctness, 3 cost) / 1 | 8 | 37 |
-| `late_fees` | inherited (2 seeds) | 4 | 7 / 3 / 7 (6 correctness, 1 cost) / 1 | 8 | 33 |
+| `entity_outbox` | accumulation | 5 | 13 / 4 / 9 (4 correctness, 5 cost) / 1 | 10 | 41 |
+| `late_fees` | inherited (2 seeds) | 4 | 7 / 3 / 7 (5 correctness, 2 cost) / 1 | 8 | 33 |
 
 Per episode, each package's `DEPENDENCY_MAP.md` gives every later probe's
 round-1 verdict, what it measures, its deciding sentence (JSON pointer and
@@ -63,10 +63,12 @@ Every hidden test method is declared in `scenario.json` as one probe:
   blind reader condition A does not apply to currency probes; they
   discriminate only against stale notes or records.
 
-Every episode has a task probe. Every episode after e1 has at least one
-correctness retention probe (currency does not count), and `entity_outbox` has
-one in each of e2 to e5. Every retention and currency probe has at least one
-negative fixture that fails exactly the probes it declares.
+Every episode has a task probe. After audit round 2, `supplier_quotes` and
+`late_fees` have at least one audited correctness retention probe (PASS or weak
+PASS; currency does not count) in every episode after e1. `entity_outbox` e2
+and e5 do; its e3 and e4 correctness probes are new in revision 3 and await
+round 3. Every retention and currency probe has at least one negative fixture
+that fails exactly the probes it declares.
 
 ## Measurement
 
@@ -158,9 +160,17 @@ hashes change.
    and its first harness cell is the pre-block harness-bug check. Gemma E4B is
    exploratory (maintainer, 2026-09-13: included out of curiosity about the
    model-size floor; any improvement on it is a win). Its cells run second,
-   are reported separately, and a Gemma failure is not read as evidence
-   against the harness. Qwen first also gives horizon evidence sooner, because
+   are reported separately. The point of the harness studies is to find the
+   floor, the smallest reasonable local model that works with the harness
+   (maintainer, 2026-09-13); the v2 MCP-only setup with Codex and Claude Code
+   effectively needed Sonnet-class models to use MOOSEDev reliably. Gemma E4B
+   results are floor evidence, showing where the harness stops working, not a
+   verdict on the harness; Qwen3.8-27B remains the model of record. Qwen first also gives horizon evidence sooner, because
    long horizons need early episodes to pass.
+6. **Floor bracketing.** Open. With only a 4B and a 27B model the floor cannot
+   be bracketed: a Gemma failure and a Qwen success leave everything in between
+   unknown. Consider adding one mid-size local model (roughly 8 to 14B) as a
+   third model, at the cost of 6 more cells (about 14 more episodes per arm).
 
 **Fixed, not a decision:** before any block, the first harness cell of the
 block order (Qwen's, under the recommended order) runs alone into a discarded store and its journal is read. An
@@ -175,32 +185,34 @@ hours before indexing and model loads.
 ## Retention probes: what each measures
 
 Ratings are against a reader with the previous reference code and the current
-prompt. Round-1 verdicts are from the blind reader audit below.
+prompt. Audit verdicts are from the blind reader audit rounds below (R1, R2, R3).
 
-| Package | Probe | Measures | Round 1 | Expected discrimination |
+| Package | Probe | Measures | Audit verdicts | Expected discrimination |
 | --- | --- | --- | --- | --- |
-| supplier_quotes | e2-refetch | correctness | INFERABLE (prompt scoped dedupe); prompt revised | high |
-| supplier_quotes | e2-basket-rounding | cost | INFERABLE | low |
-| supplier_quotes | e2-basket-unknown | correctness | PASS | medium |
-| supplier_quotes | e3-discount-rounding | correctness | INFERABLE; discount restated per line | medium |
-| supplier_quotes | e4-warm-unknown | correctness | PASS (weak) | medium |
-| supplier_quotes | e5-orders-unknown | correctness | new | medium to high |
-| supplier_quotes | e5-micro-rounding | cost | INFERABLE | low |
-| supplier_quotes | e5-new-perishable | cost | INFERABLE | low |
-| entity_outbox | e2-delete-event | correctness | new | high |
-| entity_outbox | e2-recreate | cost | INFERABLE | low |
-| entity_outbox | e3-compaction | cost | INFERABLE | low |
-| entity_outbox | e3-delete-many-events | correctness | new | medium |
-| entity_outbox | e4-epoch-compaction | cost | INFERABLE | low |
-| entity_outbox | e4-patch-full | correctness | new | medium to high |
-| entity_outbox | e5-rename-events | correctness | new | medium |
-| late_fees | e1-half-up | correctness | PASS | medium |
-| late_fees | e1-charity | correctness | PASS | high |
-| late_fees | e2-foundation | correctness | PASS | high |
-| late_fees | e3-penalty-exempt | correctness | RECORDS-FAIL; seed clause removed | high |
-| late_fees | e3-penalty-half-up | correctness | PASS (weak) | medium |
-| late_fees | e4-association-penalty | cost | INFERABLE | low |
-| late_fees | e4-collection-exempt | correctness | new | medium to high |
+| supplier_quotes | e2-refetch | correctness | R1 INFERABLE (prompt scoped dedupe); prompt revised; R2 PASS (weak) | high |
+| supplier_quotes | e2-basket-rounding | cost | R1 INFERABLE | low |
+| supplier_quotes | e2-basket-unknown | correctness | R1 PASS | medium |
+| supplier_quotes | e3-discount-rounding | correctness | R1 INFERABLE; discount restated per line; R2 PASS (weak) | medium |
+| supplier_quotes | e4-warm-unknown | correctness | R1 PASS (weak) | medium |
+| supplier_quotes | e5-orders-unknown | correctness | new in revision 2; R2 PASS | medium to high |
+| supplier_quotes | e5-micro-rounding | cost | R1 INFERABLE | low |
+| supplier_quotes | e5-new-perishable | cost | R1 INFERABLE | low |
+| entity_outbox | e2-delete-event | correctness | new in revision 2; R2 PASS | high |
+| entity_outbox | e2-recreate | cost | R1 INFERABLE | low |
+| entity_outbox | e3-compaction | cost | R1 INFERABLE | low |
+| entity_outbox | e3-delete-many-atomic | correctness | new in revision 3; R3 pending | high |
+| entity_outbox | e3-delete-many-events | cost | R2 INFERABLE; relabelled cost | low |
+| entity_outbox | e4-epoch-compaction | cost | R1 INFERABLE | low |
+| entity_outbox | e4-patch-full | cost | R2 INFERABLE; relabelled cost | low |
+| entity_outbox | e4-ack-many-atomic | correctness | new in revision 3; R3 pending | medium to high |
+| entity_outbox | e5-rename-events | correctness | new in revision 2; R2 PASS (weak) | medium |
+| late_fees | e1-half-up | correctness | R1 PASS | medium |
+| late_fees | e1-charity | correctness | R1 PASS | high |
+| late_fees | e2-foundation | correctness | R1 PASS | high |
+| late_fees | e3-penalty-exempt | correctness | R1 RECORDS-FAIL; seed clause removed; R2 PASS | high |
+| late_fees | e3-penalty-half-up | cost | R1 PASS (weak); R2 INFERABLE; relabelled cost | low |
+| late_fees | e4-association-penalty | cost | R1 INFERABLE | low |
+| late_fees | e4-collection-exempt | correctness | new in revision 2; R2 PASS | medium to high |
 
 Currency probes, not scored by condition A:
 
@@ -277,7 +289,40 @@ e4-collection-exempt). Two prompts were rescoped (`supplier_quotes`
 e2-refetch and e3-discount-rounding), and the stale seed clause was removed
 from `late_fees` NP-7.
 
-### Round 2
+### Round 2 (2026-09-13)
 
-Pending. Packets cover every new or changed correctness probe and the
-`late_fees` e3 packet with corrected records.
+Same method as round 1: fresh Claude Sonnet readers, one per package episode, condition A answered and saved before condition B records were opened. Round 2 covers only new or changed correctness probes and the corrected late_fees e3 records.
+
+| Package | Probe | Measures | A | B | Verdict |
+|---|---|---|---|---|---|
+| supplier_quotes | e2-refetch | correctness | right, ambiguous (raised the instance-cache alternative) | right, determined | PASS (weak) |
+| supplier_quotes | e3-discount-rounding | correctness | right, ambiguous | right, determined | PASS (weak) |
+| supplier_quotes | e5-orders-unknown | correctness | wrong (one supplier call before the unknown SKU) | right | PASS |
+| entity_outbox | e2-delete-event | correctness | wrong (no deleted event), ambiguous | right | PASS |
+| entity_outbox | e3-delete-many-events | correctness | right, determined (followed the single delete convention) | right | INFERABLE |
+| entity_outbox | e4-patch-full | correctness | right, determined (followed the update payload convention) | right | INFERABLE |
+| entity_outbox | e5-rename-events | correctness | right, ambiguous | right, determined | PASS (weak) |
+| late_fees | e3-penalty-exempt | correctness | wrong (all segments charged) | right (records fix confirmed) | PASS |
+| late_fees | e3-penalty-half-up | correctness | right, determined (followed percent_of convention) | right | INFERABLE |
+| late_fees | e4-collection-exempt | correctness | wrong (non-profits charged) | right | PASS |
+
+Pattern confirmed: probes pass when the new path forces a choice the existing code does not settle (reject an unknown input before any side effect, classify a new category, apply an exemption to a new fee). Probes fail when the new path can copy a convention the code already shows (emit on delete, full payload on update, the rounding helper).
+
+After round 2, supplier_quotes and late_fees have at least one audited correctness probe in every episode after e1. entity_outbox e3 and e4 have none.
+
+**Revision 3 response.** Every probe is kept. `entity_outbox`
+e3-delete-many-events and e4-patch-full and `late_fees` e3-penalty-half-up are
+relabelled cost. `entity_outbox` e1 now also states, with its reason, that a
+request that raises must leave no events and no writes: "A request that raises
+must leave the database exactly as it was, with no events and no other writes,
+because the indexer must never see an event for a change that did not happen,
+and callers retry a failed request after fixing it." Two new correctness
+probes put that rule on paths whose failure behaviour the existing code does
+not settle: e3-delete-many-atomic (the e3 prompt now says only that an unknown
+ID raises KeyError) and e4-ack-many-atomic on a new `Outbox.ack_many` (the
+existing `ack` writes before it checks).
+
+### Round 3
+
+Pending. Packets cover only the new `entity_outbox` e3-delete-many-atomic and
+e4-ack-many-atomic probes.
