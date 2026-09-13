@@ -12,13 +12,14 @@ SCENARIOS = Path(__file__).parent / "scenarios"
 MAINTENANCE = "display_labels_maintenance"
 HORIZONS = ("pilot", "long")
 PROBE_KINDS = ("task", "retained", "retention", "currency")
+RETENTION_MEASURES = ("correctness", "cost")
 LONG_EPISODE_COUNTS = (4, 5)
 _LONG_FIELDS = {"schema_version", "id", "track", "title", "horizon", "initial_facts", "episodes",
                 "negative_checks", "source_mapping", "dependency_map"}
 _LONG_EPISODE_FIELDS = {"id", "prompt", "clarifications", "expected_fact_ids", "stale_fact_ids",
                         "visible_checks", "hidden_test", "reference", "allowed_paths", "probes",
                         "retired_tests"}
-_PROBE_FIELDS = {"id", "kind", "test", "fact_ids", "decided_by"}
+_PROBE_FIELDS = {"id", "kind", "test", "fact_ids", "decided_by", "measures"}
 _NEGATIVE_FIELDS = {"id", "episode", "base_reference", "overlay", "expected", "visible", "fails_probes"}
 _GOLD_FIELDS = {"schema_version", "scenario_id", "facts", "forbidden_claims", "review_status"}
 _GOLD_FACT_FIELDS = {"id", "claim", "kind", "evidence", "introduced_episode", "seeded",
@@ -178,6 +179,9 @@ def _load_long(root: Path, scenario: dict) -> dict:
             _fields(probe, _PROBE_FIELDS, "probe")
             if probe["id"] in probes or probe["kind"] not in PROBE_KINDS:
                 raise ValueError(f"duplicate or unknown probe: {probe.get('id')}")
+            if (probe.get("measures") in RETENTION_MEASURES) != (probe["kind"] == "retention") or \
+                    ("measures" in probe and probe["kind"] != "retention"):
+                raise ValueError(f"probe {probe['id']}: retention probes, and only they, measure correctness or cost")
             if not _TEST_NAME.match(probe["test"]) or probe["test"] in tests:
                 raise ValueError(f"probe {probe['id']} needs one unique Class.test_method")
             if not set(probe["fact_ids"]) <= set(facts) or not probe["fact_ids"]:

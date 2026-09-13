@@ -14,8 +14,11 @@ INTENT_DESIGN_SHA256 = "f28f83ca29deff64f2009817a34ac59f50347e939dff423ec5388811
 
 
 def probe(identifier, kind, test, decided, facts=("f-rule",)):
-    return {"id": identifier, "kind": kind, "test": test, "fact_ids": list(facts),
-            "decided_by": f"scenario.json#/episodes/{decided}/prompt"}
+    value = {"id": identifier, "kind": kind, "test": test, "fact_ids": list(facts),
+             "decided_by": f"scenario.json#/episodes/{decided}/prompt"}
+    if kind == "retention":
+        value["measures"] = "correctness"
+    return value
 
 
 def episode(number, probes, *, expected=("f-rule",), stale=(), retired=()):
@@ -113,6 +116,10 @@ class LoaderTests(unittest.TestCase):
             decided_by="scenario.json#/episodes/0/prompt"))
         self.rejects("duplicate or unknown", lambda s, g: s["episodes"][1]["probes"][1].update(kind="memory"))
         self.rejects("Class.test_method", lambda s, g: s["episodes"][1]["probes"][1].update(test="keep"))
+        self.rejects("measure correctness or cost", lambda s, g: s["episodes"][1]["probes"][1].pop("measures"))
+        self.rejects("measure correctness or cost", lambda s, g: s["episodes"][1]["probes"][1].update(measures="speed"))
+        self.rejects("measure correctness or cost", lambda s, g: s["episodes"][1]["probes"][0].update(measures="cost"))
+        self.rejects("measure correctness or cost", lambda s, g: s["episodes"][3]["probes"][1].update(measures="cost"))
 
     def test_every_retention_and_currency_probe_needs_a_negative(self):
         self.rejects("need a negative", lambda s, g: s["negative_checks"].pop(0))
