@@ -1,0 +1,101 @@
+{
+  "schema_version": 2,
+  "scenario_id": "entity_outbox",
+  "review_status": "pending",
+  "facts": [
+    {
+      "id": "outbox-seq-contiguous",
+      "claim": "Each entity ID has its own sequence: the first event is seq 1 and each next event is the previous seq plus 1, strictly increasing and contiguous across restarts and compaction, because the external search indexer keeps the last seq per ID, discards any event whose seq is not greater and treats gaps as lost events. A single global autoincrement was rejected because it leaves per-entity gaps. From episode 4 this holds within each epoch.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "outbox-seq-lifetime",
+      "claim": "An entity ID's numbering continues for as long as the ID has ever existed in the outbox, including after it is deleted and created again.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false,
+      "superseded_episode": 4,
+      "superseded_by": "outbox-epoch"
+    },
+    {
+      "id": "outbox-delete",
+      "claim": "Registry.delete removes the entity, emits a deleted event, and makes get raise KeyError; deleting a missing entity raises KeyError; customer-chosen IDs may be created again.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "outbox-compaction",
+      "claim": "ack marks an event delivered (unknown events raise KeyError), compact deletes delivered events, pending excludes delivered events, and compaction never changes numbering.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "outbox-epoch",
+      "claim": "Indexer v2 epochs replace lifetime numbering: re-creating a deleted ID starts epoch previous + 1 with seq 1; epoch(id) returns the current epoch or 0; pending events carry epoch; ack defaults to the current epoch; old databases need not be opened.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "outbox-rename",
+      "claim": "Registry.rename emits deleted for the old ID then created for the new ID with the data; renaming onto a live ID raises ValueError and renaming a missing entity raises KeyError; renaming onto a previously deleted ID starts a new epoch for it.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/4/prompt"
+      ],
+      "introduced_episode": 5,
+      "seeded": false
+    }
+  ],
+  "forbidden_claims": [
+    {
+      "claim": "Seq is a single global autoincrement.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Seq restarts when an entity ID is created again.",
+      "applies_from_episode": 1,
+      "applies_through_episode": 3
+    },
+    {
+      "claim": "Seq continues across re-creation of a deleted ID.",
+      "applies_from_episode": 4,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "The next seq is derived from the events still stored.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "The indexer tolerates gaps in an entity's sequence.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Existing databases are migrated to epochs.",
+      "applies_from_episode": 4,
+      "applies_through_episode": null
+    }
+  ]
+}

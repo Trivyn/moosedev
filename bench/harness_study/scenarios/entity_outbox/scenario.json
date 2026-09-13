@@ -1,0 +1,374 @@
+{
+  "schema_version": 2,
+  "id": "entity_outbox",
+  "track": "accumulation",
+  "horizon": "long",
+  "title": "Per-entity outbox numbering through deletion, compaction and an indexer epoch change",
+  "initial_facts": [],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "Our search indexer, run by another team, consumes this outbox. Give each entity ID its own sequence numbers: an entity's first event has seq 1 and each next event has seq equal to the previous seq plus 1; emit returns the new seq. The indexer stores the last seq it has seen for every entity ID forever, discards any event whose seq is not greater, and treats any gap as lost events. So an entity ID's seq must stay strictly increasing and contiguous for as long as that ID has ever existed in the outbox, including across restarts (reopening the database). A single global autoincrement was considered and rejected because it leaves gaps in each entity's numbers. pending() lists events in emission order as dicts with entity_id, seq, kind and payload.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "outbox-seq-contiguous",
+        "outbox-seq-lifetime"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e1-per-entity",
+          "kind": "task",
+          "test": "OutboxTests.test_sequence_per_entity",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-reopen",
+          "kind": "task",
+          "test": "OutboxTests.test_sequence_continues_after_reopen",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-pending",
+          "kind": "task",
+          "test": "OutboxTests.test_pending_lists_events_in_order",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e2",
+      "prompt": "Add Registry.delete(entity_id). It removes the entity and emits a \"deleted\" event for it; get then raises KeyError, and deleting an entity that does not exist raises KeyError. Entity IDs are chosen by customers, so a deleted ID may be created again later with Registry.create.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "outbox-seq-contiguous",
+        "outbox-seq-lifetime",
+        "outbox-delete"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e2.py",
+      "reference": "reference/e2",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e2-retained-reopen",
+          "kind": "retained",
+          "test": "OutboxTests.test_sequence_continues_after_reopen",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e2-delete",
+          "kind": "task",
+          "test": "RegistryTests.test_delete_emits_and_hides",
+          "fact_ids": [
+            "outbox-delete"
+          ],
+          "decided_by": "scenario.json#/episodes/1/prompt"
+        },
+        {
+          "id": "e2-recreate-allowed",
+          "kind": "task",
+          "test": "RegistryTests.test_recreate_after_delete_allowed",
+          "fact_ids": [
+            "outbox-delete"
+          ],
+          "decided_by": "scenario.json#/episodes/1/prompt"
+        },
+        {
+          "id": "e2-recreate",
+          "kind": "retention",
+          "test": "RegistryTests.test_recreated_entity_continues_sequence",
+          "fact_ids": [
+            "outbox-seq-lifetime"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e3",
+      "prompt": "Add Outbox.ack(entity_id, seq), which marks that event as delivered (an unknown event raises KeyError), and Outbox.compact(), which deletes delivered events from the database. pending() leaves out delivered events, whether or not they have been compacted.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "outbox-seq-contiguous",
+        "outbox-seq-lifetime",
+        "outbox-delete",
+        "outbox-compaction"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e3.py",
+      "reference": "reference/e3",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e3-retained-recreate",
+          "kind": "retained",
+          "test": "RegistryTests.test_recreated_entity_continues_sequence",
+          "fact_ids": [
+            "outbox-seq-lifetime"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e3-ack",
+          "kind": "task",
+          "test": "CompactionTests.test_ack_and_compact",
+          "fact_ids": [
+            "outbox-compaction"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-compaction",
+          "kind": "retention",
+          "test": "CompactionTests.test_sequence_survives_compaction_and_reopen",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e4",
+      "prompt": "The search indexer's version 2 tracks an epoch for each entity ID. When Registry.create creates an ID that has had events before (a deleted ID created again), that ID starts a new epoch: its epoch number is the previous epoch + 1 (an ID's first life is epoch 1) and its seq starts again at 1. The existing sequence rules still apply within an epoch. Events in pending() gain an epoch field. Add Outbox.epoch(entity_id), returning the ID's current epoch, or 0 if it has never had events. Outbox.ack gains an optional keyword argument epoch; when it is omitted, ack refers to the ID's current epoch. This version does not need to open databases written by earlier versions.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "outbox-seq-contiguous",
+        "outbox-delete",
+        "outbox-compaction",
+        "outbox-epoch"
+      ],
+      "stale_fact_ids": [
+        "outbox-seq-lifetime"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e4.py",
+      "reference": "reference/e4",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e4-retained-per-entity",
+          "kind": "retained",
+          "test": "OutboxTests.test_sequence_per_entity",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e4-epoch",
+          "kind": "task",
+          "test": "EpochTests.test_recreate_starts_new_epoch",
+          "fact_ids": [
+            "outbox-epoch"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-epoch-zero",
+          "kind": "task",
+          "test": "EpochTests.test_epoch_of_unknown_is_zero",
+          "fact_ids": [
+            "outbox-epoch"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-epoch-compaction",
+          "kind": "retention",
+          "test": "EpochTests.test_compaction_never_resets_sequence_within_epoch",
+          "fact_ids": [
+            "outbox-seq-contiguous"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        }
+      ],
+      "retired_tests": [
+        "RegistryTests.test_recreated_entity_continues_sequence"
+      ]
+    },
+    {
+      "id": "e5",
+      "prompt": "Add Registry.rename(old_id, new_id). The indexer must see a \"deleted\" event for old_id followed by a \"created\" event for new_id carrying the entity's data, and get(new_id) then returns that data. Renaming onto an ID that currently exists raises ValueError; renaming an entity that does not exist raises KeyError.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "outbox-seq-contiguous",
+        "outbox-delete",
+        "outbox-compaction",
+        "outbox-epoch",
+        "outbox-rename"
+      ],
+      "stale_fact_ids": [
+        "outbox-seq-lifetime"
+      ],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e5.py",
+      "reference": "reference/e5",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e5-retained-epoch",
+          "kind": "retained",
+          "test": "EpochTests.test_recreate_starts_new_epoch",
+          "fact_ids": [
+            "outbox-epoch"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e5-rename",
+          "kind": "task",
+          "test": "RenameTests.test_rename_emits_delete_then_create",
+          "fact_ids": [
+            "outbox-rename"
+          ],
+          "decided_by": "scenario.json#/episodes/4/prompt"
+        },
+        {
+          "id": "e5-rename-errors",
+          "kind": "task",
+          "test": "RenameTests.test_rename_errors",
+          "fact_ids": [
+            "outbox-rename"
+          ],
+          "decided_by": "scenario.json#/episodes/4/prompt"
+        },
+        {
+          "id": "e5-rename-epoch",
+          "kind": "currency",
+          "test": "RenameTests.test_rename_onto_deleted_id_starts_new_epoch",
+          "fact_ids": [
+            "outbox-epoch"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        }
+      ],
+      "retired_tests": []
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "recreate-restarts",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/recreate_restarts",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-recreate"
+      ]
+    },
+    {
+      "id": "max-seq-after-compact",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/max_seq_after_compact",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-compaction"
+      ]
+    },
+    {
+      "id": "epoch-reset-after-compact",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/epoch_reset_after_compact",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-epoch-compaction"
+      ]
+    },
+    {
+      "id": "rename-continues-lifetime",
+      "episode": "e5",
+      "base_reference": "reference/e5",
+      "overlay": "negative/rename_continues_lifetime",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e5-rename-epoch"
+      ]
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md",
+  "dependency_map": "DEPENDENCY_MAP.md"
+}
