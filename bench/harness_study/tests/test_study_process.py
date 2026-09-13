@@ -435,7 +435,8 @@ sys.exit(2)''',
                     "scope_escape_exhausted": 0, "noop_edit_continuation": 0, "association_derived": 1,
                     "association_none": 0, "association_skipped": 0, "association_unresolved": 0,
                     "capture_deferred": 1, "capture_note": 1, "capture_typed": 1, "reconciled_restates": 1,
-                    "reconciled_refines": 0, "reconciled_distinct": 1, "capture_notes": 1,
+                    "reconciled_refines": 0, "reconciled_distinct": 1, "plan_check_rejected": 0,
+                    "check_unrunnable": 0, "capture_notes": 1,
                     "structured_model_decisions": 0, "autonomous_recoveries": 1}
         self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,
                          "duplicate journal ids count once")

@@ -69,7 +69,7 @@ async fn symbolic_approval_derives_obligations_from_direct_dossier_records() {
     assert_eq!(scope.version, 2);
     assert_eq!(scope.obligation_iris, vec![PRESERVE.to_string()]);
     assert_eq!(scope.knowledge_revision, "accepted-v1");
-    assert_eq!(scope.checks, vec!["fixture-required-check".to_string()]);
+    assert_eq!(scope.checks, vec!["true".to_string()]);
     assert_eq!(scope.definition_scopes.len(), 1);
     assert_eq!(scope.definition_scopes[0].file, "labels.py");
     assert_eq!(scope.definition_scopes[0].symbol, RENDER_NAME);
@@ -128,7 +128,7 @@ async fn symbolic_replan_rederives_obligations_and_keeps_task_counters() {
             source_digest: None,
         },
     );
-    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior in the helper","files":["labels.py"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior in the helper","files":["labels.py"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert!(runner.task.approved_change_scope.is_none());
@@ -172,7 +172,7 @@ async fn symbolic_scope_escape_replans_naming_the_file_then_edits_after_approval
     assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 1);
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Planning);
-    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior and update the constant","files":["labels.py","other.py"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior and update the constant","files":["labels.py","other.py"],"checks":["true"]}));
     runner.advance().await.unwrap();
     runner.approve_plan().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Working);

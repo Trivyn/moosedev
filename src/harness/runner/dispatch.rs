@@ -387,17 +387,18 @@ impl Runner {
         if let Some(command) = plan.checks.get(index).cloned() {
             let result = self.run_command(&command).await?;
             self.record_symbolic_check(&command, result.success);
+            let failure = (!result.success).then(|| check_failure_response(&command, &result));
+            if let (false, Some(code)) = (result.success, unrunnable_exit(&result)) {
+                self.intent_event("check_unrunnable", &format!("exit {code}: {command}"));
+            }
             self.task.check_results.push(CheckResult {
                 command,
                 success: result.success,
                 output: result.output.clone(),
             });
-            if !result.success {
+            if let Some(response) = failure {
                 self.task.phase = Phase::Working;
-                self.task.last_response = format!(
-                    "Required verification failed. Repair before completion.\n{}",
-                    result.output
-                );
+                self.task.last_response = response;
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
             }
@@ -413,6 +414,62 @@ impl Runner {
         self.task.capture_due = true;
         self.task.after_review = Phase::Verifying;
         self.capture().await
+    }
+}
+
+/// The shell's statuses for a command that could not start at all.
+fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
+    result.exit_code.filter(|code| matches!(code, 126 | 127))
+}
+
+/// What the model is told about a failed required check. A check the shell
+/// could not start tested nothing, so it is named as an invalid check rather
+/// than a failure to repair in the code.
+fn check_failure_response(command: &str, result: &executor::CommandResult) -> String {
+    match unrunnable_exit(result) {
+        Some(code) => format!(
+            "Required check could not run: the shell exited {code} (command not found or not executable), so the change was not tested. The check itself is invalid, not the environment: replan with checks that are shell command lines, such as the task's verification commands.\nCheck: {command}\n{}",
+            result.output
+        ),
+        None => format!(
+            "Required verification failed. Repair before completion.\n{}",
+            result.output
+        ),
+    }
+}
+
+#[cfg(test)]
+mod check_failure_tests {
+    use super::*;
+
+    fn result(exit_code: Option<i32>, output: &str) -> executor::CommandResult {
+        executor::CommandResult {
+            success: false,
+            output: output.into(),
+            exit_code,
+        }
+    }
+
+    #[test]
+    fn a_check_the_shell_cannot_start_is_named_invalid_not_a_code_failure() {
+        let missing = result(Some(127), "/bin/sh: The: command not found");
+        let response = check_failure_response("The implementation must be idempotent.", &missing);
+        assert!(
+            response.starts_with("Required check could not run"),
+            "{response}"
+        );
+        assert!(response.contains("not the environment"), "{response}");
+        assert!(response.contains("Check: The implementation must be idempotent."));
+        assert_eq!(unrunnable_exit(&missing), Some(127));
+        assert_eq!(unrunnable_exit(&result(Some(126), "")), Some(126));
+        for ordinary in [
+            result(Some(1), "FAILED (failures=1)"),
+            result(None, "killed"),
+        ] {
+            assert_eq!(unrunnable_exit(&ordinary), None);
+            assert!(check_failure_response("python3 -m unittest", &ordinary)
+                .starts_with("Required verification failed. Repair before completion."));
+        }
     }
 }
 

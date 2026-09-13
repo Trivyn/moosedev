@@ -1,4 +1,5 @@
 //! The runner's only filesystem mutation and command execution boundary.
+mod command_line;
 #[cfg(unix)]
 mod fs_ops;
 mod output;
@@ -10,6 +11,7 @@ mod workspace;
 
 use super::progress::ProgressSender;
 use anyhow::{Context, Result};
+pub use command_line::unrunnable_reason;
 #[cfg(unix)]
 use fs_ops::remove_child;
 use output::bounded_output_into;
@@ -26,6 +28,9 @@ pub use workspace::Workspace;
 pub struct CommandResult {
     pub success: bool,
     pub output: String,
+    /// The shell's exit status; absent when a signal ended the command.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 /// Execute against a filtered, read-only source snapshot with no network.
@@ -184,6 +189,7 @@ async fn run_command(
     Ok(CommandResult {
         success: status.success() && !unfinished_output,
         output,
+        exit_code: status.code(),
     })
 }
 

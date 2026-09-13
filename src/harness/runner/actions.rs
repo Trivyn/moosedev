@@ -95,6 +95,23 @@ impl Runner {
                             .all(|c| !c.trim().is_empty() && c.len() <= 4000),
                     "plan requires 1..20 nonempty verification commands of at most 4000 bytes each"
                 );
+                // A check runs verbatim through /bin/sh. A description written in
+                // its place fails with exit 127 only after approval and work,
+                // and small models read that failure as the environment's.
+                for (index, check) in checks.iter().enumerate() {
+                    if let Some(reason) =
+                        crate::harness::executor::unrunnable_reason(self.workspace.root(), check)
+                    {
+                        self.intent_event(
+                            "plan_check_rejected",
+                            &format!("check {}: {reason}", index + 1),
+                        );
+                        anyhow::bail!(
+                            "plan check {} is not a runnable shell command: {reason}. Each check runs verbatim through /bin/sh in the project root, so write a command line (for example the task's verification commands), not a description of what should be verified",
+                            index + 1
+                        );
+                    }
+                }
             }
             Action::Inspect { event, offset } => {
                 let observation = self

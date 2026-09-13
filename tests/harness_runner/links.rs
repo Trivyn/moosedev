@@ -113,7 +113,7 @@ async fn steering_during_link_review_rederives_associations() {
 
     // The next approved plan and finish derive the batch afresh under a new
     // link operation; the abandoned one is never retried.
-    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a trimming helper","files":["labels.py"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a trimming helper","files":["labels.py"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     runner.approve_plan().await.unwrap();
@@ -228,7 +228,7 @@ async fn steering_during_link_review_keeps_the_guidance_after_the_review() {
     );
 
     // The next model step plans against the guidance.
-    fixture.conversational(json!({"action":"plan","summary":"Trim trailing dots in the helper","files":["labels.py"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Trim trailing dots in the helper","files":["labels.py"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert!(fixture
@@ -363,7 +363,7 @@ async fn no_persisted_state_is_awaiting_plan_with_capture_due() {
     // planning the steering started, and the human approves the plan again.
     assert_eq!(runner.task.phase, Phase::Planning);
     assert_journal_invariant(&fixture, "link review accepted");
-    fixture.conversational(json!({"action":"plan","summary":"Keep the helper name as implemented","files":["labels.py"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Keep the helper name as implemented","files":["labels.py"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert_journal_invariant(&fixture, "replan after steering");

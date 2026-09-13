@@ -67,7 +67,8 @@ SYMBOLIC_EVENT_KINDS = (
     "obligations_derived", "obligations_unresolved", "scope_escape_replan", "scope_escape_exhausted",
     "noop_edit_continuation", "association_derived", "association_none", "association_skipped",
     "association_unresolved", "capture_deferred", "capture_note", "capture_typed",
-    "reconciled_restates", "reconciled_refines", "reconciled_distinct")
+    "reconciled_restates", "reconciled_refines", "reconciled_distinct",
+    "plan_check_rejected", "check_unrunnable")
 
 
 def symbolic_metrics(events, model_requests):

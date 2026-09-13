@@ -268,6 +268,12 @@ intent contract 2.
   for guidance as `scope_escape_exhausted`). The first no-op edit runs the
   required checks instead of consuming the repair budget
   (`noop_edit_continuation`).
+- Checks. Plan checks run verbatim through `/bin/sh`, so each must start with
+  an installed program, a shell builtin or a project file. A description in
+  place of a command is rejected before plan approval and costs a repair
+  attempt (`plan_check_rejected`). A check the shell cannot start at run time
+  (exit 126 or 127) is reported as an invalid check, not a failed test
+  (`check_unrunnable`).
 - Associations. After `finish`, `POST /api/v1/harness/intent/associate` binds the
   changed definitions to their governing records with the predicate the ontology
   allows, skipping parameters, type members, locals and test paths

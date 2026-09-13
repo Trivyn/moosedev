@@ -200,7 +200,7 @@ async fn completed_verification_requires_human_confirmation_and_durable_checkpoi
     )
     .await
     .unwrap();
-    fixture.reply("harness_action", json!({"action":"plan","summary":"Inspect code without changes","files":["code.txt"],"checks":["fixture-required-check"]}));
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Inspect code without changes","files":["code.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     runner.confirm_no_knowledge().await.unwrap();
@@ -568,7 +568,7 @@ async fn large_observations_are_consumed_by_one_checkpoint_and_survive_restart()
             output: "long failing test output\n".repeat(5000),
         })
         .collect();
-    fixture.conversational(json!({"action":"plan","summary":"Inspect and repair within scope","files":["code.txt"],"checks":["test-command"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Inspect and repair within scope","files":["code.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(
         runner.task.phase,
@@ -633,7 +633,7 @@ async fn headless_pending_review_imports_into_interactive_with_checkpoint_bookke
     .await
     .unwrap();
     runner.configure(fixture.config(), None);
-    fixture.reply("harness_action", json!({"action":"plan","summary":"Review the implementation","files":["code.txt"],"checks":["fixture-required-check"]}));
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Review the implementation","files":["code.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     runner.confirm_no_knowledge().await.unwrap();
@@ -769,7 +769,7 @@ async fn headless_final_no_change_review_requests_one_confirmation() {
     runner.task.events.push(moosedev::harness::runner::Event {
         message: "Observed implementation detail\n".repeat(10_000),
     });
-    fixture.reply("harness_action", json!({"action":"plan","summary":"Review the observed file","files":["code.txt"],"checks":["fixture-required-check"]}));
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Review the observed file","files":["code.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     assert_eq!(journal_value(&runner)["capture_due"], false);
@@ -1295,7 +1295,7 @@ async fn cancellation_cleans_scratch_and_keeps_the_task_resumable() {
 async fn oversized_plan_summary_is_rejected_before_becoming_required_prompt_state() {
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
-    fixture.conversational(json!({"action":"plan","summary":"large summary ".repeat(10_000),"files":["code.txt"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"large summary ".repeat(10_000),"files":["code.txt"],"checks":["true"]}));
     assert!(runner.advance().await.is_err());
     assert!(runner.task.plan.is_none());
     assert_eq!(runner.task.mode, Mode::Plan);
@@ -1614,4 +1614,33 @@ async fn journal_without_last_error_kind_deserializes() {
     let legacy: moosedev::harness::runner::Task = serde_json::from_value(journal).unwrap();
     assert_eq!(legacy.last_error.as_deref(), Some("fixture failure"));
     assert!(legacy.last_error_kind.is_none());
+}
+
+#[tokio::test]
+async fn prose_plan_checks_are_repaired_before_plan_approval() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    // The smoke and campaign runs: a small model wrote what the checks should
+    // verify instead of commands, and the shell answered exit 127.
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["The implementation must preserve the original behavior."]}));
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().checks,
+        vec!["true".to_string()]
+    );
+    let rejected = intent_details(&runner, "plan_check_rejected");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert!(rejected[0].contains("`The`"), "{rejected:?}");
+    assert!(
+        runner.task.events.iter().any(|event| event
+            .message
+            .starts_with("Correcting action, attempt 2 of 3")
+            && event.message.contains("not a runnable shell command")),
+        "the repair feedback names the invalid check"
+    );
+    assert!(runner.task.recovery.is_none());
 }

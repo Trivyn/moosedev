@@ -502,7 +502,7 @@ pub(super) fn distinct_proposal(kind: &str, title: &str) -> TypedProposal {
 
 pub(super) fn passed_check() -> CheckResult {
     CheckResult {
-        command: "fixture-required-check".into(),
+        command: "true".into(),
         success: true,
         output: "fixture: successful check already observed".into(),
     }
@@ -571,7 +571,7 @@ impl Fixture {
         let mut runner = self.interactive().await;
         self.conversational(json!({"action":"read","file":"code.txt"}));
         runner.advance().await.unwrap();
-        self.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["fixture-required-check"]}));
+        self.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["true"]}));
         runner.advance().await.unwrap();
         assert_eq!(runner.task.phase, Phase::AwaitingPlan);
         runner.approve_plan().await.unwrap();
@@ -966,7 +966,7 @@ pub(super) async fn planned_symbolic_runner(fixture: &Fixture) -> Runner {
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"read","file":"labels.py"}));
     runner.advance().await.unwrap();
-    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["fixture-required-check"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     runner
@@ -1037,7 +1037,7 @@ pub(super) async fn symbolic_task_ready_for_final_capture(fixture: &Fixture) -> 
         .unwrap()
         .check_history
         .push(CheckOutcome {
-            command: "fixture-required-check".into(),
+            command: "true".into(),
             success: true,
             after_edit: true,
         });
