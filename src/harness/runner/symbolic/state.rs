@@ -40,7 +40,8 @@ pub struct SymbolicState {
 }
 
 /// `asked` (note journaled, typing not yet durable) -> `typed` (daemon typing
-/// stored; the capture request is rebuilt from it on resume).
+/// stored; the capture request is rebuilt from it on resume) -> `captured`
+/// (its proposals are in the graph; never invalidated or submitted again).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureNoteState {
     pub operation_id: String,

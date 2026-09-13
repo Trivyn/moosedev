@@ -66,6 +66,17 @@ impl Runner {
             .as_ref()
             .and_then(|state| state.capture_note.clone())
             .context("symbolic capture note state missing")?;
+        if state.status == "captured" {
+            // Accepting that capture can change knowledge and send the task
+            // back through approval and verification; the repeated final
+            // checkpoint has nothing new to capture.
+            let reason =
+                "The final note was captured and reviewed earlier in this task; nothing new to capture.";
+            self.task.capture_reason = Some(reason.into());
+            self.event(format!("Capture assessment: {reason}"));
+            self.advance_after_capture_page(checkpoint_end)?;
+            return Ok(false);
+        }
         let response = match (state.status.as_str(), state.response) {
             ("typed", Some(response)) => response,
             _ => {
@@ -220,6 +231,7 @@ impl Runner {
 
     /// Typing stored before source or accepted knowledge changed is stale:
     /// keep the note, let the daemon type it again at the current revision.
+    /// A captured note is left alone: its proposals are already in the graph.
     /// No model call and no retype budget; the change was not a rejection.
     pub(in crate::harness::runner) fn invalidate_capture_typing(&mut self, reason: &str) {
         let typed = self

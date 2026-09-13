@@ -2221,6 +2221,82 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
         "{}",
         lesson.proposal.title
     );
+
+    // A symbolic decision whose title is already at the cap keeps its
+    // qualifier: the base is shortened, never the qualifier. Symbolic
+    // campaign v2 cell 7 retyped an identical capped title until the retype
+    // budget parked a solved task.
+    let long_summary = "Refactor the duplicated name normalization logic in render_name and render_names into a single private helper that trims and substitutes";
+    let capped = format!(
+        "{}…",
+        long_summary.chars().take(97).collect::<String>().trim_end()
+    );
+    record_described(
+        &state,
+        "Requirement",
+        &capped,
+        "A requirement that shares the capped decision title.",
+    );
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let response = capture_type_operation(
+        &state,
+        typing_request(
+            "type-long",
+            "",
+            long_summary,
+            &["labels.py"],
+            &[("pytest -q", true, true)],
+            &revision,
+        ),
+    )
+    .await
+    .unwrap();
+    let decision = response
+        .proposals
+        .iter()
+        .find(|p| p.origin == ProposalOrigin::SymbolicDecision)
+        .unwrap();
+    assert_ne!(decision.proposal.title, capped);
+    assert!(
+        decision.proposal.title.ends_with(" (labels.py)"),
+        "{}",
+        decision.proposal.title
+    );
+    assert!(decision.proposal.title.chars().count() <= 100);
+
+    // When the file-qualified title is taken as well, the operation prefix,
+    // which every retype renews, qualifies it instead.
+    record_described(
+        &state,
+        "Requirement",
+        &decision.proposal.title,
+        "Another requirement sharing the qualified title.",
+    );
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let response = capture_type_operation(
+        &state,
+        typing_request(
+            "type-long-2",
+            "",
+            long_summary,
+            &["labels.py"],
+            &[("pytest -q", true, true)],
+            &revision,
+        ),
+    )
+    .await
+    .unwrap();
+    let decision = response
+        .proposals
+        .iter()
+        .find(|p| p.origin == ProposalOrigin::SymbolicDecision)
+        .unwrap();
+    assert!(
+        decision.proposal.title.ends_with(" (type-lon)"),
+        "{}",
+        decision.proposal.title
+    );
+    assert!(decision.proposal.title.chars().count() <= 100);
 }
 
 #[tokio::test]

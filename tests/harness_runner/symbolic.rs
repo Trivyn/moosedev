@@ -473,7 +473,8 @@ async fn only_action_and_capture_note_schemas_are_ever_requested() {
             .as_ref()
             .unwrap()
             .status,
-        "typed"
+        "captured",
+        "a successful capture marks the note captured"
     );
     runner.review(true).await.unwrap();
     assert_eq!(runner.task.phase, Phase::Complete);

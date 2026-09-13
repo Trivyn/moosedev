@@ -53,6 +53,34 @@ fn cap_title(text: &str) -> String {
     format!("{}…", capped.trim_end())
 }
 
+/// `title (qualifier)` within the title cap. The base is shortened, never the
+/// qualifier: re-capping the joined text once cut the qualifier off a title
+/// already at the cap, so every retype repeated the colliding title.
+fn qualified_title(title: &str, qualifier: &str) -> String {
+    let suffix = format!(" ({qualifier})");
+    let room = MAX_TITLE_CHARS.saturating_sub(suffix.chars().count());
+    if room < 2 {
+        return cap_title(&format!("{title}{suffix}"));
+    }
+    let base = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let base = if base.chars().count() <= room {
+        base
+    } else {
+        let kept: String = base.chars().take(room - 1).collect();
+        format!("{}…", kept.trim_end())
+    };
+    format!("{base}{suffix}")
+}
+
+/// Whether a current or proposed record already carries this exact title.
+fn title_in_use(state: &AppState, title: &str) -> bool {
+    graph::resolve_record_exact_all(state, title)
+        .into_iter()
+        .any(|(iri, _)| {
+            current_status(state, &iri).is_some_and(|status| graph::is_current_or_proposed(&status))
+        })
+}
+
 fn normalized(title: &str) -> String {
     title
         .split_whitespace()
@@ -388,20 +416,18 @@ async fn type_note(
                     },
                 )?;
                 // A distinct claim under a title the graph already uses is
-                // qualified so the ordinary capture path accepts it.
-                if graph::resolve_record_exact_all(state, &proposal.title)
-                    .into_iter()
-                    .any(|(iri, _)| {
-                        current_status(state, &iri)
-                            .is_some_and(|status| graph::is_current_or_proposed(&status))
-                    })
-                {
-                    let qualifier = request
+                // qualified so the ordinary capture path accepts it: by the
+                // first changed file, else (or when that is taken too) by the
+                // operation prefix, which a retype always renews.
+                if title_in_use(state, &proposal.title) {
+                    let operation: String = request.operation_id.chars().take(8).collect();
+                    let by_file = request
                         .changed_files
                         .first()
-                        .cloned()
-                        .unwrap_or_else(|| request.operation_id.chars().take(8).collect());
-                    proposal.title = cap_title(&format!("{} ({qualifier})", proposal.title));
+                        .map(|file| qualified_title(&proposal.title, file))
+                        .filter(|title| !title_in_use(state, title));
+                    proposal.title =
+                        by_file.unwrap_or_else(|| qualified_title(&proposal.title, &operation));
                 }
                 TypedDisposition::Distinct {
                     nearest_iri,

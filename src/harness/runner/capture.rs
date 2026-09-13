@@ -121,6 +121,19 @@ impl Runner {
                 .push(request.operation_id.clone());
         }
         self.task.capture_due = false;
+        // The note's typed proposals are now in the graph: a later knowledge
+        // change must not invalidate that typing, and a repeated final
+        // checkpoint must not submit the note again.
+        if let Some(note) = self
+            .task
+            .symbolic
+            .as_mut()
+            .and_then(|state| state.capture_note.as_mut())
+        {
+            if note.capture_operation_id == request.operation_id {
+                note.status = "captured".into();
+            }
+        }
         if self.task.batch_capture {
             self.commit_capture_page();
             let governing = request.has_governing();
@@ -269,7 +282,7 @@ mod tests {
             .capture_note
             .as_ref()
             .unwrap();
-        assert_eq!(note.status, "typed");
+        assert_eq!(note.status, "captured");
         assert!(
             stored.recovery.is_none(),
             "completed note retained its exhausted budget"

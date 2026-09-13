@@ -1644,3 +1644,51 @@ async fn prose_plan_checks_are_repaired_before_plan_approval() {
     );
     assert!(runner.task.recovery.is_none());
 }
+
+#[tokio::test]
+async fn accepted_governing_capture_is_not_retyped_after_approval_invalidation() {
+    // Symbolic campaign v2, cell 7: accepting the final note's governing
+    // proposal changed accepted knowledge, the approval was invalidated, and
+    // the already-captured note was typed and submitted again until its own
+    // accepted title collided and the retype budget parked a solved task.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    fixture.note("Every caller must preserve the observed contract.");
+    fixture.typed_one("Constraint", "Preserve the observed contract");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert!(runner.task.reviews[0].request.has_governing());
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-v2".into());
+    let id = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&id, true).await.unwrap();
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingPlan,
+        "unattested knowledge change"
+    );
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(
+        json!({"action":"finish","summary":"Verify again under the accepted constraint."}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    runner.task.check_results = vec![passed_check()];
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.note_calls(), 1, "the note is asked once per task");
+    assert_eq!(
+        fixture.typing_ids().len(),
+        1,
+        "a captured note is never typed again"
+    );
+    assert_eq!(
+        fixture.shared.lock().unwrap().capture_requests.len(),
+        1,
+        "a captured note is never submitted again"
+    );
+    assert!(intent_details(&runner, "capture_note_invalidated").is_empty());
+    assert!(intent_details(&runner, "capture_retyped").is_empty());
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    runner.confirm_no_knowledge().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Complete);
+}
