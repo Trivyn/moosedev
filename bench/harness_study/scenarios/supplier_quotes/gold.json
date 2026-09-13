@@ -1,0 +1,161 @@
+{
+  "schema_version": 2,
+  "scenario_id": "supplier_quotes",
+  "review_status": "pending",
+  "facts": [
+    {
+      "id": "quote-unit-rounding",
+      "claim": "Each unit price is converted to integer cents and rounded half up once, because the supplier invoices per unit; line and basket totals are unit cents times quantity, summed. Rounding a line or basket total was rejected because it disagrees with the invoice. This holds through discounts and the micro-unit representation.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "quote-quantity",
+      "claim": "Quantities are positive integers; anything else raises ValueError.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "quote-billed-calls",
+      "claim": "A request naming an unknown SKU raises KeyError before the supplier is contacted at all, on every code path that contacts the supplier (quote, quote_many, warm), because every supplier call is billed and a failed request must cost nothing.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "quote-live-price",
+      "claim": "Under contract clause 7 every quote uses the price fetched at the moment of quoting; a price cache was rejected.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false,
+      "superseded_episode": 3,
+      "superseded_by": "quote-price-guarantee"
+    },
+    {
+      "id": "quote-basket",
+      "claim": "quote_many returns per-line quotes in order and the basket total, fetching each distinct SKU at most once per call because the supplier rate-limits requests.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "quote-price-guarantee",
+      "claim": "Contract v2 replaces clause 7: a price fetched at clock time t may be reused while clock() - t < 600 seconds across quote, quote_many and later warm, with an injectable clock.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "quote-volume-discount",
+      "claim": "Lines of 10 or more units get 5% off; unit_cents is the discounted unit price, rounded once per unit.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "quote-perishable-exception",
+      "claim": "SKUs whose catalog shelf_life_days is under 30 are perishable: the supplier reprices them daily, so their prices are never reused. Perishability is decided by shelf life, not by a list of names.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "quote-warm",
+      "claim": "warm(skus) fetches the given SKUs now so later quotes can reuse the prices under the guarantee.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "quote-micro-units",
+      "claim": "Fetched prices are stored as integer micro-units and accept up to 6 decimal places (more raises ValueError); results stay in integer cents.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/4/prompt"
+      ],
+      "introduced_episode": 5,
+      "seeded": false
+    },
+    {
+      "id": "quote-new-skus",
+      "claim": "The catalog includes flowers (shelf life 5 days, perishable) and frozen_peas (180 days).",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/4/prompt"
+      ],
+      "introduced_episode": 5,
+      "seeded": false
+    }
+  ],
+  "forbidden_claims": [
+    {
+      "claim": "Prices may be reused across quote calls.",
+      "applies_from_episode": 1,
+      "applies_through_episode": 2
+    },
+    {
+      "claim": "Every quote must fetch a fresh price.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "A line or basket total may be rounded instead of each unit price.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "A price may be reused at or after 600 seconds, or for a perishable SKU.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "The volume discount is taken off the line or basket total.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Perishable SKUs are a fixed list of names.",
+      "applies_from_episode": 4,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "A path may fetch some SKUs before rejecting a request that names an unknown SKU.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Micro-unit prices are rounded once after multiplying by quantity.",
+      "applies_from_episode": 5,
+      "applies_through_episode": null
+    }
+  ]
+}
