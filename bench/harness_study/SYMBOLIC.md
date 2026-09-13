@@ -1,6 +1,7 @@
 # Symbolic two-arm baseline: pre-registration
 
-Mode `local-harness-symbolic-baseline`, study `harness-symbolic-baseline-v1`.
+Mode `local-harness-symbolic-baseline`, study `harness-symbolic-baseline-v2` (attempt v1
+is described below).
 Governing records: ArchitecturalDecision `9dcaddeb` (S8: the symbolic policy is
 the only harness) and its consequence `b5a313eb` (the next matched campaign is
 one harness arm beside opencode-without under a new identity), Requirement
@@ -90,7 +91,8 @@ three-arm baseline's native branch: `success`, `native_no_completion`,
   scope-escape replans and exhaustion, no-op continuations, associations
   derived/none/skipped/unresolved, capture deferred/note/typed, reconciled
   restates/refines/distinct, capture notes, and `structured_model_decisions`,
-  which must be zero in every symbolic run (the negative proof).
+  which must be zero in every symbolic run (the negative proof), plus
+  `plan_check_rejected` and `check_unrunnable` from the check guard.
 - `evolution_*` review counts (record and link dispositions, review
   interactions, approval cycles): one batch review is one human decision.
 - `first_edit_seconds` (harness: first `task.edits` entry; OpenCode: first
@@ -143,7 +145,12 @@ never pooled with this identity:
 - an abandoned link review resets the derived association for re-derivation;
 - a daemon-rejected or colliding typed capture is retyped under fresh ids,
   three per note, then parks;
-- typing is invalidated on a source or knowledge change without a model call.
+- typing is invalidated on a source or knowledge change without a model call;
+- plan checks must be runnable commands: plan validation rejects a check whose
+  first word is not a shell builtin, an installed program or a project file
+  (one repair attempt, `plan_check_rejected`), and a required check that exits
+  126 or 127 is reported as an invalid check rather than a failed test
+  (`check_unrunnable`).
 
 ## Smoke run
 
@@ -152,6 +159,31 @@ exercise `harness_action`, `harness_capture_note`, `POST
 /api/v1/harness/capture/type` and the contract-2 advertisement on the frozen
 build. It is never scored and never pooled. A defect found there means a new
 identity, not a patched one.
+
+## Block order
+
+The twelve cells run in two blocks, each in frozen schedule order: first the
+six Gemma E4B cells, then the six Qwen3.8-27B cells. Gemma is first because the
+model-size question lives there. Between the blocks the operator reads every
+harness journal of the first block. A harness run whose terminal path is not
+explained (what the model did and why the run ended; Lesson `1f6233e3`) stops
+the campaign before the second block, and the attempt is reported as stopped.
+A failure explained by the model's own output or code does not stop it. Blocks
+change the order in which cells run, not the cells, and the summary is
+computed over all twelve.
+
+## Attempt v1 (study `harness-symbolic-baseline-v1`, build `9aa4f75c…`)
+
+The pre-registered smoke cell (Gemma, harness, retry ledger) and the first
+Gemma harness campaign cell both ended at the deadline after dozens of approved
+plans. The journals showed the model writing its plan checks as English
+sentences; the shell failed each with exit 127 and the failure message sent the
+model back to replan the same checks. The maintainer stopped the campaign after
+cell 1; cells 2 and 4 were interrupted and cell 3 sealed before the driver was
+killed. All five runs and the smoke run are retained unscored and never pooled.
+One instrumentation defect was fixed before v1's cell 0 (the deadline snapshot
+was overwritten by the post-interrupt Cancelled state). Changes for v2: the
+check guard listed above and the block order.
 
 ## Rules
 

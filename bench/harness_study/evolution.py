@@ -47,7 +47,9 @@ DECISION = "https://moosedev.dev/kg/ArchitecturalDecision/395c4e78-0413-4cb6-90a
 # without rewriting SEALED_PREDECESSORS, which the baseline identity hashes),
 # governing records, runner bounds and frozen reconciliation thresholds.
 SEALED_BASELINE = ("abe95d92da7994ec9a801073899e480d58a492f5987e1957fff67fa45a6e1fb6",)
-SEALED_SYMBOLIC_PREDECESSORS = SEALED_PREDECESSORS + SEALED_BASELINE
+# Attempt v1 of the symbolic baseline, stopped as a pilot (plan checks written as prose).
+SEALED_SYMBOLIC_V1 = ("9aa4f75c5265db4c503ab319ffa7909393d593407f115865858b6c1b3f5fdb66",)
+SEALED_SYMBOLIC_PREDECESSORS = SEALED_PREDECESSORS + SEALED_BASELINE + SEALED_SYMBOLIC_V1
 SYMBOLIC_REQUIREMENT = "https://moosedev.dev/kg/Requirement/9ae68a19-08c9-4317-aa75-029e08e2c5b6"
 SYMBOLIC_DECISION = "https://moosedev.dev/kg/ArchitecturalDecision/9dcaddeb-4027-4178-90ab-4aee30199d45"
 SYMBOLIC_BOUNDS = {"scope_escapes": 3, "retypes": 3, "noop_continuations": 1}
@@ -59,7 +61,8 @@ S8_RUNNER_CHANGES = ("symbolic-only harness; task journal schema 2",
                      "first no-op edit runs the required checks instead of spending repair budget",
                      "abandoned link review resets the derived association for re-derivation",
                      "daemon-rejected or colliding typed capture retypes under fresh ids, three per note, then parks",
-                     "typing invalidated on source or knowledge change without a model call")
+                     "typing invalidated on source or knowledge change without a model call",
+                     "plan checks must be runnable commands; a required check the shell cannot start is reported as invalid")
 
 
 def postedit_association_contract(mode):
