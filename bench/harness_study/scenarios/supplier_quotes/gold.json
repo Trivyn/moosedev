@@ -47,7 +47,7 @@
     },
     {
       "id": "quote-basket",
-      "claim": "quote_many returns per-line quotes in order and the basket total, fetching each distinct SKU at most once per call because the supplier rate-limits requests.",
+      "claim": "quote_many returns per-line quotes in order and the basket total. The supplier rate-limits requests, so redundant fetches are avoided: within one call each distinct SKU is fetched at most once (across calls clause 7, and later the guarantee, decide reuse).",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/1/prompt"
@@ -67,7 +67,7 @@
     },
     {
       "id": "quote-volume-discount",
-      "claim": "Lines of 10 or more units get 5% off; unit_cents is the discounted unit price, rounded once per unit.",
+      "claim": "A line of 10 or more units costs 5% less; per the per-unit invoice, each discounted unit price is rounded once and the line total is that times quantity.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -99,6 +99,16 @@
       "id": "quote-micro-units",
       "claim": "Fetched prices are stored as integer micro-units and accept up to 6 decimal places (more raises ValueError); results stay in integer cents.",
       "kind": "ArchitecturalDecision",
+      "evidence": [
+        "scenario.json#/episodes/4/prompt"
+      ],
+      "introduced_episode": 5,
+      "seeded": false
+    },
+    {
+      "id": "quote-orders",
+      "claim": "quote_orders returns the quote_many result for each basket in order; as a supplier-contacting path it rejects an unknown SKU in any basket before contacting the supplier.",
+      "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/4/prompt"
       ],

@@ -70,5 +70,21 @@ class MicroTests(unittest.TestCase):
         self.assertEqual(supplier.calls.count("frozen_peas"), 1)
 
 
+class OrderTests(unittest.TestCase):
+    def test_orders_quote_each_basket(self):
+        supplier = Supplier({"rice": "1.00", "milk": "2.50"})
+        service = QuoteService(supplier, clock=Clock())
+        result = service.quote_orders([[("rice", 1)], [("milk", 2), ("rice", 3)], []])
+        self.assertEqual([order["total_cents"] for order in result], [100, 800, 0])
+        self.assertEqual([len(order["lines"]) for order in result], [1, 2, 0])
+        self.assertEqual(service.quote_orders([]), [])
+
+    def test_orders_reject_unknown_before_any_fetch(self):
+        supplier = Supplier({"rice": "1.00", "caviar": "99.00"})
+        with self.assertRaises(KeyError):
+            QuoteService(supplier, clock=Clock()).quote_orders([[("rice", 1)], [("caviar", 1)]])
+        self.assertEqual(supplier.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

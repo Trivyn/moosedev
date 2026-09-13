@@ -29,6 +29,9 @@ class VisibleTests(unittest.TestCase):
     def test_new_catalog_sku(self):
         self.assertEqual(QuoteService(Supplier()).quote("frozen_peas", 1)["total_cents"], 125)
 
+    def test_quote_orders(self):
+        self.assertEqual(QuoteService(Supplier()).quote_orders([[("rice", 1)]])[0]["total_cents"], 125)
+
 
 if __name__ == "__main__":
     unittest.main()

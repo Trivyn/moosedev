@@ -74,7 +74,7 @@
     },
     {
       "id": "e2",
-      "prompt": "Add QuoteService.quote_many(lines). lines is a list of (sku, qty) pairs. Return {\"lines\": [...], \"total_cents\": ...}, where lines holds the quote for each pair in order, in the same form quote returns, and total_cents is the basket total in cents. An empty list returns {\"lines\": [], \"total_cents\": 0}. The supplier has started rate-limiting us, so avoid redundant supplier fetches: within one quote_many call, fetch each distinct SKU at most once.",
+      "prompt": "Add QuoteService.quote_many(lines). lines is a list of (sku, qty) pairs. Return {\"lines\": [...], \"total_cents\": ...}, where lines holds the quote for each pair in order, in the same form quote returns, and total_cents is the basket total in cents. An empty list returns {\"lines\": [], \"total_cents\": 0}. The supplier has started rate-limiting us, so avoid redundant supplier fetches.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
@@ -134,7 +134,8 @@
           "fact_ids": [
             "quote-live-price"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
         },
         {
           "id": "e2-basket-rounding",
@@ -143,7 +144,8 @@
           "fact_ids": [
             "quote-unit-rounding"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
         },
         {
           "id": "e2-basket-unknown",
@@ -152,14 +154,15 @@
           "fact_ids": [
             "quote-billed-calls"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
         }
       ],
       "retired_tests": []
     },
     {
       "id": "e3",
-      "prompt": "Supplier contract v2 replaces clause 7: a fetched price is guaranteed for 600 seconds. Give QuoteService(supplier, *, clock=time.monotonic) an optional clock that returns seconds. A price fetched at time t may be reused by quote and quote_many calls made while clock() - t < 600, and must be fetched again after that. The supplier also grants a 5% volume discount on any line of 10 or more units; unit_cents is then the discounted unit price.",
+      "prompt": "Supplier contract v2 replaces clause 7: a fetched price is guaranteed for 600 seconds. Give QuoteService(supplier, *, clock=time.monotonic) an optional clock that returns seconds. A price fetched at time t may be reused by quote and quote_many calls made while clock() - t < 600, and must be fetched again after that. The supplier also grants a 5% volume discount: a line of 10 or more units costs 5% less.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
@@ -222,7 +225,8 @@
           "fact_ids": [
             "quote-unit-rounding"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
         }
       ],
       "retired_tests": [
@@ -296,7 +300,8 @@
           "fact_ids": [
             "quote-billed-calls"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
         },
         {
           "id": "e4-guarantee",
@@ -312,7 +317,7 @@
     },
     {
       "id": "e5",
-      "prompt": "Suppliers now quote unit prices with up to 6 decimal places. Store fetched prices internally as integer micro-units (millionths of a currency unit) to avoid rounding drift; results stay in integer cents. A price with more than 6 decimal places raises ValueError. Add two SKUs to the catalog: flowers with shelf_life_days 5 and frozen_peas with shelf_life_days 180.",
+      "prompt": "Suppliers now quote unit prices with up to 6 decimal places. Store fetched prices internally as integer micro-units (millionths of a currency unit) to avoid rounding drift; results stay in integer cents. A price with more than 6 decimal places raises ValueError. Add two SKUs to the catalog: flowers with shelf_life_days 5 and frozen_peas with shelf_life_days 180. Also add QuoteService.quote_orders(orders) for the web shop's nightly batch: orders is a list of baskets, each a list of (sku, qty) pairs; return a list holding the quote_many result for each basket, in order.",
       "clarifications": {
         "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
         "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
@@ -327,7 +332,8 @@
         "quote-perishable-exception",
         "quote-warm",
         "quote-micro-units",
-        "quote-new-skus"
+        "quote-new-skus",
+        "quote-orders"
       ],
       "stale_fact_ids": [
         "quote-live-price"
@@ -373,13 +379,33 @@
           "decided_by": "scenario.json#/episodes/4/prompt"
         },
         {
+          "id": "e5-orders",
+          "kind": "task",
+          "test": "OrderTests.test_orders_quote_each_basket",
+          "fact_ids": [
+            "quote-orders"
+          ],
+          "decided_by": "scenario.json#/episodes/4/prompt"
+        },
+        {
+          "id": "e5-orders-unknown",
+          "kind": "retention",
+          "test": "OrderTests.test_orders_reject_unknown_before_any_fetch",
+          "fact_ids": [
+            "quote-billed-calls"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "correctness"
+        },
+        {
           "id": "e5-micro-rounding",
           "kind": "retention",
           "test": "MicroTests.test_six_decimal_prices_round_each_unit",
           "fact_ids": [
             "quote-unit-rounding"
           ],
-          "decided_by": "scenario.json#/episodes/0/prompt"
+          "decided_by": "scenario.json#/episodes/0/prompt",
+          "measures": "cost"
         },
         {
           "id": "e5-new-perishable",
@@ -388,7 +414,8 @@
           "fact_ids": [
             "quote-perishable-exception"
           ],
-          "decided_by": "scenario.json#/episodes/3/prompt"
+          "decided_by": "scenario.json#/episodes/3/prompt",
+          "measures": "cost"
         }
       ],
       "retired_tests": []
@@ -471,6 +498,17 @@
       "visible": "pass",
       "fails_probes": [
         "e5-micro-rounding"
+      ]
+    },
+    {
+      "id": "orders-loop",
+      "episode": "e5",
+      "base_reference": "reference/e5",
+      "overlay": "negative/orders_loop",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e5-orders-unknown"
       ]
     },
     {

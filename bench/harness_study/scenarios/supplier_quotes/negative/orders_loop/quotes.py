@@ -45,10 +45,6 @@ class QuoteService:
         return {"lines": quoted, "total_cents": sum(line["total_cents"] for line in quoted)}
 
     def quote_orders(self, orders):
-        orders = [list(order) for order in orders]
-        for order in orders:
-            for sku, qty in order:
-                self._check(sku, qty)
         return [self.quote_many(order) for order in orders]
 
     def warm(self, skus):
@@ -80,4 +76,5 @@ class QuoteService:
         return micros
 
     def _line(self, sku, qty, micros):
-        return {"sku": sku, "qty": qty, "unit_cents": to_cents(micros, qty), "total_cents": to_cents(micros * qty, qty)}
+        unit_cents = to_cents(micros, qty)
+        return {"sku": sku, "qty": qty, "unit_cents": unit_cents, "total_cents": unit_cents * qty}

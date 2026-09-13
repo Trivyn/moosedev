@@ -50,13 +50,14 @@ class GuaranteeTests(unittest.TestCase):
 class DiscountTests(unittest.TestCase):
     def test_discount_applies_from_ten_units(self):
         service = QuoteService(Supplier({"rice": "2.00"}), clock=Clock())
-        self.assertEqual(service.quote("rice", 9), {"sku": "rice", "qty": 9, "unit_cents": 200, "total_cents": 1800})
-        self.assertEqual(service.quote("rice", 10), {"sku": "rice", "qty": 10, "unit_cents": 190, "total_cents": 1900})
+        self.assertEqual(service.quote("rice", 9)["total_cents"], 1800)
+        self.assertEqual(service.quote("rice", 10)["total_cents"], 1900)
         self.assertEqual(service.quote_many([("rice", 10), ("rice", 1)])["total_cents"], 2100)
 
     def test_discount_rounds_each_unit(self):
         service = QuoteService(Supplier({"rice": "0.125", "flour": "0.125"}), clock=Clock())
-        self.assertEqual(service.quote("rice", 10), {"sku": "rice", "qty": 10, "unit_cents": 12, "total_cents": 120})
+        line = service.quote("rice", 10)
+        self.assertEqual((line["unit_cents"], line["total_cents"]), (12, 120))
         self.assertEqual(service.quote_many([("rice", 10), ("flour", 10)])["total_cents"], 240)
 
 

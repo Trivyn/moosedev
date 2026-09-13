@@ -27,7 +27,8 @@ class Clock:
 class DiscountTests(unittest.TestCase):
     def test_discount_rounds_each_unit(self):
         service = QuoteService(Supplier({"rice": "0.125", "flour": "0.125"}), clock=Clock())
-        self.assertEqual(service.quote("rice", 10), {"sku": "rice", "qty": 10, "unit_cents": 12, "total_cents": 120})
+        line = service.quote("rice", 10)
+        self.assertEqual((line["unit_cents"], line["total_cents"]), (12, 120))
         self.assertEqual(service.quote_many([("rice", 10), ("flour", 10)])["total_cents"], 240)
 
 
