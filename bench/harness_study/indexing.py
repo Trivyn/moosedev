@@ -128,8 +128,38 @@ def _entity(response, target):
     return entity
 
 
-def ready_dossiers(daemon, scenario, *, seed=False, require_empty=False):
-    targets = RESOLUTION_TARGETS[scenario["id"]]
+def resolution_tables(scenario_id):
+    """Reviewed targets and seed associations: the sealed intent tables first, then long-horizon."""
+    from . import long_horizon
+    for targets, associations in ((RESOLUTION_TARGETS, SEED_ASSOCIATIONS),
+                                  (long_horizon.RESOLUTION_TARGETS, long_horizon.SEED_ASSOCIATIONS)):
+        if scenario_id in targets:
+            return targets[scenario_id], associations[scenario_id]
+    raise KeyError(f"no reviewed resolution targets for scenario: {scenario_id}")
+
+
+def resolve_offline(root, target):
+    """Without an indexer: a target must be exactly one module function or class method."""
+    import ast
+    from .scenario import relative_file
+    path = relative_file(Path(root), target["file"])
+    tree = ast.parse(path.read_text(), filename=str(path))
+    owner, _, name = target["name"].rpartition(".")
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    if owner:
+        matches = [item for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner
+                   for item in node.body if isinstance(item, functions) and item.name == name]
+    else:
+        matches = [node for node in tree.body if isinstance(node, functions) and node.name == name]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected exactly one definition: {target}; observed {len(matches)}")
+    return {"file": target["file"], "name": target["name"], "line": matches[0].lineno}
+
+
+def ready_dossiers(daemon, scenario, *, seed=False, require_empty=False, targets=None, associations=None):
+    default_targets, default_associations = resolution_tables(scenario["id"])
+    targets = default_targets if targets is None else targets
+    associations = default_associations if associations is None else associations
     files = sorted({target["file"] for target in targets})
     resolved = daemon._request("/api/v1/harness/intent/resolve", {"files": files, "refresh_index": False})
     for target in targets:
@@ -137,7 +167,7 @@ def ready_dossiers(daemon, scenario, *, seed=False, require_empty=False):
     operations = []
     if seed:
         bindings = []
-        for association in SEED_ASSOCIATIONS[scenario["id"]]:
+        for association in associations:
             entity = _entity(resolved, association)
             bindings.append({"record_iri": seed_iri(scenario["id"] + "/fact/" + association["fact"]),
                              "file": entity["file"], "symbol": entity["symbol"],
@@ -154,7 +184,7 @@ def ready_dossiers(daemon, scenario, *, seed=False, require_empty=False):
             operations.append({"request": request, "staged": staged, "reviewed": reviewed})
             resolved = daemon._request("/api/v1/harness/intent/resolve", {"files": files, "refresh_index": False})
     if seed:
-        for association in SEED_ASSOCIATIONS[scenario["id"]]:
+        for association in associations:
             entity = _entity(resolved, association)
             expected = seed_iri(scenario["id"] + "/fact/" + association["fact"])
             if expected not in entity.get("dossier_records", []):
@@ -184,14 +214,14 @@ def short_probe_runtime(evidence):
                         shutil.copyfile(source, destination)
 
 
-def probe_indexer(indexer, binaries, assets, *, evolution_contract=False):
+def probe_indexer(indexer, binaries, assets, *, evolution_contract=False, scenarios=INTENT_SCENARIOS):
     """Prove every initial source contract in disposable, disjoint workspaces."""
     from .daemon import OwnedDaemon
     directory = REPO / "target/harness-study/indexer-probes" / str(uuid.uuid4())
     directory.mkdir(parents=True)
     result = {"directory": str(directory), "scenarios": {}, "passed": False}
     try:
-        for name in INTENT_SCENARIOS:
+        for name in scenarios:
             evidence = directory / name
             workspace = evidence / "workspace"
             shutil.copytree(SCENARIOS / name / "project", workspace)
@@ -209,7 +239,8 @@ def probe_indexer(indexer, binaries, assets, *, evolution_contract=False):
                                  helper_endpoint="http://127.0.0.1:9/v1", log_path=evidence / "daemon.log",
                                  indexer=indexer) as daemon:
                     observed["daemon"] = daemon.identity
-                    observed["dossiers"] = ready_dossiers(daemon, scenario, seed=True, require_empty=name == "retry_ledger")
+                    observed["dossiers"] = ready_dossiers(daemon, scenario, seed=True,
+                                                          require_empty=scenario["track"] == "accumulation")
                     if evolution_contract and name == MAINTENANCE:
                         from .evolution_probe import probe_evolution
                         observed["evolution"] = {}
