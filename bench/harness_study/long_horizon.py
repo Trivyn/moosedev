@@ -6,6 +6,9 @@ changes when a long-horizon package is added or revised.
 """
 
 SCENARIOS = ("supplier_quotes", "entity_outbox", "late_fees")
+# Exploratory probe packages: runnable only through the field check, never part
+# of the long-horizon campaign's scenario set.
+EXPLORATORY = ()
 PROBE_RULES_VERSION = 1
 RESOLUTION_TARGETS = {
     "supplier_quotes": [{"file": "quotes.py", "name": "QuoteService.quote"}],

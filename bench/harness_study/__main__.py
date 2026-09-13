@@ -8,7 +8,7 @@ import sys
 from .artifacts import ArtifactStore, canonical_json
 from .binaries import REPO, build_and_freeze
 from .config import approval_payload, development_config, evolution_config, field_check_config, preflight, template
-from . import evolution, intent, model_table
+from . import evolution, field_check, intent, model_table
 from .grading import record_review, report
 from .validation import validate_fixtures
 
@@ -38,12 +38,12 @@ def main(argv=None):
     command.add_argument("--stage", choices=evolution.MODES, required=True)
     command.add_argument("--study-id", required=True)
     command.add_argument("--output", type=Path, required=True)
-    command = sub.add_parser("init-field-check", help="derive an exploratory, never-scored field check of model-table models on the approved packages")
+    command = sub.add_parser("init-field-check", help="derive an exploratory, never-scored field check of model-table models on reviewed packages")
     command.add_argument("parent_preflight", type=Path)
     command.add_argument("--binary-manifest", type=Path, required=True)
     command.add_argument("--study-id", required=True)
     command.add_argument("--models", nargs="+", choices=list(model_table.MODELS), required=True)
-    command.add_argument("--scenarios", nargs="+", choices=list(intent.SCENARIOS), required=True)
+    command.add_argument("--scenarios", nargs="+", choices=list(field_check.SCENARIOS), required=True)
     command.add_argument("--approval", type=Path, required=True,
                          help="where the human field-check approval will be written; it need not exist yet")
     command.add_argument("--output", type=Path, required=True)

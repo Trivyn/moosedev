@@ -391,8 +391,11 @@ def preflight(config, *, fingerprint=True):
                   else (_ for _ in ()).throw(ValueError("evolution design identity changed")))
         elif config.get("evaluation_mode") == field_check.MODE:
             check("field_check_design", lambda: field_check.verify_config(config))
+        probed = ({"scenarios": tuple(dict.fromkeys([*intent.SCENARIOS, *config["scenario_ids"]]))}
+                  if config.get("evaluation_mode") == field_check.MODE else {})
         check("indexer_probe", lambda: probe_indexer(result["indexer"], result["binaries"], result["assets"],
-              evolution_contract=evolution.postedit_association_contract(config.get("evaluation_mode"))))
+              evolution_contract=evolution.postedit_association_contract(config.get("evaluation_mode")),
+              **probed))
         if evolution.postedit_association_contract(config.get("evaluation_mode")):
             from .native_contracts import probe_native_contracts
             check("native_intent_contracts", lambda: probe_native_contracts(config, result["binaries"]))

@@ -1,19 +1,20 @@
-"""Exploratory field check: selected model-table models on the approved packages, never scored.
+"""Exploratory field check: selected model-table models on reviewed packages, episode 1, never scored.
 
-The mode reuses the symbolic baseline's arms and bounds by reference and the
-sealed intent overlay, and has its own design identity that a schema-3 human
-approval binds. It is deliberately not a member of `evolution.MODES`, so no
+The mode reuses the symbolic baseline's arms and bounds by reference. Intent
+packages use the sealed intent overlay; long-horizon and exploratory packages
+use their long-horizon tables, which the design identity binds. A schema-3
+human approval binds that identity. It is deliberately not a member of `evolution.MODES`, so no
 scoring or evolution-assessment path accepts its runs. See FIELD_CHECK.md.
 """
 import hashlib
 from pathlib import Path
 
 from .artifacts import canonical_json
-from . import evolution, intent, model_table
+from . import evolution, intent, long_horizon, model_table
 
 MODE = "local-harness-field-check"
 ARMS = evolution.ARMS[evolution.SYMBOLIC_BASELINE_MODE]
-SCENARIOS = intent.SCENARIOS
+SCENARIOS = (*intent.SCENARIOS, *long_horizon.SCENARIOS, *long_horizon.EXPLORATORY)
 POLICIES = ("symbolic",)
 RESPONSE_POLICY = "reasoning-off"
 EPISODE_LIMIT = 1
@@ -29,7 +30,7 @@ def _selection(coding_models, scenarios):
     for model in models:
         model_table.row(model)
     if not scenarios or len(set(scenarios)) != len(scenarios) or any(name not in SCENARIOS for name in scenarios):
-        raise ValueError("field check scenarios must be distinct approved packages")
+        raise ValueError("field check scenarios must be distinct field-check packages")
     return models, scenarios
 
 
@@ -44,6 +45,9 @@ def design_identity(coding_models, scenarios):
         "arms": [{"backend": backend, "condition": condition, "intent_policy": policy}
                  for backend, condition, policy in ARMS],
         "scenarios": scenarios,
+        "scenario_tables": {name: {"resolution_targets": long_horizon.RESOLUTION_TARGETS[name],
+                                   "seed_associations": long_horizon.SEED_ASSOCIATIONS[name]}
+                            for name in scenarios if name not in intent.SCENARIOS},
         "schedule_order": "coding model, then scenario, then harness before native",
         "episode_limit": EPISODE_LIMIT,
         "harness_response_policy": RESPONSE_POLICY,

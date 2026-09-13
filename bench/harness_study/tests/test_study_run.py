@@ -30,7 +30,7 @@ class RunTests(unittest.TestCase):
         hidden.mkdir()
         for episode in ("e1", "e2", "e3"):
             (hidden / f"{episode}.py").write_text("# grading is mocked\n")
-        self.scenario = {"id": "fixture", "gold_sha256": "a" * 64,
+        self.scenario = {"id": "fixture", "track": "accumulation", "gold_sha256": "a" * 64,
                          "package_sha256": "b" * 64, "initial_facts": [],
                          "episodes": [{"id": f"e{n}", "prompt": f"Implement episode {n}",
                                        "clarifications": {"scope": "fixture only"},
@@ -429,14 +429,17 @@ class RunTests(unittest.TestCase):
         self.assertEqual((self.cell["backend"], self.cell["intent_policy"]), ("harness", "symbolic"))
         self.scenario["id"] = self.cell["scenario_id"]
         (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        readiness = []
         fake_indexing = SimpleNamespace(
             verify_indexer=lambda manifest: indexer, apply_overlay=lambda workspace: None,
             index_workspace=lambda *args: {"indexed": True},
-            ready_dossiers=lambda daemon, scenario, **kwargs: {"ready": True},
+            ready_dossiers=lambda daemon, scenario, **kwargs: readiness.append(kwargs) or {"ready": True},
             system_python_identity=lambda frozen: frozen)
+        self.scenario["track"] = "inherited"
         with patch.dict("sys.modules", {"bench.harness_study.indexing": fake_indexing}):
             result = self._run()
         self.assertEqual(result["status"], "success", result)
+        self.assertEqual(readiness, [{"seed": True, "require_empty": False}])
         backend, arguments = self.command_arguments[0]
         self.assertEqual(backend, "harness")
         self.assertEqual(arguments["harness_intent_policy"], "symbolic")

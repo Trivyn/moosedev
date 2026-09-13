@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from bench.harness_study import config, evolution, field_check, intent, model_table
+from bench.harness_study import config, evolution, field_check, intent, long_horizon, model_table
 from bench.harness_study.artifacts import canonical_json
 from bench.harness_study.scenario import MAINTENANCE
 
@@ -139,6 +139,19 @@ class DesignIdentityTests(unittest.TestCase):
         self.assertEqual(payload["intent_design_sha256"], PINNED["intent"])
         self.assertEqual(payload["document_sha256"],
                          hashlib.sha256((DOCS / "FIELD_CHECK.md").read_bytes()).hexdigest())
+        self.assertEqual(payload["scenario_tables"], {})
+
+    def test_long_horizon_selection_binds_its_resolution_tables(self):
+        payload = field_check.design_identity([G31B], ["retry_ledger", "late_fees"])["payload"]
+        self.assertEqual(payload["scenario_tables"], {"late_fees": {
+            "resolution_targets": long_horizon.RESOLUTION_TARGETS["late_fees"],
+            "seed_associations": long_horizon.SEED_ASSOCIATIONS["late_fees"]}})
+        base = field_check.design_identity([G31B], ["late_fees"])["sha256"]
+        with patch.dict(long_horizon.SEED_ASSOCIATIONS, {"late_fees": []}):
+            self.assertNotEqual(base, field_check.design_identity([G31B], ["late_fees"])["sha256"])
+        for name in (*long_horizon.SCENARIOS, *getattr(long_horizon, "EXPLORATORY", ())):
+            with self.subTest(name=name):
+                self.assertIn(name, field_check.SCENARIOS)
 
     def test_design_changes_with_order_scenarios_and_table_rows(self):
         base = field_check.design_identity([G31B, A4B], ["retry_ledger"])["sha256"]
@@ -151,7 +164,7 @@ class DesignIdentityTests(unittest.TestCase):
 
     def test_design_refuses_invalid_selections(self):
         for models, scenarios in (([], ["retry_ledger"]), ([G31B, G31B], ["retry_ledger"]),
-                                  (["unknown/model"], ["retry_ledger"]), ([G31B], ["late_fees"]),
+                                  (["unknown/model"], ["retry_ledger"]), ([G31B], ["no_such_package"]),
                                   ([G31B], []), ([G31B], ["retry_ledger", "retry_ledger"])):
             with self.subTest(models=models, scenarios=scenarios), self.assertRaises(ValueError):
                 field_check.design_identity(models, scenarios)
@@ -305,6 +318,14 @@ class ApprovalTests(unittest.TestCase):
         self.assertIn("never scored", approved["scope"])
         self.assertEqual(config.verify_approval(self.write("approval.json", approved), config=cfg), approved)
 
+    def test_field_check_approval_round_trips_for_a_long_horizon_package(self):
+        cfg = field_config((G31B,), ("late_fees",))
+        approved = config.approval_payload("James Adam", config=cfg)
+        scenario = config.load_scenario("late_fees")
+        self.assertEqual(approved["scenarios"], {"late_fees": {
+            "package_sha256": scenario["package_sha256"], "gold_sha256": scenario["gold_sha256"]}})
+        self.assertEqual(config.verify_approval(self.write("long.json", approved), config=cfg), approved)
+
     def test_approvals_bind_mode_models_scenarios_and_hashes(self):
         cfg = field_config((G31B,), ("retry_ledger",))
         approved = config.approval_payload("James Adam", config=cfg)
@@ -340,8 +361,9 @@ class ApprovalTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
-    def run_preflight(self, weights_sha256=None):
-        cfg = field_config((G31B,), ("retry_ledger",))
+    def run_preflight(self, weights_sha256=None, scenarios=("retry_ledger",)):
+        cfg = field_config((G31B,), scenarios)
+        self.probe_calls = []
         cfg.update(binary_manifest="/fixture/manifest.json", gold_approval="/fixture/approval.json",
                    endpoint="http://127.0.0.1:1234/v1", opencode="/fixture/opencode", lms="/fixture/lms",
                    indexer_manifest="/fixture/indexer/manifest.json")
@@ -354,7 +376,7 @@ class PreflightTests(unittest.TestCase):
             return {"id": model["id"], "weights": model["weights"], "files": {}, "weights_sha256": digest}
 
         fake_indexing = SimpleNamespace(verify_indexer=lambda manifest: indexer,
-                                        probe_indexer=lambda *args, **kwargs: {"ok": True},
+                                        probe_indexer=lambda *args, **kwargs: self.probe_calls.append(kwargs) or {"ok": True},
                                         system_python_identity=lambda *args: {"path": "/usr/bin/python3"})
         with patch.object(config, "verify_binaries", return_value={"build_id": "b", "indexer": indexer}), \
                 patch.object(config, "client_identity", return_value={"path": "/fixture/client"}), \
@@ -377,6 +399,13 @@ class PreflightTests(unittest.TestCase):
         self.assertNotIn("native_intent_contracts", checks)
         self.assertEqual(result["local_model_1"]["id"], HELPER)
         self.assertEqual(len(result["schedule"]), 2)
+
+    def test_preflight_probes_intent_packages_plus_the_selected_ones(self):
+        result = self.run_preflight(scenarios=("late_fees",))
+        self.assertTrue(result["ready"], result["checks"])
+        self.assertEqual(list(self.probe_calls[0]["scenarios"]), [*intent.SCENARIOS, "late_fees"])
+        self.run_preflight(scenarios=("retry_ledger",))
+        self.assertEqual(list(self.probe_calls[0]["scenarios"]), list(intent.SCENARIOS))
 
     def test_preflight_is_not_ready_when_weights_differ_from_the_table(self):
         result = self.run_preflight(weights_sha256="0" * 64)

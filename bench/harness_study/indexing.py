@@ -15,7 +15,7 @@ from .artifacts import canonical_json, sha256_file
 from .binaries import REPO
 from .intent import OVERLAY, RESOLUTION_TARGETS, SEED_ASSOCIATIONS, SCENARIOS as INTENT_SCENARIOS
 from .isolation import _checked_path, sandbox_command
-from .scenario import SCENARIOS, MAINTENANCE, load_scenario, tree_manifest
+from .scenario import SCENARIOS, MAINTENANCE, load_scenario, starts_empty, tree_manifest
 from .seed import prepare_workspace, seed_iri
 
 SYSTEM_PYTHON = Path("/usr/bin/python3")
@@ -240,7 +240,7 @@ def probe_indexer(indexer, binaries, assets, *, evolution_contract=False, scenar
                                  indexer=indexer) as daemon:
                     observed["daemon"] = daemon.identity
                     observed["dossiers"] = ready_dossiers(daemon, scenario, seed=True,
-                                                          require_empty=scenario["track"] == "accumulation")
+                                                          require_empty=starts_empty(scenario))
                     if evolution_contract and name == MAINTENANCE:
                         from .evolution_probe import probe_evolution
                         observed["evolution"] = {}

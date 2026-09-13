@@ -236,6 +236,11 @@ def list_scenarios(directory: Path = SCENARIOS, *, horizon: str = "pilot") -> li
                   if json.loads(p.read_text()).get("horizon", "pilot") == horizon)
 
 
+def starts_empty(scenario: dict) -> bool:
+    """An accumulation package starts with no project knowledge; an inherited one starts seeded."""
+    return scenario["track"] == "accumulation"
+
+
 def seed_notes(facts: list[dict]) -> str:
     """Render exactly the seed content also given to the graph condition."""
     blocks = ["# Starting project knowledge", "You may update these notes as the project changes."]

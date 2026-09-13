@@ -200,6 +200,17 @@ class OfflineResolutionTests(unittest.TestCase):
         self.assertEqual(indexing.resolution_tables("retry_ledger"), (intent.RESOLUTION_TARGETS["retry_ledger"], []))
 
 
+class TrackTests(unittest.TestCase):
+    def test_an_empty_starting_graph_follows_the_track_not_the_package_name(self):
+        from bench.harness_study.scenario import starts_empty
+        self.assertTrue(starts_empty({"id": "anything", "track": "accumulation"}))
+        self.assertFalse(starts_empty({"id": "retry_ledger", "track": "inherited"}))
+        for name, expected in (("retry_ledger", True), ("ruleset_cache", False), ("display_labels_maintenance", False),
+                               ("supplier_quotes", True), ("entity_outbox", True), ("late_fees", False)):
+            with self.subTest(name=name):
+                self.assertEqual(starts_empty(load_scenario(name)), expected)
+
+
 class IsolationTests(unittest.TestCase):
     def test_pilot_consumers_never_see_long_horizon_packages(self):
         self.assertEqual(list_scenarios(), ["display_labels_maintenance", "retry_ledger", "ruleset_cache"])

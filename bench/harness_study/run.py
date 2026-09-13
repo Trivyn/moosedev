@@ -23,7 +23,7 @@ from .process import observe
 from .proxy import ModelProxy
 from .hosted_proxy import DomainProxy
 from .privacy import CredentialFilter
-from .scenario import SCENARIOS, load_scenario, relative_file, tree_manifest
+from .scenario import SCENARIOS, load_scenario, relative_file, starts_empty, tree_manifest
 from .seed import episode_prompt, prepare_workspace
 from .validation import execute_check
 from .usage import UsageLedger, resource_metrics
@@ -357,7 +357,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                     if harness_cell:
                         first = episode_id == scenario["episodes"][0]["id"]
                         readiness = ready_dossiers(daemon, scenario, seed=first,
-                            require_empty=first and scenario["id"] == "retry_ledger")
+                            require_empty=first and starts_empty(scenario))
                         record("index_readiness", dict(readiness, episode=episode_id))
                         snapshot(store, run, workspace, f"episodes/{episode_id}/prepared")
                 executable = Path(binaries["binaries"]["session"] if cell["backend"] == "harness"
