@@ -11,8 +11,7 @@ Two reviewed seed records start in both arms, rendered identically as
 `fees.py` `FeePolicy.late_fee`:
 
 - `fees-np7`: no late or penalty fee of any kind for registered non-profit
-  segments; a reduced charity fee was rejected; charity is today's only
-  non-profit segment.
+  segments; a reduced charity fee was rejected.
 - `fees-cents`: fees are integer cents; percentage fees round half up.
 
 ## What each episode introduces
