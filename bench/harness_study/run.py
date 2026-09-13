@@ -14,7 +14,9 @@ from .artifacts import ArtifactStore, canonical_json, sha256_file
 from .binaries import REPO, verify_binaries
 from .clients import verify_client
 from .client_archive import archive_clients
-from .config import configuration_hash, inventory, model_associations, required_clients, schedule, verify_approval
+from .config import (HARNESS_MODES, configuration_hash, frozen_arms, inventory, model_associations, required_clients,
+                     schedule, verify_approval)
+from . import field_check
 from .daemon import OwnedDaemon
 from .isolation import sandbox_command
 from .process import observe
@@ -191,14 +193,14 @@ def pad_unattempted(outcome, scenario, limit=None):
 def run_cell(store_root, frozen, cell, *, replacement_for=None):
     config = frozen["config"]
     mode = config.get("evaluation_mode", "pilot")
-    experimental = mode == intent.MODE or mode in evolution.MODES
+    experimental = mode in HARNESS_MODES
     # A mode with frozen arms runs its native arm through the same frozen
     # schedule; every other local mode admits only harness cells.
     harness_cell = experimental and cell["backend"] == "harness"
-    if mode in ("local-harness-development", intent.MODE, *evolution.MODES):
+    if mode in ("local-harness-development", *HARNESS_MODES):
         if Path(store_root).resolve() == (REPO / "target/harness-study/evidence").resolve():
             raise ValueError("development reruns require a separate evidence store; preserve the pilot store")
-        arms = evolution.ARMS.get(mode)
+        arms = frozen_arms(mode)
         if arms is None and (cell["backend"] != "harness" or cell["condition"] != "harness"):
             raise ValueError("development reruns are limited to local harness cells")
         if arms is not None and (cell["backend"], cell["condition"], cell.get("intent_policy")) not in arms:
@@ -246,6 +248,8 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
         store.put_bytes(run, "preflight.json", canonical_json(frozen))
         if config.get("evaluation_mode") in evolution.MODES:
             store.put_bytes(run, "evolution-design.json", canonical_json(evolution.design_identity(config["evaluation_mode"])))
+        elif config.get("evaluation_mode") == field_check.MODE:
+            store.put_bytes(run, "field-check-design.json", canonical_json(config["field_check_design"]))
         store.put_bytes(run, "scenario.json", canonical_json(scenario))
         snapshot(store, run, SCENARIOS / scenario["id"], "scenario")
         snapshot(store, run, REPO / "bench/harness_study", "driver")

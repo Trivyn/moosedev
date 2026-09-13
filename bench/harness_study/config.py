@@ -17,6 +17,14 @@ from .binaries import REPO, verify_binaries
 from .scenario import MAINTENANCE, list_scenarios, load_scenario, tree_manifest
 from . import intent
 from . import evolution
+from . import field_check, model_table
+
+HARNESS_MODES = (intent.MODE, *evolution.MODES, field_check.MODE)
+
+
+def frozen_arms(mode):
+    """The frozen (backend, condition, intent_policy) arms of a multi-arm mode, or None."""
+    return field_check.ARMS if mode == field_check.MODE else evolution.ARMS.get(mode)
 
 
 def read_json_url(url):
@@ -63,6 +71,8 @@ def configuration_hash(config):
 
 
 def schedule(config):
+    if config.get("evaluation_mode") == field_check.MODE:
+        return field_check.schedule(config)
     if config.get("evaluation_mode") in evolution.MODES:
         stage = config["evaluation_mode"]
         scenarios = config.get("scenario_ids")
@@ -113,9 +123,9 @@ def schedule(config):
 
 def required_clients(config):
     mode = config.get("evaluation_mode")
-    if any(backend == "opencode" for backend, _, _ in evolution.ARMS.get(mode, ())):
+    if any(backend == "opencode" for backend, _, _ in frozen_arms(mode) or ()):
         return ("opencode", "lms")
-    return ("lms",) if mode in ("local-harness-development", intent.MODE, *evolution.MODES) else ("codex", "opencode", "lms")
+    return ("lms",) if mode in ("local-harness-development", *HARNESS_MODES) else ("codex", "opencode", "lms")
 
 
 def evolution_config(parent, binary_manifest, study_id, stage):
@@ -161,6 +171,49 @@ def evolution_config(parent, binary_manifest, study_id, stage):
                                 "intent_design": intent.design_identity()})
     if "opencode" in required_clients(result) and not result.get("opencode"):
         raise ValueError("baseline stage requires the parent configuration's opencode client path")
+    schedule(result)
+    return result
+
+
+def field_check_config(parent, binary_manifest, study_id, models, scenarios, approval_path):
+    """Derive an exploratory, never-scored field check of model-table models from a symbolic-baseline preflight.
+
+    Unlike an evolution stage, the field check may reuse the parent's frozen build:
+    it changes the model selection, not the harness under test.
+    """
+    original = parent.get("config")
+    if not parent.get("ready") or not isinstance(original, dict) or parent.get("config_sha256") != configuration_hash(original):
+        raise ValueError("field-check configuration requires an intact successful parent preflight")
+    if original.get("evaluation_mode") != evolution.SYMBOLIC_BASELINE_MODE:
+        raise ValueError("field-check configuration must descend from a symbolic-baseline preflight")
+    verify_approval(Path(original["gold_approval"]), config=original)
+    if not study_id.strip() or study_id == original.get("study_id"):
+        raise ValueError("field check requires a distinct nonempty study_id")
+    build = verify_binaries(Path(binary_manifest))
+    if build["build_id"] in evolution.SEALED_SYMBOLIC_PREDECESSORS:
+        raise ValueError("field check refuses a sealed symbolic predecessor build")
+    models, scenarios = list(models), list(scenarios)
+    result = deepcopy(original)
+    result.pop("evolution_design", None)
+    result.update(study_id=study_id, evaluation_mode=field_check.MODE,
+                  binary_manifest=str(Path(binary_manifest).resolve()),
+                  gold_approval=str(Path(approval_path).resolve()),
+                  coding_models=models, helper_model=model_table.HELPER,
+                  local_models=model_table.config_entries([*models, model_table.HELPER],
+                                                          model_table.models_root(original)),
+                  scenario_ids=scenarios, intent_policies=list(field_check.POLICIES),
+                  episode_limit=field_check.EPISODE_LIMIT, episode_seconds=field_check.EPISODE_SECONDS,
+                  context_tokens=field_check.CLIENT_CONTEXT_TOKENS,
+                  generation_policy={**original.get("generation_policy", {}), "local_temperature": 0.0},
+                  harness_response_policy=field_check.RESPONSE_POLICY,
+                  evidence_byte_limit=evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
+                  reject_loop_limit=evolution.BASELINE_REJECT_LOOP_LIMIT,
+                  field_check_design=field_check.design_identity(models, scenarios),
+                  parent_pilot={"study_id": original["study_id"], "config_sha256": parent["config_sha256"],
+                                "build_id": parent["binaries"]["build_id"],
+                                "evolution_design_sha256": original["evolution_design"]["sha256"]})
+    if not result.get("opencode"):
+        raise ValueError("field check requires the parent configuration's opencode client path")
     schedule(result)
     return result
 
@@ -320,8 +373,10 @@ def preflight(config, *, fingerprint=True):
             check(f"local_model_{index}", lambda model=model: fingerprint_model(model, result["lmstudio"]))
     else:
         checks.append({"check": "weight_fingerprints", "passed": False, "error": "not fingerprinted"})
+    if config.get("evaluation_mode") == field_check.MODE:
+        check("model_table_weights", lambda: model_table.verify_fingerprints(config, result))
     check("gold_approval", lambda: verify_approval(Path(config["gold_approval"]), config=config))
-    if config.get("evaluation_mode") == intent.MODE or config.get("evaluation_mode") in evolution.MODES:
+    if config.get("evaluation_mode") in HARNESS_MODES:
         from .indexing import verify_indexer, probe_indexer, system_python_identity
         check("indexer", lambda: verify_indexer(config["indexer_manifest"]))
         check("indexer_system_python", system_python_identity)
@@ -334,6 +389,8 @@ def preflight(config, *, fingerprint=True):
             check("evolution_design", lambda: evolution.design_identity(config["evaluation_mode"])
                   if config.get("evolution_design") == evolution.design_identity(config["evaluation_mode"])
                   else (_ for _ in ()).throw(ValueError("evolution design identity changed")))
+        elif config.get("evaluation_mode") == field_check.MODE:
+            check("field_check_design", lambda: field_check.verify_config(config))
         check("indexer_probe", lambda: probe_indexer(result["indexer"], result["binaries"], result["assets"],
               evolution_contract=evolution.postedit_association_contract(config.get("evaluation_mode"))))
         if evolution.postedit_association_contract(config.get("evaluation_mode")):
@@ -346,6 +403,16 @@ def preflight(config, *, fingerprint=True):
 def approval_payload(reviewer, *, config=None):
     if not reviewer.strip():
         raise ValueError("named human reviewer required")
+    if config is not None and config.get("evaluation_mode") == field_check.MODE:
+        schedule(config)
+        return {"schema_version": 3, "reviewer": reviewer, "approved_at": datetime.now(timezone.utc).isoformat(),
+                "scope": ("exploratory field-check design (coding models with pinned weights and runtime contexts, "
+                          "helper, arms, scenarios, episode limit, reasoning-off) and the approved fixture hashes; "
+                          "not outcomes; never scored or pooled"),
+                "scenarios": {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
+                              for name in config["scenario_ids"]},
+                "intent_design": intent.design_identity(),
+                "field_check_design": field_check.design_identity(config["coding_models"], config["scenario_ids"])}
     experimental = config is not None and config.get("evaluation_mode") == intent.MODE
     selected = config["scenario_ids"] if experimental else [name for name in list_scenarios() if name != MAINTENANCE]
     if experimental:
@@ -361,10 +428,24 @@ def approval_payload(reviewer, *, config=None):
 
 def verify_approval(path, *, config=None):
     value = json.loads(path.read_text())
-    if value.get("schema_version") not in (1, 2) or not value.get("reviewer") or not value.get("approved_at"):
+    if value.get("schema_version") not in (1, 2, 3) or not value.get("reviewer") or not value.get("approved_at"):
         raise ValueError("invalid human gold approval")
+    field_run = config is not None and config.get("evaluation_mode") == field_check.MODE
+    if (value["schema_version"] == 3) != field_run:
+        raise ValueError("field-check runs require, and only accept, a field-check approval")
     evolution_run = config is not None and config.get("evaluation_mode") in evolution.MODES
-    if value["schema_version"] == 2:
+    if value["schema_version"] == 3:
+        if value.get("intent_design") != intent.design_identity():
+            raise ValueError("field-check approval does not match the current intent design")
+        design = field_check.design_identity(config["coding_models"], config["scenario_ids"])
+        if value.get("field_check_design") != design or config.get("field_check_design") != design:
+            raise ValueError("field-check approval does not match the current field-check design")
+        selected = list(value.get("scenarios") or {})
+        if set(selected) != set(config["scenario_ids"]):
+            raise ValueError("field-check approval must bind the configured scenario set")
+        current = {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
+                   for name in selected}
+    elif value["schema_version"] == 2:
         if value.get("intent_design") != intent.design_identity():
             raise ValueError("intent approval does not match current design hash")
         selected = list(value["scenarios"])

@@ -72,6 +72,9 @@ def _knowledge_metrics(claims, facts):
 def _validate_review(review, run, seal, manifest):
     if not isinstance(review, dict):
         raise ValueError("review must be an object")
+    from .field_check import MODE as FIELD_CHECK_MODE
+    if manifest.get("evaluation_mode") == FIELD_CHECK_MODE:
+        raise ValueError("field-check runs are exploratory and never reviewed or scored")
     if not isinstance(review.get("reviewer_id"), str) or not review["reviewer_id"].strip():
         raise ValueError("reviewer_id is required")
     gold = review.get("scenario_gold_sha256")
@@ -417,6 +420,11 @@ def report(store_root):
         manifest = item["manifest"] or {}
         key = tuple(canonical_json(manifest.get(field)).decode().strip() for field in GROUP_FIELDS)
         grouped[key].append(item)
+    from .field_check import MODE as FIELD_CHECK_MODE
+    studies = {((item["manifest"] or {}).get("evaluation_mode"), (item["manifest"] or {}).get("study_id"))
+               for item in attempts}
+    if len(studies) > 1 and any(mode == FIELD_CHECK_MODE for mode, _ in studies):
+        raise ValueError("field-check runs are never pooled with another study")
     build_ids = {(item["manifest"] or {}).get("build_id") for item in attempts}
     if len(build_ids) > 1:
         raise ValueError("report pools runs from multiple build_ids: "

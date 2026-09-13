@@ -359,6 +359,107 @@ class RunTests(unittest.TestCase):
         self.assertEqual(manifest["intent_policy"], "symbolic")
         self.assertEqual(manifest["evaluation_mode"], evolution.SYMBOLIC_BASELINE_MODE)
 
+    def _field_check_config(self):
+        from bench.harness_study import evolution, field_check, model_table
+        models, scenarios = ["gemma-4-31b-it"], ["retry_ledger"]
+        self.config.update(evaluation_mode=field_check.MODE, coding_models=models,
+                           lmstudio_index=str(self.root / ".lmstudio/.internal/model-index-cache.json"),
+                           helper_model=model_table.HELPER,
+                           local_models=model_table.config_entries([*models, model_table.HELPER],
+                                                                   self.root / ".lmstudio/models"),
+                           scenario_ids=scenarios, intent_policies=["symbolic"], episode_limit=1,
+                           episode_seconds=1200, context_tokens=32768, generation_policy={"local_temperature": 0.0},
+                           harness_response_policy="reasoning-off",
+                           evidence_byte_limit=evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
+                           reject_loop_limit=evolution.BASELINE_REJECT_LOOP_LIMIT, seed=1,
+                           field_check_design=field_check.design_identity(models, scenarios))
+        self.config.pop("codex")
+        self.frozen.pop("codex")
+        for index, model in enumerate(self.config["local_models"]):
+            weights = Path(model["weights"])
+            weights.mkdir(parents=True)
+            (weights / "model.safetensors").write_text("fixture weights")
+            self.frozen[f"local_model_{index}"] = {"weights": str(weights), "files": tree_manifest(weights)}
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        self.frozen["schedule"] = runner.schedule(self.config)
+
+    def test_field_check_native_cell_archives_its_design_and_no_evolution_outputs(self):
+        from bench.harness_study import field_check
+        from bench.harness_study.artifacts import canonical_json
+        self._field_check_config()
+        self.cell = self.frozen["schedule"][1]
+        self.assertEqual((self.cell["backend"], self.cell["condition"], self.cell["intent_policy"]),
+                         ("opencode", "without", None))
+        self.scenario["id"] = self.cell["scenario_id"]
+        (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        with patch.dict("sys.modules", {"bench.harness_study.indexing": None}):
+            result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(self.observed, ["e1"])
+        self.assertEqual(self.observed_guards, [(8 * 1024 ** 3, 5)])
+        self.assertNotIn("evolution_constituents", result["episodes"][0])
+        backend, arguments = self.command_arguments[0]
+        self.assertEqual(backend, "opencode")
+        self.assertFalse(arguments["postedit_association_contract"])
+        saved = Path(result["path"])
+        self.assertEqual((saved / "field-check-design.json").read_bytes(),
+                         canonical_json(self.config["field_check_design"]))
+        self.assertFalse((saved / "evolution-design.json").exists())
+        manifest = json.loads((saved / "manifest.json").read_text())
+        self.assertEqual(manifest["evaluation_mode"], field_check.MODE)
+        with self.assertRaisesRegex(ValueError, "frozen arms"):
+            runner.run_cell(self.root / "other", dict(self.frozen, schedule=self.frozen["schedule"]
+                            + [dict(self.cell, condition="harness")]), dict(self.cell, condition="harness"))
+
+    def test_field_check_harness_cell_sends_symbolic_reasoning_off_without_postedit_contract(self):
+        from types import SimpleNamespace
+        from bench.harness_study import field_check, intent
+        self._field_check_config()
+        (self.repo / "spec/harness_intent_pilot.md").write_text("frozen fixture intent protocol\n")
+        indexer_dir = self.root / "indexer"
+        indexer_dir.mkdir()
+        (indexer_dir / "scip-python").write_text("#!/bin/sh\n")
+        indexer = {"directory": str(indexer_dir), "launcher": {"path": str(indexer_dir / "scip-python")}}
+        self.config["indexer_manifest"] = str(indexer_dir / "manifest.json")
+        self.binary_manifest["indexer"] = indexer
+        self.frozen.update(indexer=indexer, intent_design=intent.design_identity(), indexer_probe={"ok": True},
+                           indexer_system_python={"path": "/usr/bin/python3"})
+        self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+        self.cell = self.frozen["schedule"][0]
+        self.assertEqual((self.cell["backend"], self.cell["intent_policy"]), ("harness", "symbolic"))
+        self.scenario["id"] = self.cell["scenario_id"]
+        (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        fake_indexing = SimpleNamespace(
+            verify_indexer=lambda manifest: indexer, apply_overlay=lambda workspace: None,
+            index_workspace=lambda *args: {"indexed": True},
+            ready_dossiers=lambda daemon, scenario, **kwargs: {"ready": True},
+            system_python_identity=lambda frozen: frozen)
+        with patch.dict("sys.modules", {"bench.harness_study.indexing": fake_indexing}):
+            result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        backend, arguments = self.command_arguments[0]
+        self.assertEqual(backend, "harness")
+        self.assertEqual(arguments["harness_intent_policy"], "symbolic")
+        self.assertEqual(arguments["harness_response_policy"], "reasoning-off")
+        self.assertFalse(arguments["postedit_association_contract"])
+        saved = Path(result["path"])
+        self.assertTrue((saved / "field-check-design.json").is_file())
+        self.assertTrue((saved / "intent-design.json").is_file())
+        self.assertFalse((saved / "evolution-design.json").exists())
+        self.assertEqual(json.loads((saved / "manifest.json").read_text())["evaluation_mode"], field_check.MODE)
+
+    def test_field_check_mismatched_approval_is_a_preflight_failure_before_model_load(self):
+        self._field_check_config()
+        self.cell = self.frozen["schedule"][1]
+        self.scenario["id"] = self.cell["scenario_id"]
+        (self.scenarios / self.cell["scenario_id"]).symlink_to(self.scenarios / "fixture", target_is_directory=True)
+        with patch.dict("sys.modules", {"bench.harness_study.indexing": None}):
+            result = self._run(approval_error=ValueError("field-check approval does not match the current design"))
+        self.assertEqual(result["status"], "preflight_failure")
+        self.assertIn("field-check approval", result["error"])
+        self.assertEqual(self.model_load_calls, 0)
+        self.assertEqual(self.observed, [])
+
     def test_pending_approval_is_a_retained_preflight_attempt(self):
         result = self._run(approval_error=ValueError("scenario rubric approval is pending"))
         self.assertEqual(result["status"], "preflight_failure")
@@ -547,6 +648,34 @@ class RunHelperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.reset_episode(alias_work)
         self.assertEqual((outside / "harness/do-not-delete").read_text(), "external")
+
+    def test_field_check_models_load_with_table_contexts(self):
+        from bench.harness_study import model_table
+        models = ["gemma-4-31b-it"]
+        config = {"endpoint": "http://127.0.0.1:1234/v1", "helper_model": model_table.HELPER,
+                  "context_tokens": 32768, "lms": "/explicit/lms",
+                  "local_models": model_table.config_entries([*models, model_table.HELPER], self.root)}
+        cell = {"backend": "harness", "condition": "harness", "model": "gemma-4-31b-it"}
+
+        def inventory(coding=262144, helper=131072):
+            return {"models": [
+                {"key": "gemma-4-31b-it",
+                 "loaded_instances": [{"id": "gemma-4-31b-it", "config": {"context_length": coding}}]},
+                {"key": model_table.HELPER,
+                 "loaded_instances": [{"id": model_table.HELPER, "config": {"context_length": helper}}]}]}
+
+        records = []
+        with patch.object(runner, "inventory", return_value=inventory()), \
+                patch.object(runner.subprocess, "run") as launch:
+            runner.load_models(config, cell, lambda channel, event: records.append((channel, event)))
+            launch.assert_not_called()
+        self.assertEqual(dict(records)["model_context_policy"]["expected_runtime_context_tokens"],
+                         {"gemma-4-31b-it": 262144, model_table.HELPER: 131072})
+        for loaded in (inventory(coding=32768), inventory(helper=32768)):
+            with self.subTest(loaded=loaded), patch.object(runner, "inventory", return_value=loaded), \
+                    patch.object(runner.subprocess, "run"):
+                with self.assertRaisesRegex(ValueError, "different context"):
+                    runner.load_models(config, cell, lambda *args: None)
 
     def test_loaded_models_require_exact_identity_and_context(self):
         config = {"endpoint": "http://127.0.0.1:1234/v1", "helper_model": "helper",

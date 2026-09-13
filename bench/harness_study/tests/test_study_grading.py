@@ -301,6 +301,42 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class FieldCheckGradingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.store = ArtifactStore(Path(self.temporary.name).resolve() / "study")
+
+    def sealed_run(self, mode, study_id):
+        run = self.store.create_run({"model": "local", "backend": "harness", "condition": "harness",
+                                     "intent_policy": "symbolic", "scenario_id": "retry_ledger",
+                                     "build_id": "build-a", "evaluation_mode": mode, "study_id": study_id,
+                                     "scenario_gold_sha256": "a" * 64})
+        self.store.put_bytes(run, "evidence.txt", b"sealed evidence\n")
+        self.store.put_bytes(run, "outcome.json", canonical_json({"status": "success", "episodes": [
+            {"id": "e1", "status": "success", "checks": [{"passed": True}], "metrics": {}}]}))
+        self.store.seal_run(run)
+        return run
+
+    def test_field_check_runs_are_never_reviewed(self):
+        from bench.harness_study import field_check
+        run = self.sealed_run(field_check.MODE, "field-check-g31b")
+        review = {"reviewer_id": "independent", "scenario_gold_sha256": "a" * 64,
+                  "claims": [{"claim_id": "c", "verdict": "supported",
+                              "evidence": [{"path": "evidence.txt", "start_line": 1, "end_line": 1}]}]}
+        with self.assertRaisesRegex(ValueError, "never reviewed"):
+            record_review(self.store.root, run.name, review)
+
+    def test_report_never_pools_field_check_runs_with_another_study(self):
+        from bench.harness_study import evolution, field_check
+        self.sealed_run(field_check.MODE, "field-check-g31b")
+        self.sealed_run(field_check.MODE, "field-check-g31b")
+        self.assertEqual(report(self.store.root)["attempt_count"], 2)
+        self.sealed_run(evolution.SYMBOLIC_BASELINE_MODE, "symbolic-v3")
+        with self.assertRaisesRegex(ValueError, "never pooled"):
+            report(self.store.root)
+
+
 class EpisodeLimitOutcomeTests(unittest.TestCase):
     def test_success_with_episode_limit_padding_is_valid(self):
         from bench.harness_study.grading import _outcome
