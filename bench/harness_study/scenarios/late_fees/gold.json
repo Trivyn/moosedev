@@ -1,0 +1,127 @@
+{
+  "schema_version": 2,
+  "scenario_id": "late_fees",
+  "review_status": "pending",
+  "facts": [
+    {
+      "id": "fees-np7",
+      "claim": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all. Today charity is the only non-profit segment.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ],
+      "introduced_episode": 0,
+      "seeded": true,
+      "superseded_episode": 3,
+      "superseded_by": "fees-np9",
+      "current_scope": "From episode 3, late fees on invoices due before day 1000, and every penalty fee (including the returned-payment fee), for every registered non-profit segment."
+    },
+    {
+      "id": "fees-cents",
+      "claim": "Every fee is an integer number of cents. A percentage fee is rounded half up to the cent, never with banker's rounding.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "fees-formula",
+      "claim": "An invoice is late when today is more than 14 days after its due day; the late fee is 5% of the amount, at least 100 cents; otherwise 0.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "fees-segments",
+      "claim": "Segments foundation (a registered non-profit) and cooperative (member-owned, for-profit) exist; statement lines show display names. NP-7 covers every registered non-profit segment, so foundations pay no late fee and cooperatives do.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "fees-np9",
+      "claim": "Regulation NP-9 replaces NP-7 for late fees on invoices due on or after day 1000: a late invoice of any registered non-profit account due on or after day 1000 has a flat 200-cent late fee. Earlier invoices and all penalty fees stay under NP-7.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "fees-returned-payment",
+      "claim": "returned_payment_fee charges 2.5% of the bounced amount, at least 250 cents, rounded half up; registered non-profits pay none because NP-7 forbids penalty fees.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "fees-association",
+      "claim": "The association segment is a registered non-profit: NP-9 applies to its late fees on invoices due on or after day 1000, NP-7 to earlier invoices and to penalty fees.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "fees-forecast",
+      "claim": "fee_forecast returns the late fee for each given day, in order.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    }
+  ],
+  "forbidden_claims": [
+    {
+      "claim": "Only the charity segment is exempt from late fees.",
+      "applies_from_episode": 2,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Registered non-profits never pay a late fee, whatever the due day.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "NP-9 also replaces NP-7 for penalty fees such as the returned-payment fee.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "NP-9 applies regardless of the invoice due day.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Cooperatives are non-profits.",
+      "applies_from_episode": 2,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Non-profits pay a reduced percentage fee.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Percentage fees may use banker's rounding.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    }
+  ]
+}
