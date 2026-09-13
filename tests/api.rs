@@ -2014,7 +2014,9 @@ async fn source_route_refuses_cross_origin_browser_reads() {
         .add_header("origin", "http://evil.example")
         .await;
     denied.assert_status_forbidden();
-    assert!(denied.text().contains("cross-origin"));
+    // The router-wide guard answers first; the route keeps its own check as
+    // defence in depth. Either refusal names the origin and leaks no source.
+    assert!(denied.text().contains("origin"), "{}", denied.text());
     assert!(!denied.text().contains("build_server"));
 
     // Opaque origins are refused for the same reason.
