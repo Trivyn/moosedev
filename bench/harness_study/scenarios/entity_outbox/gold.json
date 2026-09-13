@@ -46,6 +46,16 @@
       "seeded": false
     },
     {
+      "id": "outbox-failed-request-no-effect",
+      "claim": "A request that raises leaves the database exactly as it was, with no events and no other writes, because the indexer must never see an event for a change that did not happen and callers retry a failed request after fixing it. Multi-item requests (delete_many, ack_many) are all or nothing.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
       "id": "outbox-delete",
       "claim": "Registry.delete removes the entity so get raises KeyError; deleting a missing entity raises KeyError; customer-chosen IDs may be created again.",
       "kind": "Requirement",
@@ -67,7 +77,7 @@
     },
     {
       "id": "outbox-delete-many",
-      "claim": "Registry.delete_many removes every listed entity, or raises KeyError and removes none when any listed ID does not exist; each removed entity gets its deleted event.",
+      "claim": "Registry.delete_many removes every listed entity and emits each one's deleted event; if any listed ID does not exist it raises KeyError, and then removes nothing and emits nothing.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -78,6 +88,16 @@
     {
       "id": "outbox-patch",
       "claim": "Registry.patch merges changes into the entity's data and emits an updated event carrying the complete merged data; patching a missing entity raises KeyError.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "outbox-ack-many",
+      "claim": "Outbox.ack_many acknowledges (entity_id, seq) pairs in each entity's current epoch; an unknown event raises KeyError and then nothing is acknowledged.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/3/prompt"
@@ -144,6 +164,11 @@
     },
     {
       "claim": "An updated event may carry only the changed keys.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "A failed multi-item request may leave its earlier items applied.",
       "applies_from_episode": 1,
       "applies_through_episode": null
     }

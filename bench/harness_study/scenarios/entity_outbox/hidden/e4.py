@@ -80,5 +80,22 @@ class PatchTests(Store):
         self.assertEqual((last["entity_id"], last["kind"], last["payload"]), ("x", "updated", {"a": 1, "b": 3}))
 
 
+class BulkAckTests(Store):
+    def test_ack_many_marks_events_delivered(self):
+        for entity_id in ("a", "a", "b"):
+            self.outbox.emit(entity_id, "updated", {})
+        self.outbox.ack_many([("a", 1), ("b", 1)])
+        self.assertEqual([(event["entity_id"], event["seq"]) for event in self.outbox.pending()], [("a", 2)])
+        with self.assertRaises(KeyError):
+            self.outbox.ack_many([("zzz", 9)])
+
+    def test_failed_ack_many_acknowledges_nothing(self):
+        self.outbox.emit("a", "updated", {})
+        self.outbox.emit("a", "updated", {})
+        with self.assertRaises(KeyError):
+            self.outbox.ack_many([("a", 1), ("a", 9), ("a", 2)])
+        self.assertEqual([(event["entity_id"], event["seq"]) for event in self.outbox.pending()], [("a", 1), ("a", 2)])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,7 +1,7 @@
 # Dependency map: entity outbox
 
-Status: draft for maintainer gold review, revision 2 after blind reader audit
-round 1. Written before the hidden tests.
+Status: draft for maintainer gold review, revision 3 after blind reader audit
+round 2. Written before the hidden tests.
 
 Each probe records its round-1 verdict. Condition A gave a reader only the
 episode prompt and the previous reference code; condition B added only the
@@ -14,19 +14,25 @@ to get it wrong. **Cost**: the rule is visible in the previous code, so a
 graph-first agent's value is not having to read and infer it from source; it is
 scored on reads, searches, requests and tokens before the first correct edit.
 
-Revision 2 keeps every round-1 probe and the natural reference code. It adds two
-e1 reasons that govern future code paths, each with a correctness probe on the
-first path it reaches:
+Revision 2 kept every round-1 probe and the natural reference code and added two
+e1 reasons that govern future code paths. Round 2 found that probes pass only when
+a new path forces a choice the existing code does not settle; probes that can copy
+a visible convention (emit on delete, full payload on update) were inferable.
+Revision 3 adds a third e1 reason of the passing shape, with correctness probes on
+two new multi-step paths. The e1 reasons that govern future paths are:
 
 - **Full document** (`#/episodes/0/prompt`): "The indexer replaces its stored document with the payload of each \"created\" or \"updated\" event instead of merging, so every such event must carry the entity's complete current data; this applies to every code path that changes entity data."
 - **Deleted event** (`#/episodes/0/prompt`): "The indexer removes a document only when it receives a \"deleted\" event for that ID, so every code path that removes an entity must emit exactly one \"deleted\" event for it."
+- **No effect on failure** (`#/episodes/0/prompt`): "A request that raises must leave the database exactly as it was, with no events and no other writes, because the indexer must never see an event for a change that did not happen, and callers retry a failed request after fixing it."
 
 Harness delivery routes: **dossier** (record linked to `outbox.py`
 `Outbox.emit`, the resolution target, delivered when `outbox.py` is attached),
 **topic** (top 12 records matching the objective; this project stays under a
 dozen records), **search** (`search(query)` returns accepted knowledge first).
-The full-document and deleted-event records govern `registry.py`, which is
-not the resolution target, so topic recall and search are their routes.
+The full-document, deleted-event and no-effect records govern `registry.py`
+and the outbox's bulk paths as well as `Outbox.emit`; the no-effect record is
+linked to `Outbox.emit` (dossier), the other two reach the model by topic recall
+and search.
 Native OpenCode reads `PROJECT_NOTES.md` in full.
 
 ## e1: task probes only
@@ -39,8 +45,8 @@ Native OpenCode reads `PROJECT_NOTES.md` in full.
 
 ## e2: delete, and IDs may be created again
 
-### e2-delete-event: `RegistryTests.test_delete_emits_one_deleted_event` (retention, measures correctness, new)
-- Round 1: not audited (new in revision 2). The e2 prompt no longer says that delete emits an event.
+### e2-delete-event: `RegistryTests.test_delete_emits_one_deleted_event` (retention, measures correctness)
+- Round 1: not audited (new in revision 2). Round 2: PASS (condition A emitted no deleted event). The e2 prompt no longer says that delete emits an event.
 - Deciding sentence: the e1 deleted-event reason quoted above.
 - Previous reference code: `reference/e1/registry.py` has no removal path; nothing shows how the indexer learns of a removal.
 - Code-plus-prompt default: delete the entity row, emit nothing.
@@ -59,13 +65,21 @@ Native OpenCode reads `PROJECT_NOTES.md` in full.
 
 ## e3: acknowledgement, compaction and bulk removal
 
-### e3-delete-many-events: `BulkTests.test_delete_many_emits_deleted_for_each` (retention, measures correctness, new)
-- Round 1: not audited (new in revision 2).
+### e3-delete-many-atomic: `BulkTests.test_failed_delete_many_changes_nothing` (retention, measures correctness, new)
+- Round 2: not audited (new in revision 3). The e3 prompt now says only that an unknown listed ID raises KeyError; it no longer says that nothing is removed.
+- Deciding sentence: the e1 no-effect reason quoted above.
+- Previous reference code: `reference/e2/registry.py` has single-entity operations that check existence before one write. Nothing shows what a multi-entity request that fails part-way must leave behind.
+- Code-plus-prompt default: call `delete` for each ID in order, so the IDs before the unknown one are removed and their deleted events emitted before KeyError.
+- Well-posed: the e3 prompt says the call raises; the e1 reason says a request that raises changes nothing.
+- Discrimination: **high**.
+- Gold record: `outbox-failed-request-no-effect`. Harness delivery: dossier, topic, search.
+- Negative: `delete_many_partial`.
+
+### e3-delete-many-events: `BulkTests.test_delete_many_emits_deleted_for_each` (retention, measures cost)
+- Round 2: INFERABLE (condition A followed `delete`'s emit-on-delete convention). Relabelled cost in revision 3; its test no longer includes a failing call.
 - Deciding sentence: the e1 deleted-event reason.
-- Previous reference code: `reference/e2/registry.py` emits a deleted event inside `delete`. A bulk, all-or-nothing removal has no precedent; validating every ID and then removing the rows with one `DELETE ... WHERE id IN (...)` bypasses `delete`.
-- Code-plus-prompt default: check all IDs, then remove the rows in one statement, emitting nothing.
-- Well-posed: the e3 prompt defines what `delete_many` removes and its failure rule, and never mentions events.
-- Discrimination: **medium** (calling `delete` in a loop after validation also passes).
+- Cost measured: taking the deleted-event rule from `outbox-deleted-event` instead of reading `registry.py` to copy `delete`.
+- Discrimination: **low** for correctness; cost probe.
 - Gold record: `outbox-deleted-event`. Harness delivery: topic, search.
 - Negative: `delete_many_without_events`.
 
@@ -77,15 +91,23 @@ Native OpenCode reads `PROJECT_NOTES.md` in full.
 - Gold record: `outbox-seq-contiguous` (with `outbox-compaction`). Harness delivery: dossier, topic.
 - Negative: `max_seq_after_compact`.
 
-## e4: indexer v2 epochs supersede the lifetime rule; patch
+## e4: indexer v2 epochs supersede the lifetime rule; patch; bulk acknowledgement
 
-### e4-patch-full: `PatchTests.test_patch_event_carries_complete_data` (retention, measures correctness, new)
-- Round 1: not audited (new in revision 2).
-- Deciding sentence: the e1 full-document reason quoted above.
-- Previous reference code: `reference/e3/registry.py` `update` replaces the whole data and emits it; a partial change has no precedent, and the event's payload for it is not shown.
-- Code-plus-prompt default: emit the changes that were passed in.
-- Well-posed: the e4 prompt says patch merges changes and emits an "updated" event, and says nothing about the payload.
+### e4-ack-many-atomic: `BulkAckTests.test_failed_ack_many_acknowledges_nothing` (retention, measures correctness, new)
+- Round 2: not audited (new in revision 3).
+- Deciding sentence: the e1 no-effect reason quoted above.
+- Previous reference code: `reference/e3/outbox.py` `ack` runs its `UPDATE` and only then checks the row count to raise KeyError; `reference/e3/registry.py` `delete_many` checks IDs first, in a different class and against a different kind of existence. Nothing shows whether acknowledging several events may leave earlier ones delivered when a later one is unknown.
+- Code-plus-prompt default: call `ack` for each pair, so the events before the unknown one stay delivered after KeyError.
+- Well-posed: the e4 prompt says an unknown event raises; the e1 reason says a request that raises changes nothing.
 - Discrimination: **medium to high**.
+- Gold record: `outbox-failed-request-no-effect`. Harness delivery: dossier, topic, search.
+- Negative: `ack_many_partial`.
+
+### e4-patch-full: `PatchTests.test_patch_event_carries_complete_data` (retention, measures cost)
+- Round 2: INFERABLE (condition A followed `update`'s full-payload convention). Relabelled cost in revision 3.
+- Deciding sentence: the e1 full-document reason quoted above.
+- Cost measured: taking the full-document rule from `outbox-full-document` instead of reading `registry.py` to copy `update`.
+- Discrimination: **low** for correctness; cost probe.
 - Gold record: `outbox-full-document`. Harness delivery: topic, search.
 - Negative: `patch_partial_payload`.
 
@@ -99,8 +121,8 @@ Native OpenCode reads `PROJECT_NOTES.md` in full.
 
 ## e5: rename
 
-### e5-rename-events: `RenameTests.test_rename_emits_deleted_and_full_created` (retention, measures correctness, new)
-- Round 1: not audited (new in revision 2). The e5 prompt no longer says which events rename emits.
+### e5-rename-events: `RenameTests.test_rename_emits_deleted_and_full_created` (retention, measures correctness)
+- Round 1: not audited (new in revision 2). Round 2: PASS, weak (condition A right but ambiguous). The e5 prompt no longer says which events rename emits.
 - Deciding sentences: the e1 deleted-event and full-document reasons.
 - Previous reference code: `reference/e4/registry.py` has `delete` and `create`; renaming a row in place (`UPDATE entities SET id = ?`) is the shortest implementation and emits nothing.
 - Code-plus-prompt default: rename the row in place.

@@ -51,6 +51,16 @@ class Outbox:
         if cursor.rowcount == 0:
             raise KeyError((entity_id, epoch, seq))
 
+    def ack_many(self, events):
+        events = list(events)
+        with self.connection:
+            for entity_id, seq in events:
+                cursor = self.connection.execute(
+                    "UPDATE events SET delivered = 1 WHERE entity_id = ? AND epoch = ? AND seq = ?",
+                    (entity_id, self.epoch(entity_id), seq))
+                if cursor.rowcount == 0:
+                    raise KeyError((entity_id, seq))
+
     def compact(self):
         with self.connection:
             self.connection.execute("DELETE FROM events WHERE delivered = 1")

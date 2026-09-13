@@ -66,22 +66,29 @@ class CompactionTests(Store):
 
 
 class BulkTests(Store):
-    def test_delete_many_is_all_or_nothing(self):
-        self.registry.create("a", {})
-        self.registry.create("b", {})
-        with self.assertRaises(KeyError):
-            self.registry.delete_many(["a", "missing"])
-        self.assertEqual(self.registry.get("a"), {})
+    def test_delete_many_removes_listed_entities(self):
+        for entity_id in ("a", "b", "c"):
+            self.registry.create(entity_id, {})
         self.registry.delete_many(["a", "b"])
         for entity_id in ("a", "b"):
             with self.assertRaises(KeyError):
                 self.registry.get(entity_id)
+        self.assertEqual(self.registry.get("c"), {})
+        with self.assertRaises(KeyError):
+            self.registry.delete_many(["missing"])
+
+    def test_failed_delete_many_changes_nothing(self):
+        self.registry.create("a", {"v": 1})
+        self.registry.create("b", {"v": 2})
+        with self.assertRaises(KeyError):
+            self.registry.delete_many(["a", "missing", "b"])
+        self.assertEqual(self.registry.get("a"), {"v": 1})
+        self.assertEqual(self.registry.get("b"), {"v": 2})
+        self.assertEqual(sorted(self.events()), [("a", 1, "created"), ("b", 1, "created")])
 
     def test_delete_many_emits_deleted_for_each(self):
         self.registry.create("a", {"v": 1})
         self.registry.create("b", {"v": 2})
-        with self.assertRaises(KeyError):
-            self.registry.delete_many(["a", "missing"])
         self.registry.delete_many(["a", "b"])
         self.assertEqual(sorted(self.events()), [("a", 1, "created"), ("a", 2, "deleted"), ("b", 1, "created"), ("b", 2, "deleted")])
 

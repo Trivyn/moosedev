@@ -44,6 +44,11 @@ class VisibleTests(unittest.TestCase):
         self.registry.patch("x", {"b": 2})
         self.assertEqual(self.registry.get("x"), {"a": 1, "b": 2})
 
+    def test_ack_many(self):
+        self.outbox.emit("a", "updated", {})
+        self.outbox.ack_many([("a", 1)])
+        self.assertEqual(self.outbox.pending(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
