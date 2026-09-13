@@ -155,20 +155,28 @@ hashes change.
    an offline calibration on single later episodes started from the reference.
 5. **Block order and model roles.** *Recommended:* Qwen3.8-27B first. Qwen is
    the model of record: primary outcomes and conclusions rest on its cells,
-   and its first harness cell is the pre-block harness-bug check. Gemma E4B is
-   exploratory (maintainer, 2026-09-13: included out of curiosity about the
-   model-size floor; any improvement on it is a win). Its cells run second,
-   are reported separately. The point of the harness studies is to find the
-   floor, the smallest reasonable local model that works with the harness
-   (maintainer, 2026-09-13); the v2 MCP-only setup with Codex and Claude Code
-   effectively needed Sonnet-class models to use MOOSEDev reliably. Gemma E4B
-   results are floor evidence, showing where the harness stops working, not a
-   verdict on the harness; Qwen3.8-27B remains the model of record. Qwen first also gives horizon evidence sooner, because
-   long horizons need early episodes to pass.
-6. **Floor bracketing.** Open. With only a 4B and a 27B model the floor cannot
-   be bracketed: a Gemma failure and a Qwen success leave everything in between
-   unknown. Consider adding one mid-size local model (roughly 8 to 14B) as a
-   third model, at the cost of 6 more cells (about 14 more episodes per arm).
+   and its first harness cell is the pre-block harness-bug check. The point of
+   the harness studies is to find the floor, the smallest reasonable local
+   model that works with the harness (maintainer, 2026-09-13); the v2 MCP-only
+   setup with Codex and Claude Code effectively needed Sonnet-class models to
+   use MOOSEDev reliably. Qwen first also gives horizon evidence sooner,
+   because long horizons need early episodes to pass.
+6. **Second model.** *Decided (maintainer, 2026-09-13; graph AD 68697d8d):*
+   `google/gemma-4-26b-a4b` replaces Gemma E4B. E4B's floor evidence is
+   already clear: its harness retry-ledger run never passed in v3, and after
+   the replan fixes it never edited, continuing 82 replans to the deadline
+   (Lesson d42f1fba). In long-horizon cells a failed early episode blocks the
+   later ones, so E4B would mostly re-measure episode 1. gemma-4-26b-a4b is a
+   mixture-of-experts model in the same family, 26B total and about 4B active,
+   already downloaded and close to small-model speed; it tests whether active
+   capacity or total knowledge sets the floor. Its cells run second, are
+   reported separately, and a failure there is floor evidence, not a verdict
+   on the harness. E4B stays at most an optional single-episode probe outside
+   the comparison.
+7. **Further floor bracketing.** Open. If Qwen succeeds and gemma-4-26b-a4b
+   fails, the floor lies between 4B-active and 27B-dense. A third model would
+   narrow it at the cost of 6 more cells: Qwen3.5-35B-A3B is on disk; a dense
+   8 to 14B model would need a download.
 
 **Fixed, not a decision:** before any block, the first harness cell of the
 block order (Qwen's, under the recommended order) runs alone into a discarded store and its journal is read. An
