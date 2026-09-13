@@ -5,7 +5,7 @@
   "facts": [
     {
       "id": "outbox-seq-contiguous",
-      "claim": "Each entity ID has its own sequence: the first event is seq 1 and each next event is the previous seq plus 1, strictly increasing and contiguous across restarts and compaction, because the external search indexer keeps the last seq per ID, discards any event whose seq is not greater and treats gaps as lost events. A single global autoincrement was rejected because it leaves per-entity gaps. From episode 4 this holds within each epoch.",
+      "claim": "Each entity ID has its own sequence: the first event is seq 1 and each next event is the previous seq plus 1, strictly increasing and contiguous across restarts, because the external search indexer keeps the last seq per ID, discards any event whose seq is not greater and treats gaps as lost events. A single global autoincrement was rejected because it leaves per-entity gaps.",
       "kind": "ArchitecturalDecision",
       "evidence": [
         "scenario.json#/episodes/0/prompt"
@@ -15,7 +15,7 @@
     },
     {
       "id": "outbox-seq-lifetime",
-      "claim": "An entity ID's numbering continues for as long as the ID has ever existed in the outbox, including after it is deleted and created again.",
+      "claim": "An entity ID's seq stays strictly increasing and contiguous for as long as that ID has ever existed in the outbox, including across restarts.",
       "kind": "Constraint",
       "evidence": [
         "scenario.json#/episodes/0/prompt"
@@ -47,7 +47,7 @@
     },
     {
       "id": "outbox-failed-request-no-effect",
-      "claim": "A request that raises leaves the database exactly as it was, with no events and no other writes, because the indexer must never see an event for a change that did not happen and callers retry a failed request after fixing it. Multi-item requests (delete_many, ack_many) are all or nothing.",
+      "claim": "A request that raises leaves the database exactly as it was, with no events and no other writes, because the indexer must never see an event for a change that did not happen and callers retry a failed request after fixing it.",
       "kind": "Constraint",
       "evidence": [
         "scenario.json#/episodes/0/prompt"
@@ -67,7 +67,7 @@
     },
     {
       "id": "outbox-compaction",
-      "claim": "ack marks an event delivered (unknown events raise KeyError), compact deletes delivered events, pending excludes delivered events, and compaction never changes numbering.",
+      "claim": "Outbox.ack(entity_id, seq) marks an event delivered (an unknown event raises KeyError), Outbox.compact() deletes delivered events from the database, and pending() leaves out delivered events whether or not they have been compacted.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -77,7 +77,7 @@
     },
     {
       "id": "outbox-delete-many",
-      "claim": "Registry.delete_many removes every listed entity and emits each one's deleted event; if any listed ID does not exist it raises KeyError, and then removes nothing and emits nothing.",
+      "claim": "Registry.delete_many(entity_ids) removes every listed entity; if any listed ID does not exist it raises KeyError.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -87,7 +87,7 @@
     },
     {
       "id": "outbox-patch",
-      "claim": "Registry.patch merges changes into the entity's data and emits an updated event carrying the complete merged data; patching a missing entity raises KeyError.",
+      "claim": "Registry.patch(entity_id, changes) merges changes into the entity's data (keys in changes replace existing keys) and emits an updated event; patching an entity that does not exist raises KeyError.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/3/prompt"
@@ -97,7 +97,7 @@
     },
     {
       "id": "outbox-ack-many",
-      "claim": "Outbox.ack_many acknowledges (entity_id, seq) pairs in each entity's current epoch; an unknown event raises KeyError and then nothing is acknowledged.",
+      "claim": "Outbox.ack_many(events) acknowledges several events given as (entity_id, seq) pairs in each entity's current epoch; an unknown event raises KeyError.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/3/prompt"
@@ -117,7 +117,7 @@
     },
     {
       "id": "outbox-rename",
-      "claim": "Registry.rename makes the new ID hold the data and the old ID missing, emitting a deleted event for the old ID and a created event with the complete data for the new ID; renaming onto a live ID raises ValueError and renaming a missing entity raises KeyError; renaming onto a previously deleted ID starts a new epoch for it.",
+      "claim": "Registry.rename(old_id, new_id) makes get(new_id) return the entity's data and get(old_id) raise KeyError; renaming onto an ID that currently exists raises ValueError, and renaming an entity that does not exist raises KeyError.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/4/prompt"

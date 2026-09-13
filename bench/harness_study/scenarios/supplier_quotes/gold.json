@@ -5,7 +5,7 @@
   "facts": [
     {
       "id": "quote-unit-rounding",
-      "claim": "Each unit price is converted to integer cents and rounded half up once, because the supplier invoices per unit; line and basket totals are unit cents times quantity, summed. Rounding a line or basket total was rejected because it disagrees with the invoice. This holds through discounts and the micro-unit representation.",
+      "claim": "Each unit price, which the supplier returns as a decimal string, is converted to integer cents per unit and rounded half up once, because the supplier invoices per unit; total_cents is unit_cents times qty. Rounding the line total instead was rejected because it disagrees with the invoice.",
       "kind": "ArchitecturalDecision",
       "evidence": [
         "scenario.json#/episodes/0/prompt"
@@ -25,7 +25,7 @@
     },
     {
       "id": "quote-billed-calls",
-      "claim": "A request naming an unknown SKU raises KeyError before the supplier is contacted at all, on every code path that contacts the supplier (quote, quote_many, warm), because every supplier call is billed and a failed request must cost nothing.",
+      "claim": "A request that names an unknown SKU (one not in the catalog) raises KeyError before the supplier is contacted at all, on every code path that contacts the supplier, because every supplier call is billed and a failed request must cost nothing.",
       "kind": "Constraint",
       "evidence": [
         "scenario.json#/episodes/0/prompt"
@@ -47,7 +47,7 @@
     },
     {
       "id": "quote-basket",
-      "claim": "quote_many returns per-line quotes in order and the basket total. The supplier rate-limits requests, so redundant fetches are avoided: within one call each distinct SKU is fetched at most once (across calls clause 7, and later the guarantee, decide reuse).",
+      "claim": "QuoteService.quote_many(lines) takes (sku, qty) pairs and returns {\"lines\": [...], \"total_cents\": ...}: the quote for each pair in order, in the form quote returns, and the basket total in cents; an empty list returns no lines and a total of 0. The supplier rate-limits requests, so redundant supplier fetches are avoided.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/1/prompt"
@@ -57,7 +57,7 @@
     },
     {
       "id": "quote-price-guarantee",
-      "claim": "Contract v2 replaces clause 7: a price fetched at clock time t may be reused while clock() - t < 600 seconds across quote, quote_many and later warm, with an injectable clock.",
+      "claim": "Supplier contract v2 replaces clause 7: a fetched price is guaranteed for 600 seconds. QuoteService takes an optional clock that returns seconds; a price fetched at time t may be reused by quote and quote_many calls made while clock() - t < 600, and must be fetched again after that.",
       "kind": "ArchitecturalDecision",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -67,7 +67,7 @@
     },
     {
       "id": "quote-volume-discount",
-      "claim": "A line of 10 or more units costs 5% less; per the per-unit invoice, each discounted unit price is rounded once and the line total is that times quantity.",
+      "claim": "The supplier grants a 5% volume discount: a line of 10 or more units costs 5% less.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/2/prompt"
@@ -107,7 +107,7 @@
     },
     {
       "id": "quote-orders",
-      "claim": "quote_orders returns the quote_many result for each basket in order; as a supplier-contacting path it rejects an unknown SKU in any basket before contacting the supplier.",
+      "claim": "QuoteService.quote_orders(orders) takes a list of baskets, each a list of (sku, qty) pairs, and returns the quote_many result for each basket, in order.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/4/prompt"
@@ -117,7 +117,7 @@
     },
     {
       "id": "quote-new-skus",
-      "claim": "The catalog includes flowers (shelf life 5 days, perishable) and frozen_peas (180 days).",
+      "claim": "The catalog includes flowers with shelf_life_days 5 and frozen_peas with shelf_life_days 180.",
       "kind": "Requirement",
       "evidence": [
         "scenario.json#/episodes/4/prompt"

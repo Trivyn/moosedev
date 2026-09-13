@@ -391,6 +391,22 @@ supersession NP-7 to NP-9 (task probe `e3-np9`, currency probe
 `entity_outbox` keeps lifetime numbering to epochs, both full supersessions
 with a retired test.
 
-### `supplier_quotes` and `entity_outbox`
+### `supplier_quotes` and `entity_outbox` (decided)
 
-Pending.
+4. **Claims that named later episodes or restated earlier rules.** The
+   late-fees rule was applied to both packages: each gold claim states only
+   what its own episode's task text states. Trimmed in `supplier_quotes`:
+   `quote-unit-rounding` (basket, discount and micro-unit clauses),
+   `quote-billed-calls` (the list of later paths), `quote-basket` (the
+   within-one-call scoping the refetch probe tests), `quote-price-guarantee`
+   ("later warm"), `quote-volume-discount`, `quote-orders` and
+   `quote-new-skus` (consequences of earlier rules). Trimmed in
+   `entity_outbox`: `outbox-seq-contiguous` (compaction and epochs),
+   `outbox-seq-lifetime` (now episode 1's own wording, so re-creation stays
+   the inference `e2-recreate` measures), `outbox-failed-request-no-effect`
+   (the later multi-item paths), `outbox-compaction`, `outbox-delete-many`,
+   `outbox-patch`, `outbox-ack-many` and `outbox-rename` (consequences of
+   episode-1 and episode-4 rules). Every consequence stays expected through the
+   earlier fact that states it. Hidden tests, probes, blind audit results,
+   forbidden claims and both full supersessions are unchanged. Long-horizon
+   validate 113/113; study suite green.
