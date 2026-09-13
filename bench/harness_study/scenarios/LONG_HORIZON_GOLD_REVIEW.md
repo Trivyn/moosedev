@@ -137,10 +137,11 @@ hashes change.
 
 ## Decisions for James before any run
 
-1. **Failure policy.** Today a hidden-check failure stops the run and hides
-   every later episode. *Recommended:* continue after a hidden-check failure
-   and stop only when an episode fails to complete, so one retention miss does
-   not hide later episodes. Per-test independence makes later probes readable.
+1. **Failure policy.** *Decided (maintainer, 2026-09-13):* continue after a
+   hidden-check failure and stop only when an episode fails to complete, so one
+   retention miss does not hide later episodes. Today's driver stops on any
+   hidden-check failure; the long-horizon mode must implement the new policy.
+   Per-test independence makes later probes readable.
 2. **Primary outcome.** *Recommended:* an episode passes when it completes, the
    probes it introduces pass, and nothing that passed in the previous attempted
    episode regresses. Horizon reached is the run of leading passing episodes.
