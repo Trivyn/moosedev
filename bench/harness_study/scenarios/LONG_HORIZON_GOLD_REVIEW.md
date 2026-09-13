@@ -63,11 +63,9 @@ Every hidden test method is declared in `scenario.json` as one probe:
   blind reader condition A does not apply to currency probes; they
   discriminate only against stale notes or records.
 
-Every episode has a task probe. After audit round 2, `supplier_quotes` and
-`late_fees` have at least one audited correctness retention probe (PASS or weak
-PASS; currency does not count) in every episode after e1. `entity_outbox` e2
-and e5 do; its e3 and e4 correctness probes are new in revision 3 and await
-round 3. Every retention and currency probe has at least one negative fixture
+Every episode has a task probe. After audit round 3, all three packages have
+at least one audited correctness retention probe (PASS or weak PASS; currency
+does not count) in every episode after e1. Every retention and currency probe has at least one negative fixture
 that fails exactly the probes it declares.
 
 ## Measurement
@@ -324,5 +322,19 @@ existing `ack` writes before it checks).
 
 ### Round 3
 
-Pending. Packets cover only the new `entity_outbox` e3-delete-many-atomic and
-e4-ack-many-atomic probes.
+Same method: fresh Claude Sonnet readers, condition A answered and saved before
+the condition B records were opened. Packets covered only the two new
+`entity_outbox` correctness probes.
+
+| Package | Probe | Measures | A | B | Verdict |
+|---|---|---|---|---|---|
+| entity_outbox | e3-delete-many-atomic | correctness | right, ambiguous (inferred validate-first from `update`/`delete` raising before mutating) | right, determined (cites the e1 no-partial-writes constraint) | PASS (weak) |
+| entity_outbox | e4-ack-many-atomic | correctness | right, ambiguous (inferred from the e3 reference's validate-first `delete_many`) | right, determined | PASS (weak) |
+
+Both probes pass weakly: a no-memory reader reaches the gold answer by analogy
+but cannot settle it, and the deciding record settles it. The e4 reader's
+analogy came from the e3 reference itself, the long-horizon form of the round-1
+pattern (earlier episodes' code becomes local evidence). With these, every
+episode after e1 in all three packages has an audited correctness probe.
+Recorded as graph Lesson 2f56f4de; the stale seed clause finding is Lesson
+8b72b8ed.
