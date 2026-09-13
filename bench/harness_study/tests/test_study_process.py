@@ -256,6 +256,22 @@ sys.exit(2)''',
         self.assertIsNone(result["first_edit_seconds"])
         self.assertEqual(sum(kind == "input" and value.get("text") == "/approve" for kind, value in records), 1)
 
+    def test_deadline_snapshot_is_taken_before_the_interrupt_cancels_a_busy_task(self):
+        result, _ = self.run_client("""
+            import json, sys
+            json.loads(sys.stdin.readline())
+            task = {"id":"one", "phase":"Planning", "steps":3, "edits":[], "intent_events":[]}
+            print(json.dumps({"type":"state", "model":"frozen-model", "busy":True, "task":task}), flush=True)
+            assert json.loads(sys.stdin.readline())["type"] == "interrupt"
+            task["phase"] = "Cancelled"
+            print(json.dumps({"type":"state", "model":"frozen-model", "busy":False, "task":task}), flush=True)
+            assert json.loads(sys.stdin.readline())["type"] == "quit"
+            print(json.dumps({"type":"closed"}))
+        """, backend="harness", seconds=0.3, expected_model="frozen-model")
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["terminal_cause"], "deadline_in_phase:Planning")
+        self.assertEqual(result["terminal_detail"], "Planning")
+
     def test_first_applied_edit_is_timed_relative_to_episode_start(self):
         result, _ = self.run_client("""
             import json, sys

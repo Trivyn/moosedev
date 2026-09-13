@@ -250,7 +250,11 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
         if backend != "harness" or event_type != "state":
             return
         task = event.get("task") or {}
-        last_task = task
+        # The deadline interrupt cancels a busy task, and the session then emits
+        # one more state whose phase is Cancelled. The terminal cause names the
+        # phase at the deadline, so the last task freezes when shutdown begins.
+        if shutdown_deadline is None or last_task is None:
+            last_task = task
         if first_edit_monotonic is None and task.get("edits"):
             first_edit_monotonic = time.monotonic()
         recovery = task.get("recovery")
