@@ -148,9 +148,18 @@ hashes change.
    Correctness retention and currency pass rates are the explanatory
    breakdown, reported conditionally (episode completed and its task probes
    passed) and unconditionally; cost counts are reported beside them.
-3. **Build.** *Recommended:* a new frozen build carrying the replan
-   continuation, the attested own final capture and graph-first search, not
-   v3's `1cd75b0b`.
+3. **Build.** *Decided (maintainer, 2026-09-13):* settle plan-time recall
+   first, with a crowded-graph probe, and let the build follow. Build 1d31f454
+   already carries the replan continuation, the attested own final capture and
+   graph-first search, and the long-horizon mode is Python driver code, so
+   without plan-time recall 1d31f454 is reused. The seeded late fees episode 1
+   check cannot settle plan-time recall: its graph holds two seed records, so
+   the task-start push (top 12 records) and the dossier of the linked late-fee
+   code already deliver everything. The probe is a variant with many realistic
+   distractor records in which the deciding record is neither linked to code
+   the model reads nor in the top 12 for the task; it runs before and after
+   plan-time recall, and a new build is frozen only if plan-time recall is
+   adopted.
 4. **Native no-notes floor arm.** Open. It adds 6 cells and a new guidance key,
    and shows how much a well-kept notes file contributes. The alternative is
    an offline calibration on single later episodes started from the reference.
