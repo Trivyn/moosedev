@@ -208,6 +208,22 @@ the rule above; the Gemma native cells 1, 6 and 10 and all v2 runs are retained
 unscored and never pooled. Changes for v3: the capture fixes listed above.
 Attempt v3 re-runs all twelve cells in the same block order.
 
+## After attempt v3 (study `harness-symbolic-baseline-v3`, build `1cd75b0b…`)
+
+Attempt v3 ran all twelve cells and closed; its result is Lesson `1aa42909` and
+its build is sealed. Three runner changes were made afterwards and have not run
+under any study identity:
+
+- a model replan with nothing new since approval continues the approved plan,
+  and real replans keep the working set;
+- the task's own accepted final note completes without renewed approval when
+  the daemon attests its review, governing records and its own code links
+  included;
+- search returns accepted project knowledge before repository matches, and the
+  sensor role states that graph answers are authoritative.
+
+A study that runs them needs a new build identity, study id and store.
+
 ## Rules
 
 No mid-campaign fixes. Retain every failure. A provider stall may be replaced

@@ -47,6 +47,18 @@ class CauseTableTests(unittest.TestCase):
                 self.assertEqual(classify({"status": "agent_failure", "returncode": 0, "timed_out": True},
                                           task, final, state()), expected)
 
+    def test_step_cap_is_named_within_the_runner_error_row(self):
+        final = {"terminal": "agent_failure", "cause": "runner_error", "reason": "cap"}
+        cap = {"phase": "Working", "steps": 256, "last_error_kind": "other",
+               "last_error": "task reached 256 model steps; inspect and provide new guidance"}
+        outcome = {"status": "agent_failure", "returncode": 0}
+        self.assertEqual(classify(outcome, cap, final, state()), ("runner_error", "step_cap"))
+        for task in (dict(cap, steps=12), dict(cap, last_error="other failure"), dict(cap, last_error_kind="model_output")):
+            with self.subTest(task=task):
+                self.assertNotEqual(classify(outcome, task, final, state())[1], "step_cap")
+        self.assertIn("runner_error", TERMINAL_CAUSES)
+        self.assertNotIn("step_cap", TERMINAL_CAUSES)
+
     def test_row8_untyped_last_error_is_unknown_only_when_key_is_absent(self):
         task = {"phase": "Working", "last_error": "failed"}
         self.assertEqual(classify({"status": "agent_failure", "returncode": 0}, task, None, state()),

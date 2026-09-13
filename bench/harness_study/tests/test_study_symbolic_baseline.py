@@ -28,6 +28,7 @@ SEALED = {
 BASELINE_BUILD = "abe95d92da7994ec9a801073899e480d58a492f5987e1957fff67fa45a6e1fb6"
 SYMBOLIC_V1_BUILD = "9aa4f75c5265db4c503ab319ffa7909393d593407f115865858b6c1b3f5fdb66"
 SYMBOLIC_V2_BUILD = "a0fcebdecde28c1f308a600654de15e035c968b1438035752923274b0cad9aed"
+SYMBOLIC_V3_BUILD = "1cd75b0b9aac5afc74128e39df37f64584e493a7fa3c62ce2dcf9b5a454ab09d"
 
 
 def specification(stage=STAGE):
@@ -92,10 +93,11 @@ class SymbolicDesignTests(unittest.TestCase):
         self.assertEqual(payload["reject_loop_limit"], evolution.BASELINE_REJECT_LOOP_LIMIT)
         self.assertEqual(payload["episode_limit"], 1)
         self.assertEqual(payload["runner_changes"], list(evolution.S8_RUNNER_CHANGES))
-        self.assertEqual(len(payload["runner_changes"]), 8)
+        self.assertEqual(len(payload["runner_changes"]), 11)
         self.assertEqual(payload["sealed_predecessors"],
-                         list(evolution.SEALED_PREDECESSORS) + [BASELINE_BUILD, SYMBOLIC_V1_BUILD, SYMBOLIC_V2_BUILD])
-        self.assertEqual(len(payload["sealed_predecessors"]), 7)
+                         list(evolution.SEALED_PREDECESSORS)
+                         + [BASELINE_BUILD, SYMBOLIC_V1_BUILD, SYMBOLIC_V2_BUILD, SYMBOLIC_V3_BUILD])
+        self.assertEqual(len(payload["sealed_predecessors"]), 8)
         self.assertEqual(payload["preregistration_sha256"],
                          hashlib.sha256((DOCS / "SYMBOLIC.md").read_bytes()).hexdigest())
         self.assertEqual(payload["historical_baseline"], intent.design_identity())

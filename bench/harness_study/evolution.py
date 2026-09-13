@@ -51,7 +51,10 @@ SEALED_BASELINE = ("abe95d92da7994ec9a801073899e480d58a492f5987e1957fff67fa45a6e
 SEALED_SYMBOLIC_V1 = ("9aa4f75c5265db4c503ab319ffa7909393d593407f115865858b6c1b3f5fdb66",)
 # Attempt v2, stopped after its Gemma block (a captured note was re-captured after governing review).
 SEALED_SYMBOLIC_V2 = ("a0fcebdecde28c1f308a600654de15e035c968b1438035752923274b0cad9aed",)
-SEALED_SYMBOLIC_PREDECESSORS = SEALED_PREDECESSORS + SEALED_BASELINE + SEALED_SYMBOLIC_V1 + SEALED_SYMBOLIC_V2
+# Attempt v3, closed after all twelve cells (Lesson 1aa42909).
+SEALED_SYMBOLIC_V3 = ("1cd75b0b9aac5afc74128e39df37f64584e493a7fa3c62ce2dcf9b5a454ab09d",)
+SEALED_SYMBOLIC_PREDECESSORS = (SEALED_PREDECESSORS + SEALED_BASELINE + SEALED_SYMBOLIC_V1 + SEALED_SYMBOLIC_V2
+                                + SEALED_SYMBOLIC_V3)
 SYMBOLIC_REQUIREMENT = "https://moosedev.dev/kg/Requirement/9ae68a19-08c9-4317-aa75-029e08e2c5b6"
 SYMBOLIC_DECISION = "https://moosedev.dev/kg/ArchitecturalDecision/9dcaddeb-4027-4178-90ab-4aee30199d45"
 SYMBOLIC_BOUNDS = {"scope_escapes": 3, "retypes": 3, "noop_continuations": 1}
@@ -65,7 +68,10 @@ S8_RUNNER_CHANGES = ("symbolic-only harness; task journal schema 2",
                      "daemon-rejected or colliding typed capture retypes under fresh ids, three per note, then parks",
                      "typing invalidated on source or knowledge change without a model call",
                      "plan checks must be runnable commands; a required check the shell cannot start is reported as invalid",
-                     "a captured final note is never invalidated or submitted again; a colliding title keeps its qualifier within the cap")
+                     "a captured final note is never invalidated or submitted again; a colliding title keeps its qualifier within the cap",
+                     "a model replan with nothing new since approval continues the approved plan; real replans keep the working set",
+                     "the task's own accepted final note completes without renewed approval when the daemon attests its review, governing records and own code links included",
+                     "search returns accepted project knowledge before repository matches; the sensor role states graph answers are authoritative")
 
 
 def postedit_association_contract(mode):

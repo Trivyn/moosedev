@@ -68,7 +68,8 @@ SYMBOLIC_EVENT_KINDS = (
     "noop_edit_continuation", "association_derived", "association_none", "association_skipped",
     "association_unresolved", "capture_deferred", "capture_note", "capture_typed",
     "reconciled_restates", "reconciled_refines", "reconciled_distinct",
-    "plan_check_rejected", "check_unrunnable")
+    "plan_check_rejected", "check_unrunnable", "replan_continuation", "replan_noop", "model_replan",
+    "final_review_attested", "knowledge_search")
 
 
 def symbolic_metrics(events, model_requests):
@@ -91,8 +92,42 @@ def symbolic_metrics(events, model_requests):
     metrics["structured_model_decisions"] = sum(
         1 for request in model_requests if isinstance(request, dict)
         and request.get("purpose") in SYMBOLIC_STRUCTURED_PURPOSES)
-    metrics["autonomous_recoveries"] = (metrics["scope_escape_replan"] + metrics["noop_edit_continuation"])
+    metrics["autonomous_recoveries"] = (metrics["scope_escape_replan"] + metrics["noop_edit_continuation"]
+                                        + metrics["replan_continuation"])
     return metrics
+
+
+def graph_authority_metrics(task):
+    """Whether graph answers were used instead of combing source, per task.
+
+    ``knowledge_answered_searches`` counts searches that returned accepted
+    knowledge; ``unplanned_unedited_reads`` counts file reads of files no plan
+    named and no edit touched.
+    """
+    answered = 0
+    for event in task.get("intent_events") or []:
+        if isinstance(event, dict) and event.get("kind") == "knowledge_search":
+            records = str(event.get("detail", "")).split(" ", 1)[0]
+            if records.isdigit() and int(records) > 0:
+                answered += 1
+    events = [event.get("message", "") for event in task.get("events") or [] if isinstance(event, dict)]
+    planned = set((task.get("plan") or {}).get("files") or [])
+    for message in events:
+        if message.startswith("Proposed plan: "):
+            try:
+                plan = json.loads(message[len("Proposed plan: "):])
+            except ValueError:
+                continue
+            if isinstance(plan, dict):
+                planned.update(plan.get("files") or [])
+    edited = {edit.get("file") for edit in task.get("edits") or [] if isinstance(edit, dict)}
+    reads = 0
+    for message in events:
+        if message.startswith("Read ") and ": " in message:
+            file = message[len("Read "):].split(": ", 1)[0]
+            if file not in planned and file not in edited:
+                reads += 1
+    return {"knowledge_answered_searches": answered, "unplanned_unedited_reads": reads}
 
 
 def _journal_metrics(outcome, task):
@@ -119,6 +154,7 @@ def _journal_metrics(outcome, task):
                 outcome["metrics"]["evolution_" + field] = outcome["evolution_reviews"][field]
     if (task.get("schema", 1) >= 2 or task.get("intent_policy") == "symbolic") and "intent_events" in task:
         outcome["symbolic"] = symbolic_metrics(task["intent_events"], task.get("model_requests") or [])
+        outcome["symbolic"].update(graph_authority_metrics(task))
         for field, value in outcome["symbolic"].items():
             if isinstance(value, int):
                 outcome["metrics"]["symbolic_" + field] = value

@@ -5,7 +5,8 @@ The first matching row wins; ordering is part of the frozen study identity.
 
 Harness rows (backend "harness" or absent): infrastructure, evidence_limit
 (driver evidence-volume guard, any backend), success, model_repair_exhausted,
-typed last_error kinds, reviewer terminals (reviewer_scope_rejection,
+typed last_error kinds (the runner's step cap is named by its detail,
+runner_error/step_cap), reviewer terminals (reviewer_scope_rejection,
 clarification_cap, reviewer_reject_loop), purpose exhaustion, symbolic parks
 (scope_escape_exhausted, capture_retype_exhausted: the runner parked itself in
 AwaitingInput after its autonomous bound), deadlines, unknown. Native rows (any
@@ -92,6 +93,9 @@ def classify(outcome, last_task, final, driver_state):
             return "daemon_rejection", kind
         if kind == "service":
             return "infrastructure", "service"
+        if kind == "other" and str(task["last_error"]).startswith("task reached") \
+                and (task.get("steps") or 0) >= 256:
+            return "runner_error", "step_cap"
         if kind in {"model_output", "other"}:
             return "runner_error", kind
         if "last_error_kind" not in task:

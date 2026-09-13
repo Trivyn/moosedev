@@ -149,12 +149,18 @@ proposals remain outside policy authority until ratified. Completion requires th
 human acceptance/rejection of outstanding capture operations (or consolidated
 no-change confirmation), graph persistence, and validation. Ratification can
 invalidate a prior plan approval and require renewed approval and verification.
-An accepted final proposal can retain verification only when the daemon proves
-that the task's non-governing review alone caused the revision change. Changes to
-requirements, constraints, lifecycle, or unrelated knowledge retain the approval
-gate.
+The task's own accepted final note completes without renewed approval or
+re-verification when the daemon proves that its review alone caused the revision
+change, counting the code entities and record-entity edges its own links write;
+this holds for requirements and constraints too (`final_review_attested`). The
+runner asks only after every plan check passed with nothing else pending, and
+refreshes first so it never sends a stale expected revision. A supersession or
+retraction, a capture that is no longer the final checkpoint (for example after
+steering), an unrelated or concurrent knowledge change, or a source change
+retains the approval gate.
 At final review, operations can be accepted in either order. Governing changes
-still require renewed plan approval before execution. If review succeeds but the
+outside that attested final note still require renewed plan approval before
+execution. If review succeeds but the
 final checkpoint fails, `/continue` retries completion without repeating capture
 or claiming that no knowledge changed.
 
@@ -227,8 +233,9 @@ to fit the model window.
 
 Repository navigation previews are byte-bounded (up to 8 KB), and optional
 conversation history uses only space remaining after current evidence and the
-action schema. Omitted paths are disclosed; `search` examines both paths and
-contents throughout the permitted workspace. The configured model ID is supplied
+action schema. Omitted paths are disclosed; `search` first returns the accepted
+project knowledge matching the query, then examines both paths and contents
+throughout the permitted workspace. The configured model ID is supplied
 as session metadata so the model can answer identity questions without guessing.
 Action observations use bounded previews; `inspect(event,offset)` lets the model
 read detailed journal output without repeating a command. The final checkpoint
@@ -263,17 +270,29 @@ intent contract 2.
   dossier records of its resolved definitions and takes the plan summary as the
   purpose (`obligations_derived`). One human approval; no purpose review. A file
   without governing records is ungoverned, which is journaled, not parked.
+- Knowledge. Accepted knowledge, entity dossiers and knowledge returned by
+  `search` are the project's authoritative answers: the model is told to act on
+  them instead of re-deriving or confirming them from source, and a divergence
+  between source and an accepted record is a code defect unless a record chose
+  that behaviour. `search(query)` asks the daemon for the query's accepted
+  records (an evidence-only context request: complete claims, no inventory or
+  dossiers) and returns them before repository matches (`knowledge_search`).
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). The first no-op edit runs the
   required checks instead of consuming the repair budget
-  (`noop_edit_continuation`).
+  (`noop_edit_continuation`). A model replan with no edit, command, required
+  check result or human answer since approval continues the approved plan
+  instead of reopening planning (`replan_continuation`, unbounded); a replan
+  while already planning changes nothing (`replan_noop`). A real replan keeps
+  the files already read (`model_replan`).
 - Checks. Plan checks run verbatim through `/bin/sh`, so each must start with
   an installed program, a shell builtin or a project file. A description in
   place of a command is rejected before plan approval and costs a repair
   attempt (`plan_check_rejected`). A check the shell cannot start at run time
   (exit 126 or 127) is reported as an invalid check, not a failed test
-  (`check_unrunnable`).
+  (`check_unrunnable`). A replan after any check result is a real replan,
+  since replanning is how checks change.
 - Associations. After `finish`, `POST /api/v1/harness/intent/associate` binds the
   changed definitions to their governing records with the predicate the ontology
   allows, skipping parameters, type members, locals and test paths

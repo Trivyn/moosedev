@@ -427,7 +427,10 @@ sys.exit(2)''',
                           {"id": "f", "cycle": None, "kind": "capture_typed", "detail": "SymbolicOnly, 2 proposals"},
                           {"id": "g", "cycle": None, "kind": "reconciled_restates", "detail": "x restates y"},
                           {"id": "h", "cycle": None, "kind": "reconciled_distinct", "detail": "Lesson z"},
-                          {"id": "i", "cycle": None, "kind": "link_review", "detail": "accepted"}],
+                          {"id": "i", "cycle": None, "kind": "link_review", "detail": "accepted"},
+                          {"id": "j", "cycle": "c1", "kind": "replan_continuation", "detail": "1: reconsider"},
+                          {"id": "k", "cycle": None, "kind": "knowledge_search",
+                           "detail": "2 records, 0 repository matches: cache"}],
                       "events": [{"message": "Read labels.py: source"}],
                       "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
                                          {"purpose": "harness_capture_note", "attempt": 1, "decision_id": "d2"}]}
@@ -436,8 +439,9 @@ sys.exit(2)''',
                     "association_none": 0, "association_skipped": 0, "association_unresolved": 0,
                     "capture_deferred": 1, "capture_note": 1, "capture_typed": 1, "reconciled_restates": 1,
                     "reconciled_refines": 0, "reconciled_distinct": 1, "plan_check_rejected": 0,
-                    "check_unrunnable": 0, "capture_notes": 1,
-                    "structured_model_decisions": 0, "autonomous_recoveries": 1}
+                    "check_unrunnable": 0, "replan_continuation": 1, "replan_noop": 0, "model_replan": 0,
+                    "final_review_attested": 0, "knowledge_search": 1, "capture_notes": 1,
+                    "structured_model_decisions": 0, "autonomous_recoveries": 2}
         self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,
                          "duplicate journal ids count once")
         result, records = self.run_client(f"""
@@ -448,11 +452,29 @@ sys.exit(2)''',
             print(json.dumps({{"type":"closed"}}))
         """, backend="harness", expected_model="model")
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["symbolic"], expected)
+        self.assertEqual(result["symbolic"],
+                         dict(expected, knowledge_answered_searches=1, unplanned_unedited_reads=1))
         self.assertEqual(result["metrics"]["symbolic_structured_model_decisions"], 0)
         self.assertEqual(result["metrics"]["symbolic_capture_notes"], 1)
         self.assertEqual(result["harness_recovery"]["decisions"]["d2"],
                          {"purpose": "harness_capture_note", "attempts": [1]})
+
+    def test_graph_authority_metrics_count_answered_searches_and_unplanned_reads(self):
+        from bench.harness_study.process import graph_authority_metrics
+        task = {"plan": {"files": ["cache.py"]},
+                "edits": [{"file": "ledger.py"}],
+                "events": [{"message": 'Proposed plan: {"summary":"s","files":["ledger.py","cache.py"],"checks":["true"]}'},
+                           {"message": "Read cache.py: planned source"},
+                           {"message": "Read ledger.py: planned and edited"},
+                           {"message": "Read notes.md: combing"},
+                           {"message": "Read notes.md: combing again"},
+                           {"message": "Read helpers.py: [file does not exist]"}],
+                "intent_events": [{"id": "a", "kind": "knowledge_search", "detail": "3 records, 1 repository matches: ttl"},
+                                  {"id": "b", "kind": "knowledge_search", "detail": "0 records, 4 repository matches: x"}]}
+        self.assertEqual(graph_authority_metrics(task),
+                         {"knowledge_answered_searches": 1, "unplanned_unedited_reads": 3})
+        self.assertEqual(graph_authority_metrics({}),
+                         {"knowledge_answered_searches": 0, "unplanned_unedited_reads": 0})
 
     def test_schema_2_journals_derive_review_metrics_without_a_capture_contract(self):
         import json
