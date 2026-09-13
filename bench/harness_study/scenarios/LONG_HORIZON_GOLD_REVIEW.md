@@ -153,12 +153,17 @@ hashes change.
 4. **Native no-notes floor arm.** Open. It adds 6 cells and a new guidance key,
    and shows how much a well-kept notes file contributes. The alternative is
    an offline calibration on single later episodes started from the reference.
-5. **Block order.** Open. Qwen first gives horizon evidence sooner, because
-   long horizons need early episodes to pass; Gemma first keeps the
-   model-size question first, as in the symbolic campaign.
+5. **Block order and model roles.** *Recommended:* Qwen3.8-27B first. Qwen is
+   the model of record: primary outcomes and conclusions rest on its cells,
+   and its first harness cell is the pre-block harness-bug check. Gemma E4B is
+   exploratory (maintainer, 2026-09-13: included out of curiosity about the
+   model-size floor; any improvement on it is a win). Its cells run second,
+   are reported separately, and a Gemma failure is not read as evidence
+   against the harness. Qwen first also gives horizon evidence sooner, because
+   long horizons need early episodes to pass.
 
 **Fixed, not a decision:** before any block, the first harness cell of the
-block order runs alone into a discarded store and its journal is read. An
+block order (Qwen's, under the recommended order) runs alone into a discarded store and its journal is read. An
 unexplained terminal path or a harness-class cause (runner error, controller
 invariant, daemon rejection, infrastructure, unknown) stops the campaign
 before any hours are spent.
