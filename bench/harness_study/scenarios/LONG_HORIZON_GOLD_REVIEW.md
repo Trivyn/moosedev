@@ -178,6 +178,17 @@ hashes change.
    narrow it at the cost of 6 more cells: Qwen3.5-35B-A3B is on disk; a dense
    8 to 14B model would need a download.
 
+8. **Thinking mode.** *Recommended:* pin the harness arm to reasoning off for
+   both models (`MOOSEDEV_HARNESS_RESPONSE_POLICY=reasoning-off`) and disclose
+   the arm difference. State on 2026-09-13: thinking is enabled in LM Studio
+   for gemma-4-26b-a4b, and Qwen3.8-27B's provider default already thinks.
+   The native OpenCode arm sends no reasoning option, so it inherits LM
+   Studio's setting and thinks for both models. The harness's automatic
+   response check resolved reasoning off for Qwen (its default returned
+   reasoning with no message content) and provider default for E4B, so left
+   on `auto` the harness mode for gemma-4-26b-a4b depends on what that check
+   sees. Thinking in the harness arm, if wanted, is a separate later variable.
+
 **Fixed, not a decision:** before any block, the first harness cell of the
 block order (Qwen's, under the recommended order) runs alone into a discarded store and its journal is read. An
 unexplained terminal path or a harness-class cause (runner error, controller
