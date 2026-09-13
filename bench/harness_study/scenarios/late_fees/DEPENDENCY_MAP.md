@@ -1,7 +1,7 @@
 # Dependency map: late fees
 
-Status: draft for maintainer gold review, revision 2 after blind reader audit
-round 1. Written before the hidden tests.
+Status: draft for maintainer gold review, revision 3 after blind reader audit
+round 2. Written before the hidden tests.
 
 Each probe records its round-1 verdict. Condition A gave a reader only the
 episode prompt and the previous reference code; condition B added only the
@@ -63,7 +63,7 @@ project stays under a dozen), **search**. Native OpenCode reads
 ## e3: NP-9 partially replaces NP-7; returned-payment fee
 
 ### e3-penalty-exempt: `ReturnedPaymentTests.test_nonprofits_pay_no_returned_payment_fee` (retention, measures correctness)
-- Round 1: RECORDS-FAIL. Condition B charged the foundation because the seed said "today charity is the only non-profit segment". Revision 2 removes that clause; the probe is re-audited in round 2.
+- Round 1: RECORDS-FAIL. Condition B charged the foundation because the seed said "today charity is the only non-profit segment". Revision 2 removed that clause. Round 2: PASS (condition A charged every segment; condition B right with the corrected records).
 - Deciding records, both current at e3: `fees-np7` (seed 0: "no late fee or penalty fee of any kind" for registered non-profit segments) and `fees-segments` (e2: foundation is a registered non-profit, cooperative is for-profit). NP-9 replaces NP-7 only "for late fees on invoices due on or after day 1000".
 - Previous reference code: `reference/e2/fees.py` exempts non-profits inside `late_fee` only; the new method has no precedent.
 - Code-plus-prompt default: charge the returned-payment fee to every account.
@@ -71,19 +71,18 @@ project stays under a dozen), **search**. Native OpenCode reads
 - Gold records: `fees-np7`, `fees-segments`. Harness delivery: dossier (`fees-np7`), topic (both).
 - Negative: `penalty_charged_to_nonprofits`.
 
-### e3-penalty-half-up: `ReturnedPaymentTests.test_returned_payment_fee_rounds_half_up` (retention, measures correctness)
-- Round 1: PASS, weak (condition A right but ambiguous; it followed the `percent_of` convention).
+### e3-penalty-half-up: `ReturnedPaymentTests.test_returned_payment_fee_rounds_half_up` (retention, measures cost)
+- Round 1: PASS, weak (condition A right but ambiguous). Round 2: INFERABLE (condition A followed the `percent_of` convention with confidence). Relabelled cost in revision 3.
 - Deciding sentence: seed 1.
-- Previous reference code: `reference/e2/fees.py` rounds the late fee half up with `Decimal`; a new method may not reuse it.
-- Code-plus-prompt default: `round(amount_cents * 0.025)`, which rounds 252.5 to 252.
-- Discrimination: **medium** (low if the helper is reused).
+- Cost measured: taking half-up rounding from `fees-cents` instead of reading `fees.py` to find and reuse `percent_of`.
+- Discrimination: **low** for correctness; cost probe.
 - Gold record: `fees-cents`. Harness delivery: dossier, topic.
 - Negative: `penalty_bankers_rounding`.
 
 ## e4: a third non-profit segment, a forecast and a collection penalty
 
-### e4-collection-exempt: `CollectionTests.test_nonprofits_pay_no_collection_penalty` (retention, measures correctness, new)
-- Round 1: not audited (new in revision 2).
+### e4-collection-exempt: `CollectionTests.test_nonprofits_pay_no_collection_penalty` (retention, measures correctness)
+- Round 1: not audited (new in revision 2). Round 2: PASS (condition A charged the non-profits).
 - Deciding records, current at e4: `fees-np7` (current for every penalty fee and for late fees on invoices due before day 1000), `fees-np9` (e3: replaces NP-7 only for late fees on invoices due on or after day 1000), and `fees-segments`.
 - Previous reference code: `reference/e3/fees.py` has two precedents. `late_fee` charges a registered non-profit a flat 200 cents on invoices due on or after day 1000; `returned_payment_fee` exempts non-profits. A collection penalty is tied to an invoice's due day, like the late fee.
 - Code-plus-prompt default: copy the late fee's structure, charging a non-profit 200 cents on an invoice due on or after day 1000.

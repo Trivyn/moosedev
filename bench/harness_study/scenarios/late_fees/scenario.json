@@ -230,7 +230,7 @@
             "fees-cents"
           ],
           "decided_by": "scenario.json#/initial_facts/1",
-          "measures": "correctness"
+          "measures": "cost"
         }
       ],
       "retired_tests": []
