@@ -1,6 +1,8 @@
 //! Derived code associations use existing graph predicates and ratification.
 //! A symbol is usable only while filesystem evidence proves its indexed source.
+use super::context::current_record_targets;
 use super::journal::{journal_path, load, load_or_store, lock_operations, save_operation};
+use super::review::{preflight_resolution, resolve_proposal};
 use super::revision::ensure_unchanged;
 use super::*;
 use crate::harness::digest::sha256_hex;

@@ -1235,7 +1235,7 @@ async fn capture_v2_returns_typed_collision_without_creating_an_operation() {
 
 #[test]
 fn candidate_lookup_is_complete_bounded_and_shacl_derived() {
-    use daemon::reconciliation::candidate_page;
+    use daemon::candidates::candidate_page;
 
     let fixture = Fixture::new();
     let state = fixture.state();
@@ -1877,7 +1877,7 @@ fn relate_with_confidence_annotates_edges_and_conforms() {
         "export dropped the reifier quads"
     );
     assert!(dump.text.contains("<<("), "export dropped the triple term");
-    let candidate = daemon::reconciliation::candidate_page(
+    let candidate = daemon::candidates::candidate_page(
         &state,
         &CaptureCandidateRequest {
             owner_id: "task-a".into(),

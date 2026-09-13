@@ -11,11 +11,11 @@ use axum::Json;
 use oxigraph::model::NamedNode;
 
 use super::current_status;
-use super::intent_candidates::{
+use super::revision::ensure_unchanged;
+use super::scope::{
     changed_scopes, entity_record_context, index_revision, index_status, intersects, maybe_refresh,
     producer_label, prove_changed_source, validate_files, validate_source_ranges,
 };
-use super::revision::ensure_unchanged;
 use crate::api::error::ApiError;
 use crate::code::substrate::{is_test_path, DefinitionEntry, DefinitionScope, SourceRange};
 use crate::graph::{self, AppState};
@@ -251,7 +251,7 @@ pub fn associate_page(
                     continue;
                 }
                 let (_, _, _, assertion_digest) =
-                    super::reconciliation::candidate_assertions(state, iri)?;
+                    super::candidates::candidate_assertions(state, iri)?;
                 let definition_range: HarnessSourceRange = scope.definition.range.into();
                 let candidate_digest = sha256_json(&(
                     &changed.file,

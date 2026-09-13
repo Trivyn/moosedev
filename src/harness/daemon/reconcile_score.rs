@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::candidates::candidate_page;
 use super::journal::{journal_path, load, load_or_store, validate_id};
-use super::reconciliation::candidate_page;
 use crate::graph::{self, AppState};
 use crate::harness::protocol::*;
 
