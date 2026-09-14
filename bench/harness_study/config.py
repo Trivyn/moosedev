@@ -175,7 +175,8 @@ def evolution_config(parent, binary_manifest, study_id, stage):
     return result
 
 
-def field_check_config(parent, binary_manifest, study_id, models, scenarios, approval_path):
+def field_check_config(parent, binary_manifest, study_id, models, scenarios, approval_path,
+                       response_policy=field_check.RESPONSE_POLICY):
     """Derive an exploratory, never-scored field check of model-table models from a symbolic-baseline preflight.
 
     Unlike an evolution stage, the field check may reuse the parent's frozen build:
@@ -205,10 +206,10 @@ def field_check_config(parent, binary_manifest, study_id, models, scenarios, app
                   episode_limit=field_check.EPISODE_LIMIT, episode_seconds=field_check.EPISODE_SECONDS,
                   context_tokens=field_check.CLIENT_CONTEXT_TOKENS,
                   generation_policy={**original.get("generation_policy", {}), "local_temperature": 0.0},
-                  harness_response_policy=field_check.RESPONSE_POLICY,
+                  harness_response_policy=response_policy,
                   evidence_byte_limit=evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
                   reject_loop_limit=evolution.BASELINE_REJECT_LOOP_LIMIT,
-                  field_check_design=field_check.design_identity(models, scenarios),
+                  field_check_design=field_check.design_identity(models, scenarios, response_policy),
                   parent_pilot={"study_id": original["study_id"], "config_sha256": parent["config_sha256"],
                                 "build_id": parent["binaries"]["build_id"],
                                 "evolution_design_sha256": original["evolution_design"]["sha256"]})
@@ -410,12 +411,15 @@ def approval_payload(reviewer, *, config=None):
         schedule(config)
         return {"schema_version": 3, "reviewer": reviewer, "approved_at": datetime.now(timezone.utc).isoformat(),
                 "scope": ("exploratory field-check design (coding models with pinned weights and runtime contexts, "
-                          "helper, arms, scenarios, episode limit, reasoning-off) and the approved fixture hashes; "
+                          f"helper, arms, scenarios, episode limit, "
+                          f"{config.get('harness_response_policy', field_check.RESPONSE_POLICY)}) and the approved fixture hashes; "
                           "not outcomes; never scored or pooled"),
                 "scenarios": {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
                               for name in config["scenario_ids"]},
                 "intent_design": intent.design_identity(),
-                "field_check_design": field_check.design_identity(config["coding_models"], config["scenario_ids"])}
+                "field_check_design": field_check.design_identity(
+                    config["coding_models"], config["scenario_ids"],
+                    config.get("harness_response_policy", field_check.RESPONSE_POLICY))}
     experimental = config is not None and config.get("evaluation_mode") == intent.MODE
     selected = config["scenario_ids"] if experimental else [name for name in list_scenarios() if name != MAINTENANCE]
     if experimental:
@@ -440,7 +444,8 @@ def verify_approval(path, *, config=None):
     if value["schema_version"] == 3:
         if value.get("intent_design") != intent.design_identity():
             raise ValueError("field-check approval does not match the current intent design")
-        design = field_check.design_identity(config["coding_models"], config["scenario_ids"])
+        design = field_check.design_identity(config["coding_models"], config["scenario_ids"],
+                                             config.get("harness_response_policy", field_check.RESPONSE_POLICY))
         if value.get("field_check_design") != design or config.get("field_check_design") != design:
             raise ValueError("field-check approval does not match the current field-check design")
         selected = list(value.get("scenarios") or {})

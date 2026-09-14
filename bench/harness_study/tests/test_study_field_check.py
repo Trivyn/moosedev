@@ -414,6 +414,36 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(checks["model_table_weights"])
 
+class ResponsePolicyVariantTests(unittest.TestCase):
+    def test_default_policy_keeps_every_existing_identity(self):
+        base = field_check.design_identity([G31B], ["retry_ledger"])
+        self.assertEqual(base, field_check.design_identity([G31B], ["retry_ledger"], "reasoning-off"))
+        self.assertNotIn("response_policy_deviation", base["payload"])
+
+    def test_provider_default_is_a_distinct_design_that_records_its_deviation(self):
+        base = field_check.design_identity([G31B], ["retry_ledger"])
+        thinking = field_check.design_identity([G31B], ["retry_ledger"], "provider-default")
+        self.assertNotEqual(base["sha256"], thinking["sha256"])
+        self.assertEqual(thinking["payload"]["harness_response_policy"], "provider-default")
+        self.assertIn("FIELD_CHECK.md", thinking["payload"]["response_policy_deviation"])
+        with self.assertRaises(ValueError):
+            field_check.design_identity([G31B], ["retry_ledger"], "auto")
+
+    def test_provider_default_config_schedules_and_its_approval_round_trips(self):
+        cfg = dict(field_config((G31B,), ("retry_ledger",)), harness_response_policy="provider-default",
+                   field_check_design=field_check.design_identity([G31B], ["retry_ledger"], "provider-default"))
+        self.assertEqual(len(config.schedule(cfg)), 2)
+        with self.assertRaises(ValueError):
+            config.schedule(dict(cfg, field_check_design=field_check.design_identity([G31B], ["retry_ledger"])))
+        approved = config.approval_payload("James Adam", config=cfg)
+        self.assertIn("provider-default", approved["scope"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "approval.json"
+            path.write_text(json.dumps(approved))
+            self.assertEqual(config.verify_approval(path, config=cfg), approved)
+            with self.assertRaisesRegex(ValueError, "design"):
+                config.verify_approval(path, config=field_config((G31B,), ("retry_ledger",)))
+
 
 if __name__ == "__main__":
     unittest.main()

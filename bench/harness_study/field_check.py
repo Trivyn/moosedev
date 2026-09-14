@@ -17,6 +17,9 @@ ARMS = evolution.ARMS[evolution.SYMBOLIC_BASELINE_MODE]
 SCENARIOS = (*intent.SCENARIOS, *long_horizon.SCENARIOS, *long_horizon.EXPLORATORY)
 POLICIES = ("symbolic",)
 RESPONSE_POLICY = "reasoning-off"
+RESPONSE_POLICIES = (RESPONSE_POLICY, "provider-default")
+RESPONSE_POLICY_DEVIATION = ("provider-default overrides FIELD_CHECK.md's reasoning-off pin: the harness sends no "
+                             "reasoning option, so both arms inherit LM Studio's model thinking setting")
 EPISODE_LIMIT = 1
 EPISODE_SECONDS = 1200
 CLIENT_CONTEXT_TOKENS = 32768
@@ -34,8 +37,10 @@ def _selection(coding_models, scenarios):
     return models, scenarios
 
 
-def design_identity(coding_models, scenarios):
+def design_identity(coding_models, scenarios, response_policy=RESPONSE_POLICY):
     models, scenarios = _selection(coding_models, scenarios)
+    if response_policy not in RESPONSE_POLICIES:
+        raise ValueError(f"field check harness_response_policy must be one of {RESPONSE_POLICIES!r}")
     payload = {
         "schema_version": 1,
         "mode": MODE,
@@ -50,7 +55,7 @@ def design_identity(coding_models, scenarios):
                             for name in scenarios if name not in intent.SCENARIOS},
         "schedule_order": "coding model, then scenario, then harness before native",
         "episode_limit": EPISODE_LIMIT,
-        "harness_response_policy": RESPONSE_POLICY,
+        "harness_response_policy": response_policy,
         "native_reasoning": "no reasoning option sent",
         "client_context_tokens": CLIENT_CONTEXT_TOKENS,
         "episode_seconds": EPISODE_SECONDS,
@@ -62,6 +67,8 @@ def design_identity(coding_models, scenarios):
         "intent_design_sha256": intent.design_identity()["sha256"],
         "document_sha256": hashlib.sha256(DOCUMENT.read_bytes()).hexdigest(),
     }
+    if response_policy != RESPONSE_POLICY:
+        payload["response_policy_deviation"] = RESPONSE_POLICY_DEVIATION
     return {"payload": payload, "sha256": hashlib.sha256(canonical_json(payload)).hexdigest()}
 
 
@@ -73,15 +80,18 @@ def verify_config(config):
         raise ValueError("field check keeps the frozen daemon helper model")
     model_table.verify_entries(config, [*models, model_table.HELPER])
     frozen = {"intent_policies": list(POLICIES), "episode_limit": EPISODE_LIMIT,
-              "harness_response_policy": RESPONSE_POLICY, "context_tokens": CLIENT_CONTEXT_TOKENS,
+              "context_tokens": CLIENT_CONTEXT_TOKENS,
               "episode_seconds": EPISODE_SECONDS, "evidence_byte_limit": evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
               "reject_loop_limit": evolution.BASELINE_REJECT_LOOP_LIMIT}
+    response_policy = config.get("harness_response_policy")
+    if response_policy not in RESPONSE_POLICIES:
+        raise ValueError(f"field check requires harness_response_policy in {RESPONSE_POLICIES!r}")
     for key, value in frozen.items():
         if config.get(key) != value:
             raise ValueError(f"field check requires {key} = {value!r}")
     if (config.get("generation_policy") or {}).get("local_temperature") != 0.0:
         raise ValueError("field check requires local temperature 0.0")
-    if config.get("field_check_design") != design_identity(models, scenarios):
+    if config.get("field_check_design") != design_identity(models, scenarios, response_policy):
         raise ValueError("field-check design identity changed")
     return config["field_check_design"]
 
