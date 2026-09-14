@@ -29,6 +29,12 @@ MODELS = {
         "runtime_context_tokens": 262144,
         "weights_sha256": "8252068e715e84786f0f662f6d6320155d0105ae3a6b769860f6f80d2096ca19",
     },
+    "qwen/qwen3.5-9b": {
+        "weights": "lmstudio-community/Qwen3.5-9B-MLX-4bit",
+        "description": "dense 9B, 4-bit MLX; floor-bracketing model",
+        "runtime_context_tokens": 262144,
+        "weights_sha256": "1952ccec586ce748a84783c67919ea70d18eeaf677f05b895d5ef46964338e36",
+    },
     "gemma-4-e4b-it-mlx": {
         "weights": "lmstudio-community/gemma-4-E4B-it-MLX-4bit",
         "description": "Gemma 4 E4B, 4-bit MLX; the daemon helper",
