@@ -97,6 +97,7 @@ impl Runner {
                 operation_id: request.operation_id.clone(),
                 proposals: vec![],
                 changed: vec![],
+                restated: vec![],
             },
             response: CaptureResponse {
                 proposals: vec![CapturedProposal {
@@ -108,6 +109,7 @@ impl Runner {
                     anchors: vec![],
                     anchor_notes: vec![],
                 }],
+                restated: vec![],
             },
             reason: "Review the relevance of each derived association; a link records relevance, not proof of implementation.".into(),
         });

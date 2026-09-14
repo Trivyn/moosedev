@@ -6,7 +6,8 @@ use super::super::scope::changed_files;
 use super::super::{Phase, Runner};
 use super::{CaptureNoteState, NoteAnswer, CAPTURE_NOTE_QUESTION, MAX_RETYPES};
 use crate::harness::protocol::{
-    CaptureRequest, CaptureTypeRequest, CaptureTypeResponse, KnowledgeProposal, TypedDisposition,
+    CaptureRequest, CaptureTypeRequest, CaptureTypeResponse, KnowledgeProposal, RestatedCandidate,
+    TypedDisposition,
 };
 use anyhow::{bail, Context, Result};
 use serde_json::json;
@@ -168,6 +169,34 @@ impl Runner {
             .filter(|typed| !matches!(typed.disposition, TypedDisposition::Restates { .. }))
             .map(|typed| typed.proposal.clone())
             .collect();
+        // A restatement that names a changed file still links its existing
+        // record to that change, through the same capture and review.
+        let edited = self.changed_file_names();
+        let mut restated_records: Vec<RestatedCandidate> = Vec::new();
+        for typed in &response.proposals {
+            if let TypedDisposition::Restates {
+                candidate_iri,
+                receipt_operation_id,
+                ..
+            } = &typed.disposition
+            {
+                if typed
+                    .proposal
+                    .files
+                    .iter()
+                    .any(|file| edited.contains(file))
+                    && !restated_records
+                        .iter()
+                        .any(|known| &known.candidate_iri == candidate_iri)
+                {
+                    restated_records.push(RestatedCandidate {
+                        candidate_iri: candidate_iri.clone(),
+                        receipt_operation_id: receipt_operation_id.clone(),
+                        files: typed.proposal.files.clone(),
+                    });
+                }
+            }
+        }
         let reason = format!(
             "Symbolic capture typing ({:?}): {} proposals, {restated} restated existing knowledge.",
             response.typing_mode,
@@ -175,7 +204,7 @@ impl Runner {
         );
         self.task.capture_reason = Some(reason.clone());
         self.event(format!("Capture assessment: {reason}"));
-        if proposals.is_empty() {
+        if proposals.is_empty() && restated_records.is_empty() {
             self.advance_after_capture_page(checkpoint_end)?;
             return Ok(false);
         }
@@ -184,6 +213,7 @@ impl Runner {
             operation_id: state.capture_operation_id,
             proposals,
             changed: changed_files(&self.task.edits)?,
+            restated: restated_records,
         });
         self.persist()?;
         Ok(true)

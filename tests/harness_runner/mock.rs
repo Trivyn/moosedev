@@ -303,7 +303,24 @@ pub(super) async fn capture_v2(
         StatusCode::OK,
         Json(
             serde_json::to_value(CaptureV2Response::Captured {
-                capture: CaptureResponse { proposals },
+                capture: CaptureResponse {
+                    proposals,
+                    // One queued link per restated record.
+                    restated: request
+                        .restated
+                        .iter()
+                        .enumerate()
+                        .map(|(index, candidate)| RestatedLinks {
+                            candidate_iri: candidate.candidate_iri.clone(),
+                            links: vec![format!(
+                                "https://moosedev.dev/kg/ProposedLink/{}-restated-{index}",
+                                request.operation_id
+                            )],
+                            anchors: vec![],
+                            anchor_notes: vec![],
+                        })
+                        .collect(),
+                },
             })
             .unwrap(),
         ),

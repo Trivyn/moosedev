@@ -93,6 +93,7 @@ impl Runner {
             owner_id: self.task.id.clone(),
             proposals: request.proposals.clone(),
             changed: request.changed.clone(),
+            restated: request.restated.clone(),
         };
         let response: CaptureResponse = match self.post("capture/v2", &submission).await {
             Ok(CaptureV2Response::Captured { capture }) => capture,
@@ -176,8 +177,9 @@ impl Runner {
     }
 }
 
-/// Definition anchors, module anchors, unanchored files and anchor notes the
-/// daemon resolved for one capture, in the fixed order the study reads.
+/// Definition anchors, module anchors, unanchored files, anchor notes and
+/// restated-record links the daemon resolved for one capture, in the fixed
+/// order the study reads.
 fn anchor_counts(response: &CaptureResponse) -> String {
     let anchors = |basis: AnchorBasis| {
         response
@@ -188,7 +190,7 @@ fn anchor_counts(response: &CaptureResponse) -> String {
             .count()
     };
     format!(
-        "{} definition anchors, {} module anchors, {} unanchored files, {} anchor notes",
+        "{} definition anchors, {} module anchors, {} unanchored files, {} anchor notes, {} restated links",
         anchors(AnchorBasis::Definition),
         anchors(AnchorBasis::Module),
         response
@@ -200,6 +202,11 @@ fn anchor_counts(response: &CaptureResponse) -> String {
             .proposals
             .iter()
             .map(|proposal| proposal.anchor_notes.len())
+            .sum::<usize>(),
+        response
+            .restated
+            .iter()
+            .map(|restated| restated.links.len())
             .sum::<usize>(),
     )
 }

@@ -81,6 +81,20 @@ pub struct CaptureRequest {
     /// to the definitions these hunks touch (capture contract 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed: Vec<ChangedFile>,
+    /// Existing records the note restated, with their receipts: capture links
+    /// each to the definitions its files' hunks touch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restated: Vec<RestatedCandidate>,
+}
+
+/// A restated note's existing record, carried with the reconciliation receipt
+/// that found it so the daemon can prove the restatement before linking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestatedCandidate {
+    pub candidate_iri: String,
+    pub receipt_operation_id: String,
+    pub files: Vec<String>,
 }
 
 impl CaptureRequest {
@@ -104,6 +118,8 @@ pub struct CaptureV2Request {
     pub proposals: Vec<KnowledgeProposal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed: Vec<ChangedFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restated: Vec<RestatedCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,6 +200,20 @@ pub enum AnchorNoteKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureResponse {
     pub proposals: Vec<CapturedProposal>,
+    /// Links queued from restated existing records, one entry per record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restated: Vec<RestatedLinks>,
+}
+
+/// The code links a capture queued for one restated existing record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestatedLinks {
+    pub candidate_iri: String,
+    pub links: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<CaptureAnchor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_notes: Vec<AnchorNote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

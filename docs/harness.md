@@ -341,7 +341,12 @@ contract 3 and intent contract 2.
   for Rust), and so does a file whose anchors were capped (`anchor_overflow`) or
   whose leaves share one span (`anchor_ambiguous`); an index that proves
   neither side is noted (`index_unproven`). The runner journals the counts once
-  per capture (`capture_anchored`).
+  per capture (`capture_anchored`). A restated note (a `restates` receipt) links
+  its existing record to the same anchors, skipping definitions the record
+  already reaches or awaits review for, so a note that only restates still
+  submits a capture. That capture is reviewed and attested like any other; the
+  attestation excludes exactly the edges its acceptance writes onto the existing
+  record.
 
 Human review remains only where a new record or a new code link is written.
 Read-only conversations never reach the final checkpoint and therefore capture

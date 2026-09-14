@@ -53,6 +53,7 @@ pub fn capture_v2_operation(
         operation_id: request.operation_id.clone(),
         proposals: request.proposals.clone(),
         changed: request.changed.clone(),
+        restated: request.restated.clone(),
     };
     if let Some(mut stored) = load::<Operation>(&path)? {
         anyhow::ensure!(
@@ -69,6 +70,11 @@ pub fn capture_v2_operation(
             capture: CaptureResponse {
                 proposals: stored
                     .entries
+                    .into_iter()
+                    .map(|entry| entry.response)
+                    .collect(),
+                restated: stored
+                    .restated
                     .into_iter()
                     .map(|entry| entry.response)
                     .collect(),
@@ -110,6 +116,11 @@ pub fn capture_v2_operation(
         capture: CaptureResponse {
             proposals: operation
                 .entries
+                .into_iter()
+                .map(|entry| entry.response)
+                .collect(),
+            restated: operation
+                .restated
                 .into_iter()
                 .map(|entry| entry.response)
                 .collect(),
@@ -255,10 +266,80 @@ fn prepare(
             reconciled: proposal.reconciled.clone(),
         });
     }
+    // A restated note links its existing record to the same kind of anchors,
+    // proven by the receipt that found the restatement. Definitions the record
+    // already reaches, or awaits review for, are skipped.
+    let pending = graph::list_proposals(state, Some("proposed"))?;
+    let mut restated = Vec::new();
+    let mut restated_records = HashSet::new();
+    for candidate in &request.restated {
+        anyhow::ensure!(
+            restated_records.insert(candidate.candidate_iri.clone()),
+            "duplicate restated record in capture batch"
+        );
+        anyhow::ensure!(
+            !retired_targets.contains(&candidate.candidate_iri),
+            "a restated record cannot be superseded or retracted by the same capture"
+        );
+        for file in &candidate.files {
+            validate_path(file)?;
+        }
+        let receipt = reconcile_score::load_receipt(state, &candidate.receipt_operation_id)?
+            .ok_or_else(|| anyhow::anyhow!("reconciliation receipt missing for restated record"))?;
+        anyhow::ensure!(
+            receipt.owner_id == owner_id
+                && receipt.disposition == "restates"
+                && receipt.candidate_iri.as_deref() == Some(candidate.candidate_iri.as_str()),
+            "restated record does not match its reconciliation receipt"
+        );
+        let class =
+            graph::require_information_record(state, &NamedNode::new(&candidate.candidate_iri)?)?;
+        anyhow::ensure!(
+            graph::in_working_set(
+                &current_status(state, &candidate.candidate_iri).unwrap_or_default()
+            ),
+            "restated record must be current accepted knowledge"
+        );
+        let kind = graph::local_name(&class).to_string();
+        let linkable = links_to_code(state, &class, &kind, &code_class);
+        let mut anchoring = anchors::proposal_anchors(
+            substrate.as_deref().filter(|_| linkable),
+            &request.changed,
+            &candidate.files,
+        )?;
+        anchoring.retain(|anchor| {
+            let awaiting = pending.iter().any(|link| {
+                link.subject_iri == candidate.candidate_iri && link.target_symbol == anchor.symbol
+            });
+            let reached = graph::get_entity_dossier(
+                state,
+                &graph::DossierTarget::Symbol(anchor.symbol.clone()),
+            )?
+            .is_some_and(|dossier| {
+                dossier
+                    .direct_records
+                    .iter()
+                    .any(|record| record.iri == candidate.candidate_iri)
+            });
+            Ok(!awaiting && !reached)
+        })?;
+        restated.push(RestatedEntry {
+            response: RestatedLinks {
+                candidate_iri: candidate.candidate_iri.clone(),
+                links: vec![],
+                anchors: anchoring.anchors,
+                anchor_notes: anchoring.notes,
+            },
+            kind,
+            anchors: anchoring.links,
+        });
+    }
     Ok(Operation {
         request,
         owner_id,
         entries,
+        restated,
+        review_restated_edges: Vec::new(),
         timestamp: Utc::now().to_rfc3339(),
         review: None,
         captured: false,
@@ -425,6 +506,25 @@ pub(super) fn finish_capture(
                     Utc::now(),
                 )?,
             };
+            if !entry.response.links.contains(&iri) {
+                entry.response.links.push(iri);
+            }
+        }
+    }
+    for entry in &mut operation.restated {
+        for (symbol, file) in &entry.anchors {
+            // Prepare skipped every pending link to this target, so a pending
+            // one found here is this operation's own from an interrupted try.
+            let iri = graph::propose_link_unlocked(
+                state,
+                &entry.response.candidate_iri,
+                graph::link_predicate_for_kind(&entry.kind),
+                symbol,
+                file,
+                "restated knowledge; code changed by the captured work",
+                AUTHOR,
+                Utc::now(),
+            )?;
             if !entry.response.links.contains(&iri) {
                 entry.response.links.push(iri);
             }

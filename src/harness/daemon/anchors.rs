@@ -24,6 +24,24 @@ pub(super) struct ProposalAnchors {
     pub(super) unanchored: Vec<String>,
 }
 
+impl ProposalAnchors {
+    /// Keep the anchors `keep` accepts, with their links in lockstep.
+    pub(super) fn retain(
+        &mut self,
+        mut keep: impl FnMut(&CaptureAnchor) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<()> {
+        let links = std::mem::take(&mut self.links);
+        let anchors = std::mem::take(&mut self.anchors);
+        for (link, anchor) in links.into_iter().zip(anchors) {
+            if keep(&anchor)? {
+                self.links.push(link);
+                self.anchors.push(anchor);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The runner's hunk geometry: unique repository paths, ordered ranges, and
 /// original-source ranges pairwise with the changed ones when present.
 pub(super) fn validate_changed(changed: &[ChangedFile]) -> anyhow::Result<()> {

@@ -77,6 +77,7 @@ fn request(id: &str, proposals: Vec<KnowledgeProposal>) -> CaptureV2Request {
         owner_id: "test-owner".into(),
         proposals,
         changed: vec![],
+        restated: vec![],
     }
 }
 
@@ -1495,6 +1496,7 @@ async fn capture_v2_returns_typed_collision_without_creating_an_operation() {
             owner_id: "task-a".into(),
             proposals: vec![proposal("Lesson", "Reuse the existing capture")],
             changed: vec![],
+            restated: vec![],
         })
         .await;
     response.assert_status_ok();
@@ -2432,6 +2434,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
             owner_id: "task-a".into(),
             proposals: vec![lesson.proposal.clone()],
             changed: vec![],
+            restated: vec![],
         },
     )
     .unwrap();
@@ -2482,6 +2485,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
             owner_id: "task-a".into(),
             proposals: vec![tampered],
             changed: vec![],
+            restated: vec![],
         },
     )
     .is_err());
@@ -2492,6 +2496,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
             owner_id: "task-a".into(),
             proposals: vec![refined.proposal.clone()],
             changed: vec![],
+            restated: vec![],
         },
     )
     .unwrap();
@@ -3307,4 +3312,125 @@ async fn multi_anchor_review_attests_with_one_existing_and_one_minted_entity() {
     let iri = captured.proposals[0].iri.clone();
     assert!(direct_record_iris(&state, BUILD_SERVER).contains(&iri));
     assert!(direct_record_iris(&state, SERVER_HELPER).contains(&iri));
+}
+
+fn restates_receipt(state: &AppState, id: &str, owner: &str, candidate: &str) {
+    daemon::reconcile_score::record_receipt(
+        state,
+        daemon::reconcile_score::ScoreReceipt {
+            operation_id: id.into(),
+            owner_id: owner.into(),
+            proposal_digest: "fixture".into(),
+            candidate_revision: "fixture".into(),
+            thresholds: ReconcileThresholds::default(),
+            disposition: "restates".into(),
+            candidate_iri: Some(candidate.into()),
+            candidate_digest: None,
+            score: 0.93,
+            confidence: 0.93,
+            resolved_by: "symbolic".into(),
+        },
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn restated_links_attest_and_skip_definitions_the_record_already_reaches() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let after = SERVER_SOURCE
+        .replace("port: 80", "port: 443")
+        .replace("LIMIT as u16", "(LIMIT * 2) as u16");
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", SERVER_SOURCE, &after, server_definitions())],
+    );
+    let existing = record(&state, "Constraint", "Server ports stay configurable");
+    // The record already constrains helper; another record already minted
+    // build_server's entity, so the new edge lands on an existing entity.
+    graph::link_code(
+        &state,
+        &existing,
+        "constrains",
+        &graph::CodeSelector::Symbol(SERVER_HELPER.into()),
+        "test-human",
+    )
+    .unwrap();
+    let other = record(&state, "Lesson", "An earlier builder lesson");
+    let builder = graph::link_code(
+        &state,
+        &other,
+        "concerns",
+        &graph::CodeSelector::Symbol(BUILD_SERVER.into()),
+        "test-human",
+    )
+    .unwrap()
+    .entity_iri;
+    state.note_project_write();
+    let builder_literals = literal_quads(&state, &builder);
+    restates_receipt(&state, "restated-r0", "test-owner", &existing);
+    let base = review_base(&state);
+    let changed = line_hunks(
+        "src/server.rs",
+        SERVER_SOURCE,
+        &after,
+        &[(7, 8, 7, 8), (11, 12, 11, 12)],
+    );
+    let restated = RestatedCandidate {
+        candidate_iri: existing.clone(),
+        receipt_operation_id: "restated-r0".into(),
+        files: vec!["src/server.rs".into()],
+    };
+    let captured = daemon::capture_operation(
+        &state,
+        CaptureV2Request {
+            changed: vec![changed.clone()],
+            restated: vec![restated.clone()],
+            ..request("restated", vec![])
+        },
+    )
+    .unwrap();
+    assert!(captured.proposals.is_empty());
+    assert_eq!(captured.restated.len(), 1);
+    let links = &captured.restated[0];
+    assert_eq!(links.candidate_iri, existing);
+    assert_eq!(
+        links
+            .anchors
+            .iter()
+            .map(|anchor| (anchor.symbol.clone(), anchor.basis))
+            .collect::<Vec<_>>(),
+        vec![(normalized(BUILD_SERVER), AnchorBasis::Definition)]
+    );
+    assert_eq!(links.links.len(), 1);
+    assert!(
+        !direct_record_iris(&state, BUILD_SERVER).contains(&existing),
+        "the link waits for review"
+    );
+    let reviewed = review_expecting(&state, "restated", &base).await;
+    assert!(reviewed.ok);
+    assert!(reviewed.result.is_some());
+    assert_eq!(
+        reviewed.result, reviewed.revision,
+        "the restated record's new edge is this acceptance's own write"
+    );
+    assert!(direct_record_iris(&state, BUILD_SERVER).contains(&existing));
+    assert_eq!(literal_quads(&state, &builder), builder_literals);
+    // A receipt owned by another task proves nothing for this one.
+    restates_receipt(&state, "foreign-r0", "other-owner", &existing);
+    let error = daemon::capture_operation(
+        &state,
+        CaptureV2Request {
+            changed: vec![changed],
+            restated: vec![RestatedCandidate {
+                receipt_operation_id: "foreign-r0".into(),
+                ..restated
+            }],
+            ..request("foreign-restated", vec![])
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("receipt"), "{error}");
 }

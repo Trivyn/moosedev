@@ -757,13 +757,14 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
+    // A restatement that names no changed file has nothing to link.
     fixture.typed(vec![TypedProposal {
         proposal: KnowledgeProposal {
             kind: "Requirement".into(),
             title: "Preserve display label behavior".into(),
             description: "Labels keep their display form.".into(),
             evidence: vec!["Event 1: capture note".into()],
-            files: vec!["labels.py".into()],
+            files: vec![],
             components: vec![],
             requirement: None,
             supersedes: None,
@@ -827,8 +828,68 @@ async fn symbolic_capture_submits_hunk_ranges_and_journals_its_anchors_once() {
     assert_eq!(
         intent_details(&runner, "capture_anchored"),
         vec![
-            "1 definition anchors, 0 module anchors, 0 unanchored files, 0 anchor notes"
+            "1 definition anchors, 0 module anchors, 0 unanchored files, 0 anchor notes, 0 restated links"
                 .to_string()
         ]
+    );
+}
+
+#[tokio::test]
+async fn symbolic_restated_note_links_the_existing_record_through_one_capture() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
+    fixture.typed(vec![TypedProposal {
+        proposal: KnowledgeProposal {
+            kind: "Requirement".into(),
+            title: "Preserve display label behavior".into(),
+            description: "Labels keep their display form.".into(),
+            evidence: vec!["Event 1: capture note".into()],
+            files: vec!["labels.py".into()],
+            components: vec![],
+            requirement: None,
+            supersedes: None,
+            retracts: None,
+            reconciled: vec![],
+        },
+        origin: ProposalOrigin::SymbolicDecision,
+        disposition: TypedDisposition::Restates {
+            candidate_iri: PRESERVE.into(),
+            score: 0.93,
+            confidence: 0.93,
+            receipt_operation_id: "receipt-r0".into(),
+        },
+        resolved_by: "symbolic".into(),
+    }]);
+    fixture.note("Labels keep their display form.");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    let captures = fixture.shared.lock().unwrap().capture_requests.clone();
+    assert_eq!(captures.len(), 1, "a restated-only note submits a capture");
+    assert!(captures[0].proposals.is_empty());
+    assert_eq!(
+        captures[0].restated,
+        vec![RestatedCandidate {
+            candidate_iri: PRESERVE.into(),
+            receipt_operation_id: "receipt-r0".into(),
+            files: vec!["labels.py".into()],
+        }]
+    );
+    assert_eq!(runner.task.reviews.len(), 1);
+    assert_eq!(
+        intent_details(&runner, "capture_anchored"),
+        vec!["0 definition anchors, 0 module anchors, 0 unanchored files, 0 anchor notes, 1 restated links".to_string()]
+    );
+    runner.review(true).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Complete);
+    // The earlier association review journaled its own link_review events.
+    let link_reviews = intent_details(&runner, "link_review");
+    assert_eq!(
+        link_reviews
+            .iter()
+            .filter(|detail| detail.contains("-restated-0"))
+            .count(),
+        1,
+        "{link_reviews:?}"
     );
 }

@@ -295,5 +295,15 @@ impl Runner {
                 );
             }
         }
+        for link in response
+            .restated
+            .iter()
+            .flat_map(|restated| &restated.links)
+        {
+            self.intent_event(
+                "link_review",
+                &format!("{disposition} {link} in {operation_id}"),
+            );
+        }
     }
 }

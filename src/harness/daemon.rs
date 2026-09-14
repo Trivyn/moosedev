@@ -65,6 +65,14 @@ struct Operation {
     /// acceptance are its own writes.
     #[serde(default)]
     review_unminted_symbols: Vec<String>,
+    /// Existing records a restated note links to the changed definitions;
+    /// reviewed and attested with the rest of the operation.
+    #[serde(default)]
+    restated: Vec<RestatedEntry>,
+    /// Quads between each restated record and its links' existing entities
+    /// when the review base was recorded; the acceptance's own are the rest.
+    #[serde(default)]
+    review_restated_edges: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +88,15 @@ struct Entry {
     /// record is written.
     #[serde(default)]
     reconciled: Vec<ReconciledRelation>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RestatedEntry {
+    response: RestatedLinks,
+    /// The existing record's kind, which picks its link predicate.
+    kind: String,
+    /// `(raw symbol, file)`, frozen like a proposal's anchors.
+    anchors: Vec<(String, String)>,
 }
 
 fn current_status(state: &AppState, iri: &str) -> Option<String> {

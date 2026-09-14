@@ -134,12 +134,16 @@ pub(super) fn current_record_targets(state: &AppState) -> anyhow::Result<Vec<Cap
 /// Ignore unratified subjects AND inferred incoming links to those subjects.
 /// A proposed capture must not invalidate the approval that led to its creation.
 pub fn accepted_revision(state: &AppState) -> anyhow::Result<String> {
-    accepted_revision_masked(state, &HashSet::new())
+    accepted_revision_excluding(state, &HashSet::new(), &HashSet::new())
 }
 
-pub(super) fn accepted_revision_masked(
+/// The accepted revision ignoring `masked` subjects (with the quads that
+/// reference them) and the exact `own_quads` a review wrote onto records that
+/// existed before it.
+pub(super) fn accepted_revision_excluding(
     state: &AppState,
     masked: &HashSet<String>,
+    own_quads: &HashSet<String>,
 ) -> anyhow::Result<String> {
     let graph = GraphNameRef::NamedNode(NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?);
     let quads = state
@@ -167,6 +171,7 @@ pub(super) fn accepted_revision_masked(
             !excluded.contains(&q.subject.to_string()) && !excluded.contains(&q.object.to_string())
         })
         .map(ToString::to_string)
+        .filter(|quad| !own_quads.contains(quad))
         .collect();
     canonical.sort();
     Ok(sha256_hex(canonical.join("\n")))

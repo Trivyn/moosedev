@@ -1,7 +1,7 @@
 //! Human review of a captured operation: ratify or reject its proposals
 //! atomically, then attest the resulting knowledge revision.
 use super::capture::{finish_capture, record_input};
-use super::context::accepted_revision_masked;
+use super::context::accepted_revision_excluding;
 use super::*;
 
 pub async fn review(
@@ -176,6 +176,32 @@ fn review_operation_checked(
                 );
             }
         }
+        for entry in &operation.restated {
+            anyhow::ensure!(
+                graph::in_working_set(
+                    &current_status(state, &entry.response.candidate_iri).unwrap_or_default()
+                ),
+                "restated record changed after capture; reject this operation"
+            );
+            let links = graph::list_proposals(state, None)?;
+            for iri in &entry.response.links {
+                preflight_resolution(state, iri, true)?;
+                let link = links
+                    .iter()
+                    .find(|p| &p.iri == iri)
+                    .ok_or_else(|| anyhow::anyhow!("queued code link disappeared after capture"))?;
+                anyhow::ensure!(
+                    link.subject_iri == entry.response.candidate_iri
+                        && link.predicate_local == graph::link_predicate_for_kind(&entry.kind)
+                        && entry.anchors.iter().any(|(symbol, file)| {
+                            crate::code::substrate::symbols::normalize_symbol(symbol).as_deref()
+                                == Some(link.target_symbol.as_str())
+                                && file == &link.target_path
+                        }),
+                    "queued code link changed after capture"
+                );
+            }
+        }
     }
     if !operation.reviewed && !request.accept {
         for entry in &operation.entries {
@@ -183,11 +209,24 @@ fn review_operation_checked(
                 preflight_resolution(state, iri, false)?;
             }
         }
+        for iri in operation
+            .restated
+            .iter()
+            .flat_map(|entry| &entry.response.links)
+        {
+            preflight_resolution(state, iri, false)?;
+        }
     }
     let subjects: HashSet<String> = operation
         .entries
         .iter()
         .flat_map(|entry| std::iter::once(&entry.response.iri).chain(&entry.response.links))
+        .chain(
+            operation
+                .restated
+                .iter()
+                .flat_map(|entry| &entry.response.links),
+        )
         .map(|iri| NamedNode::new(iri).map(|node| node.to_string()))
         .collect::<Result<_, _>>()?;
     if let Some(expected) = expected_revision.filter(|_| operation.review.is_none()) {
@@ -202,6 +241,7 @@ fn review_operation_checked(
             operation.review_base_revision = Some(actual);
             operation.review_claims = Some(review_claims(state, &subjects)?);
             operation.review_unminted_symbols = unminted_link_symbols(state, &operation)?;
+            operation.review_restated_edges = restated_edges(state, &operation)?;
         }
     }
     operation.review = Some(request.accept);
@@ -212,6 +252,12 @@ fn review_operation_checked(
                 .entries
                 .iter()
                 .flat_map(|entry| std::iter::once(&entry.response.iri).chain(&entry.response.links))
+                .chain(
+                    operation
+                        .restated
+                        .iter()
+                        .flat_map(|entry| &entry.response.links),
+                )
                 .cloned()
                 .collect();
             members.extend(
@@ -248,6 +294,13 @@ fn review_operation_checked(
                 }
             }
         }
+        for iri in operation
+            .restated
+            .iter()
+            .flat_map(|entry| &entry.response.links)
+        {
+            resolve_proposal(state, iri, request.accept)?;
+        }
         durable_flush(state)?;
         operation.reviewed = true;
         save_operation(&path, &operation)?;
@@ -278,7 +331,11 @@ fn review_operation_checked(
             expected_claims.extend(own_link_edges(state, &operation)?);
             expected_claims.sort();
             expected_claims.dedup();
-            if accepted_revision_masked(state, &masked)? == *base
+            let own_restated_edges: HashSet<String> = restated_edges(state, &operation)?
+                .into_iter()
+                .filter(|quad| !operation.review_restated_edges.contains(quad))
+                .collect();
+            if accepted_revision_excluding(state, &masked, &own_restated_edges)? == *base
                 && review_claims(state, &subjects)? == expected_claims
                 && generation == state.project_write_generation()
             {
@@ -348,12 +405,60 @@ fn own_link_edges(state: &AppState, operation: &Operation) -> anyhow::Result<Vec
     Ok(edges)
 }
 
+/// Quads between each restated record and the existing entities its queued
+/// links target, in either direction.
+fn restated_edges(state: &AppState, operation: &Operation) -> anyhow::Result<Vec<String>> {
+    if operation
+        .restated
+        .iter()
+        .all(|entry| entry.response.links.is_empty())
+    {
+        return Ok(Vec::new());
+    }
+    let project = GraphNameRef::NamedNode(NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?);
+    let terms = graph::CodeTerms::resolve(state)?;
+    let links = graph::list_proposals(state, None)?;
+    let mut edges = Vec::new();
+    for entry in &operation.restated {
+        let record = NamedNodeRef::new(&entry.response.candidate_iri)?;
+        for iri in &entry.response.links {
+            let Some(link) = links.iter().find(|link| &link.iri == iri) else {
+                continue;
+            };
+            let Some(entity_iri) = graph::entity_for_symbol(state, &terms, &link.target_symbol)?
+            else {
+                continue;
+            };
+            let entity = NamedNodeRef::new(&entity_iri)?;
+            for (subject, object) in [(record, entity), (entity, record)] {
+                for quad in state.store.quads_for_pattern(
+                    Some(subject.into()),
+                    None,
+                    Some(object.into()),
+                    Some(project),
+                ) {
+                    edges.push(quad?.to_string());
+                }
+            }
+        }
+    }
+    edges.sort();
+    edges.dedup();
+    Ok(edges)
+}
+
 /// Target symbols of this operation's code links that have no entity yet.
 fn unminted_link_symbols(state: &AppState, operation: &Operation) -> anyhow::Result<Vec<String>> {
     let iris: Vec<&String> = operation
         .entries
         .iter()
         .flat_map(|entry| &entry.response.links)
+        .chain(
+            operation
+                .restated
+                .iter()
+                .flat_map(|entry| &entry.response.links),
+        )
         .collect();
     if iris.is_empty() {
         return Ok(Vec::new());
