@@ -28,11 +28,13 @@ EVIDENCE_START = "Topic evidence ("
 PLAN_EVIDENCE_START = "Plan evidence ("
 LINKED_EVIDENCE_START = "Linked evidence ("
 FALLBACK_EVIDENCE_START = "Topic evidence (fallback;"
+# The runner's rules block header; guidance text may say "Project rules" without it.
+RULES_START = "Project rules (hard requirements"
 MIN_RANK = 16
 PLAN_TOPIC_BYTES = 4000
 BUDGET_BYTES = 84_992
 EDIT_TOOLS = {"edit", "write", "patch", "multiedit"}
-LEAKS = ("claim_anywhere", "topic_evidence", "walk", "linked_evidence", "dossier_title", "policy_reason")
+LEAKS = ("claim_anywhere", "topic_evidence", "walk", "linked_evidence", "rules", "dossier_title", "policy_reason")
 
 
 def split_context(context):
@@ -73,14 +75,17 @@ def membership(response, *, iri, title, claim):
     files = response.get("files") or []
     dossiers = "\n".join(item.get("dossier", "") for item in files)
     policies = "\n".join(json.dumps(item.get("policy"), ensure_ascii=False) for item in files)
+    rules = response.get("governing_constraints") or []
+    governing = "\n".join(rule.get("claim", "") for rule in rules)
     return {"inventory": any(item["iri"] == iri for item in parsed["inventory"]),
             "topic_evidence": any(item["iri"] == iri and not item["walked"] and not item["linked"]
                                   for item in parsed["evidence"]),
             "walk": any(item["iri"] == iri and item["walked"] for item in parsed["evidence"]),
             "linked_evidence": any(item["iri"] == iri and item["linked"] for item in parsed["evidence"]),
+            "rules": any(rule.get("iri") == iri for rule in rules),
             "dossier_title": title in dossiers or iri in dossiers,
             "policy_reason": title in policies or iri in policies,
-            "claim_anywhere": claim in "\n".join((context, dossiers, policies))}
+            "claim_anywhere": claim in "\n".join((context, dossiers, policies, governing))}
 
 
 def parse_ranking(text):
@@ -137,10 +142,15 @@ def v2_verdict(plan_results, required=2):
 
 
 def delivery_verdict(memberships, files="fees.py"):
-    """After-build verdict: the deciding claim arrives through linked evidence for the file set."""
+    """After-build verdict: the deciding claim arrives through Project rules or linked evidence for the file set."""
     checked = [entry for entry in memberships if entry["files"] == files]
-    failures = [f"{entry['topic']} / {entry['files']}: {key}" for entry in checked
-                for key in ("linked_evidence", "claim_anywhere") if not entry["membership"].get(key)]
+    failures = []
+    for entry in checked:
+        member = entry["membership"]
+        if not (member.get("rules") or member.get("linked_evidence")):
+            failures.append(f"{entry['topic']} / {entry['files']}: rules or linked_evidence")
+        if not member.get("claim_anywhere"):
+            failures.append(f"{entry['topic']} / {entry['files']}: claim_anywhere")
     return {"passed": bool(checked) and not failures, "failures": failures, "files": files}
 
 
@@ -164,7 +174,7 @@ def first_sentence(text):
 
 
 def _segments(prompt):
-    markers = (("instructions", "You are the coding sensor"), ("conversation", "Recent conversation"),
+    markers = (("instructions", "You are the coding sensor"), ("rules", RULES_START), ("conversation", "Recent conversation"),
                ("navigation", "Repository paths"), ("knowledge", "Current accepted knowledge:"),
                ("dossiers", "Entity dossiers:"), ("state", "Current harness state"),
                ("observations", "Recent observations"), ("observations", "Last result:"))
@@ -265,6 +275,7 @@ def harness_report(run, *, iri, title, claim, probes):
             "title_before_first_edit": any(item["title_sections"] for item in locations[:before]),
             "linked_claim_before_first_edit": any("linked_evidence" in item["claim_sections"]
                                                   for item in locations[:before]),
+            "rules_claim_before_first_edit": any("rules" in item["claim_sections"] for item in locations[:before]),
             "request_locations": locations,
             "searches": [event.get("detail") or event.get("message") for event in intents
                          if event.get("kind") == "knowledge_search"],

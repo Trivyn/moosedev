@@ -509,16 +509,24 @@ def prompt_read_files(prompt):
 
 
 def linked_claims(prompt):
-    """(iri, kind, title, description) of each record in a prompt's linked evidence section."""
-    records, current = [], None
+    """(iri, kind, title, description) of each record in a prompt's Project rules or linked evidence section.
+
+    A governing Constraint's claim sits under Project rules while its linked-evidence copy points there, so a
+    record seen in both sections is listed once with the description either section carried.
+    """
+    records, by_iri = [], {}
     for name, text in _segments(prompt):
-        if name != "linked_evidence":
+        if name not in ("rules", "linked_evidence"):
             continue
+        current = None
         for line in text.splitlines():
             match = HEADER.match(line)
             if match:
-                current = {"iri": match["iri"], "kind": match["kind"], "title": match["label"], "description": ""}
-                records.append(current)
+                current = by_iri.get(match["iri"])
+                if current is None:
+                    current = {"iri": match["iri"], "kind": match["kind"], "title": match["label"], "description": ""}
+                    by_iri[match["iri"]] = current
+                    records.append(current)
             elif current is not None and line.startswith("hasDescription: "):
                 current["description"] = line[len("hasDescription: "):]
     return records
