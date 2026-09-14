@@ -431,6 +431,31 @@ fn commit_project_quads(
     Ok(())
 }
 
+/// Minted CodeEntity IRIs for one file: its whole-file module, when the
+/// producer synthesizes one, then every definition. Shared by the policy push
+/// and the linked-evidence walk, so both reach the same code.
+pub(crate) fn file_entity_iris(state: &AppState, file: &str) -> anyhow::Result<Vec<String>> {
+    let Some(substrate) = state.substrate() else {
+        return Ok(Vec::new());
+    };
+    let terms = CodeTerms::resolve(state)?;
+    let entities = entities_by_symbol(state, &terms)?;
+    // A synthetic whole-file module (Rust) is never a position target, but
+    // knowledge anchored to it concerns the whole file, so it leads the push.
+    let module = substrate
+        .file_module_symbol(file)
+        .map(|entry| entry.normalized_symbol);
+    let definitions = substrate
+        .definitions_in_file(file)
+        .into_iter()
+        .map(|def| def.entry.normalized_symbol);
+    Ok(module
+        .into_iter()
+        .chain(definitions)
+        .filter_map(|symbol| entities.get(&symbol).cloned())
+        .collect())
+}
+
 /// Return a component IRI for a path, preserving `None` for unmapped paths.
 fn component_iri_for_path<'a>(path: &str, components: &'a [ComponentEntry]) -> Option<&'a str> {
     best_component_for_path(path, components).and_then(|component| component.iri.as_deref())

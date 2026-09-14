@@ -21,9 +21,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    direct_records_for_entity, entities_by_symbol, first_literal, get_entity_dossier, local_name,
-    render_dossiers_within, resolve_target_entity, AppState, CodeTerms, DossierTarget,
-    RecordSummary,
+    direct_records_for_entity, entities_by_symbol, file_entity_iris, first_literal,
+    get_entity_dossier, local_name, render_dossiers_within, resolve_target_entity, AppState,
+    CodeTerms, DossierTarget, RecordSummary,
 };
 
 use fires::{append_fire_best_effort, FireEvent};
@@ -472,30 +472,6 @@ fn anchor_line_span(repo_root: &Path, file: &str, anchor: &str) -> Option<(u32, 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// Minted CodeEntity IRIs for one file: its whole-file module, when the
-/// producer synthesizes one, then every definition.
-fn file_entity_iris(state: &AppState, file: &str) -> anyhow::Result<Vec<String>> {
-    let Some(substrate) = state.substrate() else {
-        return Ok(Vec::new());
-    };
-    let terms = CodeTerms::resolve(state)?;
-    let entities = entities_by_symbol(state, &terms)?;
-    // A synthetic whole-file module (Rust) is never a position target, but
-    // knowledge anchored to it concerns the whole file, so it leads the push.
-    let module = substrate
-        .file_module_symbol(file)
-        .map(|entry| entry.normalized_symbol);
-    let definitions = substrate
-        .definitions_in_file(file)
-        .into_iter()
-        .map(|def| def.entry.normalized_symbol);
-    Ok(module
-        .into_iter()
-        .chain(definitions)
-        .filter_map(|symbol| entities.get(&symbol).cloned())
-        .collect())
-}
 
 fn entity_display_name(state: &AppState, iri: &str) -> String {
     first_literal(&state.store, iri, moose::RDFS_LABEL)

@@ -26,6 +26,7 @@ pub mod relations;
 pub mod state;
 pub mod taxonomy;
 pub mod util;
+pub mod walk;
 
 pub use capture::*;
 pub use classify::*;
@@ -44,6 +45,7 @@ pub use relations::*;
 pub use state::*;
 pub use taxonomy::*;
 pub use util::*;
+pub use walk::*;
 
 /// Named graph holding recorded knowledge instances (the durable project KG).
 pub const PROJECT_KG_GRAPH_IRI: &str = "https://moosedev.dev/kg/project";

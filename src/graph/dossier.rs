@@ -666,6 +666,29 @@ pub(crate) fn resolve_target_entity(
     }
 }
 
+/// Every component the entity `realizes`, in IRI order.
+pub(super) fn realized_components(
+    state: &AppState,
+    terms: &CodeTerms,
+    entity_iri: &str,
+) -> anyhow::Result<Vec<String>> {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let subject = NamedNodeRef::new(entity_iri)?;
+    let predicate = NamedNodeRef::new(&terms.realizes)?;
+    let mut out = BTreeSet::new();
+    for q in state.store.quads_for_pattern(
+        Some(subject.into()),
+        Some(predicate),
+        None,
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        if let Term::NamedNode(component) = q?.object {
+            out.insert(component.as_str().to_string());
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
 /// Return the first component reached by `realizes`, with a display label.
 fn first_realized_component(
     state: &AppState,
@@ -696,30 +719,50 @@ fn first_realized_component(
 /// Canonical predicate plus inverse predicate used to find records regardless of
 /// which direction was asserted in the project graph.
 #[derive(Debug, Clone)]
-struct PredicatePair {
+pub(super) struct PredicatePair {
     canonical_local: &'static str,
     canonical_iri: String,
     inverse_iri: String,
     direction: CanonicalDirection,
 }
 
-/// Orientation of the canonical predicate relative to the CodeEntity target.
+impl PredicatePair {
+    /// Resolve one canonical/inverse object-property pair by local name.
+    pub(super) fn new(
+        state: &AppState,
+        canonical_local: &'static str,
+        inverse_local: &str,
+        direction: CanonicalDirection,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            canonical_local,
+            canonical_iri: state.resolve_object_property(canonical_local)?,
+            inverse_iri: state.resolve_object_property(inverse_local)?,
+            direction,
+        })
+    }
+}
+
+/// Orientation of the canonical predicate relative to the target: whether the
+/// canonical edge points at the target (`RecordToEntity`) or away from it.
 #[derive(Debug, Clone, Copy)]
-enum CanonicalDirection {
+pub(super) enum CanonicalDirection {
     RecordToEntity,
     EntityToRecord,
 }
 
 /// Resolved predicate sets for direct records and component secondary records.
-struct LinkPairs {
-    concerns: Vec<PredicatePair>,
-    all: Vec<PredicatePair>,
+pub(super) struct LinkPairs {
+    pub(super) concerns: Vec<PredicatePair>,
+    /// `concerns` and `constrains`: the edges by which a record governs a component.
+    pub(super) component: Vec<PredicatePair>,
+    pub(super) all: Vec<PredicatePair>,
 }
 
 impl LinkPairs {
     /// Resolve the object properties by local name, keeping ontology namespaces
     /// out of the read logic.
-    fn resolve(state: &AppState) -> anyhow::Result<Self> {
+    pub(super) fn resolve(state: &AppState) -> anyhow::Result<Self> {
         let specs = [
             (
                 "concerns",
@@ -750,23 +793,19 @@ impl LinkPairs {
         let all = specs
             .into_iter()
             .map(|(canonical_local, inverse_local, direction)| {
-                Ok(PredicatePair {
-                    canonical_local,
-                    canonical_iri: state.resolve_object_property(canonical_local)?,
-                    inverse_iri: state.resolve_object_property(inverse_local)?,
-                    direction,
-                })
+                PredicatePair::new(state, canonical_local, inverse_local, direction)
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
             concerns: all[..1].to_vec(),
+            component: all[..2].to_vec(),
             all,
         })
     }
 }
 
 /// Collect summaries for all records linked to one target by any supplied pair.
-fn collect_records(
+pub(super) fn collect_records(
     state: &AppState,
     pairs: &[PredicatePair],
     target_iri: &str,
@@ -783,7 +822,7 @@ fn collect_records(
 }
 
 /// Return candidate record IRIs linked through the canonical or inverse edge.
-fn linked_records(
+pub(super) fn linked_records(
     state: &AppState,
     pair: &PredicatePair,
     target_iri: &str,
@@ -851,7 +890,7 @@ fn collect_objects(
 }
 
 /// Build a display summary for a record, skipping dangling and dossier-hidden nodes.
-fn summarize_record(
+pub(super) fn summarize_record(
     state: &AppState,
     record_iri: &str,
     predicate_local: &str,
@@ -974,7 +1013,7 @@ fn encode_path_segment(segment: &str) -> String {
 
 /// Keep dossier output stable and useful: constraints first, then decisions,
 /// then lessons, with newer records before older records inside each group.
-fn sort_records(records: &mut [RecordSummary]) {
+pub(super) fn sort_records(records: &mut [RecordSummary]) {
     records.sort_by(|a, b| {
         kind_rank(&a.kind)
             .cmp(&kind_rank(&b.kind))
