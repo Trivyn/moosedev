@@ -60,7 +60,35 @@ sentence (cross-checked against the daemon's own evidence). Largest pushed
 context plus dossiers: 18,417 bytes. Evidence:
 `target/harness-crowded-probe-v1/gate/v1-round1/gate.json`.
 
-Blind-audit rounds: pending.
+Gate V2 (same build, the three condition-A plans; Definition A topic = plan
+summary + newline + plan files): **fail, 0 of 3 plans reach NP-7** (search
+ranks 31, 36 and 28; not in any plan's top 12 or walk; claim absent). The
+plans repeat the task's vocabulary and never mention segments, charities or
+non-profits. Diagnostics, not part of Definition A: adding identifiers from
+the plan files and the modules they import (Definition B) also misses (ranks
+26, 36, 27); adding plan 1's source string literals, which name the charity
+segment, reaches rank 11 with the claim delivered. Evidence:
+`target/harness-crowded-probe-v1/gate/v2/` and
+`target/harness-crowded-probe-v1/gate/v2-definition-b-diagnostic/`. The final
+gate re-run on this package (V1 and V2) is
+`target/harness-crowded-probe-v1/gate/final/gate.json`, which records the
+package hash.
+
+Blind-audit round 1 (2026-09-13, fresh Claude Sonnet readers, one per packet):
+
+- **A** (e1 prompt and starter project; three readers, each writing a plan
+  first): e1-charity answered 500, determined, by all three (wrong); e1-half-up
+  ambiguous (100 or 101); grace and minimum right.
+- **Push-only** (A plus today's harness push for the full episode prompt and
+  all project files): e1-charity 500, determined, so the push does not decide
+  it, as V1 requires; e1-half-up 101, determined, citing the `fees.py` dossier
+  title "Fees are integer cents rounded half up" (positive control works);
+  grace and minimum right.
+- **B** (A plus every seed rendered as `PROJECT_NOTES.md`): all four right and
+  determined; e1-charity 0, citing `fees-np7`. The distractors do not mislead.
+- **Plan-push**: not built, because no plan reached NP-7 in V2.
+
+Packets, keys and answers: `/Users/jcadam/.claude/jobs/7f3a44c1/tmp/probe/audit/`.
 
 ## What each episode introduces
 

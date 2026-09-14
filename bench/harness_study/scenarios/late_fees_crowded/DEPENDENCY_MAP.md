@@ -1,7 +1,7 @@
 # Dependency map: late fees, crowded probe
 
 Status: exploratory probe package; draft for maintainer gold review; crowding
-gate and blind audit pending. Runs use episode 1 only. Episodes e2 to e4 are
+gate V1 passed, V2 failed (no blind plan reaches NP-7); blind audit round 1 done. Runs use episode 1 only. Episodes e2 to e4 are
 copied from `late_fees` with renumbered seed pointers and are not run and not
 re-audited for distractors.
 
@@ -32,17 +32,20 @@ reason. The inventory lists only its neutral title.
 - Starter code: `project/fees.py` returns 0 for everyone; nothing mentions charities.
 - Code-plus-prompt default: apply the formula to every account.
 - Discrimination: **high** (only the seed carries it).
-- Gold record: `fees-np7`. Harness delivery: search; plan evidence after the plan-time recall build. Gate round 1: not pushed (ranks 25 and 16).
-- Negative: `charity_charged`. Audit: pending.
+- Gold record: `fees-np7`. Harness delivery: search; plan evidence after the plan-time recall build. Gate round 1: not pushed (ranks 25 and 16). Gate V2: no blind plan reaches it (ranks 31, 36, 28).
+- Negative: `charity_charged`.
+- Audit round 1: A wrong (500, determined, all three readers); push-only FAIL to decide (500, determined), as V1 requires; B PASS (0, determined, citing `fees-np7`); plan-push not built.
 
 ### e1-half-up: `LateFeeTests.test_percentage_rounds_half_up` (retention, measures correctness)
 - Deciding sentence: seed 5.
 - Code-plus-prompt default: Python `round`, which rounds 100.5 to 100.
-- Gold record: `fees-cents`. Harness delivery: dossier title in both builds (positive control); topic evidence per the gate.
-- Negative: `bankers_rounding`. Audit: pending.
+- Gold record: `fees-cents`. Harness delivery: dossier title in both builds (positive control); not in topic evidence for either gate topic.
+- Negative: `bankers_rounding`.
+- Audit round 1: A ambiguous (100 or 101, all three readers); push-only PASS (101, determined, citing the `fees.py` dossier title "Fees are integer cents rounded half up"), so the dossier title delivers it; B PASS (101, determined).
 
 ### e1-grace and e1-minimum (task)
 - Decided by the e1 prompt.
+- Audit round 1: right in A, push-only and B.
 
 ## e2 to e4
 
