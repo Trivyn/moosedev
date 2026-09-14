@@ -528,6 +528,116 @@
       "evidence": [
         "SOURCE_MAPPING.md#distractors"
       ]
+    },
+    {
+      "id": "statements-late-fee-next-statement",
+      "kind": "Requirement",
+      "title": "A late fee first appears on the invoice's next statement",
+      "description": "When an invoice becomes late, its late fee first appears on the account's next statement line for that invoice, never as a separate invoice.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-amounts-in-cents",
+      "kind": "Requirement",
+      "title": "Late fee amounts are reported in cents",
+      "description": "Every late fee amount in exports, statements and notices is reported in cents of the invoice amount's currency and is never converted to another unit.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "statements-late-fee-recomputed",
+      "kind": "Requirement",
+      "title": "An invoice's late fee is recomputed for each statement day",
+      "description": "The late fee shown for an invoice is recomputed from today's day number for each statement day, so a statement never copies a late fee from an earlier statement.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-history",
+      "kind": "Requirement",
+      "title": "Each invoice keeps its late fee history",
+      "description": "Each invoice keeps a history of the late fee amounts shown to the customer and the day each amount was shown.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-late-fee-with-amount",
+      "kind": "Requirement",
+      "title": "A late fee is payable with the invoice amount",
+      "description": "A late fee is payable together with the overdue invoice amount; a payment is applied to the invoice amount before its late fee.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-due-day-shown",
+      "kind": "Requirement",
+      "title": "Every invoice shows its due day and amount",
+      "description": "Each invoice shows its due day and its amount in cents, so the customer knows the day after which the invoice is late.",
+      "component": "Invoicing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-today-passed-in",
+      "kind": "Constraint",
+      "title": "Fee code is always given today",
+      "description": "Fee code never reads the current day itself; callers pass today as an integer day number with every account and invoice they ask about.",
+      "component": "Engineering",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-disputes-logged",
+      "kind": "Requirement",
+      "title": "Late fee disputes are logged against the invoice",
+      "description": "Every late fee dispute is logged against the invoice ID with the day it was raised, so support can see an invoice's full late fee history.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "accounts-late-fee-totals-derived",
+      "kind": "Requirement",
+      "title": "An account's late fee total is derived, never stored",
+      "description": "An account's total late fees are summed from its invoices' late fees on demand; no account keeps a stored late fee total.",
+      "component": "Accounts",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-never-negative",
+      "kind": "Constraint",
+      "title": "A late fee is never negative",
+      "description": "A late fee is zero or a positive number of cents; money owed back to a customer is issued separately as a credit note.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
     }
   ],
   "episodes": [

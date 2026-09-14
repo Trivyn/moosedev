@@ -5,7 +5,7 @@ gate and blind audit pending. Runs use episode 1 only. Episodes e2 to e4 are
 copied from `late_fees` with renumbered seed pointers and are not run and not
 re-audited for distractors.
 
-Seeds: 44 (the two `late_fees` seeds plus 42 distractors; see
+Seeds: 54 (the two `late_fees` seeds plus 52 distractors; see
 `SOURCE_MAPPING.md`).
 
 - Seed 7, `fees-np7` (`#/initial_facts/7`), title "Regulation NP-7 compliance
@@ -20,8 +20,10 @@ Seeds: 44 (the two `late_fees` seeds plus 42 distractors; see
 Harness delivery routes for the deciding record `fees-np7`: **search** (both
 builds), **plan evidence** (the plan-time recall build only), and native
 OpenCode reading `PROJECT_NOTES.md`. It is not delivered by a dossier (no code
-association). Whether topic evidence or the link walk carries it is measured by
-the crowding gate: pending. The inventory lists only its neutral title.
+association). Crowding gate round 1 (build 1d31f454): it is absent from topic
+evidence and the link walk for the full episode prompt (search rank 25) and
+for the bare task sentence (rank 16), and absent from every dossier and policy
+reason. The inventory lists only its neutral title.
 
 ## e1: the late-fee formula
 
@@ -30,7 +32,7 @@ the crowding gate: pending. The inventory lists only its neutral title.
 - Starter code: `project/fees.py` returns 0 for everyone; nothing mentions charities.
 - Code-plus-prompt default: apply the formula to every account.
 - Discrimination: **high** (only the seed carries it).
-- Gold record: `fees-np7`. Harness delivery: search; plan evidence after the plan-time recall build. Gate: pending.
+- Gold record: `fees-np7`. Harness delivery: search; plan evidence after the plan-time recall build. Gate round 1: not pushed (ranks 25 and 16).
 - Negative: `charity_charged`. Audit: pending.
 
 ### e1-half-up: `LateFeeTests.test_percentage_rounds_half_up` (retention, measures correctness)

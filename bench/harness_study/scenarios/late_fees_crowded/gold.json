@@ -515,6 +515,106 @@
       ],
       "introduced_episode": 0,
       "seeded": true
+    },
+    {
+      "id": "statements-late-fee-next-statement",
+      "claim": "When an invoice becomes late, its late fee first appears on the account's next statement line for that invoice, never as a separate invoice.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-fee-amounts-in-cents",
+      "claim": "Every late fee amount in exports, statements and notices is reported in cents of the invoice amount's currency and is never converted to another unit.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "statements-late-fee-recomputed",
+      "claim": "The late fee shown for an invoice is recomputed from today's day number for each statement day, so a statement never copies a late fee from an earlier statement.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-fee-history",
+      "claim": "Each invoice keeps a history of the late fee amounts shown to the customer and the day each amount was shown.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-late-fee-with-amount",
+      "claim": "A late fee is payable together with the overdue invoice amount; a payment is applied to the invoice amount before its late fee.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-due-day-shown",
+      "claim": "Each invoice shows its due day and its amount in cents, so the customer knows the day after which the invoice is late.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-today-passed-in",
+      "claim": "Fee code never reads the current day itself; callers pass today as an integer day number with every account and invoice they ask about.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-fee-disputes-logged",
+      "claim": "Every late fee dispute is logged against the invoice ID with the day it was raised, so support can see an invoice's full late fee history.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "accounts-late-fee-totals-derived",
+      "claim": "An account's total late fees are summed from its invoices' late fees on demand; no account keeps a stored late fee total.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-fee-never-negative",
+      "claim": "A late fee is zero or a positive number of cents; money owed back to a customer is issued separately as a credit note.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
     }
   ],
   "forbidden_claims": [

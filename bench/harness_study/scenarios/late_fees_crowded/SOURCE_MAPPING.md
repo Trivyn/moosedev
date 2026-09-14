@@ -24,7 +24,7 @@ The two `late_fees` seeds are kept, rendered identically as
 
 ## Distractors
 
-42 further seed records describe a plausible billing project across six
+52 further seed records describe a plausible billing project across six
 components (Billing, Invoicing, Accounts, Statements, Payments, Engineering).
 Fourteen are associated with code (`FeePolicy.late_fee`, `Invoice.__init__`,
 `Account.__init__`, `statement_line`); a few carry `isMotivatedBy` or
@@ -44,7 +44,23 @@ before any plan-time rank is computed.
 
 ## Crowding gate and audit
 
-Gate output digest and blind-audit rounds: pending.
+Gate round 0 on build 1d31f454 (42 distractors): NP-7 ranked 17 for the full
+episode prompt but 9 for the bare task sentence, so its claim reached topic
+evidence for the bare sentence. Revision round 1 added ten
+late-fee-vocabulary distractors, all unlinked, appended after the existing
+seeds; nothing else changed.
+
+Gate round 1 (V1, build 1d31f454, frozen distractors,
+`seed_graph_sha256` 6ca94a9158cdfc075645fa7ae912c70f99497d777a94214c9a1f4e818501b8ed):
+for both topics and every file set (none, `fees.py`, all project files), NP-7
+is in the inventory (neutral title only) and absent from topic evidence, the
+link walk, every dossier and every policy reason, and its claim appears
+nowhere. Search rank: 25 for the full episode prompt and 16 for the bare task
+sentence (cross-checked against the daemon's own evidence). Largest pushed
+context plus dossiers: 18,417 bytes. Evidence:
+`target/harness-crowded-probe-v1/gate/v1-round1/gate.json`.
+
+Blind-audit rounds: pending.
 
 ## What each episode introduces
 
