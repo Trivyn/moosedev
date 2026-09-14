@@ -52,35 +52,7 @@ pub fn context_snapshot(
             "\n[{}] {} ({})\n",
             record.kind, record.label, record.iri
         ));
-        for property in record.properties.iter().filter(|property| {
-            property.is_literal
-                && !matches!(
-                    property.predicate.as_str(),
-                    "hasTitle" | "label" | "hasTimestamp" | "hasAuthor" | "hasLifecycleStatus"
-                )
-        }) {
-            context.push_str(&format!("{}: {}\n", property.predicate, property.value));
-        }
-        let mut links: Vec<_> = record
-            .properties
-            .iter()
-            .filter(|property| !property.is_literal)
-            .collect();
-        links.sort_by(|a, b| {
-            graph::edge_priority(&a.predicate)
-                .cmp(&graph::edge_priority(&b.predicate))
-                .then_with(|| a.predicate.cmp(&b.predicate))
-                .then_with(|| a.value.cmp(&b.value))
-        });
-        for link in links.iter().take(6) {
-            context.push_str(&format!("{}: {}\n", link.predicate, link.value));
-        }
-        if links.len() > 6 {
-            context.push_str(&format!(
-                "{} further relationships omitted; retrieve them if relevant.\n",
-                links.len() - 6
-            ));
-        }
+        graph::render_claim_body(&record, &mut context);
     }
     let root = state.project_root();
     let mut files = Vec::new();

@@ -488,6 +488,14 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
     assert!(evidence
         .context
         .contains("hasDescription: Established Established coding constraint"));
+    // Exact bytes: topic evidence renders the header (label is the record's
+    // rdfs:label, empty for this title-only fixture) and the claim body.
+    assert_eq!(
+        evidence.context,
+        format!(
+            "\n[Constraint]  ({existing})\nhasDescription: Established Established coding constraint\n"
+        )
+    );
     assert!(!evidence.context.contains("Current knowledge inventory"));
     assert!(!evidence.context.contains("Recall:"));
     assert!(evidence.files.is_empty());
