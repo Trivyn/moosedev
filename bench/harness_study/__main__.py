@@ -74,6 +74,15 @@ def main(argv=None):
     command.add_argument("--lmstudio", default="http://127.0.0.1:1234",
                          help="LM Studio server; tier 2 runs only if the helper is already loaded there (never loads models)")
     command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
+    command = sub.add_parser("intercept-diagnostics", help="diagnostic only: model actions as knowledge queries "
+                                                           "(action census, pattern lookup, edit- and read-time grounding); no model calls")
+    command.add_argument("--scenario", default="late_fees_crowded")
+    command.add_argument("--deciding-fact", default="fees-np7")
+    command.add_argument("--binary-manifest", type=Path, required=True)
+    command.add_argument("--parent-preflight", type=Path, required=True, help="ready preflight supplying the indexer and assets")
+    command.add_argument("--roots", nargs="+", default=None, help="study evidence roots for the action census")
+    command.add_argument("--crowded-roots", nargs="+", default=None, help="crowded probe field-check roots")
+    command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
     command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
     command.add_argument("runs", type=Path, nargs="+")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -145,6 +154,15 @@ def main(argv=None):
                                   lmstudio=args.lmstudio, templates=args.templates)
         print(json.dumps({"helper": result["helper"], "summary": tier_summary(result),
                           "evidence": str(args.output / "tiers.json")}))
+        return 0
+    elif args.command == "intercept-diagnostics":
+        from .intercept import DEFAULT_CROWDED_ROOTS, DEFAULT_ROOTS, intercept_diagnostics, summary
+        result = intercept_diagnostics(roots=args.roots or list(DEFAULT_ROOTS),
+                                       crowded_roots=args.crowded_roots or list(DEFAULT_CROWDED_ROOTS),
+                                       scenario_id=args.scenario, binary_manifest=args.binary_manifest,
+                                       parent_preflight=args.parent_preflight, output=args.output,
+                                       deciding_fact=args.deciding_fact)
+        print(json.dumps({"summary": summary(result), "evidence": str(args.output / "intercept.json")}))
         return 0
     elif args.command == "crowding-report":
         from .crowding import report as crowding_report
