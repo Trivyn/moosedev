@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use moose::embeddings::retrieval_embed_query;
 use moose::entity_index::DEFAULT_DENSE_FLOOR;
-use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
 use super::capture::{
@@ -841,6 +841,23 @@ fn build_context_item(
         label,
         properties,
     }
+}
+
+/// The claim item for one record IRI, built exactly as topic recall builds it
+/// (rationale text inlined). `None` for an untyped or invalid subject.
+pub(crate) fn context_item_for_iri(
+    state: &AppState,
+    iri: &str,
+    include_history: bool,
+) -> Option<ContextItem> {
+    let subject = NamedNode::new(iri).ok()?;
+    let class_iri = asserted_project_types(state, &subject).into_iter().next()?;
+    Some(build_context_item(
+        state,
+        iri.to_string(),
+        class_iri,
+        include_history,
+    ))
 }
 
 /// Literal properties that identify or stamp a record rather than state its claim.

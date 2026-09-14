@@ -37,7 +37,7 @@ pub fn context_snapshot(
     let mut context = String::new();
     if !request.evidence_only {
         let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
-        context.push_str("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; search with words from a record name returns its complete claims. Attached file dossiers remain complete.\n\nCurrent knowledge inventory:\n");
+        context.push_str("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; search with words from a record name returns its complete claims. Attached file dossiers carry the complete claims of records linked to the file's code.\n\nCurrent knowledge inventory:\n");
         for record in inventory {
             context.push_str(&format!(
                 "[{}] {} ({})\n",

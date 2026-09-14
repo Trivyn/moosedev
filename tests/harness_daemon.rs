@@ -516,6 +516,48 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
 }
 
 #[tokio::test]
+async fn file_dossier_carries_the_topic_evidence_claim_body() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let existing = record(&state, "Constraint", "Established harness constraint");
+    graph::link_code(
+        &state,
+        &existing,
+        "constrains",
+        &graph::CodeSelector::Symbol(symbol.into()),
+        "test-human",
+    )
+    .unwrap();
+    state.note_project_write();
+    let request = |evidence_only: bool, files: Vec<String>| ContextRequest {
+        topic: "harness constraint".into(),
+        files,
+        evidence_only,
+    };
+
+    let evidence = daemon::context_snapshot(&state, &request(true, vec![])).unwrap();
+    assert_eq!(evidence.evidence_iris, vec![existing.clone()]);
+    let body = evidence
+        .context
+        .strip_prefix(&format!("\n[Constraint]  ({existing})\n"))
+        .expect("topic evidence header");
+    assert!(
+        body.starts_with("hasDescription: Established Established harness constraint\n"),
+        "{body}"
+    );
+
+    let attached =
+        daemon::context_snapshot(&state, &request(false, vec!["src/harness.rs".into()])).unwrap();
+    // The file dossier and topic evidence render one claim body, byte for byte.
+    assert!(
+        attached.files[0].dossier.contains(body),
+        "{}",
+        attached.files[0].dossier
+    );
+}
+
+#[tokio::test]
 async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
     let fixture = Fixture::new();
     let state = Arc::new(fixture.state());

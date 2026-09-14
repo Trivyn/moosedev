@@ -511,6 +511,12 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
     );
     let constraint = record(&state, "Constraint", "Runtime builder hover constraint");
     link_public(&state, &decision, 4);
+    insert_literal(
+        &state,
+        &decision,
+        &state.capture.description,
+        "Runtime builder hover decision claim text.",
+    );
     link_public(&state, &constraint, 4);
     let component_iri = graph::load_components(&state)?[0]
         .iri
@@ -569,6 +575,8 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
 
     assert_eq!(hover_markdown(&response), expected);
     assert!(hover_markdown(&response).contains("Runtime builder hover decision"));
+    // Hover stays compact: titles only, never the claim text push carries.
+    assert!(!hover_markdown(&response).contains("hover decision claim text"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/adrs/"));
     assert!(hover_markdown(&response).contains("Runtime builder hover constraint"));
     assert!(hover_markdown(&response).contains("](http://127.0.0.1:7474/#/constraints/"));
