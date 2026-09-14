@@ -69,6 +69,10 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
             post(crate::harness::daemon::intent::resolve),
         )
         .route(
+            "/harness/ground",
+            post(crate::harness::daemon::ground::ground),
+        )
+        .route(
             "/harness/intent/associate",
             post(crate::harness::daemon::associate::associate),
         )

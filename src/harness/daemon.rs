@@ -28,6 +28,7 @@ mod capture;
 pub mod capture_type;
 mod checkpoint;
 mod context;
+pub mod ground;
 pub mod intent;
 mod journal;
 pub mod reconcile_score;

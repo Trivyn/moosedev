@@ -3874,3 +3874,243 @@ async fn restated_links_attest_and_skip_definitions_the_record_already_reaches()
     .to_string();
     assert!(error.contains("receipt"), "{error}");
 }
+
+/// A rooted Python index for grounding: a module constant in `channels.py`, a
+/// same-named function in the edited `billing.py`, a parameter in `routing.py`
+/// and a test function, all named like the compared attribute.
+fn install_grounding_index(fixture: &Fixture, state: &AppState) {
+    use moosedev::code::substrate::{Substrate, SubstrateMeta};
+    use protobuf::EnumOrUnknown;
+    use scip::types::{symbol_information::Kind, Document, Index, Occurrence, SymbolInformation};
+    let files = [
+        ("channels.py", "CHANNELS = {\"wire\", \"card\"}\n"),
+        (
+            "billing.py",
+            "def fee(order):\n    return 0\n\ndef channel():\n    return None\n",
+        ),
+        ("routing.py", "def route(channel):\n    return channel\n"),
+        (
+            "tests/test_channels.py",
+            "def channel():\n    return None\n",
+        ),
+    ];
+    for (file, source) in files {
+        let path = fixture.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+    }
+    let mut index = Index::new();
+    for (file, symbol, name, kind, range) in [
+        (
+            "channels.py",
+            "channels/CHANNELS.",
+            "CHANNELS",
+            Kind::Constant,
+            vec![0, 0, 8],
+        ),
+        (
+            "billing.py",
+            "billing/channel().",
+            "channel",
+            Kind::Function,
+            vec![3, 4, 11],
+        ),
+        (
+            "routing.py",
+            "routing/route().(channel)",
+            "channel",
+            Kind::Parameter,
+            vec![0, 10, 17],
+        ),
+        (
+            "tests/test_channels.py",
+            "tests/test_channels/channel().",
+            "channel",
+            Kind::Function,
+            vec![0, 4, 11],
+        ),
+    ] {
+        let symbol = format!("scip-python python sample 1 {symbol}");
+        let mut info = SymbolInformation::new();
+        info.symbol = symbol.clone();
+        info.display_name = name.into();
+        info.kind = EnumOrUnknown::new(kind);
+        let mut occurrence = Occurrence::new();
+        occurrence.symbol = symbol;
+        occurrence.symbol_roles = 1;
+        occurrence.range = range;
+        let mut document = Document::new();
+        document.relative_path = file.into();
+        document.symbols.push(info);
+        document.occurrences.push(occurrence);
+        index.documents.push(document);
+    }
+    let mut meta = SubstrateMeta::single(
+        "scip-python",
+        SubstrateMeta::current_head(&fixture.0),
+        Utc::now(),
+        4,
+        4,
+    );
+    meta.indexed_started_at = Some(Utc::now());
+    state.set_substrate(Arc::new(
+        Substrate::from_index_rooted(index, meta, false, &fixture.0).unwrap(),
+    ));
+}
+
+fn ground_lines(first: u32, end: u32) -> Vec<HarnessSourceRange> {
+    vec![HarnessSourceRange {
+        start: HarnessSourcePosition {
+            line: first,
+            col: 0,
+        },
+        end: HarnessSourcePosition { line: end, col: 0 },
+    }]
+}
+
+#[test]
+fn grounding_names_proven_definitions_and_literal_mismatches() {
+    use daemon::ground::ground_edit;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    install_grounding_index(&fixture, &state);
+    let after = "def fee(order):\n    if order.channel == \"cash\":\n        return 1\n    return 0\n\ndef channel():\n    return None\n";
+    let request =
+        |after: &str, ranges: Vec<HarnessSourceRange>, ranges_coalesced: bool| GroundRequest {
+            file: "billing.py".into(),
+            after: after.into(),
+            ranges,
+            ranges_coalesced,
+        };
+
+    let response = ground_edit(&state, &request(after, ground_lines(1, 3), false)).unwrap();
+    let keys: Vec<(&str, Vec<&str>)> = response
+        .keys
+        .iter()
+        .map(|key| {
+            (
+                key.attribute.as_str(),
+                key.literals.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(keys, vec![("channel", vec!["cash"])]);
+    let definitions: Vec<(&str, &str, &str)> = response
+        .definitions
+        .iter()
+        .map(|definition| {
+            (
+                definition.file.as_str(),
+                definition.name.as_str(),
+                definition.role.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        definitions,
+        vec![("channels.py", "CHANNELS", "declaration")],
+        "the edited file, a parameter and test code never ground an edit"
+    );
+    let preview = &response.definitions[0].preview;
+    assert!(
+        preview.starts_with("CHANNELS = {\"wire\", \"card\"}"),
+        "{preview}"
+    );
+    assert!(preview.len() <= 256);
+    let mismatches: Vec<(&str, &str, &str, &str)> = response
+        .mismatches
+        .iter()
+        .map(|mismatch| {
+            (
+                mismatch.key.as_str(),
+                mismatch.literal.as_str(),
+                mismatch.file.as_str(),
+                mismatch.definition.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        mismatches,
+        vec![("channel", "cash", "channels.py", "CHANNELS")]
+    );
+
+    // A defined literal is no mismatch.
+    let defined = after.replace("cash", "wire");
+    let response = ground_edit(&state, &request(&defined, ground_lines(1, 3), false)).unwrap();
+    assert_eq!(response.definitions.len(), 1);
+    assert!(response.mismatches.is_empty());
+
+    // Ranges are end-exclusive; outside them, coalesced, or unparsable, there are no keys.
+    let outside = ground_edit(&state, &request(after, ground_lines(3, 4), false)).unwrap();
+    assert!(outside.keys.is_empty());
+    let before_comparison =
+        ground_edit(&state, &request(after, ground_lines(0, 1), false)).unwrap();
+    assert!(before_comparison.keys.is_empty());
+    let coalesced = ground_edit(&state, &request(after, ground_lines(1, 3), true)).unwrap();
+    assert!(coalesced.keys.is_empty() && coalesced.definitions.is_empty());
+    let broken = ground_edit(
+        &state,
+        &request(
+            "def fee(order):\n    if order.channel == \"cash\"\n",
+            ground_lines(1, 2),
+            false,
+        ),
+    )
+    .unwrap();
+    assert!(broken.keys.is_empty());
+
+    // Source the index cannot prove current is never previewed or compared.
+    std::fs::write(fixture.0.join("channels.py"), "CHANNELS = {\"cash\"}\n").unwrap();
+    let unproven = ground_edit(&state, &request(after, ground_lines(1, 3), false)).unwrap();
+    assert_eq!(unproven.definitions.len(), 1);
+    assert_eq!(unproven.definitions[0].preview, "");
+    assert!(unproven.mismatches.is_empty());
+    let _ = std::fs::remove_dir_all(&fixture.0);
+}
+
+#[tokio::test]
+async fn http_ground_route_answers_keys_and_rejects_escaping_paths_and_unknown_fields() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let server = TestServer::new(build_routes(state.clone())).unwrap();
+    let body = GroundRequest {
+        file: "billing.py".into(),
+        after: "def fee(order):\n    return order.kind == \"x\"\n".into(),
+        ranges: ground_lines(1, 2),
+        ranges_coalesced: false,
+    };
+    let response = server.post("/api/v1/harness/ground").json(&body).await;
+    response.assert_status_ok();
+    let response: GroundResponse = response.json();
+    assert_eq!(response.keys.len(), 1);
+    assert_eq!(response.keys[0].attribute, "kind");
+    assert!(
+        response.definitions.is_empty() && response.mismatches.is_empty(),
+        "no index, no definitions"
+    );
+
+    let escaping = GroundRequest {
+        file: "../outside.py".into(),
+        ..body
+    };
+    let rejected = server
+        .post("/api/v1/harness/ground")
+        .json(&escaping)
+        .expect_failure()
+        .await;
+    assert!(!rejected.status_code().is_success());
+    let unknown = server
+        .post("/api/v1/harness/ground")
+        .json(&json!({"file": "billing.py", "after": "", "ranges": [], "extra": true}))
+        .expect_failure()
+        .await;
+    assert!(!unknown.status_code().is_success());
+    let _ = std::fs::remove_dir_all(&fixture.0);
+}

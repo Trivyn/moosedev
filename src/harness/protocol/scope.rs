@@ -48,3 +48,57 @@ pub enum IntentScopeBasis {
     EnclosingDefinition,
     ConservativeFile,
 }
+
+/// An edit to ground against the code index: the proposed full text of one
+/// file and its changed ranges in that text's coordinates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroundRequest {
+    pub file: String,
+    pub after: String,
+    #[serde(default)]
+    pub ranges: Vec<HarnessSourceRange>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ranges_coalesced: bool,
+}
+
+/// An attribute of a function parameter the edit compares with string literals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroundKey {
+    pub attribute: String,
+    pub literals: Vec<String>,
+}
+
+/// An indexed definition outside the edited file whose name matches a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroundDefinition {
+    pub key: String,
+    pub name: String,
+    pub file: String,
+    pub symbol: String,
+    /// `declaration` or `type_member`.
+    pub role: String,
+    /// The definition's first lines as proven indexed source; empty when the
+    /// file cannot be proven to match the index.
+    #[serde(default)]
+    pub preview: String,
+}
+
+/// A compared literal that does not appear among a definition's string values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroundMismatch {
+    pub key: String,
+    pub literal: String,
+    pub file: String,
+    pub definition: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroundResponse {
+    #[serde(default)]
+    pub keys: Vec<GroundKey>,
+    #[serde(default)]
+    pub definitions: Vec<GroundDefinition>,
+    #[serde(default)]
+    pub mismatches: Vec<GroundMismatch>,
+}
