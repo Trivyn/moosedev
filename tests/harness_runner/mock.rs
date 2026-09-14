@@ -59,6 +59,8 @@ pub(super) struct Script {
     pub(super) root: PathBuf,
     pub(super) usage: Option<Value>,
     pub(super) context: Option<String>,
+    /// Governing rules the full context returns.
+    pub(super) governing_constraints: Vec<GoverningConstraint>,
     /// Accepted knowledge an evidence-only (search) request returns.
     pub(super) search_knowledge: Option<String>,
     pub(super) replies: VecDeque<(&'static str, Value)>,
@@ -202,7 +204,7 @@ pub(super) async fn context(
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             evidence_iris: vec![],
-            governing_constraints: vec![],
+            governing_constraints: script.governing_constraints.clone(),
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."
                     .into()
