@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 
 from .artifacts import canonical_json
 from .scenario import SCENARIOS, load_scenario, starts_empty, tree_manifest
@@ -763,6 +764,15 @@ def nlq_question(logical_paths, files):
     return "Which constraints and requirements govern " + ", ".join(names) + "?"
 
 
+def timed_call(call):
+    """One tool call's text, or its error and empty text, with the wall seconds it took; a failure never aborts the run."""
+    start = time.monotonic()
+    try:
+        return call(), None, time.monotonic() - start
+    except RuntimeError as error:
+        return "", str(error), time.monotonic() - start
+
+
 def helper_ready(models, model=HELPER_MODEL, context=HELPER_CONTEXT_TOKENS):
     """True only when LM Studio reports the exact helper already loaded at its pinned runtime context."""
     return any(item.get("id") == model and item.get("state") == "loaded" and item.get("loaded_context_length") == context
@@ -817,7 +827,8 @@ def tier_summary(result):
         stages.update({f"tier3@{limit}": row for limit, row in entry["tier3"].items()})
         stages.update({f"cumulative:{name}": row for name, row in entry["cumulative"].items()})
         rows.append({"plan": entry["plan"]["name"], "files": entry["plan"]["files"],
-                     "tier2": "run" if entry["tier2"].get("run") else entry["tier2"].get("note"),
+                     "tier2": (("failed" if entry["tier2"].get("error") else "run") if entry["tier2"].get("run")
+                               else entry["tier2"].get("note")),
                      "stages": {name: {key: row[key] for key in keys} for name, row in stages.items()}})
     return rows
 
@@ -923,9 +934,11 @@ def tier_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output, 
                 question = nlq_question(logical, plan["files"])
                 stages = [("tier1", tier1_stage)]
                 if helper:
-                    answer = mcp("query", {"question": question}, f"{slug}-tier2")
+                    answer, error, seconds = timed_call(lambda: mcp("query", {"question": question}, f"{slug}-tier2"))
+                    if error is not None:
+                        (directory / "responses" / f"{slug}-tier2-error.txt").write_text(error)
                     tier2_stage = text_stage(answer, len(answer.encode()), known)
-                    tier2 = dict(row(tier2_stage), run=True, question=question)
+                    tier2 = dict(row(tier2_stage), run=True, question=question, seconds=seconds, error=error)
                     stages.append(("tier2", tier2_stage))
                 else:
                     tier2 = {"run": False, "note": helper_note, "question": question}

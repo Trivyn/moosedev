@@ -312,6 +312,17 @@ class TierDiagnosticTests(unittest.TestCase):
         self.assertEqual(crowding.nlq_question([], ["fees.py", "tests/test_fees.py"]),
                          "Which constraints and requirements govern fees.py, tests/test_fees.py?")
 
+    def test_timed_call_records_a_failed_tool_call_without_raising(self):
+        text, error, seconds = crowding.timed_call(lambda: "answer")
+        self.assertEqual((text, error), ("answer", None))
+        self.assertGreaterEqual(seconds, 0)
+
+        def failing():
+            raise RuntimeError("MCP tool query failed: could not regularize")
+        text, error, seconds = crowding.timed_call(failing)
+        self.assertEqual((text, error), ("", "MCP tool query failed: could not regularize"))
+        self.assertGreaterEqual(seconds, 0)
+
     def test_helper_must_already_be_loaded_at_its_pinned_context(self):
         loaded = {"id": crowding.HELPER_MODEL, "state": "loaded", "loaded_context_length": 131072}
         self.assertTrue(crowding.helper_ready({"data": [{"id": "google/gemma-4-26b-a4b", "state": "loaded"}, loaded]}))
@@ -329,6 +340,11 @@ class TierDiagnosticTests(unittest.TestCase):
                  "cumulative": {"tier1": cell, "tier1+tier3@5": cell, "tier1+tier3@10": dict(cell, deciding_claim=True)}}
         [row] = crowding.tier_summary({"plans": [entry]})
         self.assertEqual(row["tier2"], "not run: helper not loaded")
+        failed = dict(entry, tier2=dict(cell, run=True, question="q", seconds=1.0, error="could not regularize"),
+                      cumulative={"tier1+tier2": cell})
+        [failed_row] = crowding.tier_summary({"plans": [failed]})
+        self.assertEqual(failed_row["tier2"], "failed")
+        self.assertIn("tier2", failed_row["stages"])
         self.assertEqual(list(row["stages"]), ["push", "tier1", *(f"tier1.{hop}" for hop in crowding.TIER1_HOPS),
                                                "tier3@5", "tier3@10", "cumulative:tier1", "cumulative:tier1+tier3@5",
                                                "cumulative:tier1+tier3@10"])
