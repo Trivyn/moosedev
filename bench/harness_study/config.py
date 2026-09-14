@@ -42,7 +42,8 @@ def inventory(endpoint):
 
 def template():
     home = Path.home()
-    model_root = home / ".lmstudio/models/lmstudio-community"
+    index = home / ".lmstudio/.internal/model-index-cache.json"
+    model_root = model_table.models_root({"lmstudio_index": str(index)}) / "lmstudio-community"
     return {
         "schema_version": 1, "study_id": "harness-pilot-v1", "seed": 20260907,
         "episode_seconds": 1200, "context_tokens": 32768,
@@ -58,7 +59,7 @@ def template():
         "codex": shutil.which("codex"), "opencode": shutil.which("opencode"),
         "lms": str(home / ".lmstudio/bin/lms"),
         "codex_auth": str(home / ".codex/auth.json"),
-        "lmstudio_index": str(home / ".lmstudio/.internal/model-index-cache.json"),
+        "lmstudio_index": str(index),
         "hosted_endpoints": ["https://chatgpt.com", "https://api.openai.com", "https://auth.openai.com"],
         "embedding_source": str(REPO.parent / "moose/models/snowflake-arctic-embed-s"),
         "generation_policy": {"local_temperature": 0.0, "frontier_reasoning": "medium",

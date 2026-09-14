@@ -293,7 +293,7 @@ class FieldCheckConfigTests(unittest.TestCase):
                 patch.object(config, "verify_binaries", return_value={"build_id": "fresh-build"}):
             derived = config.field_check_config(parent, self.PARENT.with_name("manifest.json"), "g31b-probe",
                                                 [G31B], ["retry_ledger"], Path(temporary) / "approval.json")
-        root = Path(parent["config"]["lmstudio_index"]).parents[1] / "models"
+        root = model_table.models_root(parent["config"])
         self.assertEqual(derived["local_models"][0]["weights"], str(root / "mlx-community/gemma-4-31b-it-5bit"))
         self.assertEqual(len(config.schedule(derived)), 2)
 
@@ -443,6 +443,24 @@ class ResponsePolicyVariantTests(unittest.TestCase):
             self.assertEqual(config.verify_approval(path, config=cfg), approved)
             with self.assertRaisesRegex(ValueError, "design"):
                 config.verify_approval(path, config=field_config((G31B,), ("retry_ledger",)))
+
+class ModelsRootTests(unittest.TestCase):
+    def test_models_root_follows_lm_studio_downloads_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".lmstudio"
+            (home / ".internal").mkdir(parents=True)
+            config_value = {"lmstudio_index": str(home / ".internal/model-index-cache.json")}
+            self.assertEqual(model_table.models_root(config_value), home / "models")
+            elsewhere = Path(directory) / "external" / "models"
+            (home / "settings.json").write_text(json.dumps({"downloadsFolder": str(elsewhere)}))
+            self.assertEqual(model_table.models_root(config_value), elsewhere)
+            self.assertEqual(model_table.config_entries([HELPER], model_table.models_root(config_value))[0]["weights"],
+                             str(elsewhere / model_table.row(HELPER)["weights"]))
+            (home / "settings.json").write_text(json.dumps({"downloadsFolder": "relative/models"}))
+            with self.assertRaisesRegex(ValueError, "absolute"):
+                model_table.models_root(config_value)
+            (home / "settings.json").write_text(json.dumps({"downloadsFolder": ""}))
+            self.assertEqual(model_table.models_root(config_value), home / "models")
 
 
 if __name__ == "__main__":

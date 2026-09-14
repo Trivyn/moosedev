@@ -6,6 +6,7 @@ fingerprint (sha256 of the canonical tree manifest of that directory). Pinning
 the fingerprint here lets a human approval cover the exact weight bytes before
 any preflight runs. Changing a row changes every design identity that selects it.
 """
+import json
 from pathlib import Path
 
 HELPER = "gemma-4-e4b-it-mlx"
@@ -51,8 +52,17 @@ def row(model_id):
 
 
 def models_root(config):
-    """LM Studio's models root, next to the index cache the configuration names."""
-    return Path(config["lmstudio_index"]).parents[1] / "models"
+    """LM Studio's models root: the app's `downloadsFolder` setting beside the index cache the
+    configuration names, else the default `models` folder there."""
+    home = Path(config["lmstudio_index"]).parents[1]
+    settings = home / "settings.json"
+    if settings.is_file():
+        folder = json.loads(settings.read_text()).get("downloadsFolder")
+        if isinstance(folder, str) and folder.strip():
+            if not Path(folder).is_absolute():
+                raise ValueError("LM Studio downloadsFolder must be an absolute path")
+            return Path(folder)
+    return home / "models"
 
 
 def config_entries(model_ids, root):
