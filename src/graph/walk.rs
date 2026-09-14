@@ -34,6 +34,9 @@ const CONSTRAINT_CLAIM_LIMIT: usize = 24;
 /// reached by several hops is shown once, under the first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Hop {
+    /// An accepted Constraint linked directly to the files' code. Never a walk
+    /// candidate (the dossiers print its claim); it names governing rules.
+    Direct,
     /// An accepted Constraint on a component the files' code belongs to.
     ComponentConstraint,
     /// A record a directly linked record is motivated by.
@@ -46,8 +49,9 @@ pub enum Hop {
 
 impl Hop {
     /// The `via:` line naming what the walk reached the record from.
-    fn via(self, source: &str) -> String {
+    pub(crate) fn via(self, source: &str) -> String {
         match self {
+            Hop::Direct => format!("via: linked to {source}"),
             Hop::ComponentConstraint => format!("via: component {source}"),
             Hop::Motivating => format!("via: motivates {source}"),
             Hop::SupersessionHead => format!("via: supersedes {source}"),
@@ -58,7 +62,7 @@ impl Hop {
     /// Non-Constraint records rendered in full per hop before the rest are omitted.
     fn limit(self) -> usize {
         match self {
-            Hop::ComponentConstraint => usize::MAX,
+            Hop::Direct | Hop::ComponentConstraint => usize::MAX,
             Hop::Motivating => 8,
             Hop::SupersessionHead => 8,
             Hop::Lesson => 6,
@@ -89,6 +93,10 @@ pub struct LinkedEvidence {
     /// Working-set records linked directly to the files' code. The file dossiers
     /// print their claims, so the walk and any fallback leave them out.
     pub excluded: BTreeSet<String>,
+    /// Accepted Constraints among the directly linked records, with claims, in
+    /// dossier order. Together with the walk's Constraints they are the
+    /// governing rules of the files.
+    pub direct_constraints: Vec<LinkedRecord>,
 }
 
 /// Walk from the code of `files` to the governing knowledge linked around it.
@@ -102,10 +110,14 @@ pub fn linked_evidence(state: &AppState, files: &[String]) -> anyhow::Result<Lin
     let pairs = LinkPairs::resolve(state)?;
     let catalog = load_components(state)?;
     let mut direct: BTreeMap<String, RecordSummary> = BTreeMap::new();
+    let mut direct_file: BTreeMap<String, String> = BTreeMap::new();
     let mut components: BTreeSet<String> = BTreeSet::new();
     for file in files {
         for entity in file_entity_iris(state, file)? {
             for record in direct_records_for_entity(state, &entity)? {
+                direct_file
+                    .entry(record.iri.clone())
+                    .or_insert_with(|| file.clone());
                 direct.entry(record.iri.clone()).or_insert(record);
             }
             components.extend(realized_components(state, &terms, &entity)?);
@@ -229,7 +241,33 @@ pub fn linked_evidence(state: &AppState, files: &[String]) -> anyhow::Result<Lin
         render_claim_body(&item, &mut record.claim);
         true
     });
-    Ok(LinkedEvidence { records, excluded })
+    let mut constraints: Vec<RecordSummary> = sources
+        .iter()
+        .filter(|record| record.kind == "Constraint" && is_accepted(&record.status))
+        .map(|record| (*record).clone())
+        .collect();
+    sort_records(&mut constraints);
+    let direct_constraints = constraints
+        .into_iter()
+        .filter_map(|record| {
+            let item = context_item_for_iri(state, &record.iri, false)?;
+            let mut claim = String::new();
+            render_claim_body(&item, &mut claim);
+            Some(LinkedRecord {
+                source: direct_file.get(&record.iri).cloned().unwrap_or_default(),
+                iri: record.iri,
+                kind: item.kind.clone(),
+                label: item.label.clone(),
+                hop: Hop::Direct,
+                claim,
+            })
+        })
+        .collect();
+    Ok(LinkedEvidence {
+        records,
+        excluded,
+        direct_constraints,
+    })
 }
 
 /// Render the walk's records: header, `via:` line and claim body per record,
@@ -438,6 +476,19 @@ mod tests {
         assert_eq!(
             rendered,
             "\n[Constraint] urn:np7 label (urn:np7)\nvia: component Billing\nhasDescription: claim of urn:np7\n"
+        );
+    }
+
+    #[test]
+    fn via_lines_name_the_direct_file_and_every_hop_source() {
+        assert_eq!(Hop::Direct.via("src/fees.rs"), "via: linked to src/fees.rs");
+        assert_eq!(
+            Hop::ComponentConstraint.via("Billing"),
+            "via: component Billing"
+        );
+        assert!(
+            Hop::Direct < Hop::ComponentConstraint,
+            "direct rules sort first"
         );
     }
 

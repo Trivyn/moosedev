@@ -1,4 +1,5 @@
 //! Daemon-backed coding workflow with mandatory reading and capture.
+pub mod coverage;
 pub mod daemon;
 pub mod digest;
 #[cfg(feature = "harness")]
