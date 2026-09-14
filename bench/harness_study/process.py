@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import selectors
 import signal
 import subprocess
@@ -69,7 +70,11 @@ SYMBOLIC_EVENT_KINDS = (
     "association_unresolved", "capture_deferred", "capture_note", "capture_typed",
     "reconciled_restates", "reconciled_refines", "reconciled_distinct",
     "plan_check_rejected", "check_unrunnable", "replan_continuation", "replan_noop", "model_replan",
-    "final_review_attested", "knowledge_search")
+    "final_review_attested", "knowledge_search", "capture_anchored")
+# The runner journals one `capture_anchored` event per capture operation with this detail.
+CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
+                                   r"(\d+) anchor notes, (\d+) restated links$")
+CAPTURE_ANCHOR_FIELDS = ("definition_anchors", "module_anchors", "unanchored_files", "anchor_notes", "restated_links")
 
 
 def symbolic_metrics(events, model_requests):
@@ -87,6 +92,15 @@ def symbolic_metrics(events, model_requests):
         kind = event.get("kind", "unknown")
         kinds[kind] = kinds.get(kind, 0) + 1
     metrics = {kind: kinds.get(kind, 0) for kind in SYMBOLIC_EVENT_KINDS}
+    metrics.update({field: 0 for field in CAPTURE_ANCHOR_FIELDS})
+    for event in unique.values():
+        if event.get("kind") != "capture_anchored":
+            continue
+        counts = CAPTURE_ANCHOR_COUNTS.match(str(event.get("detail", "")))
+        if counts is None:
+            raise ValueError(f"unrecognized capture_anchored detail: {event.get('detail')!r}")
+        for field, value in zip(CAPTURE_ANCHOR_FIELDS, counts.groups()):
+            metrics[field] += int(value)
     metrics["capture_notes"] = sum(1 for request in model_requests if isinstance(request, dict)
                                    and request.get("purpose") == "harness_capture_note")
     metrics["structured_model_decisions"] = sum(

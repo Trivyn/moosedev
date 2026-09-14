@@ -26,23 +26,30 @@ BARE_IRI = re.compile(r"^https?://\S+$")
 INVENTORY_START = "Current knowledge inventory:"
 EVIDENCE_START = "Topic evidence ("
 PLAN_EVIDENCE_START = "Plan evidence ("
+LINKED_EVIDENCE_START = "Linked evidence ("
+FALLBACK_EVIDENCE_START = "Topic evidence (fallback;"
 MIN_RANK = 16
 PLAN_TOPIC_BYTES = 4000
 BUDGET_BYTES = 84_992
 EDIT_TOOLS = {"edit", "write", "patch", "multiedit"}
-LEAKS = ("claim_anywhere", "topic_evidence", "walk", "dossier_title", "policy_reason")
+LEAKS = ("claim_anywhere", "topic_evidence", "walk", "linked_evidence", "dossier_title", "policy_reason")
 
 
 def split_context(context):
-    """Inventory names and evidence records (with walk flags) of a harness context text."""
-    inventory, evidence, current = [], [], None
+    """Inventory names and evidence records of a harness context text.
+
+    Each evidence record carries whether topic recall walked to it (`walked`),
+    whether it sits in the structural linked-evidence section (`linked`), and
+    that section's `via:` line.
+    """
+    inventory, evidence, current, linked = [], [], None, False
     section = "preamble" if INVENTORY_START in context else "evidence"
     for line in context.splitlines():
         if line.startswith(INVENTORY_START):
             section = "inventory"
             continue
-        if line.startswith(EVIDENCE_START) or line.startswith(PLAN_EVIDENCE_START):
-            section, current = "evidence", None
+        if line.startswith((EVIDENCE_START, PLAN_EVIDENCE_START, LINKED_EVIDENCE_START)):
+            section, current, linked = "evidence", None, line.startswith(LINKED_EVIDENCE_START)
             continue
         match = HEADER.match(line)
         if section == "inventory":
@@ -50,11 +57,13 @@ def split_context(context):
                 inventory.append(match.groupdict())
         elif section == "evidence":
             if match:
-                current = dict(match.groupdict(), lines=[], walked=False)
+                current = dict(match.groupdict(), lines=[], walked=False, linked=linked, via=None)
                 evidence.append(current)
             elif current is not None and line:
                 current["lines"].append(line)
                 current["walked"] = current["walked"] or line.startswith("linkedVia: ")
+                if linked and current["via"] is None and line.startswith("via: "):
+                    current["via"] = line[len("via: "):]
     return {"inventory": inventory, "evidence": evidence}
 
 
@@ -65,8 +74,10 @@ def membership(response, *, iri, title, claim):
     dossiers = "\n".join(item.get("dossier", "") for item in files)
     policies = "\n".join(json.dumps(item.get("policy"), ensure_ascii=False) for item in files)
     return {"inventory": any(item["iri"] == iri for item in parsed["inventory"]),
-            "topic_evidence": any(item["iri"] == iri and not item["walked"] for item in parsed["evidence"]),
+            "topic_evidence": any(item["iri"] == iri and not item["walked"] and not item["linked"]
+                                  for item in parsed["evidence"]),
             "walk": any(item["iri"] == iri and item["walked"] for item in parsed["evidence"]),
+            "linked_evidence": any(item["iri"] == iri and item["linked"] for item in parsed["evidence"]),
             "dossier_title": title in dossiers or iri in dossiers,
             "policy_reason": title in policies or iri in policies,
             "claim_anywhere": claim in "\n".join((context, dossiers, policies))}
@@ -125,6 +136,29 @@ def v2_verdict(plan_results, required=2):
             "reached": reached, "plans": len(plan_results), "required": required}
 
 
+def delivery_verdict(memberships, files="fees.py"):
+    """After-build verdict: the deciding claim arrives through linked evidence for the file set."""
+    checked = [entry for entry in memberships if entry["files"] == files]
+    failures = [f"{entry['topic']} / {entry['files']}: {key}" for entry in checked
+                for key in ("linked_evidence", "claim_anywhere") if not entry["membership"].get(key)]
+    return {"passed": bool(checked) and not failures, "failures": failures, "files": files}
+
+
+def push_shape(contexts):
+    """`linked` when a build serves linked evidence (or its topic fallback); `topic` for the earlier push."""
+    return "linked" if any(LINKED_EVIDENCE_START in text or FALLBACK_EVIDENCE_START in text
+                           for text in contexts) else "topic"
+
+
+def dossier_claims(files, scenario, associations):
+    """Every seed association's full description must appear in its file's dossier."""
+    facts = {fact["id"]: fact for fact in scenario["initial_facts"]}
+    dossiers = {item.get("file"): item.get("dossier", "") for item in files}
+    missing = [association["fact"] for association in associations
+               if facts[association["fact"]]["description"] not in dossiers.get(association["file"], "")]
+    return {"passed": bool(associations) and not missing, "checked": len(associations), "missing": missing}
+
+
 def first_sentence(text):
     return re.split(r"(?<=\.)\s", text.strip(), maxsplit=1)[0]
 
@@ -147,14 +181,14 @@ def _segments(prompt):
         if name != "knowledge":
             refined.append((name, text))
             continue
-        inventory, evidence, plan = text.find(INVENTORY_START), text.find(EVIDENCE_START), text.find(PLAN_EVIDENCE_START)
-        cuts = sorted((position, label) for position, label in ((inventory, "inventory"), (evidence, "topic_evidence"),
-                                                                  (plan, "plan_evidence")) if position >= 0)
+        starts = ((INVENTORY_START, "inventory"), (EVIDENCE_START, "topic_evidence"),
+                  (PLAN_EVIDENCE_START, "plan_evidence"), (LINKED_EVIDENCE_START, "linked_evidence"))
+        cuts = sorted((position, label) for marker, label in starts for position in [text.find(marker)] if position >= 0)
         refined.append(("knowledge", text[:cuts[0][0]] if cuts else text))
         for index, (position, label) in enumerate(cuts):
             end = cuts[index + 1][0] if index + 1 < len(cuts) else len(text)
             part = text[position:end]
-            if label != "inventory":
+            if label in ("topic_evidence", "plan_evidence"):
                 walked = "\n".join("\n".join(record["lines"]) for record in split_context(part)["evidence"]
                                    if record["walked"])
                 refined.append(("walk", walked))
@@ -223,18 +257,24 @@ def harness_report(run, *, iri, title, claim, probes):
             if entry not in plans:
                 plans.append(entry)
     intents = final.get("intent_events", [])
+    reads = [message.split(":", 1)[0][len("Read "):] for message in messages if message.startswith("Read ")]
     return {"arm": "harness", "first_edit_sequence": first[0] if first else None,
             "requests": len(requests), "requests_before_first_edit": before,
             "claim_before_first_edit": any(item["claim_sections"] for item in locations[:before]),
             "claim_after_first_edit": any(item["claim_sections"] for item in locations[before:]),
             "title_before_first_edit": any(item["title_sections"] for item in locations[:before]),
+            "linked_claim_before_first_edit": any("linked_evidence" in item["claim_sections"]
+                                                  for item in locations[:before]),
             "request_locations": locations,
             "searches": [event.get("detail") or event.get("message") for event in intents
                          if event.get("kind") == "knowledge_search"],
             "search_returned_record": any(message.startswith("Accepted project knowledge for") and iri in message
                                           for message in messages),
             "plan_recall": [event.get("detail") for event in intents if event.get("kind") == "plan_recall"],
-            "reads": [message.split(":", 1)[0][len("Read "):] for message in messages if message.startswith("Read ")],
+            "reads": reads,
+            # The linked-evidence walk starts from the files both read and planned.
+            "walk_files": [{"plan": index, "files": sorted(set(plan["files"]) & set(reads))}
+                           for index, plan in enumerate(plans)],
             "plans": plans, "probes": probe_results(run, probes)}
 
 
@@ -278,7 +318,7 @@ def report(runs, *, scenario_id, deciding_fact):
         else:
             entry = native_report(run, claim=claim, probes=probes)
         results.append(dict(entry, run=str(run), model=manifest.get("model"), backend=manifest.get("backend")))
-    return {"schema_version": 1, "scenario_id": scenario_id, "package_sha256": scenario["package_sha256"],
+    return {"schema_version": 2, "scenario_id": scenario_id, "package_sha256": scenario["package_sha256"],
             "deciding_fact": deciding_fact, "iri": iri, "title": title, "claim": claim, "runs": results}
 
 
@@ -331,7 +371,8 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
     """Seed the package with the frozen daemon and measure today's push, ranks and plan-topic reach."""
     from .binaries import verify_binaries
     from .daemon import OwnedDaemon
-    from .indexing import apply_overlay, index_workspace, ready_dossiers, short_probe_runtime, verify_indexer
+    from .indexing import (apply_overlay, index_workspace, ready_dossiers, resolution_tables, short_probe_runtime,
+                           verify_indexer)
     scenario = load_scenario(scenario_id)
     iri, title, claim = _deciding(scenario, deciding_fact)
     binaries = verify_binaries(Path(binary_manifest))
@@ -351,7 +392,7 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
     topics = {"objective": episode_prompt(episode, "harness").strip(), "bare": episode["prompt"].strip()}
     file_sets = {"none": [], "fees.py": ["fees.py"], "all": project_files}
     plans = [{"summary": plan["summary"], "files": list(plan["files"])} for plan in plans]
-    result = {"schema_version": 1, "scenario_id": scenario_id, "package_sha256": scenario["package_sha256"],
+    result = {"schema_version": 2, "scenario_id": scenario_id, "package_sha256": scenario["package_sha256"],
               "gold_sha256": scenario["gold_sha256"],
               "seed_graph_sha256": hashlib.sha256(seed_graph(scenario).encode()).hexdigest(),
               "build_id": binaries["build_id"], "deciding_fact": deciding_fact, "iri": iri, "title": title,
@@ -371,11 +412,12 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
             readiness = ready_dossiers(daemon, scenario, seed=True, require_empty=starts_empty(scenario))
             result["readiness"] = {"conforms": [op["reviewed"].get("conforms") for op in readiness["seed_operations"]],
                                    "bindings": sum(len(op["request"]["bindings"]) for op in readiness["seed_operations"])}
-            memberships = []
+            memberships, responses = [], {}
             for topic_name, topic in topics.items():
                 for set_name, files in file_sets.items():
                     response = save(f"{topic_name}-{set_name}",
                                     daemon._request("/api/v1/harness/context", {"topic": topic, "files": files}))
+                    responses[f"{topic_name}-{set_name}"] = response
                     memberships.append({"topic": topic_name, "files": set_name,
                                         "membership": membership(response, iri=iri, title=title, claim=claim),
                                         "bytes": {"context": len(response.get("context", "").encode()),
@@ -407,6 +449,12 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
             result["repeat_unchanged"] = (split_context(repeat.get("context", "")) == split_context(first.get("context", "")))
             result["checkpoint"] = daemon.checkpoint()
     result["memberships"] = memberships
+    result["dossier_claims"] = dossier_claims(responses["objective-all"].get("files", []), scenario,
+                                              resolution_tables(scenario_id)[1])
+    result["push_shape"] = push_shape(response.get("context", "") for response in responses.values())
+    result["delivery"] = delivery_verdict(memberships)
+    # V1 (the claim is absent) describes the topic push; a linked-evidence build is held to delivery instead.
+    result["applies"] = "delivery" if result["push_shape"] == "linked" else "v1"
     result["ranks"] = ranks
     result["plan_results"] = plan_results
     result["largest_push_bytes"] = max(entry["bytes"]["context"] + entry["bytes"]["files"] for entry in memberships)
@@ -421,55 +469,29 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
 # ---------------------------------------------------------------------------
 # Diagnostics only: delivery levers for the crowded-graph probe.
 # Nothing below changes `gate`, its output, or the frozen probe package. The
-# lever run seeds its own disposable workspace and reports what two candidate
-# deterministic levers would deliver: dossiers that carry claims (lever 1) and
-# recall driven by source the model has read (lever 2, variants 2a-2d).
+# lever run seeds its own disposable workspace and reports what two
+# deterministic levers deliver: the claim-bearing dossiers the build serves
+# (lever 1, measured live) and recall driven by source the model has read
+# (lever 2, variants 2a-2d).
 # ---------------------------------------------------------------------------
 
 RAW_SOURCE_BYTES = 4000
 READ_VARIANTS = ("2a", "2b", "2c", "2d")
-DOSSIER_RECORD = re.compile(r"^- \[(?P<kind>[A-Za-z]+)\] \[(?P<title>.+?)\]\([^)]*\) - .*\(via (?P<via>[A-Za-z]+)\)\s*$")
+DOSSIER_RECORD = re.compile(r"^- \[(?P<kind>[A-Za-z]+)\] (?:\[(?P<linked>.+?)\]\([^)]*\)|(?P<bare>.+?)) - "
+                            r".*\(via (?P<via>[A-Za-z]+)\)\s*$")
 
 
 def dossier_records(dossier):
-    """Record lines of an entity dossier, in order: kind, title and the linking predicate."""
-    return [{"kind": match["kind"], "title": match["title"], "via": match["via"]}
+    """Record lines of an entity dossier, in order: kind, title (linked or bare) and the linking predicate."""
+    return [{"kind": match["kind"], "title": match["linked"] or match["bare"], "via": match["via"]}
             for line in dossier.splitlines() for match in [DOSSIER_RECORD.match(line)] if match]
 
 
-def _claim_block(scenario, fact):
-    component = seed_iri(scenario["id"] + "/component/" + fact["component"])
-    lines = [f"[{fact['kind']}] {fact['title']} ({seed_iri(scenario['id'] + '/fact/' + fact['id'])})",
-             "hasDescription: " + fact["description"], "concerns: " + component]
-    lines.extend(f"{relation['predicate']}: {seed_iri(scenario['id'] + '/fact/' + relation['target'])}"
-                 for relation in fact.get("relations", [])[:5])
-    return "\n".join(lines)
-
-
-def simulate_claim_dossiers(files, scenario):
-    """Lever 1: each listed record line replaced by its full claim, rendered as topic evidence renders records."""
-    facts = {fact["title"]: fact for fact in scenario["initial_facts"]}
-    delivered, unmatched, simulated = [], [], []
-    for item in files:
-        lines = []
-        for line in item.get("dossier", "").splitlines():
-            match = DOSSIER_RECORD.match(line)
-            if not match:
-                lines.append(line)
-                continue
-            fact = facts.get(match["title"])
-            if fact is None:
-                unmatched.append(match["title"])
-                lines.append(line)
-                continue
-            if fact["id"] not in delivered:
-                delivered.append(fact["id"])
-            lines.append(_claim_block(scenario, fact))
-        text = "\n".join(lines) + ("\n" if item.get("dossier", "").endswith("\n") else "")
-        simulated.append({"file": item.get("file"), "dossier": text})
-    return {"files": simulated, "delivered_fact_ids": delivered, "unmatched_titles": unmatched,
-            "today_bytes": sum(len(item.get("dossier", "").encode()) for item in files),
-            "simulated_bytes": sum(len(item["dossier"].encode()) for item in simulated)}
+def live_claim_dossiers(files, scenario):
+    """Lever 1, live: which seed facts' full descriptions the served file dossiers carry."""
+    text = "\n".join(item.get("dossier", "") for item in files)
+    return {"delivered_fact_ids": [fact["id"] for fact in scenario["initial_facts"] if fact["description"] in text],
+            "bytes": len(text.encode())}
 
 
 def _positioned(tree):
@@ -617,10 +639,10 @@ def lever_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output,
             for set_name, files in (("fees.py", ["fees.py"]), ("all", project_files)):
                 response = save(f"lever1-{set_name}", daemon._request("/api/v1/harness/context",
                                                                       {"topic": objective, "files": files}))
-                simulated = simulate_claim_dossiers(response.get("files", []), scenario)
-                text = "\n".join(item["dossier"] for item in simulated["files"])
-                lever1[set_name] = dict({key: value for key, value in simulated.items() if key != "files"},
-                                        deciding_claim_delivered=claim in text, control_claim_delivered=control_claim in text)
+                live = live_claim_dossiers(response.get("files", []), scenario)
+                text = "\n".join(item.get("dossier", "") for item in response.get("files", []))
+                lever1[set_name] = dict(live, deciding_claim_delivered=claim in text,
+                                        control_claim_delivered=control_claim in text)
             result["lever1"] = lever1
             objective_response = save("objective-evidence", daemon._request(
                 "/api/v1/harness/context", {"topic": objective, "files": [], "evidence_only": True}))

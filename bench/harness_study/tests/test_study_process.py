@@ -430,7 +430,13 @@ sys.exit(2)''',
                           {"id": "i", "cycle": None, "kind": "link_review", "detail": "accepted"},
                           {"id": "j", "cycle": "c1", "kind": "replan_continuation", "detail": "1: reconsider"},
                           {"id": "k", "cycle": None, "kind": "knowledge_search",
-                           "detail": "2 records, 0 repository matches: cache"}],
+                           "detail": "2 records, 0 repository matches: cache"},
+                          {"id": "l", "cycle": None, "kind": "capture_anchored",
+                           "detail": "1 definition anchors, 1 module anchors, 0 unanchored files, 1 anchor notes, 0 restated links"},
+                          {"id": "l", "cycle": None, "kind": "capture_anchored",
+                           "detail": "1 definition anchors, 1 module anchors, 0 unanchored files, 1 anchor notes, 0 restated links"},
+                          {"id": "m", "cycle": None, "kind": "capture_anchored",
+                           "detail": "2 definition anchors, 0 module anchors, 1 unanchored files, 0 anchor notes, 1 restated links"}],
                       "events": [{"message": "Read labels.py: source"}],
                       "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
                                          {"purpose": "harness_capture_note", "attempt": 1, "decision_id": "d2"}]}
@@ -440,10 +446,14 @@ sys.exit(2)''',
                     "capture_deferred": 1, "capture_note": 1, "capture_typed": 1, "reconciled_restates": 1,
                     "reconciled_refines": 0, "reconciled_distinct": 1, "plan_check_rejected": 0,
                     "check_unrunnable": 0, "replan_continuation": 1, "replan_noop": 0, "model_replan": 0,
-                    "final_review_attested": 0, "knowledge_search": 1, "capture_notes": 1,
+                    "final_review_attested": 0, "knowledge_search": 1, "capture_anchored": 2,
+                    "definition_anchors": 3, "module_anchors": 1, "unanchored_files": 1, "anchor_notes": 1,
+                    "restated_links": 1, "capture_notes": 1,
                     "structured_model_decisions": 0, "autonomous_recoveries": 2}
         self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,
                          "duplicate journal ids count once")
+        with self.assertRaisesRegex(ValueError, "capture_anchored"):
+            symbolic_metrics([{"id": "x", "kind": "capture_anchored", "detail": "anchored somewhere"}], [])
         result, records = self.run_client(f"""
             import json, sys
             json.loads(sys.stdin.readline())

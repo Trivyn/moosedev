@@ -38,7 +38,7 @@ class ContextParsingTests(unittest.TestCase):
         self.assertEqual([item["iri"] for item in parsed["inventory"]], [NP7, OTHER])
         self.assertEqual([(item["iri"], item["walked"]) for item in parsed["evidence"]], [(OTHER, False), (WALKED, True)])
         member = crowding.membership(response, iri=NP7, title=TITLE, claim=CLAIM)
-        self.assertEqual(member, {"inventory": True, "topic_evidence": False, "walk": False,
+        self.assertEqual(member, {"inventory": True, "topic_evidence": False, "walk": False, "linked_evidence": False,
                                   "dossier_title": False, "policy_reason": False, "claim_anywhere": False})
         leaked = dict(response, files=[{"file": "fees.py", "dossier": f"- [Constraint] {TITLE} - accepted",
                                         "policy": {"reason": f"Constraint {TITLE} requires ratification"}}])
@@ -49,6 +49,24 @@ class ContextParsingTests(unittest.TestCase):
         member = crowding.membership(evidence_only, iri=NP7, title=TITLE, claim=CLAIM)
         self.assertTrue(member["topic_evidence"] and member["claim_anywhere"])
         self.assertFalse(member["inventory"])
+
+    def test_linked_evidence_section_records_its_via_lines(self):
+        context = (context_text(inventory=[("Constraint", TITLE, NP7)]).replace(
+            "\nTopic evidence (complete claims; up to six relationships per record):\n",
+            "\nLinked evidence (records linked to the files' code and components; complete claims):\n")
+            + f"\n[Constraint] {TITLE} ({NP7})\nvia: component Billing\nhasDescription: {CLAIM}\n"
+            + "\n1 further linked record not shown in full (Lesson: 1); search project knowledge for their claims\n")
+        parsed = crowding.split_context(context)
+        self.assertEqual([(item["iri"], item["linked"], item["via"], item["walked"]) for item in parsed["evidence"]],
+                         [(NP7, True, "component Billing", False)])
+        member = crowding.membership({"context": context, "files": []}, iri=NP7, title=TITLE, claim=CLAIM)
+        self.assertTrue(member["linked_evidence"] and member["claim_anywhere"])
+        self.assertFalse(member["topic_evidence"] or member["walk"])
+        self.assertEqual(crowding.push_shape([context]), "linked")
+        fallback = context_text(inventory=[("Constraint", TITLE, NP7)]).replace(
+            "Topic evidence (complete", "Topic evidence (fallback; nothing is linked beyond the file dossiers; complete")
+        self.assertEqual(crowding.push_shape(["", fallback]), "linked")
+        self.assertEqual(crowding.push_shape([context_text(inventory=[("Constraint", TITLE, NP7)])]), "topic")
 
 
 class RankingTests(unittest.TestCase):
@@ -71,8 +89,8 @@ class RankingTests(unittest.TestCase):
 
 
 class VerdictTests(unittest.TestCase):
-    CLEAN = {"inventory": True, "topic_evidence": False, "walk": False, "dossier_title": False,
-             "policy_reason": False, "claim_anywhere": False}
+    CLEAN = {"inventory": True, "topic_evidence": False, "walk": False, "linked_evidence": False,
+             "dossier_title": False, "policy_reason": False, "claim_anywhere": False}
 
     def memberships(self, **change):
         return [{"topic": topic, "files": files, "membership": dict(self.CLEAN, **change)}
@@ -82,7 +100,7 @@ class VerdictTests(unittest.TestCase):
         ranks = {"objective": {"rank": 20, "cross_check": True}, "bare": {"rank": 16, "cross_check": True}}
         self.assertTrue(crowding.v1_verdict(self.memberships(), ranks)["passed"])
         for change in ({"claim_anywhere": True}, {"topic_evidence": True}, {"walk": True},
-                       {"dossier_title": True}, {"policy_reason": True}):
+                       {"linked_evidence": True}, {"dossier_title": True}, {"policy_reason": True}):
             with self.subTest(change=change):
                 self.assertFalse(crowding.v1_verdict(self.memberships(**change), ranks)["passed"])
         low = dict(ranks, bare={"rank": 15, "cross_check": True})
@@ -91,6 +109,32 @@ class VerdictTests(unittest.TestCase):
         verdict = crowding.v1_verdict(self.memberships(), unavailable)
         self.assertTrue(verdict["passed"])
         self.assertIn("rank unavailable", " ".join(verdict["notes"]))
+
+    def test_delivery_verdict_requires_the_claim_in_linked_evidence_for_the_file(self):
+        delivered = self.memberships(linked_evidence=True, claim_anywhere=True)
+        self.assertTrue(crowding.delivery_verdict(delivered)["passed"])
+        # Only the fees.py file set is required; other sets may fall back.
+        mixed = [dict(entry, membership=dict(self.CLEAN)) if entry["files"] != "fees.py" else entry
+                 for entry in delivered]
+        self.assertTrue(crowding.delivery_verdict(mixed)["passed"])
+        for change in ({"linked_evidence": False}, {"claim_anywhere": False}):
+            with self.subTest(change=change):
+                broken = [dict(entry, membership=dict(entry["membership"], **change)) for entry in delivered]
+                verdict = crowding.delivery_verdict(broken)
+                self.assertFalse(verdict["passed"])
+                self.assertEqual(len(verdict["failures"]), 2)
+        self.assertFalse(crowding.delivery_verdict([])["passed"])
+
+    def test_dossier_claims_require_every_seed_description_in_its_file_dossier(self):
+        associations = [{"fact": "stateless", "file": "fees.py", "name": "FeePolicy.late_fee"},
+                        {"fact": "fees-cents", "file": "fees.py", "name": "FeePolicy.late_fee"}]
+        files = [{"file": "fees.py", "dossier": CLAIM_DOSSIER}, {"file": "README.md", "dossier": ""}]
+        self.assertEqual(crowding.dossier_claims(files, SCENARIO, associations),
+                         {"passed": True, "checked": 2, "missing": []})
+        titles_only = [{"file": "fees.py", "dossier": DOSSIER}]
+        self.assertEqual(crowding.dossier_claims(titles_only, SCENARIO, associations),
+                         {"passed": False, "checked": 2, "missing": ["stateless", "fees-cents"]})
+        self.assertFalse(crowding.dossier_claims(files, SCENARIO, [])["passed"])
 
     def test_v2_counts_plans_whose_topic_reaches_the_record(self):
         reach = [{"reaches": True}, {"reaches": False}, {"reaches": True}]
@@ -147,6 +191,8 @@ class ReportTests(unittest.TestCase):
         probes = [{"id": "e1-charity", "test": "LateFeeTests.test_charity_pays_no_late_fee"},
                   {"id": "e1-half-up", "test": "LateFeeTests.test_percentage_rounds_half_up"}]
         report = crowding.harness_report(self.run, iri=NP7, title=TITLE, claim=CLAIM, probes=probes)
+        self.assertFalse(report["linked_claim_before_first_edit"])
+        self.assertEqual(report["walk_files"], [{"plan": 0, "files": []}])
         self.assertEqual(report["first_edit_sequence"], 2)
         self.assertEqual(report["requests_before_first_edit"], 2)
         self.assertFalse(report["claim_before_first_edit"])
@@ -155,6 +201,25 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(report["search_returned_record"])
         self.assertEqual(report["plans"], [{"summary": "Add the fee", "files": ["fees.py"]}])
         self.assertEqual(report["probes"], {"e1-charity": "FAIL", "e1-half-up": "ok"})
+
+    def test_harness_report_measures_linked_delivery_from_read_plan_files(self):
+        linked = ("Current accepted knowledge:\n" + context_text(inventory=[("Constraint", TITLE, NP7)]).replace(
+            "Topic evidence (complete claims; up to six relationships per record)",
+            "Linked evidence (records linked to the files' code and components; complete claims)")
+            + f"\n[Constraint] {TITLE} ({NP7})\nvia: component Billing\nhasDescription: {CLAIM}\nEntity dossiers:\n[]\n")
+        location = crowding.locate(linked, iri=NP7, title=TITLE, claim=CLAIM)
+        self.assertEqual(location["claim_sections"], ["linked_evidence"])
+        plan = {"summary": "Add the fee", "files": ["fees.py", "tests/test_fees.py"], "checks": ["python3 -m unittest"]}
+        task1 = {"phase": "Working", "edits": [], "model_requests": [{"purpose": "harness_action", "prompt": linked}],
+                 "events": [{"message": "Read fees.py: class FeePolicy"},
+                            {"message": "Proposed plan: " + json.dumps(plan)}], "intent_events": []}
+        task2 = dict(task1, edits=[{"file": "fees.py"}])
+        self.write_run([stdout(1, {"type": "state", "task": task1}), stdout(2, {"type": "state", "task": task2})],
+                       {"episodes": [{"id": "e1", "status": "success", "checks": [{"stderr": ""}]}]})
+        report = crowding.harness_report(self.run, iri=NP7, title=TITLE, claim=CLAIM, probes=[])
+        self.assertTrue(report["claim_before_first_edit"])
+        self.assertTrue(report["linked_claim_before_first_edit"])
+        self.assertEqual(report["walk_files"], [{"plan": 0, "files": ["fees.py"]}])
 
     def test_native_report_finds_the_notes_read_before_the_first_edit(self):
         def tool(sequence, name, value):
@@ -172,6 +237,12 @@ class ReportTests(unittest.TestCase):
 DOSSIER = ("### late_fee (Unknown)\n`fees::FeePolicy::late_fee` - defined in `fees.py`\n\n**Records**\n"
            "- [Constraint] [FeePolicy keeps no state between calls](http://127.0.0.1:1/#/constraints/a) - accepted, 2026-09-07T00:00:00Z (via constrains)\n"
            "- [Requirement] [Fees are integer cents rounded half up](http://127.0.0.1:1/#/requirements/b) - accepted, 2026-09-07T00:00:00Z (via concerns)\n")
+# The served, claim-bearing form: bare titles (no workbench address) with claim lines beneath.
+CLAIM_DOSSIER = ("### late_fee (Unknown)\n`fees::FeePolicy::late_fee` - defined in `fees.py`\n\n**Records**\n"
+                 "- [Constraint] FeePolicy keeps no state between calls - accepted, 2026-09-07T00:00:00Z (via constrains)\n"
+                 "hasDescription: FeePolicy holds no state.\n"
+                 "- [Requirement] Fees are integer cents rounded half up - accepted, 2026-09-07T00:00:00Z (via concerns)\n"
+                 "hasDescription: Percentages round half up to the cent.\nconcerns: https://moosedev.dev/kg/study/billing\n")
 SCENARIO = {"id": "probe", "initial_facts": [
     {"id": "stateless", "kind": "Constraint", "title": "FeePolicy keeps no state between calls",
      "description": "FeePolicy holds no state.", "component": "Billing", "relations": []},
@@ -198,17 +269,19 @@ class LeverDiagnosticTests(unittest.TestCase):
             {"kind": "Constraint", "title": "FeePolicy keeps no state between calls", "via": "constrains"},
             {"kind": "Requirement", "title": "Fees are integer cents rounded half up", "via": "concerns"}])
         self.assertEqual(crowding.dossier_records("No recorded entity knowledge is linked to this file."), [])
+        # Bare titles parse too, and claim lines beneath a record are not records.
+        self.assertEqual(crowding.dossier_records(CLAIM_DOSSIER), [
+            {"kind": "Constraint", "title": "FeePolicy keeps no state between calls", "via": "constrains"},
+            {"kind": "Requirement", "title": "Fees are integer cents rounded half up", "via": "concerns"}])
 
-    def test_simulated_claim_dossiers_deliver_listed_records_only(self):
-        files = [{"file": "fees.py", "dossier": DOSSIER, "policy": {"decision": "gate"}},
+    def test_live_claim_dossiers_report_the_descriptions_served(self):
+        files = [{"file": "fees.py", "dossier": CLAIM_DOSSIER, "policy": {"decision": "gate"}},
                  {"file": "README.md", "dossier": "No recorded entity knowledge is linked to this file.", "policy": {}}]
-        result = crowding.simulate_claim_dossiers(files, SCENARIO)
+        result = crowding.live_claim_dossiers(files, SCENARIO)
         self.assertEqual(result["delivered_fact_ids"], ["stateless", "fees-cents"])
-        self.assertEqual(result["today_bytes"], len(DOSSIER.encode()) + len("No recorded entity knowledge is linked to this file.".encode()))
-        self.assertGreater(result["simulated_bytes"], result["today_bytes"])
-        simulated = "\n".join(item["dossier"] for item in result["files"])
-        self.assertIn("hasDescription: Percentages round half up to the cent.", simulated)
-        self.assertNotIn(CLAIM, simulated)
+        text = CLAIM_DOSSIER + "\n" + "No recorded entity knowledge is linked to this file."
+        self.assertEqual(result["bytes"], len(text.encode()))
+        self.assertEqual(crowding.live_claim_dossiers([{"file": "fees.py", "dossier": DOSSIER}], SCENARIO)["delivered_fact_ids"], [])
 
     def test_source_identifiers_literals_and_imports(self):
         self.assertEqual(crowding.source_identifiers(SOURCES["accounts.py"]),
