@@ -217,7 +217,12 @@ impl Runner {
                 files,
                 checks,
             } => {
-                self.refresh(&files).await?;
+                let context = self.refresh(&files).await?;
+                // Before anything is stored: a plan whose summary skips a
+                // governing rule goes back once with a note naming it.
+                if self.plan_coverage_return(&summary, &context) {
+                    return self.persist();
+                }
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));

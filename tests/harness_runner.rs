@@ -153,6 +153,127 @@ async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     assert!(!prompt.contains("each project rule:"));
 }
 
+fn coverage_rules() -> Vec<GoverningConstraint> {
+    vec![
+        GoverningConstraint {
+            iri: "urn:rule:resume".into(),
+            label: "Uploads resume from the last acknowledged chunk".into(),
+            claim: "hasDescription: An interrupted upload resumes from the chunk the server acknowledged.\n".into(),
+            via: "via: component Transfers".into(),
+        },
+        GoverningConstraint {
+            iri: "urn:rule:audit".into(),
+            label: "Every transfer writes an audit entry".into(),
+            claim: "hasDescription: Each transfer attempt appends one audit entry with its outcome.\n".into(),
+            via: "via: linked to code.txt".into(),
+        },
+    ]
+}
+
+fn coverage_events(runner: &Runner, kind: &str) -> Vec<String> {
+    runner
+        .task
+        .intent_events
+        .iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| event.detail.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let _env = Env::configure(&fixture.url);
+    fixture.shared.lock().unwrap().governing_constraints = coverage_rules();
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Repair code.txt".into(),
+    )
+    .await
+    .unwrap();
+    // A file read outside the plan shows that nothing is narrowed on return.
+    std::fs::write(fixture.root.join("notes.txt"), "context\n").unwrap();
+    fixture.reply(
+        "harness_action",
+        json!({"action":"read","file":"notes.txt"}),
+    );
+    runner.advance().await.unwrap();
+    assert!(runner.task.read_files.contains(&"notes.txt".into()));
+    let silent = json!({"action":"plan","summary":"Edit code.txt to repair the output","files":["code.txt"],"checks":["true"]});
+    fixture.reply("harness_action", silent.clone());
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.plan.is_none(),
+        "a returned plan is never stored"
+    );
+    assert!(runner.task.read_files.contains(&"notes.txt".into()));
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner.task.last_error.is_none());
+    assert!(
+        runner.task.recovery.is_none(),
+        "the repair budget is untouched"
+    );
+    assert!(runner.task.capture_request.is_none());
+    assert!(
+        coverage_events(&runner, "cycle_started").is_empty(),
+        "no intent cycle starts"
+    );
+    assert_eq!(coverage_events(&runner, "constraint_coverage").len(), 2);
+    assert!(coverage_events(&runner, "constraint_coverage")
+        .iter()
+        .all(|detail| detail.contains("\"covered\":false")));
+    let note = runner.task.last_response.clone();
+    assert!(
+        note.contains("Uploads resume from the last acknowledged chunk (urn:rule:resume)"),
+        "{note}"
+    );
+    assert!(
+        note.contains("Every transfer writes an audit entry (urn:rule:audit)"),
+        "{note}"
+    );
+    assert!(note.contains("summary's wording only"), "{note}");
+
+    // The return counter survives a resume.
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().coverage_returns, 1);
+
+    // The limit (1) is used: the same plan is kept and the gap journaled.
+    fixture.reply("harness_action", silent);
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_some());
+    assert!(runner.task.last_error.is_none());
+    let unmet = coverage_events(&runner, "constraint_coverage_unmet");
+    assert_eq!(unmet.len(), 1);
+    assert!(unmet[0].contains("urn:rule:resume") && unmet[0].contains("urn:rule:audit"));
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().coverage_returns, 0);
+}
+
+#[tokio::test]
+async fn a_plan_that_addresses_each_rule_is_stored_at_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let _env = Env::configure(&fixture.url);
+    fixture.shared.lock().unwrap().governing_constraints = coverage_rules();
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Repair code.txt".into(),
+    )
+    .await
+    .unwrap();
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Repair code.txt. Interrupted uploads resume from the acknowledged chunk; the audit entry rule does not apply to this change.","files":["code.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_some());
+    assert!(coverage_events(&runner, "constraint_coverage_unmet").is_empty());
+    assert!(coverage_events(&runner, "constraint_coverage")
+        .iter()
+        .all(|detail| detail.contains("\"covered\":true")));
+}
+
 #[tokio::test]
 async fn standing_guidance_is_snapshotted_capped_and_replayed() {
     let _env_lock = ENVIRONMENT.lock().await;

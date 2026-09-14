@@ -4,6 +4,7 @@
 //! definition scopes and the graph.
 mod associate;
 mod capture_note;
+mod coverage;
 mod scope;
 mod state;
 

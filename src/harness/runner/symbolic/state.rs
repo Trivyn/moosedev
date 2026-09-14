@@ -43,6 +43,10 @@ pub struct SymbolicState {
     /// Every required-check outcome in order, feeding the symbolic lesson.
     #[serde(default)]
     pub check_history: Vec<CheckOutcome>,
+    /// Plans returned in the current planning cycle because their summary did
+    /// not address a governing rule. Reset when a plan is stored.
+    #[serde(default)]
+    pub coverage_returns: usize,
     /// The one final capture note and its typing; cleared by each applied edit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_note: Option<CaptureNoteState>,
