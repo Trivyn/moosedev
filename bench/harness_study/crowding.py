@@ -6,6 +6,7 @@ ask, and reports whether the deciding record's claim, title or IRI reaches the
 coding model, plus its search rank. The report measures the same question from
 a finished field-check run's evidence.
 """
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -406,4 +407,240 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
         result["v1"]["notes"].append("the repeated objective query differed after rank queries")
     result["v2"] = v2_verdict(plan_results) if plans else None
     (directory / "gate.json").write_bytes(canonical_json(result))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics only: delivery levers for the crowded-graph probe.
+# Nothing below changes `gate`, its output, or the frozen probe package. The
+# lever run seeds its own disposable workspace and reports what two candidate
+# deterministic levers would deliver: dossiers that carry claims (lever 1) and
+# recall driven by source the model has read (lever 2, variants 2a-2d).
+# ---------------------------------------------------------------------------
+
+RAW_SOURCE_BYTES = 4000
+READ_VARIANTS = ("2a", "2b", "2c", "2d")
+DOSSIER_RECORD = re.compile(r"^- \[(?P<kind>[A-Za-z]+)\] \[(?P<title>.+?)\]\([^)]*\) - .*\(via (?P<via>[A-Za-z]+)\)\s*$")
+
+
+def dossier_records(dossier):
+    """Record lines of an entity dossier, in order: kind, title and the linking predicate."""
+    return [{"kind": match["kind"], "title": match["title"], "via": match["via"]}
+            for line in dossier.splitlines() for match in [DOSSIER_RECORD.match(line)] if match]
+
+
+def _claim_block(scenario, fact):
+    component = seed_iri(scenario["id"] + "/component/" + fact["component"])
+    lines = [f"[{fact['kind']}] {fact['title']} ({seed_iri(scenario['id'] + '/fact/' + fact['id'])})",
+             "hasDescription: " + fact["description"], "concerns: " + component]
+    lines.extend(f"{relation['predicate']}: {seed_iri(scenario['id'] + '/fact/' + relation['target'])}"
+                 for relation in fact.get("relations", [])[:5])
+    return "\n".join(lines)
+
+
+def simulate_claim_dossiers(files, scenario):
+    """Lever 1: each listed record line replaced by its full claim, rendered as topic evidence renders records."""
+    facts = {fact["title"]: fact for fact in scenario["initial_facts"]}
+    delivered, unmatched, simulated = [], [], []
+    for item in files:
+        lines = []
+        for line in item.get("dossier", "").splitlines():
+            match = DOSSIER_RECORD.match(line)
+            if not match:
+                lines.append(line)
+                continue
+            fact = facts.get(match["title"])
+            if fact is None:
+                unmatched.append(match["title"])
+                lines.append(line)
+                continue
+            if fact["id"] not in delivered:
+                delivered.append(fact["id"])
+            lines.append(_claim_block(scenario, fact))
+        text = "\n".join(lines) + ("\n" if item.get("dossier", "").endswith("\n") else "")
+        simulated.append({"file": item.get("file"), "dossier": text})
+    return {"files": simulated, "delivered_fact_ids": delivered, "unmatched_titles": unmatched,
+            "today_bytes": sum(len(item.get("dossier", "").encode()) for item in files),
+            "simulated_bytes": sum(len(item["dossier"].encode()) for item in simulated)}
+
+
+def _positioned(tree):
+    return sorted((node for node in ast.walk(tree) if hasattr(node, "lineno")),
+                  key=lambda node: (node.lineno, node.col_offset))
+
+
+def _unique(values):
+    seen, result = set(), []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def source_identifiers(text):
+    """Definition and reference names in source order: classes, functions, arguments, names, attributes, imports."""
+    names = []
+    for node in _positioned(ast.parse(text)):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.append(node.name)
+        elif isinstance(node, ast.arg):
+            names.append(node.arg)
+        elif isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.append(node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            names.append(node.module)
+        elif isinstance(node, ast.alias):
+            names.append(node.asname or node.name)
+    return _unique(names)
+
+
+def source_literals(text):
+    """String literals in source order, including the literal parts of f-strings."""
+    return _unique(node.value for node in _positioned(ast.parse(text))
+                   if isinstance(node, ast.Constant) and isinstance(node.value, str))
+
+
+def imported_project_files(text, project_files):
+    """Project modules a source file imports, as project-relative .py paths, in import order."""
+    modules = []
+    for node in _positioned(ast.parse(text)):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            modules.append(node.module)
+        elif isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+    return _unique(path for module in modules for path in [module.replace(".", "/") + ".py"] if path in project_files)
+
+
+def read_topic(objective, sources, files, variant, raw_bytes=RAW_SOURCE_BYTES):
+    """Lever 2 topic: the objective plus text derived from the source of the given read files.
+
+    2a identifiers; 2b identifiers and string literals; 2c 2b over the files plus the project
+    modules they import; 2d raw source text truncated to raw_bytes. Non-Python files contribute
+    nothing to 2a-2c and their raw text to 2d.
+    """
+    if variant not in READ_VARIANTS:
+        raise ValueError(f"unknown read-source variant: {variant}")
+    selected = list(files)
+    if variant == "2c":
+        for name in list(files):
+            if name.endswith(".py"):
+                selected.extend(imported_project_files(sources[name], set(sources)))
+        selected = _unique(selected)
+    if variant == "2d":
+        raw = "\n".join(sources[name] for name in selected).encode()[:raw_bytes].decode(errors="ignore")
+        return objective + "\n" + raw if raw else objective
+    tokens = []
+    for name in selected:
+        if not name.endswith(".py"):
+            continue
+        tokens.extend(source_identifiers(sources[name]))
+        if variant in ("2b", "2c"):
+            tokens.extend(source_literals(sources[name]))
+    tokens = _unique(tokens)
+    return objective + "\n" + " ".join(tokens) if tokens else objective
+
+
+def added_records(topic_context, objective_evidence):
+    """Records a topic's evidence adds beyond the objective topic's evidence, with their rendered bytes."""
+    known = {record["iri"] for record in objective_evidence}
+    records = [record for record in split_context(topic_context)["evidence"] if record["iri"] not in known]
+    rendered = "".join(f"[{r['kind']}] {r['label']} ({r['iri']})\n" + "".join(line + "\n" for line in r["lines"])
+                       for r in records)
+    return {"records": records, "titles": [record["label"] for record in records], "bytes": len(rendered.encode())}
+
+
+def lever_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), deciding_fact,
+                      extra_facts=(), control_fact="fees-cents"):
+    """Diagnostic only: seed a disposable workspace and measure lever 1 and lever 2 for the deciding record."""
+    from .binaries import verify_binaries
+    from .daemon import OwnedDaemon
+    from .indexing import apply_overlay, index_workspace, ready_dossiers, short_probe_runtime, verify_indexer
+    scenario = load_scenario(scenario_id)
+    iri, title, claim = _deciding(scenario, deciding_fact)
+    control_iri, control_title, control_claim = _deciding(scenario, control_fact)
+    if extra_facts:
+        scenario = dict(scenario, initial_facts=list(scenario["initial_facts"]) + list(extra_facts))
+    binaries = verify_binaries(Path(binary_manifest))
+    parent = json.loads(Path(parent_preflight).read_text())
+    indexer = verify_indexer(parent["indexer"])
+    assets = parent["assets"]
+    directory = Path(output).absolute()
+    directory.mkdir(parents=True)
+    (directory / "responses").mkdir()
+    workspace = directory / "workspace"
+    shutil.copytree(SCENARIOS / scenario_id / "project", workspace)
+    project_files = sorted(tree_manifest(SCENARIOS / scenario_id / "project"))
+    sources = {name: (SCENARIOS / scenario_id / "project" / name).read_text() for name in project_files}
+    subprocess.run(["/usr/bin/git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    prepare_workspace(workspace, scenario, "harness")
+    apply_overlay(workspace)
+    episode = scenario["episodes"][0]
+    objective = episode_prompt(episode, "harness").strip()
+    read_sets = {"fees.py": ["fees.py"], "fees.py+accounts.py": ["fees.py", "accounts.py"], "all": project_files}
+    plan_sets = {}
+    for number, plan in enumerate(plans):
+        key = "plan-files:" + "+".join(plan["files"])
+        plan_sets.setdefault(key, {"files": list(plan["files"]), "plans": []})["plans"].append(number)
+    result = {"schema_version": 1, "diagnostic": "delivery levers; not part of the gate verdict",
+              "scenario_id": scenario_id, "package_sha256": scenario["package_sha256"],
+              "seed_graph_sha256": hashlib.sha256(seed_graph(scenario).encode()).hexdigest(),
+              "extra_facts": [fact["id"] for fact in extra_facts], "build_id": binaries["build_id"],
+              "deciding_fact": deciding_fact, "iri": iri, "title": title, "claim": claim,
+              "control_fact": control_fact, "raw_source_bytes": RAW_SOURCE_BYTES, "read_sets": read_sets,
+              "plan_sets": plan_sets}
+
+    def save(name, value):
+        (directory / "responses" / f"{name}.json").write_bytes(canonical_json(value))
+        return value
+
+    result["index"] = index_workspace(indexer, binaries["binaries"]["daemon"], workspace, directory / "index-runtime")
+    with short_probe_runtime(directory / "daemon-runtime") as runtime:
+        with OwnedDaemon(executable=Path(binaries["binaries"]["daemon"]), expected_sha256=binaries["binary_hashes"]["daemon"],
+                         workspace=workspace, runtime=runtime, assets=Path(assets["directory"]),
+                         helper_model="unused-no-inference", helper_endpoint="http://127.0.0.1:9/v1",
+                         log_path=directory / "daemon.log", indexer=indexer) as daemon:
+            readiness = ready_dossiers(daemon, scenario, seed=True, require_empty=starts_empty(scenario))
+            result["readiness"] = {"conforms": [op["reviewed"].get("conforms") for op in readiness["seed_operations"]],
+                                   "bindings": sum(len(op["request"]["bindings"]) for op in readiness["seed_operations"])}
+            lever1 = {}
+            for set_name, files in (("fees.py", ["fees.py"]), ("all", project_files)):
+                response = save(f"lever1-{set_name}", daemon._request("/api/v1/harness/context",
+                                                                      {"topic": objective, "files": files}))
+                simulated = simulate_claim_dossiers(response.get("files", []), scenario)
+                text = "\n".join(item["dossier"] for item in simulated["files"])
+                lever1[set_name] = dict({key: value for key, value in simulated.items() if key != "files"},
+                                        deciding_claim_delivered=claim in text, control_claim_delivered=control_claim in text)
+            result["lever1"] = lever1
+            objective_response = save("objective-evidence", daemon._request(
+                "/api/v1/harness/context", {"topic": objective, "files": [], "evidence_only": True}))
+            objective_evidence = split_context(objective_response.get("context", ""))["evidence"]
+            rows, topics = [], {}
+            all_sets = dict(read_sets, **{key: value["files"] for key, value in plan_sets.items()})
+            for set_name, files in all_sets.items():
+                for variant in READ_VARIANTS:
+                    topic = read_topic(objective, sources, files, variant)
+                    name = f"{variant}-{set_name}".replace("/", "_").replace(":", "_").replace("+", "_")
+                    response = save(name, daemon._request("/api/v1/harness/context",
+                                                          {"topic": topic, "files": [], "evidence_only": True}))
+                    added = added_records(response.get("context", ""), objective_evidence)
+                    member = membership(response, iri=iri, title=title, claim=claim)
+                    rows.append({"read_set": set_name, "variant": variant, "name": name, "topic_bytes": len(topic.encode()),
+                                 "reaches": member["topic_evidence"] or member["walk"],
+                                 "claim_delivered": member["claim_anywhere"], "added_bytes": added["bytes"],
+                                 "added_titles": added["titles"]})
+                    topics[name] = (topic, response)
+            for row in rows:
+                topic, response = topics[row["name"]]
+                text = mcp_relevant_context(Path(binaries["binaries"]["daemon"]), daemon.socket,
+                                            getattr(daemon, "data", workspace / ".moosedev"), topic)
+                (directory / "responses" / f"{row['name']}-rank.txt").write_text(text)
+                items = parse_ranking(text)
+                row["rank"] = rank_of(items, iri)
+                row["cross_check"] = cross_check(items, split_context(response.get("context", ""))["evidence"])
+            result["checkpoint"] = daemon.checkpoint()
+    result["lever2"] = rows
+    (directory / "levers.json").write_bytes(canonical_json(result))
     return result

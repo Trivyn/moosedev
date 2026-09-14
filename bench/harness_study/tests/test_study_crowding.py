@@ -169,12 +169,89 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(report["claim_before_first_edit"])
 
 
+DOSSIER = ("### late_fee (Unknown)\n`fees::FeePolicy::late_fee` - defined in `fees.py`\n\n**Records**\n"
+           "- [Constraint] [FeePolicy keeps no state between calls](http://127.0.0.1:1/#/constraints/a) - accepted, 2026-09-07T00:00:00Z (via constrains)\n"
+           "- [Requirement] [Fees are integer cents rounded half up](http://127.0.0.1:1/#/requirements/b) - accepted, 2026-09-07T00:00:00Z (via concerns)\n")
+SCENARIO = {"id": "probe", "initial_facts": [
+    {"id": "stateless", "kind": "Constraint", "title": "FeePolicy keeps no state between calls",
+     "description": "FeePolicy holds no state.", "component": "Billing", "relations": []},
+    {"id": "fees-cents", "kind": "Requirement", "title": "Fees are integer cents rounded half up",
+     "description": "Percentages round half up to the cent.", "component": "Billing", "relations": []},
+    {"id": "fees-np7", "kind": "Constraint", "title": TITLE, "description": CLAIM, "component": "Billing", "relations": []}]}
+SOURCES = {
+    "fees.py": "class FeePolicy:\n    def late_fee(self, account, invoice, today):\n        return 0\n",
+    "accounts.py": 'SEGMENTS = {\n    "retail": "Retail",\n    "charity": "Registered charity",\n}\n\n\nclass Account:\n'
+                   '    def __init__(self, account_id, segment):\n        if segment not in SEGMENTS:\n'
+                   '            raise ValueError(f"unknown segment: {segment}")\n        self.segment = segment\n',
+    "tests/test_visible.py": "import unittest\n\nfrom accounts import Account\nfrom fees import FeePolicy\n\n\n"
+                             "class VisibleTests(unittest.TestCase):\n    def test_retail(self):\n"
+                             "        self.assertEqual(FeePolicy().late_fee(Account('r', 'retail'), None, 130), 500)\n",
+    "README.md": "# Late fees\n\n- `accounts.py`: account segments.\n",
+}
+
+
+class LeverDiagnosticTests(unittest.TestCase):
+    """Diagnostic-only helpers for the dossier-claims and read-source recall levers."""
+
+    def test_dossier_record_lines_are_parsed(self):
+        self.assertEqual(crowding.dossier_records(DOSSIER), [
+            {"kind": "Constraint", "title": "FeePolicy keeps no state between calls", "via": "constrains"},
+            {"kind": "Requirement", "title": "Fees are integer cents rounded half up", "via": "concerns"}])
+        self.assertEqual(crowding.dossier_records("No recorded entity knowledge is linked to this file."), [])
+
+    def test_simulated_claim_dossiers_deliver_listed_records_only(self):
+        files = [{"file": "fees.py", "dossier": DOSSIER, "policy": {"decision": "gate"}},
+                 {"file": "README.md", "dossier": "No recorded entity knowledge is linked to this file.", "policy": {}}]
+        result = crowding.simulate_claim_dossiers(files, SCENARIO)
+        self.assertEqual(result["delivered_fact_ids"], ["stateless", "fees-cents"])
+        self.assertEqual(result["today_bytes"], len(DOSSIER.encode()) + len("No recorded entity knowledge is linked to this file.".encode()))
+        self.assertGreater(result["simulated_bytes"], result["today_bytes"])
+        simulated = "\n".join(item["dossier"] for item in result["files"])
+        self.assertIn("hasDescription: Percentages round half up to the cent.", simulated)
+        self.assertNotIn(CLAIM, simulated)
+
+    def test_source_identifiers_literals_and_imports(self):
+        self.assertEqual(crowding.source_identifiers(SOURCES["accounts.py"]),
+                         ["SEGMENTS", "Account", "__init__", "self", "account_id", "segment", "ValueError"])
+        self.assertEqual(crowding.source_literals(SOURCES["accounts.py"]),
+                         ["retail", "Retail", "charity", "Registered charity", "unknown segment: "])
+        self.assertEqual(crowding.imported_project_files(SOURCES["tests/test_visible.py"], set(SOURCES)),
+                         ["accounts.py", "fees.py"])
+
+    def test_read_topics_by_variant(self):
+        objective = "Implement FeePolicy.late_fee"
+        fees = crowding.read_topic(objective, SOURCES, ["fees.py"], "2a")
+        self.assertEqual(fees, objective + "\nFeePolicy late_fee self account invoice today")
+        with_accounts = crowding.read_topic(objective, SOURCES, ["fees.py", "accounts.py"], "2b")
+        self.assertIn("Registered charity", with_accounts)
+        self.assertNotIn("Registered charity", crowding.read_topic(objective, SOURCES, ["fees.py", "accounts.py"], "2a"))
+        plan = crowding.read_topic(objective, SOURCES, ["fees.py", "tests/test_visible.py"], "2c")
+        self.assertIn("Registered charity", plan)  # the test file imports accounts.py
+        self.assertNotIn("Registered charity", crowding.read_topic(objective, SOURCES, ["fees.py", "tests/test_visible.py"], "2b"))
+        self.assertEqual(crowding.read_topic(objective, SOURCES, ["README.md"], "2a"), objective)
+        raw = crowding.read_topic(objective, SOURCES, ["accounts.py", "fees.py"], "2d", raw_bytes=40)
+        self.assertEqual(raw, objective + "\n" + (SOURCES["accounts.py"] + "\n" + SOURCES["fees.py"]).encode()[:40].decode())
+        with self.assertRaises(ValueError):
+            crowding.read_topic(objective, SOURCES, ["fees.py"], "2z")
+
+    def test_added_records_exclude_the_objective_evidence(self):
+        objective = crowding.split_context(context_text(header=False, evidence=[("Requirement", "Late fees are computed on demand", OTHER, ["hasDescription: x"])]))["evidence"]
+        topic = context_text(header=False, evidence=[
+            ("Requirement", "Late fees are computed on demand", OTHER, ["hasDescription: x"]),
+            ("Constraint", TITLE, NP7, ["hasDescription: " + CLAIM])])
+        added = crowding.added_records(topic, objective)
+        self.assertEqual([item["iri"] for item in added["records"]], [NP7])
+        self.assertEqual(added["titles"], [TITLE])
+        self.assertGreater(added["bytes"], len(CLAIM))
+
+
 class CommandTests(unittest.TestCase):
     def test_commands_are_registered(self):
         from bench.harness_study import __main__ as cli
         source = Path(cli.__file__).read_text()
         self.assertIn('"crowding-gate"', source)
         self.assertIn('"crowding-report"', source)
+        self.assertIn('"crowding-levers"', source)
 
 
 if __name__ == "__main__":
