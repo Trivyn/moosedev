@@ -2752,3 +2752,559 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     );
     server.abort();
 }
+
+const SERVER_MODULE: &str = "rust-analyzer cargo sample 0.1.0 server/";
+const SERVER_LIMIT: &str = "rust-analyzer cargo sample 0.1.0 server/LIMIT.";
+const BUILD_SERVER: &str = "rust-analyzer cargo sample 0.1.0 server/build_server().";
+const SERVER_HELPER: &str = "rust-analyzer cargo sample 0.1.0 server/helper().";
+
+/// The capture-anchoring Rust fixture before the task's change: a constant, a
+/// struct with a field, a public function and a private helper.
+const SERVER_SOURCE: &str = "const LIMIT: usize = 8;\n\npub struct Server {\n    port: u16,\n}\n\npub fn build_server() -> Server {\n    Server { port: 80 }\n}\n\nfn helper() -> u16 {\n    LIMIT as u16\n}\n";
+
+type RustDefinition = (
+    String,
+    scip::types::symbol_information::Kind,
+    Vec<i32>,
+    Vec<i32>,
+);
+
+fn server_definitions() -> Vec<RustDefinition> {
+    use scip::types::symbol_information::Kind;
+    vec![
+        (
+            SERVER_MODULE.into(),
+            Kind::Module,
+            vec![0, 0, 13, 0],
+            vec![],
+        ),
+        (
+            SERVER_LIMIT.into(),
+            Kind::Constant,
+            vec![0, 6, 11],
+            vec![0, 0, 23],
+        ),
+        (
+            "rust-analyzer cargo sample 0.1.0 server/Server#".into(),
+            Kind::Struct,
+            vec![2, 11, 17],
+            vec![2, 0, 4, 1],
+        ),
+        (
+            "rust-analyzer cargo sample 0.1.0 server/Server#port.".into(),
+            Kind::Field,
+            vec![3, 4, 8],
+            vec![3, 4, 13],
+        ),
+        (
+            BUILD_SERVER.into(),
+            Kind::Function,
+            vec![6, 7, 19],
+            vec![6, 0, 8, 1],
+        ),
+        (
+            SERVER_HELPER.into(),
+            Kind::Function,
+            vec![10, 3, 9],
+            vec![10, 0, 12, 1],
+        ),
+    ]
+}
+
+/// A rust-analyzer-shaped index over `(file, indexed source, disk source,
+/// definitions)`. The published digest proves the indexed source. When the
+/// disk differs, the file was edited after the producer ran (the usual Rust
+/// case), so the filesystem no longer proves it either.
+fn install_rust_index(
+    fixture: &Fixture,
+    state: &AppState,
+    files: Vec<(&str, &str, &str, Vec<RustDefinition>)>,
+) {
+    use moosedev::code::substrate::{Substrate, SubstrateMeta};
+    use protobuf::EnumOrUnknown;
+    use scip::types::{Document, Index, Occurrence, SymbolInformation};
+    let mut index = Index::new();
+    let mut meta = SubstrateMeta::single(
+        "rust-analyzer",
+        SubstrateMeta::current_head(&fixture.0),
+        Utc::now(),
+        files.len(),
+        0,
+    );
+    let mut refreshed = true;
+    for (file, indexed, disk, definitions) in files {
+        let path = fixture.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, disk).unwrap();
+        if indexed == disk {
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(
+                        std::time::SystemTime::now() - std::time::Duration::from_secs(2),
+                    ),
+                )
+                .unwrap();
+        } else {
+            refreshed = false;
+        }
+        meta.source_digests
+            .insert(file.into(), sha256_text(indexed));
+        let mut document = Document::new();
+        document.relative_path = file.into();
+        for (symbol, kind, range, enclosing) in definitions {
+            let mut info = SymbolInformation::new();
+            info.symbol = symbol.clone();
+            info.kind = EnumOrUnknown::new(kind);
+            document.symbols.push(info);
+            let mut occurrence = Occurrence::new();
+            occurrence.symbol = symbol;
+            occurrence.symbol_roles = 1;
+            occurrence.range = range;
+            occurrence.enclosing_range = enclosing;
+            document.occurrences.push(occurrence);
+        }
+        index.documents.push(document);
+    }
+    meta.indexed_started_at = Some(if refreshed {
+        Utc::now()
+    } else {
+        Utc::now() - chrono::Duration::seconds(60)
+    });
+    state.set_substrate(Arc::new(
+        Substrate::from_index_rooted(index, meta, false, &fixture.0).unwrap(),
+    ));
+}
+
+/// Line hunks `(before start, before end, after start, after end)`.
+fn line_hunks(
+    file: &str,
+    before: &str,
+    after: &str,
+    hunks: &[(u32, u32, u32, u32)],
+) -> ChangedFile {
+    let line = |line: u32| HarnessSourcePosition { line, col: 0 };
+    let range = |start: u32, end: u32| HarnessSourceRange {
+        start: line(start),
+        end: line(end),
+    };
+    ChangedFile {
+        file: file.into(),
+        before_digest: Some(sha256_text(before)),
+        after_digest: Some(sha256_text(after)),
+        changed_ranges: hunks.iter().map(|(_, _, a1, a2)| range(*a1, *a2)).collect(),
+        before_ranges: hunks.iter().map(|(b1, b2, _, _)| range(*b1, *b2)).collect(),
+        ranges_coalesced: false,
+    }
+}
+
+fn anchored_request(
+    id: &str,
+    kind: &str,
+    title: &str,
+    changed: Vec<ChangedFile>,
+) -> CaptureV2Request {
+    let mut proposed = proposal(kind, title);
+    proposed.files = changed.iter().map(|change| change.file.clone()).collect();
+    CaptureV2Request {
+        changed,
+        ..request(id, vec![proposed])
+    }
+}
+
+fn normalized(raw: &str) -> String {
+    raw.replacen(" 0.1.0 ", " . ", 1)
+}
+
+fn anchor_summary(captured: &CapturedProposal) -> Vec<(String, AnchorBasis)> {
+    captured
+        .anchors
+        .iter()
+        .map(|anchor| (anchor.symbol.clone(), anchor.basis))
+        .collect()
+}
+
+fn accept(state: &AppState, operation_id: &str) {
+    daemon::review_operation(
+        state,
+        &ReviewRequest {
+            operation_id: operation_id.into(),
+            accept: true,
+        },
+    )
+    .unwrap();
+}
+
+fn direct_record_iris(state: &AppState, symbol: &str) -> Vec<String> {
+    graph::get_entity_dossier(state, &graph::DossierTarget::Symbol(symbol.into()))
+        .unwrap()
+        .map(|dossier| dossier.direct_records.into_iter().map(|r| r.iri).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn capture_anchors_the_changed_function_and_its_dossier_lists_the_capture() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let after = SERVER_SOURCE.replace("port: 80", "port: 443");
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", SERVER_SOURCE, &after, server_definitions())],
+    );
+    let changed = line_hunks("src/server.rs", SERVER_SOURCE, &after, &[(7, 8, 7, 8)]);
+    let captured = daemon::capture_operation(
+        &state,
+        anchored_request("anchored", "Lesson", "Server port choice", vec![changed]),
+    )
+    .unwrap();
+    let proposal = &captured.proposals[0];
+    assert_eq!(
+        anchor_summary(proposal),
+        vec![(normalized(BUILD_SERVER), AnchorBasis::Definition)]
+    );
+    assert!(proposal.anchor_notes.is_empty() && proposal.unanchored.is_empty());
+    assert_eq!(proposal.links.len(), 1);
+    accept(&state, "anchored");
+    assert_eq!(
+        direct_record_iris(&state, BUILD_SERVER),
+        vec![proposal.iri.clone()]
+    );
+    assert!(direct_record_iris(&state, SERVER_HELPER).is_empty());
+    assert!(direct_record_iris(&state, SERVER_MODULE).is_empty());
+}
+
+#[test]
+fn a_change_outside_every_definition_anchors_the_module_and_reaches_file_pushes() {
+    use moosedev::policy::{evaluate, PolicyDecision, PolicyEvent};
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let after = SERVER_SOURCE.replacen("\n\npub struct", "\n// Sized for tests.\npub struct", 1);
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", SERVER_SOURCE, &after, server_definitions())],
+    );
+    let changed = line_hunks("src/server.rs", SERVER_SOURCE, &after, &[(1, 2, 1, 2)]);
+    let captured = daemon::capture_operation(
+        &state,
+        anchored_request("commented", "Lesson", "Server sizing note", vec![changed]),
+    )
+    .unwrap();
+    assert_eq!(
+        anchor_summary(&captured.proposals[0]),
+        vec![(normalized(SERVER_MODULE), AnchorBasis::Module)]
+    );
+    accept(&state, "commented");
+    let event = PolicyEvent::EntityTouched {
+        file: "src/server.rs".into(),
+        line: None,
+        col: None,
+        max_bytes: None,
+    };
+    let PolicyDecision::Inject {
+        dossier_markdown, ..
+    } = evaluate(&state, &fixture.0, &event).unwrap()
+    else {
+        panic!("a file push carries the module-anchored capture");
+    };
+    assert!(
+        dossier_markdown.contains("Server sizing note"),
+        "{dossier_markdown}"
+    );
+}
+
+#[test]
+fn a_refreshed_index_proves_after_ranges_and_keeps_a_changed_module_constant() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let after = SERVER_SOURCE.replace("usize = 8", "usize = 16");
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", &after, &after, server_definitions())],
+    );
+    let changed = line_hunks("src/server.rs", SERVER_SOURCE, &after, &[(0, 1, 0, 1)]);
+    let captured = daemon::capture_operation(
+        &state,
+        anchored_request(
+            "constant",
+            "Constraint",
+            "Server limit bound",
+            vec![changed],
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        anchor_summary(&captured.proposals[0]),
+        vec![(normalized(SERVER_LIMIT), AnchorBasis::Definition)]
+    );
+    assert!(captured.proposals[0].anchor_notes.is_empty());
+}
+
+#[test]
+fn before_proof_skips_rewritten_names_and_an_unproven_index_falls_back_to_the_module() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let after = SERVER_SOURCE.replace("pub fn build_server()", "pub fn build_server_v2()");
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", SERVER_SOURCE, &after, server_definitions())],
+    );
+    let changed = line_hunks("src/server.rs", SERVER_SOURCE, &after, &[(6, 7, 6, 7)]);
+    let renamed = daemon::capture_operation(
+        &state,
+        anchored_request(
+            "renamed",
+            "Lesson",
+            "Server builder rename",
+            vec![changed.clone()],
+        ),
+    )
+    .unwrap();
+    // The original index names build_server inside the rewritten hunk: the
+    // symbol may no longer exist, so the file's module anchors instead.
+    assert_eq!(
+        anchor_summary(&renamed.proposals[0]),
+        vec![(normalized(SERVER_MODULE), AnchorBasis::Module)]
+    );
+    assert!(renamed.proposals[0].anchor_notes.is_empty());
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![(
+            "src/server.rs",
+            "stale source\n",
+            &after,
+            server_definitions(),
+        )],
+    );
+    let unproven = daemon::capture_operation(
+        &state,
+        anchored_request("unproven", "Lesson", "Server builder note", vec![changed]),
+    )
+    .unwrap();
+    assert_eq!(
+        anchor_summary(&unproven.proposals[0]),
+        vec![(normalized(SERVER_MODULE), AnchorBasis::Module)]
+    );
+    assert_eq!(
+        unproven.proposals[0].anchor_notes,
+        vec![AnchorNote {
+            file: "src/server.rs".into(),
+            note: AnchorNoteKind::IndexUnproven,
+        }]
+    );
+}
+
+#[test]
+fn definition_anchors_are_capped_and_ambiguous_spans_fall_back_to_the_module() {
+    use scip::types::symbol_information::Kind;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let many: String = (0..10).map(|i| format!("fn f{i}() {{}}\n")).collect();
+    let many_file = |n: usize| {
+        let mut definitions: Vec<RustDefinition> = vec![(
+            format!("rust-analyzer cargo sample 0.1.0 many_{n}/"),
+            Kind::Module,
+            vec![0, 0, 10, 0],
+            vec![],
+        )];
+        for i in 0..10 {
+            definitions.push((
+                format!("rust-analyzer cargo sample 0.1.0 many_{n}/f{i}()."),
+                Kind::Function,
+                vec![i, 3, 5],
+                vec![i, 0, 10],
+            ));
+        }
+        definitions
+    };
+    let twin = "fn twin() {}\n";
+    let twin_definitions: Vec<RustDefinition> = vec![
+        (
+            "rust-analyzer cargo sample 0.1.0 twin/".into(),
+            Kind::Module,
+            vec![0, 0, 1, 0],
+            vec![],
+        ),
+        (
+            "rust-analyzer cargo sample 0.1.0 twin/twin().".into(),
+            Kind::Function,
+            vec![0, 3, 7],
+            vec![0, 0, 12],
+        ),
+        (
+            "rust-analyzer cargo sample 0.1.0 twin/twin_alias().".into(),
+            Kind::Function,
+            vec![0, 3, 7],
+            vec![0, 0, 12],
+        ),
+    ];
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![
+            ("src/many_0.rs", &many, &many, many_file(0)),
+            ("src/many_1.rs", &many, &many, many_file(1)),
+            ("src/many_2.rs", &many, &many, many_file(2)),
+            ("src/twin.rs", twin, twin, twin_definitions),
+        ],
+    );
+    let changed = |file: &str, source: &str, lines: u32| {
+        let mut change = line_hunks(file, "", source, &[(0, 0, 0, lines)]);
+        change.before_ranges.clear();
+        change
+    };
+    let captured = daemon::capture_operation(
+        &state,
+        anchored_request(
+            "capped",
+            "Lesson",
+            "Generated functions",
+            vec![
+                changed("src/twin.rs", twin, 1),
+                changed("src/many_2.rs", &many, 10),
+                changed("src/many_0.rs", &many, 10),
+                changed("src/many_1.rs", &many, 10),
+            ],
+        ),
+    )
+    .unwrap();
+    let proposal = &captured.proposals[0];
+    let count = |basis: AnchorBasis| proposal.anchors.iter().filter(|a| a.basis == basis).count();
+    assert_eq!(count(AnchorBasis::Definition), 16);
+    assert_eq!(count(AnchorBasis::Module), 4);
+    assert_eq!(proposal.links.len(), 20);
+    // Files anchor in path order; the first eight definitions of each file.
+    assert_eq!(
+        proposal.anchors[..9]
+            .iter()
+            .map(|a| a.symbol.rsplit('/').next().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        ["f0().", "f1().", "f2().", "f3().", "f4().", "f5().", "f6().", "f7().", ""]
+    );
+    let note = |file: &str, note: AnchorNoteKind| AnchorNote {
+        file: file.into(),
+        note,
+    };
+    assert_eq!(
+        proposal.anchor_notes,
+        vec![
+            note("src/many_0.rs", AnchorNoteKind::AnchorOverflow),
+            note("src/many_1.rs", AnchorNoteKind::AnchorOverflow),
+            note("src/many_2.rs", AnchorNoteKind::AnchorOverflow),
+            note("src/twin.rs", AnchorNoteKind::AnchorAmbiguous),
+        ]
+    );
+}
+
+#[test]
+fn replaying_an_operation_with_different_hunks_is_refused() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let after = SERVER_SOURCE
+        .replace("port: 80", "port: 443")
+        .replace("LIMIT as u16", "(LIMIT * 2) as u16");
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", SERVER_SOURCE, &after, server_definitions())],
+    );
+    let first = line_hunks("src/server.rs", SERVER_SOURCE, &after, &[(7, 8, 7, 8)]);
+    daemon::capture_operation(
+        &state,
+        anchored_request("replayed", "Lesson", "Server replay", vec![first]),
+    )
+    .unwrap();
+    let other = line_hunks("src/server.rs", SERVER_SOURCE, &after, &[(11, 12, 11, 12)]);
+    let error = daemon::capture_operation(
+        &state,
+        anchored_request("replayed", "Lesson", "Server replay", vec![other]),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("already used for a different capture"),
+        "{error}"
+    );
+}
+
+fn literal_quads(state: &AppState, iri: &str) -> Vec<String> {
+    use oxigraph::model::{NamedNodeRef, Term};
+    let mut quads: Vec<String> = state
+        .store
+        .quads_for_pattern(
+            Some(NamedNodeRef::new(iri).unwrap().into()),
+            None,
+            None,
+            None,
+        )
+        .filter_map(Result::ok)
+        .filter(|quad| matches!(quad.object, Term::Literal(_)))
+        .map(|quad| quad.to_string())
+        .collect();
+    quads.sort();
+    quads
+}
+
+#[tokio::test]
+async fn multi_anchor_review_attests_with_one_existing_and_one_minted_entity() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let after = SERVER_SOURCE
+        .replace("port: 80", "port: 443")
+        .replace("LIMIT as u16", "(LIMIT * 2) as u16");
+    install_rust_index(
+        &fixture,
+        &state,
+        vec![("src/server.rs", SERVER_SOURCE, &after, server_definitions())],
+    );
+    let earlier = record(&state, "Lesson", "An earlier helper lesson");
+    let helper = graph::link_code(
+        &state,
+        &earlier,
+        "concerns",
+        &graph::CodeSelector::Symbol(SERVER_HELPER.into()),
+        "test-human",
+    )
+    .unwrap()
+    .entity_iri;
+    state.note_project_write();
+    let helper_literals = literal_quads(&state, &helper);
+    let base = review_base(&state);
+    let changed = line_hunks(
+        "src/server.rs",
+        SERVER_SOURCE,
+        &after,
+        &[(7, 8, 7, 8), (11, 12, 11, 12)],
+    );
+    let captured = daemon::capture_operation(
+        &state,
+        anchored_request("multi", "Constraint", "Server limits", vec![changed]),
+    )
+    .unwrap();
+    assert_eq!(
+        anchor_summary(&captured.proposals[0]),
+        vec![
+            (normalized(BUILD_SERVER), AnchorBasis::Definition),
+            (normalized(SERVER_HELPER), AnchorBasis::Definition),
+        ]
+    );
+    let reviewed = review_expecting(&state, "multi", &base).await;
+    assert!(reviewed.ok);
+    assert!(reviewed.result.is_some());
+    assert_eq!(
+        reviewed.result, reviewed.revision,
+        "both link materializations are this acceptance's own writes"
+    );
+    assert_eq!(
+        literal_quads(&state, &helper),
+        helper_literals,
+        "linking an existing entity rewrites none of its literals"
+    );
+    let iri = captured.proposals[0].iri.clone();
+    assert!(direct_record_iris(&state, BUILD_SERVER).contains(&iri));
+    assert!(direct_record_iris(&state, SERVER_HELPER).contains(&iri));
+}

@@ -105,6 +105,8 @@ impl Runner {
                     kind: LINK_REVIEW_KIND.into(),
                     links: response.links,
                     unanchored: vec![],
+                    anchors: vec![],
+                    anchor_notes: vec![],
                 }],
             },
             reason: "Review the relevance of each derived association; a link records relevance, not proof of implementation.".into(),

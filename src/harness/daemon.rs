@@ -2,7 +2,7 @@
 //! routes: the runner asks for `context`, submits typed captures (`capture`),
 //! has a human `review` them, and reads `checkpoint`s; `intent`, `associate`
 //! and `capture_type` derive associations and typed proposals symbolically,
-//! with `scope` and `candidates` as their snapshot-bound projections. This
+//! with `scope`, `candidates` and `anchors` as their snapshot-bound projections. This
 //! file keeps the shared operation journal types and the small helpers every
 //! submodule uses.
 use std::collections::{BTreeSet, HashSet};
@@ -21,6 +21,7 @@ use crate::api::error::ApiError;
 use crate::graph::{self, AppState, CaptureStamp, RecordInput, PROJECT_KG_GRAPH_IRI};
 use crate::policy::{self, PolicyDecision, PolicyEvent};
 
+mod anchors;
 pub mod associate;
 pub mod candidates;
 mod capture;

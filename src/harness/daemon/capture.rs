@@ -128,6 +128,8 @@ fn prepare(
     );
     let components = graph::load_components(state)?;
     let substrate = state.substrate();
+    anchors::validate_changed(&request.changed)?;
+    let code_class = state.resolve_code_class("CodeEntity")?;
     let mut entries = Vec::new();
     let mut retired_targets = HashSet::new();
     let mut titles = HashSet::new();
@@ -218,8 +220,6 @@ fn prepare(
             );
             relations.push(("refines".into(), reconciled.target_iri.clone()));
         }
-        let mut anchors = Vec::new();
-        let mut unanchored = Vec::new();
         for file in &proposal.files {
             validate_path(file)?;
             if let Some(component) = graph::best_component_for_path(file, &components) {
@@ -227,19 +227,13 @@ fn prepare(
                     relations.push(("concerns".into(), iri.clone()));
                 }
             }
-            let module = substrate.as_ref().and_then(|s| {
-                s.definitions_in_file(file)
-                    .into_iter()
-                    .filter(|d| {
-                        d.entry.is_module && d.entry.display_name.as_deref() != Some("tests")
-                    })
-                    .min_by_key(|d| d.entry.symbol.matches('/').count())
-            });
-            match module {
-                Some(def) => anchors.push((def.entry.symbol.clone(), file.clone())),
-                None => unanchored.push(file.clone()),
-            }
         }
+        let linkable = links_to_code(state, &input.class_iri, &proposal.kind, &code_class);
+        let anchoring = anchors::proposal_anchors(
+            substrate.as_deref().filter(|_| linkable),
+            &request.changed,
+            &proposal.files,
+        )?;
         let (relations, _) = graph::plan_relation_args(state, &input, &relations)?;
         entries.push(Entry {
             response: CapturedProposal {
@@ -247,11 +241,13 @@ fn prepare(
                 title: proposal.title.clone(),
                 kind: proposal.kind.clone(),
                 links: vec![],
-                unanchored,
+                unanchored: anchoring.unanchored,
+                anchors: anchoring.anchors,
+                anchor_notes: anchoring.notes,
             },
             class: input.class_iri,
             relations,
-            anchors,
+            anchors: anchoring.links,
             rationale: proposal
                 .supersedes
                 .as_ref()
@@ -272,6 +268,19 @@ fn prepare(
         review_claims: None,
         review_unminted_symbols: Vec::new(),
     })
+}
+
+/// Whether the catalogue allows this record kind's code-link predicate from
+/// `class` to code. Acceptance could not materialize any other link.
+fn links_to_code(state: &AppState, class: &str, kind: &str, code_class: &str) -> bool {
+    let predicate = graph::link_predicate_for_kind(kind);
+    state
+        .catalogue
+        .legal_predicates(&state.store, class, code_class)
+        .iter()
+        .any(|edge| {
+            edge.predicate_local == predicate && edge.direction == graph::EdgeDirection::Forward
+        })
 }
 
 pub(super) fn record_input(
@@ -385,26 +394,33 @@ pub(super) fn finish_capture(
             )?;
         }
     }
+    // One queue snapshot serves every anchor: anchors are unique per record,
+    // so no link this loop proposes is looked up again.
+    let queued = graph::list_proposals(state, None)?;
     for (entry, proposal) in operation
         .entries
         .iter_mut()
         .zip(&operation.request.proposals)
     {
-        for (symbol, file) in &entry.anchors {
+        for (index, (symbol, file)) in entry.anchors.iter().enumerate() {
             let normalized = crate::code::substrate::symbols::normalize_symbol(symbol)
                 .ok_or_else(|| anyhow::anyhow!("invalid frozen substrate anchor"))?;
-            let existing = graph::list_proposals(state, None)?
-                .into_iter()
+            let existing = queued
+                .iter()
                 .find(|p| p.subject_iri == entry.response.iri && p.target_symbol == normalized);
+            let evidence = match entry.response.anchors.get(index).map(|anchor| anchor.basis) {
+                Some(AnchorBasis::Definition) => "definition changed by the captured work",
+                _ => "file identified in harness capture evidence",
+            };
             let iri = match existing {
-                Some(p) => p.iri,
+                Some(p) => p.iri.clone(),
                 None => graph::propose_link_unlocked(
                     state,
                     &entry.response.iri,
                     graph::link_predicate_for_kind(&proposal.kind),
                     symbol,
                     file,
-                    "file identified in harness capture evidence",
+                    evidence,
                     AUTHOR,
                     Utc::now(),
                 )?,

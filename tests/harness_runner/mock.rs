@@ -284,6 +284,19 @@ pub(super) async fn capture_v2(
                 })
                 .collect(),
             unanchored: vec![],
+            // One definition anchor per proposal file the capture changed.
+            anchors: proposal
+                .files
+                .iter()
+                .filter(|file| request.changed.iter().any(|changed| &changed.file == *file))
+                .map(|file| CaptureAnchor {
+                    file: file.clone(),
+                    symbol: fixture_symbol(file, "changed"),
+                    name: None,
+                    basis: AnchorBasis::Definition,
+                })
+                .collect(),
+            anchor_notes: vec![],
         })
         .collect();
     (

@@ -3,7 +3,7 @@
 //! note and submits the daemon's typed proposals.
 use super::model::InvalidModelOutput;
 use super::{HttpFailure, Mode, Phase, ReviewItem, Runner};
-use crate::harness::protocol::{CaptureResponse, CaptureV2Request, CaptureV2Response};
+use crate::harness::protocol::{AnchorBasis, CaptureResponse, CaptureV2Request, CaptureV2Response};
 use anyhow::{Context, Result};
 
 impl Runner {
@@ -117,6 +117,11 @@ impl Runner {
             "daemon omitted capture proposals"
         );
         if !self.task.capture_operations.contains(&request.operation_id) {
+            if !request.changed.is_empty() {
+                // Once per operation: a retried submission replays the same
+                // anchors and must not count them again.
+                self.intent_event("capture_anchored", &anchor_counts(&response));
+            }
             self.task
                 .capture_operations
                 .push(request.operation_id.clone());
@@ -169,6 +174,34 @@ impl Runner {
         self.candidate_accepted();
         self.persist()
     }
+}
+
+/// Definition anchors, module anchors, unanchored files and anchor notes the
+/// daemon resolved for one capture, in the fixed order the study reads.
+fn anchor_counts(response: &CaptureResponse) -> String {
+    let anchors = |basis: AnchorBasis| {
+        response
+            .proposals
+            .iter()
+            .flat_map(|proposal| &proposal.anchors)
+            .filter(|anchor| anchor.basis == basis)
+            .count()
+    };
+    format!(
+        "{} definition anchors, {} module anchors, {} unanchored files, {} anchor notes",
+        anchors(AnchorBasis::Definition),
+        anchors(AnchorBasis::Module),
+        response
+            .proposals
+            .iter()
+            .map(|proposal| proposal.unanchored.len())
+            .sum::<usize>(),
+        response
+            .proposals
+            .iter()
+            .map(|proposal| proposal.anchor_notes.len())
+            .sum::<usize>(),
+    )
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 //! retyped under fresh ids when the daemon rejects the typing, and
 //! invalidated when the evidence it was typed against changes.
 use super::super::model::observation_preview;
+use super::super::scope::changed_files;
 use super::super::{Phase, Runner};
 use super::{CaptureNoteState, NoteAnswer, CAPTURE_NOTE_QUESTION, MAX_RETYPES};
 use crate::harness::protocol::{
@@ -182,7 +183,7 @@ impl Runner {
         self.task.capture_request = Some(CaptureRequest {
             operation_id: state.capture_operation_id,
             proposals,
-            changed: vec![],
+            changed: changed_files(&self.task.edits)?,
         });
         self.persist()?;
         Ok(true)

@@ -133,6 +133,52 @@ pub struct CapturedProposal {
     pub links: Vec<String>,
     #[serde(default)]
     pub unanchored: Vec<String>,
+    /// The code entities the queued links target, in link order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<CaptureAnchor>,
+    /// Why a file's anchoring is weaker than its hunks: coalesced ranges, an
+    /// unproven index, an ambiguous span or a capped anchor count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_notes: Vec<AnchorNote>,
+}
+
+/// One code anchor the daemon resolved for a captured proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureAnchor {
+    pub file: String,
+    /// Version-normalized SCIP symbol the queued link targets.
+    pub symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub basis: AnchorBasis,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorBasis {
+    /// A leaf definition a hunk of the file's change touches.
+    Definition,
+    /// The file's module: the fallback when no definition anchor resolved.
+    Module,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorNote {
+    pub file: String,
+    pub note: AnchorNoteKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorNoteKind {
+    /// The runner coalesced this file's hunks into one prefix/suffix range.
+    RangesCoalesced,
+    /// The loaded index proves neither the changed nor the original source.
+    IndexUnproven,
+    /// Leaves of different symbols share one span; neither is picked.
+    AnchorAmbiguous,
+    /// More definitions changed than a file or a proposal anchors.
+    AnchorOverflow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

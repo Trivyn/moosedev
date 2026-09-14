@@ -331,6 +331,17 @@ contract 3 and intent contract 2.
   same note under fresh operation IDs without a model call (`capture_retyped`,
   three per note, then `capture_retype_exhausted`); a source or knowledge change
   between typing and capture does the same (`capture_note_invalidated`).
+- Capture links. Each proposal links to the leaf definitions the hunks of its
+  files touch, proven against the loaded index: the changed ranges when the
+  index holds the changed source, or the original ranges when it holds the
+  original (Rust's index is not refreshed after an edit), keeping only
+  definitions whose name no hunk touches. At most eight definitions per file and
+  sixteen per proposal, in file, range and symbol order. A file without a
+  definition anchor links its module instead (the synthetic whole-file module
+  for Rust), and so does a file whose anchors were capped (`anchor_overflow`) or
+  whose leaves share one span (`anchor_ambiguous`); an index that proves
+  neither side is noted (`index_unproven`). The runner journals the counts once
+  per capture (`capture_anchored`).
 
 Human review remains only where a new record or a new code link is written.
 Read-only conversations never reach the final checkpoint and therefore capture

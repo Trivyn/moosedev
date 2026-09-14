@@ -790,3 +790,45 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
     runner.confirm_no_knowledge().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Complete);
 }
+
+#[tokio::test]
+async fn symbolic_capture_submits_hunk_ranges_and_journals_its_anchors_once() {
+    use moosedev::harness::protocol::{HarnessSourcePosition, HarnessSourceRange};
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
+    fixture.shared.lock().unwrap().fail_capture_once = true;
+    fixture.note("Keep normalization in one helper.");
+    assert!(
+        runner.advance().await.is_err(),
+        "the first capture acknowledgment is lost"
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    let captures = fixture.shared.lock().unwrap().capture_requests.clone();
+    assert_eq!(captures.len(), 2);
+    let lines = |start: u32, end: u32| HarnessSourceRange {
+        start: HarnessSourcePosition {
+            line: start,
+            col: 0,
+        },
+        end: HarnessSourcePosition { line: end, col: 0 },
+    };
+    // The helper edit replaced one line with four: one hunk on each side.
+    assert_eq!(captures[1].changed.len(), 1);
+    assert_eq!(captures[1].changed[0].file, "labels.py");
+    assert_eq!(captures[1].changed[0].changed_ranges, vec![lines(1, 5)]);
+    assert_eq!(captures[1].changed[0].before_ranges, vec![lines(1, 2)]);
+    assert_eq!(
+        serde_json::to_value(&captures[0]).unwrap(),
+        serde_json::to_value(&captures[1]).unwrap(),
+        "the retried submission carries the frozen geometry"
+    );
+    assert_eq!(
+        intent_details(&runner, "capture_anchored"),
+        vec![
+            "1 definition anchors, 0 module anchors, 0 unanchored files, 0 anchor notes"
+                .to_string()
+        ]
+    );
+}
