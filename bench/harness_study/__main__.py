@@ -62,6 +62,16 @@ def main(argv=None):
     command.add_argument("--plans", type=Path, help="JSON list of {summary, files} plans whose files form extra read sets")
     command.add_argument("--extra-seeds", type=Path, help="diagnostic seeds appended in memory only; the package is never changed")
     command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
+    command = sub.add_parser("crowding-tiers", help="diagnostic only: what structural, NLQ and small-k tiers would deliver; "
+                                                   "no model calls unless LM Studio already has the helper loaded")
+    command.add_argument("--scenario", default="late_fees_crowded")
+    command.add_argument("--deciding-fact", default="fees-np7")
+    command.add_argument("--binary-manifest", type=Path, required=True)
+    command.add_argument("--parent-preflight", type=Path, required=True, help="ready preflight supplying the indexer and assets")
+    command.add_argument("--plans", type=Path, required=True, help="JSON list of {name, summary, files} plans")
+    command.add_argument("--lmstudio", default="http://127.0.0.1:1234",
+                         help="LM Studio server; tier 2 runs only if the helper is already loaded there (never loads models)")
+    command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
     command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
     command.add_argument("runs", type=Path, nargs="+")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -124,6 +134,15 @@ def main(argv=None):
                                    parent_preflight=args.parent_preflight, output=args.output, plans=plans,
                                    deciding_fact=args.deciding_fact, extra_facts=extra)
         print(json.dumps({"evidence": str(args.output / "levers.json")}))
+        return 0
+    elif args.command == "crowding-tiers":
+        from .crowding import tier_diagnostics, tier_summary
+        result = tier_diagnostics(scenario_id=args.scenario, binary_manifest=args.binary_manifest,
+                                  parent_preflight=args.parent_preflight, output=args.output,
+                                  plans=json.loads(args.plans.read_text()), deciding_fact=args.deciding_fact,
+                                  lmstudio=args.lmstudio)
+        print(json.dumps({"helper": result["helper"], "summary": tier_summary(result),
+                          "evidence": str(args.output / "tiers.json")}))
         return 0
     elif args.command == "crowding-report":
         from .crowding import report as crowding_report

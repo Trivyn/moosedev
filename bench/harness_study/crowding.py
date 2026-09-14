@@ -283,6 +283,11 @@ def report(runs, *, scenario_id, deciding_fact):
 
 def mcp_relevant_context(executable, socket, data_dir, topic, limit=100, timeout=120):
     """One get_relevant_context call through `moosedev --connect`, never auto-spawning a backend."""
+    return mcp_call(executable, socket, data_dir, "get_relevant_context", {"topic": topic, "limit": limit}, timeout)
+
+
+def mcp_call(executable, socket, data_dir, tool, arguments, timeout=120):
+    """One MOOSEDev MCP tool call through `moosedev --connect`, never auto-spawning a backend."""
     environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "MOOSEDEV_NO_AUTOSPAWN": "1",
                    "MOOSEDEV_SOCKET": str(socket), "MOOSEDEV_DATA_DIR": str(data_dir), "HOME": str(data_dir)}
     process = subprocess.Popen([str(executable), "--connect", str(socket)], stdin=subprocess.PIPE,
@@ -309,10 +314,12 @@ def mcp_relevant_context(executable, socket, data_dir, topic, limit=100, timeout
                          "clientInfo": {"name": "crowding-gate", "version": "1"}}})
         receive(1)
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-              "params": {"name": "get_relevant_context", "arguments": {"topic": topic, "limit": limit}}})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
         result = receive(2)
-        return "\n".join(item.get("text", "") for item in result.get("content", []))
+        text = "\n".join(item.get("text", "") for item in result.get("content", []))
+        if result.get("isError"):
+            raise RuntimeError(f"MCP tool {tool} failed: {text[:2000]}")
+        return text
     finally:
         timer.cancel()
         process.kill()
@@ -643,4 +650,300 @@ def lever_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output,
             result["checkpoint"] = daemon.checkpoint()
     result["lever2"] = rows
     (directory / "levers.json").write_bytes(canonical_json(result))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics only: tiered, precise-first delivery for the crowded-graph probe.
+# Nothing below changes `gate`, the harness push, or the frozen probe package.
+# For each plan it measures, next to today's push, what three candidate tiers
+# would deliver: a deterministic structural walk from the plan's files (tier 1),
+# one templated question built only from symbolic state (tier 2, which needs the
+# daemon's helper model and runs only if LM Studio already has it loaded) and a
+# small-k topic fallback (tier 3).
+# ---------------------------------------------------------------------------
+ARCH_NS = "https://trivyn.io/ontologies/software/architecture#"
+CODE_NS = "https://trivyn.io/ontologies/software/code#"
+SPARQL_PREFIXES = f"PREFIX arch: <{ARCH_NS}>\nPREFIX code: <{CODE_NS}>\n"
+TIER1_HOPS = ("direct", "motivating", "component_constraints", "supersession_heads", "lessons")
+TIER3_LIMITS = (5, 10)
+KNOWLEDGE_KINDS = ("Constraint", "Requirement", "ArchitecturalDecision", "Lesson", "Pattern", "AntiPattern")
+HELPER_MODEL = "gemma-4-e4b-it-mlx"
+HELPER_CONTEXT_TOKENS = 131072
+STUDY_IRI = re.compile(r"https://moosedev\.dev/kg/study/[0-9a-f-]{36}")
+
+
+def _literals(values):
+    return " ".join(json.dumps(value, ensure_ascii=False) for value in values)
+
+
+def _iris(values):
+    return " ".join(f"<{value}>" for value in values)
+
+
+def tier1_query(hop, *, files=(), records=()):
+    """SPARQL for one structural hop: records linked to the plan files' definitions (direct), or one hop from them."""
+    if hop == "direct":
+        return (SPARQL_PREFIXES + "SELECT DISTINCT ?record WHERE {\n"
+                f"  VALUES ?path {{ {_literals(files)} }}\n"
+                "  VALUES ?predicate { arch:concerns arch:constrains }\n"
+                "  ?entity code:definedInPath ?path .\n"
+                "  ?record ?predicate ?entity .\n"
+                '  ?record arch:hasLifecycleStatus "accepted" .\n'
+                "} ORDER BY ?record")
+    bodies = {
+        "motivating": "?record arch:isMotivatedBy ?found .",
+        "component_constraints": ("?record arch:concerns ?component .\n  ?component a arch:SystemComponent .\n"
+                                  "  ?found a arch:Constraint ;\n    arch:concerns ?component ."),
+        "supersession_heads": "?found arch:supersedes+ ?record .\n  FILTER NOT EXISTS { ?newer arch:supersedes ?found }",
+        "lessons": "?found a arch:Lesson ;\n    arch:learnedFrom ?record .",
+    }
+    if hop not in bodies:
+        raise ValueError(f"unknown tier-1 hop: {hop}")
+    return (SPARQL_PREFIXES + "SELECT DISTINCT ?found WHERE {\n"
+            f"  VALUES ?record {{ {_iris(records)} }}\n"
+            f"  {bodies[hop]}\n"
+            '  ?found arch:hasLifecycleStatus "accepted" .\n'
+            "} ORDER BY ?found")
+
+
+def claims_query(records):
+    return (SPARQL_PREFIXES + "SELECT ?record ?kind ?title ?description WHERE {\n"
+            f"  VALUES ?record {{ {_iris(records)} }}\n"
+            "  ?record a ?kind ;\n    arch:hasTitle ?title .\n"
+            "  OPTIONAL { ?record arch:hasDescription ?description }\n"
+            f'  FILTER(STRSTARTS(STR(?kind), "{ARCH_NS}"))\n'
+            "} ORDER BY ?record")
+
+
+def definitions_query(files):
+    return (SPARQL_PREFIXES + "SELECT DISTINCT ?entity ?logical WHERE {\n"
+            f"  VALUES ?path {{ {_literals(files)} }}\n"
+            "  ?entity code:definedInPath ?path ;\n    code:hasLogicalPath ?logical .\n"
+            "} ORDER BY ?logical")
+
+
+def sparql_bindings(text, *names):
+    """Rows of a SPARQL JSON SELECT result as tuples of the named variables (None when unbound)."""
+    return [tuple(row.get(name, {}).get("value") for name in names)
+            for row in json.loads(text)["results"]["bindings"]]
+
+
+def claim_records(rows):
+    """One record per IRI from claims_query rows, preferring a knowledge kind over inferred superclasses."""
+    chosen = {}
+    for record, kind, title, description in rows:
+        local = kind.rpartition("#")[2]
+        current = chosen.get(record)
+        if current is None or (current["kind"] not in KNOWLEDGE_KINDS and local in KNOWLEDGE_KINDS):
+            chosen[record] = {"iri": record, "kind": local, "title": title, "description": description or ""}
+    return chosen
+
+
+def render_claim(record):
+    return f"[{record['kind']}] {record['title']} ({record['iri']})\nhasDescription: {record['description']}\n"
+
+
+def assemble_tier1(hops, claims):
+    """Tier-1 delivery in hop order; each hop contributes only records no earlier hop delivered."""
+    seen, result = set(), {}
+    for hop in TIER1_HOPS:
+        added = [iri for iri in _unique(hops.get(hop, [])) if iri not in seen and iri in claims]
+        seen.update(added)
+        text = "".join(render_claim(claims[iri]) for iri in added)
+        result[hop] = {"records": added, "text": text, "bytes": len(text.encode())}
+    text = "".join(result[hop]["text"] for hop in TIER1_HOPS)
+    return {"hops": result, "records": [iri for hop in TIER1_HOPS for iri in result[hop]["records"]],
+            "text": text, "bytes": len(text.encode())}
+
+
+def nlq_question(logical_paths, files):
+    """One short question built only from symbolic state: the plan files' indexed definitions, else the files."""
+    names = [path.replace("::", ".") for path in _unique(logical_paths)] or list(files)
+    return "Which constraints and requirements govern " + ", ".join(names) + "?"
+
+
+def helper_ready(models, model=HELPER_MODEL, context=HELPER_CONTEXT_TOKENS):
+    """True only when LM Studio reports the exact helper already loaded at its pinned runtime context."""
+    return any(item.get("id") == model and item.get("state") == "loaded" and item.get("loaded_context_length") == context
+               for item in models.get("data", []))
+
+
+def lmstudio_models(server):
+    """LM Studio's model listing; a read, never a load or unload."""
+    import urllib.request
+    with urllib.request.urlopen(server.rstrip("/") + "/api/v0/models", timeout=10) as response:
+        return json.loads(response.read())
+
+
+def fact_iris(scenario):
+    return {seed_iri(scenario["id"] + "/fact/" + fact["id"]): fact["id"] for fact in scenario["initial_facts"]}
+
+
+def text_stage(text, byte_count, known_iris):
+    """A delivery stage: its text, the bytes it costs, and the seed records it names in any form."""
+    return {"text": text, "bytes": byte_count,
+            "iris": [iri for iri in _unique(STUDY_IRI.findall(text)) if iri in known_iris]}
+
+
+def combine(stages):
+    """Stages delivered together: texts joined, bytes summed, named records unioned in order."""
+    return {"text": "".join(stage["text"] for stage in stages), "bytes": sum(stage["bytes"] for stage in stages),
+            "iris": _unique(iri for stage in stages for iri in stage["iris"])}
+
+
+def delivery(text, facts, *, deciding_fact, expected=()):
+    """Which seed claims a text carries: the deciding claim, the others, and those outside the episode's expected facts."""
+    delivered = [fact["id"] for fact in facts if fact["description"] in text]
+    others = [fact_id for fact_id in delivered if fact_id != deciding_fact]
+    return {"deciding_claim": deciding_fact in delivered, "delivered_fact_ids": delivered, "other_claims": len(others),
+            "outside_expected": [fact_id for fact_id in others if fact_id not in expected]}
+
+
+def stage_row(stage, facts, *, deciding_fact, expected=()):
+    return dict(delivery(stage["text"], facts, deciding_fact=deciding_fact, expected=expected),
+                bytes=stage["bytes"], records=len(stage["iris"]))
+
+
+def tier_summary(result):
+    """Compact per-plan rows: bytes, named records, deciding-claim delivery and other claims for every stage."""
+    keys = ("bytes", "records", "deciding_claim", "other_claims")
+    rows = []
+    for entry in result["plans"]:
+        stages = {"push": entry["push"], "tier1": entry["tier1"]}
+        stages.update({f"tier1.{hop}": entry["tier1"]["hops"][hop] for hop in TIER1_HOPS})
+        if entry["tier2"].get("run"):
+            stages["tier2"] = entry["tier2"]
+        stages.update({f"tier3@{limit}": row for limit, row in entry["tier3"].items()})
+        stages.update({f"cumulative:{name}": row for name, row in entry["cumulative"].items()})
+        rows.append({"plan": entry["plan"]["name"], "files": entry["plan"]["files"],
+                     "tier2": "run" if entry["tier2"].get("run") else entry["tier2"].get("note"),
+                     "stages": {name: {key: row[key] for key in keys} for name, row in stages.items()}})
+    return rows
+
+
+def tier_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output, plans, deciding_fact,
+                     lmstudio="http://127.0.0.1:1234"):
+    """Diagnostic only: seed a disposable workspace and measure tiered delivery of the deciding record per plan."""
+    from .binaries import verify_binaries
+    from .daemon import OwnedDaemon
+    from .indexing import apply_overlay, index_workspace, ready_dossiers, short_probe_runtime, verify_indexer
+    if not plans:
+        raise ValueError("crowding-tiers needs at least one plan")
+    scenario = load_scenario(scenario_id)
+    iri, title, claim = _deciding(scenario, deciding_fact)
+    facts = scenario["initial_facts"]
+    known = fact_iris(scenario)
+    episode = scenario["episodes"][0]
+    expected = list(episode.get("expected_fact_ids", []))
+    binaries = verify_binaries(Path(binary_manifest))
+    parent = json.loads(Path(parent_preflight).read_text())
+    indexer = verify_indexer(parent["indexer"])
+    assets = parent["assets"]
+    try:
+        helper = helper_ready(lmstudio_models(lmstudio))
+        helper_note = None if helper else "not run: helper not loaded"
+    except OSError as error:
+        helper, helper_note = False, f"not run: LM Studio unreachable ({error})"
+    directory = Path(output).absolute()
+    directory.mkdir(parents=True)
+    (directory / "responses").mkdir()
+    workspace = directory / "workspace"
+    shutil.copytree(SCENARIOS / scenario_id / "project", workspace)
+    subprocess.run(["/usr/bin/git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    prepare_workspace(workspace, scenario, "harness")
+    apply_overlay(workspace)
+    objective = episode_prompt(episode, "harness").strip()
+    plans = [{"name": plan.get("name") or f"plan-{number}", "summary": plan["summary"], "files": list(plan["files"])}
+             for number, plan in enumerate(plans)]
+    result = {"schema_version": 1, "diagnostic": "tiered delivery; not part of the gate verdict",
+              "scenario_id": scenario_id, "package_sha256": scenario["package_sha256"],
+              "seed_graph_sha256": hashlib.sha256(seed_graph(scenario).encode()).hexdigest(),
+              "build_id": binaries["build_id"], "deciding_fact": deciding_fact, "iri": iri, "title": title,
+              "claim": claim, "expected_fact_ids": expected, "tier1_hops": list(TIER1_HOPS),
+              "tier3_limits": list(TIER3_LIMITS),
+              "helper": {"model": HELPER_MODEL, "context_tokens": HELPER_CONTEXT_TOKENS, "ready": helper, "note": helper_note}}
+
+    def save(name, value):
+        (directory / "responses" / f"{name}.json").write_bytes(canonical_json(value))
+        return value
+
+    def row(stage):
+        return stage_row(stage, facts, deciding_fact=deciding_fact, expected=expected)
+
+    result["index"] = index_workspace(indexer, binaries["binaries"]["daemon"], workspace, directory / "index-runtime")
+    executable = Path(binaries["binaries"]["daemon"])
+    with short_probe_runtime(directory / "daemon-runtime") as runtime:
+        with OwnedDaemon(executable=executable, expected_sha256=binaries["binary_hashes"]["daemon"],
+                         workspace=workspace, runtime=runtime, assets=Path(assets["directory"]),
+                         helper_model=HELPER_MODEL if helper else "unused-no-inference",
+                         helper_endpoint=lmstudio.rstrip("/") + "/v1" if helper else "http://127.0.0.1:9/v1",
+                         log_path=directory / "daemon.log", indexer=indexer) as daemon:
+            readiness = ready_dossiers(daemon, scenario, seed=True, require_empty=starts_empty(scenario))
+            result["readiness"] = {"conforms": [op["reviewed"].get("conforms") for op in readiness["seed_operations"]],
+                                   "bindings": sum(len(op["request"]["bindings"]) for op in readiness["seed_operations"])}
+            data_dir = getattr(daemon, "data", workspace / ".moosedev")
+
+            def mcp(tool, arguments, name):
+                text = mcp_call(executable, daemon.socket, data_dir, tool, arguments)
+                (directory / "responses" / f"{name}.txt").write_text(text)
+                return text
+
+            def select(query, names, name):
+                return sparql_bindings(mcp("sparql", {"query": query}, name), *names)
+
+            entries = []
+            for plan in plans:
+                slug = re.sub(r"[^A-Za-z0-9]+", "_", plan["name"]).strip("_")
+                push = save(f"{slug}-push", daemon._request("/api/v1/harness/context",
+                                                            {"topic": objective, "files": plan["files"]}))
+                push_text = push.get("context", "") + "".join("\n" + item.get("dossier", "") for item in push.get("files", []))
+                push_stage = text_stage(push_text, len(push.get("context", "").encode())
+                                        + len(json.dumps(push.get("files", [])).encode()), known)
+                hops, errors = {hop: [] for hop in TIER1_HOPS}, {}
+                if plan["files"]:
+                    hops["direct"] = [value for (value,) in select(tier1_query("direct", files=plan["files"]),
+                                                                   ("record",), f"{slug}-tier1-direct")]
+                for hop in TIER1_HOPS[1:]:
+                    if not hops["direct"]:
+                        continue
+                    try:
+                        hops[hop] = [value for (value,) in select(tier1_query(hop, records=hops["direct"]),
+                                                                  ("found",), f"{slug}-tier1-{hop}")]
+                    except RuntimeError as error:
+                        errors[hop] = str(error)
+                collected = _unique(value for hop in TIER1_HOPS for value in hops[hop])
+                claims = claim_records(select(claims_query(collected), ("record", "kind", "title", "description"),
+                                              f"{slug}-tier1-claims")) if collected else {}
+                tier1 = assemble_tier1(hops, claims)
+                (directory / "responses" / f"{slug}-tier1.txt").write_text(tier1["text"])
+                tier1_stage = text_stage(tier1["text"], tier1["bytes"], known)
+                logical = [value for (_, value) in select(definitions_query(plan["files"]), ("entity", "logical"),
+                                                          f"{slug}-definitions")] if plan["files"] else []
+                question = nlq_question(logical, plan["files"])
+                stages = [("tier1", tier1_stage)]
+                if helper:
+                    answer = mcp("query", {"question": question}, f"{slug}-tier2")
+                    tier2_stage = text_stage(answer, len(answer.encode()), known)
+                    tier2 = dict(row(tier2_stage), run=True, question=question)
+                    stages.append(("tier2", tier2_stage))
+                else:
+                    tier2 = {"run": False, "note": helper_note, "question": question}
+                tier3, cumulative = {}, {}
+                for limit in TIER3_LIMITS:
+                    text = mcp("get_relevant_context", {"topic": plan["summary"], "limit": limit}, f"{slug}-tier3-k{limit}")
+                    stage = text_stage(text, len(text.encode()), known)
+                    tier3[str(limit)] = dict(row(stage), ranked=len(parse_ranking(text)))
+                    names = [name for name, _ in stages] + [f"tier3@{limit}"]
+                    cumulative["+".join(names)] = row(combine([value for _, value in stages] + [stage]))
+                cumulative = dict({"+".join(name for name, _ in stages): row(combine([value for _, value in stages]))},
+                                  **cumulative)
+                entries.append({"plan": plan, "question": question, "push": row(push_stage),
+                                "tier1": dict(row(tier1_stage), errors=errors, hops={
+                                    hop: row(text_stage(tier1["hops"][hop]["text"], tier1["hops"][hop]["bytes"], known))
+                                    for hop in TIER1_HOPS}),
+                                "tier2": tier2, "tier3": tier3, "cumulative": cumulative})
+            result["checkpoint"] = daemon.checkpoint()
+    result["plans"] = entries
+    (directory / "tiers.json").write_bytes(canonical_json(result))
     return result

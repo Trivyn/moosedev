@@ -245,6 +245,97 @@ class LeverDiagnosticTests(unittest.TestCase):
         self.assertGreater(added["bytes"], len(CLAIM))
 
 
+class TierDiagnosticTests(unittest.TestCase):
+    """Diagnostic-only helpers for tiered, precise-first delivery."""
+
+    def test_tier1_queries_walk_from_plan_files_one_hop_at_a_time(self):
+        direct = crowding.tier1_query("direct", files=["fees.py", "tests/test_visible.py"])
+        self.assertIn('VALUES ?path { "fees.py" "tests/test_visible.py" }', direct)
+        self.assertIn("VALUES ?predicate { arch:concerns arch:constrains }", direct)
+        self.assertIn("code:definedInPath", direct)
+        expected = {"motivating": "arch:isMotivatedBy", "component_constraints": "a arch:Constraint",
+                    "supersession_heads": "arch:supersedes+", "lessons": "arch:learnedFrom"}
+        for hop, fragment in expected.items():
+            query = crowding.tier1_query(hop, records=[OTHER, NP7])
+            self.assertIn(f"VALUES ?record {{ <{OTHER}> <{NP7}> }}", query)
+            self.assertIn(fragment, query)
+            self.assertIn('?found arch:hasLifecycleStatus "accepted"', query)
+        with self.assertRaises(ValueError):
+            crowding.tier1_query("reads")
+
+    def test_bindings_and_claim_records_prefer_knowledge_kinds(self):
+        text = json.dumps({"head": {"vars": ["record", "kind", "title", "description"]}, "results": {"bindings": [
+            {"record": {"value": NP7}, "kind": {"value": crowding.ARCH_NS + "KnowledgeRecord"}, "title": {"value": TITLE},
+             "description": {"value": CLAIM}},
+            {"record": {"value": NP7}, "kind": {"value": crowding.ARCH_NS + "Constraint"}, "title": {"value": TITLE},
+             "description": {"value": CLAIM}},
+            {"record": {"value": OTHER}, "kind": {"value": crowding.ARCH_NS + "Requirement"}, "title": {"value": "Other"}}]}})
+        rows = crowding.sparql_bindings(text, "record", "kind", "title", "description")
+        self.assertEqual(rows[2], (OTHER, crowding.ARCH_NS + "Requirement", "Other", None))
+        records = crowding.claim_records(rows)
+        self.assertEqual(records[NP7]["kind"], "Constraint")
+        self.assertEqual(records[OTHER]["description"], "")
+        self.assertEqual(crowding.render_claim(records[NP7]), f"[Constraint] {TITLE} ({NP7})\nhasDescription: {CLAIM}\n")
+
+    def test_tier1_counts_each_record_once_in_hop_order(self):
+        claims = {iri: {"iri": iri, "kind": "Requirement", "title": iri[-5:], "description": "claim " + iri[-5:]}
+                  for iri in (OTHER, NP7, WALKED)}
+        tier1 = crowding.assemble_tier1({"direct": [OTHER], "component_constraints": [OTHER, NP7], "lessons": [WALKED],
+                                         "motivating": ["https://moosedev.dev/kg/study/unrendered"]}, claims)
+        self.assertEqual(tier1["hops"]["direct"]["records"], [OTHER])
+        self.assertEqual(tier1["hops"]["component_constraints"]["records"], [NP7])
+        self.assertEqual(tier1["hops"]["motivating"]["records"], [])
+        self.assertEqual(tier1["records"], [OTHER, NP7, WALKED])
+        self.assertEqual(tier1["bytes"], sum(tier1["hops"][hop]["bytes"] for hop in crowding.TIER1_HOPS))
+        self.assertEqual(tier1["text"], "".join(crowding.render_claim(claims[iri]) for iri in (OTHER, NP7, WALKED)))
+
+    def test_delivery_stages_and_cumulative_rows(self):
+        facts = SCENARIO["initial_facts"]
+        known = crowding.fact_iris(SCENARIO)
+        np7 = next(iri for iri, fact_id in known.items() if fact_id == "fees-np7")
+        cents = next(iri for iri, fact_id in known.items() if fact_id == "fees-cents")
+        titles = crowding.text_stage(f"[Constraint] {TITLE} ({np7})\n", 40, known)
+        claims = crowding.text_stage(f"hasDescription: {CLAIM}\n({cents}) Percentages round half up to the cent.\n", 60, known)
+        self.assertEqual(titles["iris"], [np7])
+        row = crowding.stage_row(titles, facts, deciding_fact="fees-np7", expected=["fees-np7"])
+        self.assertEqual((row["deciding_claim"], row["records"], row["bytes"], row["other_claims"]), (False, 1, 40, 0))
+        both = crowding.combine([titles, claims])
+        self.assertEqual((both["bytes"], both["iris"]), (100, [np7, cents]))
+        row = crowding.stage_row(both, facts, deciding_fact="fees-np7", expected=["fees-np7"])
+        self.assertTrue(row["deciding_claim"])
+        self.assertEqual((row["delivered_fact_ids"], row["other_claims"], row["outside_expected"]),
+                         (["fees-cents", "fees-np7"], 1, ["fees-cents"]))
+
+    def test_nlq_question_uses_only_symbolic_state(self):
+        self.assertEqual(crowding.nlq_question(["fees::FeePolicy::late_fee", "fees::FeePolicy::late_fee"], ["fees.py"]),
+                         "Which constraints and requirements govern fees.FeePolicy.late_fee?")
+        self.assertEqual(crowding.nlq_question([], ["fees.py", "tests/test_fees.py"]),
+                         "Which constraints and requirements govern fees.py, tests/test_fees.py?")
+
+    def test_helper_must_already_be_loaded_at_its_pinned_context(self):
+        loaded = {"id": crowding.HELPER_MODEL, "state": "loaded", "loaded_context_length": 131072}
+        self.assertTrue(crowding.helper_ready({"data": [{"id": "google/gemma-4-26b-a4b", "state": "loaded"}, loaded]}))
+        self.assertFalse(crowding.helper_ready({"data": [dict(loaded, state="not-loaded")]}))
+        self.assertFalse(crowding.helper_ready({"data": [dict(loaded, loaded_context_length=32768)]}))
+        self.assertFalse(crowding.helper_ready({"data": []}))
+
+    def test_summary_rows_cover_every_stage(self):
+        cell = {"bytes": 1, "records": 1, "deciding_claim": False, "other_claims": 0, "delivered_fact_ids": [],
+                "outside_expected": []}
+        entry = {"plan": {"name": "blind-1", "files": ["fees.py"], "summary": "s"}, "push": cell,
+                 "tier1": dict(cell, hops={hop: cell for hop in crowding.TIER1_HOPS}, errors={}),
+                 "tier2": {"run": False, "note": "not run: helper not loaded", "question": "q"},
+                 "tier3": {"5": dict(cell, ranked=5), "10": dict(cell, deciding_claim=True, ranked=10)},
+                 "cumulative": {"tier1": cell, "tier1+tier3@5": cell, "tier1+tier3@10": dict(cell, deciding_claim=True)}}
+        [row] = crowding.tier_summary({"plans": [entry]})
+        self.assertEqual(row["tier2"], "not run: helper not loaded")
+        self.assertEqual(list(row["stages"]), ["push", "tier1", *(f"tier1.{hop}" for hop in crowding.TIER1_HOPS),
+                                               "tier3@5", "tier3@10", "cumulative:tier1", "cumulative:tier1+tier3@5",
+                                               "cumulative:tier1+tier3@10"])
+        self.assertTrue(row["stages"]["cumulative:tier1+tier3@10"]["deciding_claim"])
+        self.assertEqual(set(row["stages"]["push"]), {"bytes", "records", "deciding_claim", "other_claims"})
+
+
 class CommandTests(unittest.TestCase):
     def test_commands_are_registered(self):
         from bench.harness_study import __main__ as cli
@@ -252,6 +343,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn('"crowding-gate"', source)
         self.assertIn('"crowding-report"', source)
         self.assertIn('"crowding-levers"', source)
+        self.assertIn('"crowding-tiers"', source)
 
 
 if __name__ == "__main__":
