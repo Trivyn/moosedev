@@ -24,7 +24,7 @@ The two `late_fees` seeds are kept, rendered identically as
 
 ## Distractors
 
-52 further seed records describe a plausible billing project across six
+55 further seed records describe a plausible billing project across six
 components (Billing, Invoicing, Accounts, Statements, Payments, Engineering).
 Fourteen are associated with code (`FeePolicy.late_fee`, `Invoice.__init__`,
 `Account.__init__`, `statement_line`); a few carry `isMotivatedBy` or
@@ -73,6 +73,52 @@ segment, reaches rank 11 with the claim delivered. Evidence:
 gate re-run on this package (V1 and V2) is
 `target/harness-crowded-probe-v1/gate/final/gate.json`, which records the
 package hash.
+
+## Revision round 2 (after audit round 1 and gate V2)
+
+Round 2 of the three allowed distractor revisions, approved by the maintainer
+on 2026-09-13. **Disclosure:** it happened after gate V2 had been computed and
+after blind-audit round 1. V2 no longer drives any decision, because plan-time
+recall was rejected (graph AD a238e9ba). Neither the task text, NP-7's
+description nor `fees-cents` changed.
+
+- **Contradictions fixed.** `billing-late-fee-history` kept a per-invoice
+  history, against `invoicing-immutable` and `billing-fee-on-demand`; it is now
+  "Shown late fees are logged in a fee history log", recorded in a separate log
+  and never on the invoice. `invoicing-amount-cents` said amounts are converted
+  to currency units for printed statements, against
+  `billing-late-fee-amounts-in-cents`; it now says every statement, export and
+  notice shows amounts in cents.
+- **Wording tensions smoothed.** `billing-late-fee-per-invoice` (each overdue
+  invoice has its own late fee, computed for it, not "carries");
+  `billing-no-tax-on-fees` (no sales tax wherever a late fee is shown, not "on
+  invoices"); `payments-flat-late-fee` (title now "One late fee per overdue
+  invoice rather than daily interest", no "flat"); `statements-consolidated`
+  (one monthly statement instead of one per statement day, not "one per
+  invoice"). Ids and code links unchanged.
+- **Records added** (unlinked, appended): `billing-late-fee-identified` "A
+  shown late fee is identified by its invoice and statement day",
+  `payments-received-day` "A payment records the day it was received",
+  `billing-late-fee-questions` "Late fee questions are answered by recomputing
+  the fee". The contradiction fix alone had dropped NP-7 to rank 15 for the
+  bare task sentence (`target/harness-crowded-probe-v1/gate/final-v2-numbers/`);
+  these three restore the V1 margin.
+
+Gate on the round-2 package (build 1d31f454; `gold_sha256`
+e50a609bfa754be5533f9b35c71f35aac96964e00e9a460b146140e0aaafdf83,
+`seed_graph_sha256`
+c58ea4d711fd848cbafc04bfcbdd0722360ceed0b57c84d2a28b179cb1a9b59f): V1 passes.
+For both topics and every file set NP-7 is in the inventory by its neutral
+title only; its claim, topic evidence, walk, dossier titles and policy reasons
+are absent. Search rank 25 for the full episode prompt and 16 for the bare
+task sentence, cross-checked. V2 (diagnostic only): plan ranks 28, 39, 30;
+0 of 3 reach NP-7. Largest push 19,207 bytes. Recorded runs, which record this
+package's hash: `target/harness-crowded-probe-v1/gate/final-v2/gate.json` and
+its reproduction `target/harness-crowded-probe-v1/gate/final-v2-repeat/gate.json`.
+
+The audit round 1 results below were measured on the round-1 package. The
+push-only and full-notes (B) verdicts are **pending re-run** on this package;
+condition A saw no seeds and is unaffected.
 
 Blind-audit round 1 (2026-09-13, fresh Claude Sonnet readers, one per packet):
 

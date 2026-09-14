@@ -58,7 +58,7 @@
       "id": "billing-no-tax-on-fees",
       "kind": "Requirement",
       "title": "Late fees carry no sales tax",
-      "description": "A late fee is a charge for paying late rather than a sale, so no sales tax is added to it on invoices or statements.",
+      "description": "A late fee is a charge for paying late rather than a sale, so no sales tax is added to a late fee wherever it is shown.",
       "component": "Billing",
       "relations": [],
       "evidence": [
@@ -129,7 +129,7 @@
       "id": "billing-late-fee-per-invoice",
       "kind": "Requirement",
       "title": "Late fees are assessed per invoice",
-      "description": "Each overdue invoice carries its own late fee; late fees are never combined or averaged across an account's invoices.",
+      "description": "Each overdue invoice has its own late fee, computed for that invoice alone; late fees are never combined or averaged across an account's invoices.",
       "component": "Billing",
       "relations": [],
       "evidence": [
@@ -184,7 +184,7 @@
       "id": "invoicing-amount-cents",
       "kind": "Requirement",
       "title": "Invoice amounts are held in cents",
-      "description": "An invoice holds its amount in amount_cents; conversion to currency units for display happens only when a statement is printed.",
+      "description": "An invoice holds its amount in amount_cents, and every statement, export and notice shows amounts in cents.",
       "component": "Invoicing",
       "relations": [],
       "evidence": [
@@ -353,7 +353,7 @@
       "id": "statements-consolidated",
       "kind": "Requirement",
       "title": "Busy accounts get one consolidated statement a month",
-      "description": "An account with more than twenty open invoices receives one consolidated statement per month instead of one per invoice.",
+      "description": "An account with more than twenty open invoices receives one consolidated statement per month instead of one statement per statement day.",
       "component": "Statements",
       "relations": [],
       "evidence": [
@@ -429,8 +429,8 @@
     {
       "id": "payments-flat-late-fee",
       "kind": "ArchitecturalDecision",
-      "title": "Late fees are flat charges rather than daily interest",
-      "description": "Charging daily interest on overdue invoices was considered and rejected in favour of a single late fee per invoice, which customers found easier to understand.",
+      "title": "One late fee per overdue invoice rather than daily interest",
+      "description": "Charging daily interest on overdue invoices was considered and rejected in favour of one late fee per overdue invoice, which customers found easier to understand.",
       "component": "Payments",
       "relations": [
         {
@@ -565,8 +565,8 @@
     {
       "id": "billing-late-fee-history",
       "kind": "Requirement",
-      "title": "Each invoice keeps its late fee history",
-      "description": "Each invoice keeps a history of the late fee amounts shown to the customer and the day each amount was shown.",
+      "title": "Shown late fees are logged in a fee history log",
+      "description": "Each late fee amount shown to a customer is recorded with its invoice ID and statement day in a separate fee history log; invoices themselves never store late fees.",
       "component": "Billing",
       "relations": [],
       "evidence": [
@@ -633,6 +633,39 @@
       "kind": "Constraint",
       "title": "A late fee is never negative",
       "description": "A late fee is zero or a positive number of cents; money owed back to a customer is issued separately as a credit note.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-identified",
+      "kind": "Requirement",
+      "title": "A shown late fee is identified by its invoice and statement day",
+      "description": "Each late fee shown to a customer is identified by its invoice ID and the statement day it was computed for, so support can match it to the statement that showed it.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-received-day",
+      "kind": "Requirement",
+      "title": "A payment records the day it was received",
+      "description": "Each payment records the integer day number on which it was received, so support can compare it with the invoice's due day.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-questions",
+      "kind": "Requirement",
+      "title": "Late fee questions are answered by recomputing the fee",
+      "description": "Support answers a customer's question about a late fee by recomputing the fee for that invoice and the day in question, never by reading an amount stored on the invoice.",
       "component": "Billing",
       "relations": [],
       "evidence": [
