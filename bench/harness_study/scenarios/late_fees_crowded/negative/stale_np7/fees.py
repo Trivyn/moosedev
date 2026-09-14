@@ -1,0 +1,41 @@
+from decimal import Decimal, ROUND_HALF_UP
+
+GRACE_DAYS = 14
+LATE_RATE = Decimal("0.05")
+MINIMUM_LATE_FEE = 100
+NON_PROFIT_SEGMENTS = {"charity", "foundation", "association"}
+NP9_FIRST_DUE_DAY = 1000
+NP9_LATE_FEE = 200
+RETURNED_PAYMENT_RATE = Decimal("0.025")
+MINIMUM_RETURNED_PAYMENT_FEE = 250
+COLLECTION_DAYS = 60
+COLLECTION_RATE = Decimal("0.15")
+MINIMUM_COLLECTION_PENALTY = 500
+
+
+def percent_of(amount_cents, rate):
+    return int((Decimal(amount_cents) * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+class FeePolicy:
+    def late_fee(self, account, invoice, today):
+        if today - invoice.due_day <= GRACE_DAYS:
+            return 0
+        if account.segment == "association":
+            return 0
+        if account.segment in NON_PROFIT_SEGMENTS:
+            return NP9_LATE_FEE if invoice.due_day >= NP9_FIRST_DUE_DAY else 0
+        return max(MINIMUM_LATE_FEE, percent_of(invoice.amount_cents, LATE_RATE))
+
+    def returned_payment_fee(self, account, amount_cents):
+        if account.segment in NON_PROFIT_SEGMENTS:
+            return 0
+        return max(MINIMUM_RETURNED_PAYMENT_FEE, percent_of(amount_cents, RETURNED_PAYMENT_RATE))
+
+    def fee_forecast(self, account, invoice, days):
+        return [self.late_fee(account, invoice, day) for day in days]
+
+    def collection_penalty(self, account, invoice, today):
+        if today - invoice.due_day <= COLLECTION_DAYS or account.segment in NON_PROFIT_SEGMENTS:
+            return 0
+        return max(MINIMUM_COLLECTION_PENALTY, percent_of(invoice.amount_cents, COLLECTION_RATE))

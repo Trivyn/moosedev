@@ -1,0 +1,562 @@
+{
+  "schema_version": 2,
+  "scenario_id": "late_fees_crowded",
+  "review_status": "pending",
+  "facts": [
+    {
+      "id": "fees-np7",
+      "claim": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ],
+      "introduced_episode": 0,
+      "seeded": true,
+      "superseded_episode": 3,
+      "superseded_by": "fees-np9",
+      "current_scope": "From episode 3, late fees on invoices due before day 1000, and every penalty fee (including the returned-payment fee), for every registered non-profit segment."
+    },
+    {
+      "id": "fees-cents",
+      "claim": "Every fee is an integer number of cents. A percentage fee is rounded half up to the cent, never with banker's rounding.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "fees-formula",
+      "claim": "An invoice is late when today is more than 14 days after its due day; the late fee is 5% of the amount, at least 100 cents; otherwise 0.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/0/prompt"
+      ],
+      "introduced_episode": 1,
+      "seeded": false
+    },
+    {
+      "id": "fees-segments",
+      "claim": "The foundation segment, displayed as \"Registered foundation\", is for registered non-profit foundations; the cooperative segment, displayed as \"Member cooperative\", is for member-owned for-profit cooperatives. Statement lines show a segment's display name instead of its code.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/1/prompt"
+      ],
+      "introduced_episode": 2,
+      "seeded": false
+    },
+    {
+      "id": "fees-np9",
+      "claim": "Regulation NP-9 replaces NP-7 for late fees on invoices due on or after day 1000: a late invoice of any registered non-profit account due on or after day 1000 has a flat 200-cent late fee. Earlier invoices and all penalty fees stay under NP-7.",
+      "kind": "Constraint",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "fees-returned-payment",
+      "claim": "FeePolicy.returned_payment_fee(account, amount_cents) charges a bounced payment 2.5% of amount_cents, but at least 250 cents.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/2/prompt"
+      ],
+      "introduced_episode": 3,
+      "seeded": false
+    },
+    {
+      "id": "fees-association",
+      "claim": "The association segment, displayed as \"Registered association\", is for registered non-profit associations.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "fees-forecast",
+      "claim": "fee_forecast returns the late fee for each given day, in order.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "fees-collection",
+      "claim": "FeePolicy.collection_penalty(account, invoice, today) charges 15% of amount_cents, but at least 500 cents, once today is more than 60 days after invoice.due_day; otherwise 0.",
+      "kind": "Requirement",
+      "evidence": [
+        "scenario.json#/episodes/3/prompt"
+      ],
+      "introduced_episode": 4,
+      "seeded": false
+    },
+    {
+      "id": "billing-fee-on-demand",
+      "claim": "A late fee is computed from the invoice and the day it is requested; it is never stored on the invoice, so a statement always shows the fee as of its statement day.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-feepolicy-stateless",
+      "claim": "FeePolicy methods depend only on their arguments and module constants; they keep no caches or counters, so any fee can be recomputed for any day.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-fee-rules-in-policy",
+      "claim": "Fee calculations are methods on FeePolicy rather than helpers spread across statements and invoices, so a fee rule changes in one place.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-fee-constants",
+      "claim": "Day counts, percentages and minimum amounts used by fee rules are named constants at the top of fees.py, so every fee parameter can be reviewed in one place.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-no-tax-on-fees",
+      "claim": "A late fee is a charge for paying late rather than a sale, so no sales tax is added to it on invoices or statements.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-fee-revenue-export",
+      "claim": "Finance reconciles fee income separately from invoice revenue, so the monthly revenue export reports each kind of fee in its own column.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-disputed-fee-credit",
+      "claim": "When support upholds a customer's dispute of a late fee, the fee is reversed with a credit note; neither the invoice nor the fee rule is edited.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-grace-lesson",
+      "claim": "A statement once showed a late fee one day before it was due because the day count was off by one; boundary days now get their own visible test.",
+      "kind": "Lesson",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-fee-per-invoice",
+      "claim": "Each overdue invoice carries its own late fee; late fees are never combined or averaged across an account's invoices.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-fee-currency",
+      "claim": "The platform bills in a single currency; a late fee is expressed in the same cents as the invoice it applies to.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-fee-change-signoff",
+      "claim": "Any change to a fee amount or fee rule is reviewed by finance before release, because fees appear on customer statements; a code-only review was considered and rejected.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "billing-late-notice-wording",
+      "claim": "Customer-facing text that mentions a late fee states the invoice ID, the due day and the fee in cents, without legal abbreviations.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-day-numbers",
+      "claim": "Due days, statement days and today are integer day numbers counted from the billing epoch, so comparing two days is plain integer arithmetic.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-amount-cents",
+      "claim": "An invoice holds its amount in amount_cents; conversion to currency units for display happens only when a statement is printed.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-due-day-fixed",
+      "claim": "The due day is set when an invoice is issued and never moves; a payment plan issues new invoices instead of changing due days.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-ids-unique",
+      "claim": "Each invoice ID identifies exactly one invoice for its whole life, so statements, payments and credit notes refer to invoices by ID.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-immutable",
+      "claim": "Once issued, an invoice's amount, due day and account never change.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-corrections",
+      "claim": "A wrong invoice is corrected with a credit note and a replacement invoice rather than by editing it, so billing history stays auditable; editing in place was rejected.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "invoicing-day-numbers-decision",
+      "claim": "Calendar dates were considered for billing arithmetic and rejected because month lengths and time zones made due-day comparisons error-prone.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "accounts-one-segment",
+      "claim": "An account's segment code must be a key of the segment table in accounts.py; an unknown code is rejected when the account is created.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "accounts-opaque-ids",
+      "claim": "Account IDs carry no meaning; code never parses them for region, size or segment.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "accounts-stable-codes",
+      "claim": "Once a segment code is used it is never renamed, because stored accounts and exports refer to it; only its display name may change.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "accounts-segment-table",
+      "claim": "Segments are defined in a single table mapping each code to its display name in accounts.py, so adding a segment is a one-line change; a class per segment was rejected.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "accounts-closed",
+      "claim": "Closing an account never deletes its invoices; any outstanding invoice stays collectible.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "statements-line-shows-fee",
+      "claim": "Each statement line shows the invoice ID, the account's segment and the late fee as of the statement day.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "statements-statement-day",
+      "claim": "A statement is produced for one statement day, and every fee on it is computed as of that day.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "statements-order",
+      "claim": "Lines appear with the oldest due day first, so the most overdue invoices lead the statement.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "statements-consolidated",
+      "claim": "An account with more than twenty open invoices receives one consolidated statement per month instead of one per invoice.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "statements-cp3",
+      "claim": "Under regulation CP-3, every statement that shows a late fee also shows the due day of the invoice it applies to, so the customer can see why the fee applies.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-oldest-first",
+      "claim": "An unallocated payment is applied to the account's invoice with the earliest due day before any other invoice.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-partial",
+      "claim": "A partial payment is recorded against its invoice but never changes the invoice's amount or due day.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-reminder",
+      "claim": "Customers receive one payment reminder the day after an invoice's due day.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-ds2",
+      "claim": "Regulation DS-2 requires every payment record to be kept for seven years after the invoice it settles.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-pc1",
+      "claim": "Regulation PC-1 forbids adding a surcharge to an invoice because the customer pays it by card.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "payments-flat-late-fee",
+      "claim": "Charging daily interest on overdue invoices was considered and rejected in favour of a single late fee per invoice, which customers found easier to understand.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-stdlib",
+      "claim": "Billing code depends only on the Python standard library, so it runs wherever the platform's Python runs.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-public-apis",
+      "claim": "Existing public billing classes, methods and functions keep their names and parameters; new behaviour is added with new methods.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-visible-tests",
+      "claim": "Each billing rule is covered by a test under tests/ that runs with python3 -m unittest discover.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-single-threaded",
+      "claim": "Billing code runs in one thread with no network access; no locking or retries are needed.",
+      "kind": "Constraint",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-explicit-days",
+      "claim": "Tests pass today as an explicit day number instead of reading a clock, so every fee test is deterministic; freezing the system clock was rejected.",
+      "kind": "ArchitecturalDecision",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-knowledge-records",
+      "claim": "The reason behind each billing rule is kept as project knowledge, so maintainers can find why a rule exists before changing it.",
+      "kind": "Requirement",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    },
+    {
+      "id": "eng-clock-lesson",
+      "claim": "A fee test that read the system clock failed on the last day of a month; the fix was to pass day numbers explicitly.",
+      "kind": "Lesson",
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ],
+      "introduced_episode": 0,
+      "seeded": true
+    }
+  ],
+  "forbidden_claims": [
+    {
+      "claim": "Only the charity segment is exempt from late fees.",
+      "applies_from_episode": 2,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Registered non-profits never pay a late fee, whatever the due day.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "NP-9 also replaces NP-7 for penalty fees such as the returned-payment fee.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "NP-9 applies regardless of the invoice due day.",
+      "applies_from_episode": 3,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "NP-9's flat fee applies to the collection penalty.",
+      "applies_from_episode": 4,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Cooperatives are non-profits.",
+      "applies_from_episode": 2,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Non-profits pay a reduced percentage fee.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    },
+    {
+      "claim": "Percentage fees may use banker's rounding.",
+      "applies_from_episode": 1,
+      "applies_through_episode": null
+    }
+  ]
+}

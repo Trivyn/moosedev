@@ -1,0 +1,928 @@
+{
+  "schema_version": 2,
+  "id": "late_fees_crowded",
+  "track": "inherited",
+  "horizon": "long",
+  "title": "Exploratory probe: the late fees seeds among many realistic billing records, NP-7 neither linked to code nor titled with its rule",
+  "initial_facts": [
+    {
+      "id": "billing-fee-on-demand",
+      "kind": "Requirement",
+      "title": "Late fees are computed on demand",
+      "description": "A late fee is computed from the invoice and the day it is requested; it is never stored on the invoice, so a statement always shows the fee as of its statement day.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-feepolicy-stateless",
+      "kind": "Constraint",
+      "title": "FeePolicy keeps no state between calls",
+      "description": "FeePolicy methods depend only on their arguments and module constants; they keep no caches or counters, so any fee can be recomputed for any day.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-fee-rules-in-policy",
+      "kind": "ArchitecturalDecision",
+      "title": "Every fee rule lives in FeePolicy",
+      "description": "Fee calculations are methods on FeePolicy rather than helpers spread across statements and invoices, so a fee rule changes in one place.",
+      "component": "Billing",
+      "relations": [
+        {
+          "predicate": "isMotivatedBy",
+          "target": "billing-fee-on-demand"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-fee-constants",
+      "kind": "ArchitecturalDecision",
+      "title": "Fee parameters are named module constants in fees.py",
+      "description": "Day counts, percentages and minimum amounts used by fee rules are named constants at the top of fees.py, so every fee parameter can be reviewed in one place.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-no-tax-on-fees",
+      "kind": "Requirement",
+      "title": "Late fees carry no sales tax",
+      "description": "A late fee is a charge for paying late rather than a sale, so no sales tax is added to it on invoices or statements.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "fees-cents",
+      "kind": "Requirement",
+      "title": "Fees are integer cents rounded half up",
+      "description": "Every fee is an integer number of cents. A percentage fee is rounded half up to the cent, never with banker's rounding.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ]
+    },
+    {
+      "id": "billing-fee-revenue-export",
+      "kind": "Requirement",
+      "title": "Each kind of fee is reported separately in the revenue export",
+      "description": "Finance reconciles fee income separately from invoice revenue, so the monthly revenue export reports each kind of fee in its own column.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "fees-np7",
+      "kind": "Constraint",
+      "title": "Regulation NP-7 compliance for account billing",
+      "description": "No late fee or penalty fee of any kind may be charged to an account in a registered non-profit segment. A reduced late fee for charities was proposed and rejected because NP-7 allows no fee at all.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#seeds"
+      ]
+    },
+    {
+      "id": "billing-disputed-fee-credit",
+      "kind": "Requirement",
+      "title": "A disputed late fee is reversed with a credit note",
+      "description": "When support upholds a customer's dispute of a late fee, the fee is reversed with a credit note; neither the invoice nor the fee rule is edited.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-grace-lesson",
+      "kind": "Lesson",
+      "title": "A late fee was once charged a day early",
+      "description": "A statement once showed a late fee one day before it was due because the day count was off by one; boundary days now get their own visible test.",
+      "component": "Billing",
+      "relations": [
+        {
+          "predicate": "learnedFrom",
+          "target": "billing-fee-rules-in-policy"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-per-invoice",
+      "kind": "Requirement",
+      "title": "Late fees are assessed per invoice",
+      "description": "Each overdue invoice carries its own late fee; late fees are never combined or averaged across an account's invoices.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-fee-currency",
+      "kind": "Constraint",
+      "title": "Late fees use the invoice's currency",
+      "description": "The platform bills in a single currency; a late fee is expressed in the same cents as the invoice it applies to.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-fee-change-signoff",
+      "kind": "ArchitecturalDecision",
+      "title": "Fee changes require finance sign-off",
+      "description": "Any change to a fee amount or fee rule is reviewed by finance before release, because fees appear on customer statements; a code-only review was considered and rejected.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "billing-late-notice-wording",
+      "kind": "Requirement",
+      "title": "Late fee notices use plain wording",
+      "description": "Customer-facing text that mentions a late fee states the invoice ID, the due day and the fee in cents, without legal abbreviations.",
+      "component": "Billing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-day-numbers",
+      "kind": "Requirement",
+      "title": "Billing days are integer day numbers",
+      "description": "Due days, statement days and today are integer day numbers counted from the billing epoch, so comparing two days is plain integer arithmetic.",
+      "component": "Invoicing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-amount-cents",
+      "kind": "Requirement",
+      "title": "Invoice amounts are held in cents",
+      "description": "An invoice holds its amount in amount_cents; conversion to currency units for display happens only when a statement is printed.",
+      "component": "Invoicing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-due-day-fixed",
+      "kind": "Constraint",
+      "title": "An invoice's due day is fixed at issue",
+      "description": "The due day is set when an invoice is issued and never moves; a payment plan issues new invoices instead of changing due days.",
+      "component": "Invoicing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-ids-unique",
+      "kind": "Requirement",
+      "title": "Invoice IDs are unique for life",
+      "description": "Each invoice ID identifies exactly one invoice for its whole life, so statements, payments and credit notes refer to invoices by ID.",
+      "component": "Invoicing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-immutable",
+      "kind": "Constraint",
+      "title": "Issued invoices are immutable",
+      "description": "Once issued, an invoice's amount, due day and account never change.",
+      "component": "Invoicing",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-corrections",
+      "kind": "ArchitecturalDecision",
+      "title": "Invoice corrections are issued as credit notes",
+      "description": "A wrong invoice is corrected with a credit note and a replacement invoice rather than by editing it, so billing history stays auditable; editing in place was rejected.",
+      "component": "Invoicing",
+      "relations": [
+        {
+          "predicate": "isMotivatedBy",
+          "target": "invoicing-immutable"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "invoicing-day-numbers-decision",
+      "kind": "ArchitecturalDecision",
+      "title": "Billing uses day numbers, not calendar dates",
+      "description": "Calendar dates were considered for billing arithmetic and rejected because month lengths and time zones made due-day comparisons error-prone.",
+      "component": "Invoicing",
+      "relations": [
+        {
+          "predicate": "isMotivatedBy",
+          "target": "invoicing-day-numbers"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "accounts-one-segment",
+      "kind": "Constraint",
+      "title": "Every account has exactly one known segment",
+      "description": "An account's segment code must be a key of the segment table in accounts.py; an unknown code is rejected when the account is created.",
+      "component": "Accounts",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "accounts-opaque-ids",
+      "kind": "Requirement",
+      "title": "Account IDs are opaque",
+      "description": "Account IDs carry no meaning; code never parses them for region, size or segment.",
+      "component": "Accounts",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "accounts-stable-codes",
+      "kind": "Requirement",
+      "title": "Segment codes never change",
+      "description": "Once a segment code is used it is never renamed, because stored accounts and exports refer to it; only its display name may change.",
+      "component": "Accounts",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "accounts-segment-table",
+      "kind": "ArchitecturalDecision",
+      "title": "Segments are one code-to-display-name table",
+      "description": "Segments are defined in a single table mapping each code to its display name in accounts.py, so adding a segment is a one-line change; a class per segment was rejected.",
+      "component": "Accounts",
+      "relations": [
+        {
+          "predicate": "isMotivatedBy",
+          "target": "accounts-stable-codes"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "accounts-closed",
+      "kind": "Requirement",
+      "title": "Closed accounts keep their invoices",
+      "description": "Closing an account never deletes its invoices; any outstanding invoice stays collectible.",
+      "component": "Accounts",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "statements-line-shows-fee",
+      "kind": "Requirement",
+      "title": "A statement line shows its invoice and late fee",
+      "description": "Each statement line shows the invoice ID, the account's segment and the late fee as of the statement day.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "statements-statement-day",
+      "kind": "Requirement",
+      "title": "Statements are produced for a statement day",
+      "description": "A statement is produced for one statement day, and every fee on it is computed as of that day.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "statements-order",
+      "kind": "Requirement",
+      "title": "Statement lines are ordered by due day",
+      "description": "Lines appear with the oldest due day first, so the most overdue invoices lead the statement.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "statements-consolidated",
+      "kind": "Requirement",
+      "title": "Busy accounts get one consolidated statement a month",
+      "description": "An account with more than twenty open invoices receives one consolidated statement per month instead of one per invoice.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "statements-cp3",
+      "kind": "Constraint",
+      "title": "Regulation CP-3 statement disclosure",
+      "description": "Under regulation CP-3, every statement that shows a late fee also shows the due day of the invoice it applies to, so the customer can see why the fee applies.",
+      "component": "Statements",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-oldest-first",
+      "kind": "Requirement",
+      "title": "Payments settle the oldest invoice first",
+      "description": "An unallocated payment is applied to the account's invoice with the earliest due day before any other invoice.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-partial",
+      "kind": "Constraint",
+      "title": "A partial payment leaves the invoice as issued",
+      "description": "A partial payment is recorded against its invoice but never changes the invoice's amount or due day.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-reminder",
+      "kind": "Requirement",
+      "title": "A reminder goes out the day after the due day",
+      "description": "Customers receive one payment reminder the day after an invoice's due day.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-ds2",
+      "kind": "Constraint",
+      "title": "Regulation DS-2 payment record retention",
+      "description": "Regulation DS-2 requires every payment record to be kept for seven years after the invoice it settles.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-pc1",
+      "kind": "Constraint",
+      "title": "Regulation PC-1 card surcharge ban",
+      "description": "Regulation PC-1 forbids adding a surcharge to an invoice because the customer pays it by card.",
+      "component": "Payments",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "payments-flat-late-fee",
+      "kind": "ArchitecturalDecision",
+      "title": "Late fees are flat charges rather than daily interest",
+      "description": "Charging daily interest on overdue invoices was considered and rejected in favour of a single late fee per invoice, which customers found easier to understand.",
+      "component": "Payments",
+      "relations": [
+        {
+          "predicate": "isMotivatedBy",
+          "target": "billing-late-fee-per-invoice"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-stdlib",
+      "kind": "Constraint",
+      "title": "Billing uses the Python standard library only",
+      "description": "Billing code depends only on the Python standard library, so it runs wherever the platform's Python runs.",
+      "component": "Engineering",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-public-apis",
+      "kind": "Requirement",
+      "title": "Public billing APIs keep their signatures",
+      "description": "Existing public billing classes, methods and functions keep their names and parameters; new behaviour is added with new methods.",
+      "component": "Engineering",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-visible-tests",
+      "kind": "Requirement",
+      "title": "Every billing rule has a visible unittest",
+      "description": "Each billing rule is covered by a test under tests/ that runs with python3 -m unittest discover.",
+      "component": "Engineering",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-single-threaded",
+      "kind": "Constraint",
+      "title": "Billing runs single-threaded without network access",
+      "description": "Billing code runs in one thread with no network access; no locking or retries are needed.",
+      "component": "Engineering",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-explicit-days",
+      "kind": "ArchitecturalDecision",
+      "title": "Tests pass explicit day numbers",
+      "description": "Tests pass today as an explicit day number instead of reading a clock, so every fee test is deterministic; freezing the system clock was rejected.",
+      "component": "Engineering",
+      "relations": [
+        {
+          "predicate": "isMotivatedBy",
+          "target": "eng-visible-tests"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-knowledge-records",
+      "kind": "Requirement",
+      "title": "Billing rules are kept as project knowledge",
+      "description": "The reason behind each billing rule is kept as project knowledge, so maintainers can find why a rule exists before changing it.",
+      "component": "Engineering",
+      "relations": [],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    },
+    {
+      "id": "eng-clock-lesson",
+      "kind": "Lesson",
+      "title": "A clock-reading fee test failed at month end",
+      "description": "A fee test that read the system clock failed on the last day of a month; the fix was to pass day numbers explicitly.",
+      "component": "Engineering",
+      "relations": [
+        {
+          "predicate": "learnedFrom",
+          "target": "eng-explicit-days"
+        }
+      ],
+      "evidence": [
+        "SOURCE_MAPPING.md#distractors"
+      ]
+    }
+  ],
+  "episodes": [
+    {
+      "id": "e1",
+      "prompt": "Implement FeePolicy.late_fee(account, invoice, today). Days are integers. An invoice is late when today is more than 14 days after invoice.due_day. A late invoice's fee is 5% of amount_cents, but at least 100 cents; an invoice that is not late has no fee (0).",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e1.py",
+      "reference": "reference/e1",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e1-grace",
+          "kind": "task",
+          "test": "LateFeeTests.test_fee_starts_after_fourteen_days",
+          "fact_ids": [
+            "fees-formula"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-minimum",
+          "kind": "task",
+          "test": "LateFeeTests.test_minimum_fee",
+          "fact_ids": [
+            "fees-formula"
+          ],
+          "decided_by": "scenario.json#/episodes/0/prompt"
+        },
+        {
+          "id": "e1-half-up",
+          "kind": "retention",
+          "test": "LateFeeTests.test_percentage_rounds_half_up",
+          "fact_ids": [
+            "fees-cents"
+          ],
+          "decided_by": "scenario.json#/initial_facts/5",
+          "measures": "correctness"
+        },
+        {
+          "id": "e1-charity",
+          "kind": "retention",
+          "test": "LateFeeTests.test_charity_pays_no_late_fee",
+          "fact_ids": [
+            "fees-np7"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e2",
+      "prompt": "Add two account segments: foundation, displayed as \"Registered foundation\", for registered non-profit foundations; and cooperative, displayed as \"Member cooperative\", for member-owned for-profit cooperatives. Statement lines must show the segment's display name instead of its code.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula",
+        "fees-segments"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e2.py",
+      "reference": "reference/e2",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e2-retained-charity",
+          "kind": "retained",
+          "test": "LateFeeTests.test_charity_pays_no_late_fee",
+          "fact_ids": [
+            "fees-np7"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7"
+        },
+        {
+          "id": "e2-segments",
+          "kind": "task",
+          "test": "SegmentTests.test_new_segments_and_display_names",
+          "fact_ids": [
+            "fees-segments"
+          ],
+          "decided_by": "scenario.json#/episodes/1/prompt"
+        },
+        {
+          "id": "e2-foundation",
+          "kind": "retention",
+          "test": "SegmentTests.test_foundation_exempt_cooperative_charged",
+          "fact_ids": [
+            "fees-np7",
+            "fees-segments"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e3",
+      "prompt": "Regulation NP-9 replaces NP-7 for late fees on invoices due on or after day 1000: a late invoice of a registered non-profit account due on or after day 1000 has a flat late fee of 200 cents. Late fees on invoices due before day 1000 still follow NP-7. Also add FeePolicy.returned_payment_fee(account, amount_cents) for bounced payments: 2.5% of amount_cents, but at least 250 cents.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula",
+        "fees-segments",
+        "fees-np9",
+        "fees-returned-payment"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e3.py",
+      "reference": "reference/e3",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e3-retained-foundation",
+          "kind": "retained",
+          "test": "SegmentTests.test_foundation_exempt_cooperative_charged",
+          "fact_ids": [
+            "fees-np7"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7"
+        },
+        {
+          "id": "e3-np9",
+          "kind": "task",
+          "test": "Np9Tests.test_charity_flat_late_fee_from_day_1000",
+          "fact_ids": [
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-penalty",
+          "kind": "task",
+          "test": "ReturnedPaymentTests.test_returned_payment_fee_for_retail",
+          "fact_ids": [
+            "fees-returned-payment"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e3-penalty-exempt",
+          "kind": "retention",
+          "test": "ReturnedPaymentTests.test_nonprofits_pay_no_returned_payment_fee",
+          "fact_ids": [
+            "fees-np7",
+            "fees-segments"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7",
+          "measures": "correctness"
+        },
+        {
+          "id": "e3-penalty-half-up",
+          "kind": "retention",
+          "test": "ReturnedPaymentTests.test_returned_payment_fee_rounds_half_up",
+          "fact_ids": [
+            "fees-cents"
+          ],
+          "decided_by": "scenario.json#/initial_facts/5",
+          "measures": "cost"
+        }
+      ],
+      "retired_tests": []
+    },
+    {
+      "id": "e4",
+      "prompt": "Add the account segment association, displayed as \"Registered association\", for registered non-profit associations. Add FeePolicy.fee_forecast(account, invoice, days), which returns the late fee the invoice would have on each of the given days, as a list in the same order. Also add FeePolicy.collection_penalty(account, invoice, today): once today is more than 60 days after invoice.due_day, a collection penalty of 15% of amount_cents, but at least 500 cents; otherwise 0.",
+      "clarifications": {
+        "scope": "Use Python standard library only. Preserve existing public APIs unless this episode explicitly extends them. No network, threads, or concurrent callers are required. Add or update visible tests as needed.",
+        "knowledge": "Preserve useful project understanding using the persistent facilities normally available in your setup. No particular wording or record count is required."
+      },
+      "expected_fact_ids": [
+        "fees-np7",
+        "fees-cents",
+        "fees-formula",
+        "fees-segments",
+        "fees-np9",
+        "fees-returned-payment",
+        "fees-association",
+        "fees-forecast",
+        "fees-collection"
+      ],
+      "stale_fact_ids": [],
+      "visible_checks": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "hidden_test": "hidden/e4.py",
+      "reference": "reference/e4",
+      "allowed_paths": [
+        "**/*.py",
+        "README.md",
+        "PROJECT_NOTES.md",
+        "AGENTS.md",
+        ".moosedev/**"
+      ],
+      "probes": [
+        {
+          "id": "e4-retained-np9",
+          "kind": "retained",
+          "test": "Np9Tests.test_charity_flat_late_fee_from_day_1000",
+          "fact_ids": [
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e4-forecast",
+          "kind": "task",
+          "test": "ForecastTests.test_forecast_matches_late_fee_by_day",
+          "fact_ids": [
+            "fees-forecast"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-association-np9",
+          "kind": "currency",
+          "test": "AssociationTests.test_association_late_fee_follows_np9",
+          "fact_ids": [
+            "fees-np9",
+            "fees-association"
+          ],
+          "decided_by": "scenario.json#/episodes/2/prompt"
+        },
+        {
+          "id": "e4-association-penalty",
+          "kind": "retention",
+          "test": "AssociationTests.test_association_pays_no_returned_payment_fee",
+          "fact_ids": [
+            "fees-np7",
+            "fees-association"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7",
+          "measures": "cost"
+        },
+        {
+          "id": "e4-collection",
+          "kind": "task",
+          "test": "CollectionTests.test_collection_penalty_for_retail",
+          "fact_ids": [
+            "fees-collection"
+          ],
+          "decided_by": "scenario.json#/episodes/3/prompt"
+        },
+        {
+          "id": "e4-collection-exempt",
+          "kind": "retention",
+          "test": "CollectionTests.test_nonprofits_pay_no_collection_penalty",
+          "fact_ids": [
+            "fees-np7",
+            "fees-np9"
+          ],
+          "decided_by": "scenario.json#/initial_facts/7",
+          "measures": "correctness"
+        }
+      ],
+      "retired_tests": []
+    }
+  ],
+  "negative_checks": [
+    {
+      "id": "charity-charged",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/charity_charged",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e1-charity"
+      ]
+    },
+    {
+      "id": "bankers-rounding",
+      "episode": "e1",
+      "base_reference": "reference/e1",
+      "overlay": "negative/bankers_rounding",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e1-half-up"
+      ]
+    },
+    {
+      "id": "foundation-charged",
+      "episode": "e2",
+      "base_reference": "reference/e2",
+      "overlay": "negative/foundation_charged",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e2-foundation"
+      ]
+    },
+    {
+      "id": "penalty-charged-to-nonprofits",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/penalty_charged_to_nonprofits",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-penalty-exempt"
+      ]
+    },
+    {
+      "id": "penalty-bankers-rounding",
+      "episode": "e3",
+      "base_reference": "reference/e3",
+      "overlay": "negative/penalty_bankers_rounding",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e3-penalty-half-up"
+      ]
+    },
+    {
+      "id": "association-for-profit",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/association_for_profit",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-association-np9",
+        "e4-association-penalty"
+      ]
+    },
+    {
+      "id": "stale-np7",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/stale_np7",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-association-np9"
+      ]
+    },
+    {
+      "id": "collection-like-late-fee",
+      "episode": "e4",
+      "base_reference": "reference/e4",
+      "overlay": "negative/collection_like_late_fee",
+      "expected": "fail",
+      "visible": "pass",
+      "fails_probes": [
+        "e4-collection-exempt"
+      ]
+    }
+  ],
+  "source_mapping": "SOURCE_MAPPING.md",
+  "dependency_map": "DEPENDENCY_MAP.md"
+}
