@@ -668,6 +668,7 @@ CODE_NS = "https://trivyn.io/ontologies/software/code#"
 SPARQL_PREFIXES = f"PREFIX arch: <{ARCH_NS}>\nPREFIX code: <{CODE_NS}>\n"
 TIER1_HOPS = ("direct", "motivating", "component_constraints", "supersession_heads", "lessons")
 TIER3_LIMITS = (5, 10)
+TIER2_TEMPLATES = ("dotted", "label", "component")
 KNOWLEDGE_KINDS = ("Constraint", "Requirement", "ArchitecturalDecision", "Lesson", "Pattern", "AntiPattern")
 HELPER_MODEL = "gemma-4-e4b-it-mlx"
 HELPER_CONTEXT_TOKENS = 131072
@@ -718,10 +719,20 @@ def claims_query(records):
 
 
 def definitions_query(files):
-    return (SPARQL_PREFIXES + "SELECT DISTINCT ?entity ?logical WHERE {\n"
+    return (SPARQL_PREFIXES + "SELECT DISTINCT ?entity ?logical ?label WHERE {\n"
             f"  VALUES ?path {{ {_literals(files)} }}\n"
             "  ?entity code:definedInPath ?path ;\n    code:hasLogicalPath ?logical .\n"
+            "  OPTIONAL { ?entity <http://www.w3.org/2000/01/rdf-schema#label> ?label }\n"
             "} ORDER BY ?logical")
+
+
+def component_query(records):
+    """Components the given records concern, most-concerned first: the plan files' component by their linked knowledge."""
+    return (SPARQL_PREFIXES + "SELECT ?name (COUNT(DISTINCT ?record) AS ?count) WHERE {\n"
+            f"  VALUES ?record {{ {_iris(records)} }}\n"
+            "  ?record arch:concerns ?component .\n"
+            "  ?component a arch:SystemComponent ;\n    arch:hasComponentName ?name .\n"
+            "} GROUP BY ?name ORDER BY DESC(?count) ?name")
 
 
 def sparql_bindings(text, *names):
@@ -758,10 +769,23 @@ def assemble_tier1(hops, claims):
             "text": text, "bytes": len(text.encode())}
 
 
-def nlq_question(logical_paths, files):
-    """One short question built only from symbolic state: the plan files' indexed definitions, else the files."""
-    names = [path.replace("::", ".") for path in _unique(logical_paths)] or list(files)
-    return "Which constraints and requirements govern " + ", ".join(names) + "?"
+def nlq_question(template, *, logical_paths=(), labels=(), components=(), files=()):
+    """One short question built only from symbolic state.
+
+    dotted: the plan files' definitions as dotted logical paths; label: the first two definition labels joined
+    with "and"; component: the component the plan files' linked records most concern. Each falls back to the
+    plan files when its symbolic state is empty.
+    """
+    if template == "dotted":
+        names = [path.replace("::", ".") for path in _unique(logical_paths)] or list(files)
+        return "Which constraints and requirements govern " + ", ".join(names) + "?"
+    if template == "label":
+        names = _unique(labels)[:2] or list(files)[:2]
+        return "Which constraints govern " + " and ".join(names) + "?"
+    if template == "component":
+        names = _unique(components)[:1] or list(files)[:1]
+        return "Which constraints govern " + " and ".join(names) + "?"
+    raise ValueError(f"unknown tier-2 template: {template}")
 
 
 def timed_call(call):
@@ -822,25 +846,27 @@ def tier_summary(result):
     for entry in result["plans"]:
         stages = {"push": entry["push"], "tier1": entry["tier1"]}
         stages.update({f"tier1.{hop}": entry["tier1"]["hops"][hop] for hop in TIER1_HOPS})
-        if entry["tier2"].get("run"):
-            stages["tier2"] = entry["tier2"]
+        stages.update({f"tier2:{template}": row for template, row in entry["tier2"].items() if row.get("run")})
         stages.update({f"tier3@{limit}": row for limit, row in entry["tier3"].items()})
         stages.update({f"cumulative:{name}": row for name, row in entry["cumulative"].items()})
         rows.append({"plan": entry["plan"]["name"], "files": entry["plan"]["files"],
-                     "tier2": (("failed" if entry["tier2"].get("error") else "run") if entry["tier2"].get("run")
-                               else entry["tier2"].get("note")),
+                     "tier2": {template: ("failed" if row.get("error") else "run") if row.get("run") else row.get("note")
+                               for template, row in entry["tier2"].items()},
                      "stages": {name: {key: row[key] for key in keys} for name, row in stages.items()}})
     return rows
 
 
 def tier_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output, plans, deciding_fact,
-                     lmstudio="http://127.0.0.1:1234"):
+                     lmstudio="http://127.0.0.1:1234", templates=("dotted",)):
     """Diagnostic only: seed a disposable workspace and measure tiered delivery of the deciding record per plan."""
     from .binaries import verify_binaries
     from .daemon import OwnedDaemon
     from .indexing import apply_overlay, index_workspace, ready_dossiers, short_probe_runtime, verify_indexer
     if not plans:
         raise ValueError("crowding-tiers needs at least one plan")
+    templates = list(dict.fromkeys(templates))
+    for template in templates:
+        nlq_question(template, files=["probe"])
     scenario = load_scenario(scenario_id)
     iri, title, claim = _deciding(scenario, deciding_fact)
     facts = scenario["initial_facts"]
@@ -872,7 +898,7 @@ def tier_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output, 
               "seed_graph_sha256": hashlib.sha256(seed_graph(scenario).encode()).hexdigest(),
               "build_id": binaries["build_id"], "deciding_fact": deciding_fact, "iri": iri, "title": title,
               "claim": claim, "expected_fact_ids": expected, "tier1_hops": list(TIER1_HOPS),
-              "tier3_limits": list(TIER3_LIMITS),
+              "tier3_limits": list(TIER3_LIMITS), "tier2_templates": templates,
               "helper": {"model": HELPER_MODEL, "context_tokens": HELPER_CONTEXT_TOKENS, "ready": helper, "note": helper_note}}
 
     def save(name, value):
@@ -929,29 +955,33 @@ def tier_diagnostics(*, scenario_id, binary_manifest, parent_preflight, output, 
                 tier1 = assemble_tier1(hops, claims)
                 (directory / "responses" / f"{slug}-tier1.txt").write_text(tier1["text"])
                 tier1_stage = text_stage(tier1["text"], tier1["bytes"], known)
-                logical = [value for (_, value) in select(definitions_query(plan["files"]), ("entity", "logical"),
-                                                          f"{slug}-definitions")] if plan["files"] else []
-                question = nlq_question(logical, plan["files"])
-                stages = [("tier1", tier1_stage)]
-                if helper:
-                    answer, error, seconds = timed_call(lambda: mcp("query", {"question": question}, f"{slug}-tier2"))
+                definitions = select(definitions_query(plan["files"]), ("entity", "logical", "label"),
+                                     f"{slug}-definitions") if plan["files"] else []
+                components = [name for name, _ in select(component_query(hops["direct"]), ("name", "count"),
+                                                         f"{slug}-components")] if hops["direct"] else []
+                questions = {template: nlq_question(template, logical_paths=[logical for _, logical, _ in definitions],
+                                                    labels=[label for _, _, label in definitions if label],
+                                                    components=components, files=plan["files"])
+                             for template in templates}
+                tier2, cumulative = {}, {"tier1": row(tier1_stage)}
+                for template, question in questions.items():
+                    if not helper:
+                        tier2[template] = {"run": False, "note": helper_note, "question": question}
+                        continue
+                    answer, error, seconds = timed_call(
+                        lambda: mcp("query", {"question": question}, f"{slug}-tier2-{template}"))
                     if error is not None:
-                        (directory / "responses" / f"{slug}-tier2-error.txt").write_text(error)
-                    tier2_stage = text_stage(answer, len(answer.encode()), known)
-                    tier2 = dict(row(tier2_stage), run=True, question=question, seconds=seconds, error=error)
-                    stages.append(("tier2", tier2_stage))
-                else:
-                    tier2 = {"run": False, "note": helper_note, "question": question}
-                tier3, cumulative = {}, {}
+                        (directory / "responses" / f"{slug}-tier2-{template}-error.txt").write_text(error)
+                    stage = text_stage(answer, len(answer.encode()), known)
+                    tier2[template] = dict(row(stage), run=True, question=question, seconds=seconds, error=error)
+                    cumulative[f"tier1+tier2:{template}"] = row(combine([tier1_stage, stage]))
+                tier3 = {}
                 for limit in TIER3_LIMITS:
                     text = mcp("get_relevant_context", {"topic": plan["summary"], "limit": limit}, f"{slug}-tier3-k{limit}")
                     stage = text_stage(text, len(text.encode()), known)
                     tier3[str(limit)] = dict(row(stage), ranked=len(parse_ranking(text)))
-                    names = [name for name, _ in stages] + [f"tier3@{limit}"]
-                    cumulative["+".join(names)] = row(combine([value for _, value in stages] + [stage]))
-                cumulative = dict({"+".join(name for name, _ in stages): row(combine([value for _, value in stages]))},
-                                  **cumulative)
-                entries.append({"plan": plan, "question": question, "push": row(push_stage),
+                    cumulative[f"tier1+tier3@{limit}"] = row(combine([tier1_stage, stage]))
+                entries.append({"plan": plan, "questions": questions, "components": components, "push": row(push_stage),
                                 "tier1": dict(row(tier1_stage), errors=errors, hops={
                                     hop: row(text_stage(tier1["hops"][hop]["text"], tier1["hops"][hop]["bytes"], known))
                                     for hop in TIER1_HOPS}),

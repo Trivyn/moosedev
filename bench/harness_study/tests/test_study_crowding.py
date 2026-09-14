@@ -306,11 +306,30 @@ class TierDiagnosticTests(unittest.TestCase):
         self.assertEqual((row["delivered_fact_ids"], row["other_claims"], row["outside_expected"]),
                          (["fees-cents", "fees-np7"], 1, ["fees-cents"]))
 
-    def test_nlq_question_uses_only_symbolic_state(self):
-        self.assertEqual(crowding.nlq_question(["fees::FeePolicy::late_fee", "fees::FeePolicy::late_fee"], ["fees.py"]),
+    def test_nlq_question_templates_use_only_symbolic_state(self):
+        dotted = ["fees::FeePolicy::late_fee", "fees::FeePolicy::late_fee"]
+        self.assertEqual(crowding.nlq_question("dotted", logical_paths=dotted, files=["fees.py"]),
                          "Which constraints and requirements govern fees.FeePolicy.late_fee?")
-        self.assertEqual(crowding.nlq_question([], ["fees.py", "tests/test_fees.py"]),
+        self.assertEqual(crowding.nlq_question("dotted", files=["fees.py", "tests/test_fees.py"]),
                          "Which constraints and requirements govern fees.py, tests/test_fees.py?")
+        self.assertEqual(crowding.nlq_question("label", labels=["late_fee", "late_fee"], files=["fees.py"]),
+                         "Which constraints govern late_fee?")
+        self.assertEqual(crowding.nlq_question("label", labels=["late_fee", "__init__", "statement_line"]),
+                         "Which constraints govern late_fee and __init__?")
+        self.assertEqual(crowding.nlq_question("component", components=["Billing", "Engineering"], labels=["late_fee"]),
+                         "Which constraints govern Billing?")
+        self.assertEqual(crowding.nlq_question("component", files=["fees.py"]), "Which constraints govern fees.py?")
+        with self.assertRaises(ValueError):
+            crowding.nlq_question("topic", files=["fees.py"])
+
+    def test_definition_and_component_queries(self):
+        definitions = crowding.definitions_query(["fees.py"])
+        self.assertIn("?label", definitions)
+        self.assertIn("OPTIONAL { ?entity <http://www.w3.org/2000/01/rdf-schema#label> ?label }", definitions)
+        component = crowding.component_query([OTHER, NP7])
+        self.assertIn(f"VALUES ?record {{ <{OTHER}> <{NP7}> }}", component)
+        self.assertIn("arch:hasComponentName ?name", component)
+        self.assertIn("ORDER BY DESC(?count) ?name", component)
 
     def test_timed_call_records_a_failed_tool_call_without_raising(self):
         text, error, seconds = crowding.timed_call(lambda: "answer")
@@ -335,16 +354,18 @@ class TierDiagnosticTests(unittest.TestCase):
                 "outside_expected": []}
         entry = {"plan": {"name": "blind-1", "files": ["fees.py"], "summary": "s"}, "push": cell,
                  "tier1": dict(cell, hops={hop: cell for hop in crowding.TIER1_HOPS}, errors={}),
-                 "tier2": {"run": False, "note": "not run: helper not loaded", "question": "q"},
+                 "tier2": {"dotted": {"run": False, "note": "not run: helper not loaded", "question": "q"}},
                  "tier3": {"5": dict(cell, ranked=5), "10": dict(cell, deciding_claim=True, ranked=10)},
                  "cumulative": {"tier1": cell, "tier1+tier3@5": cell, "tier1+tier3@10": dict(cell, deciding_claim=True)}}
         [row] = crowding.tier_summary({"plans": [entry]})
-        self.assertEqual(row["tier2"], "not run: helper not loaded")
-        failed = dict(entry, tier2=dict(cell, run=True, question="q", seconds=1.0, error="could not regularize"),
-                      cumulative={"tier1+tier2": cell})
-        [failed_row] = crowding.tier_summary({"plans": [failed]})
-        self.assertEqual(failed_row["tier2"], "failed")
-        self.assertIn("tier2", failed_row["stages"])
+        self.assertEqual(row["tier2"], {"dotted": "not run: helper not loaded"})
+        ran = dict(entry, tier2={"dotted": dict(cell, run=True, question="q", seconds=1.0, error="could not regularize"),
+                                 "label": dict(cell, run=True, question="q", seconds=2.0, error=None)},
+                   cumulative={"tier1+tier2:dotted": cell, "tier1+tier2:label": cell})
+        [ran_row] = crowding.tier_summary({"plans": [ran]})
+        self.assertEqual(ran_row["tier2"], {"dotted": "failed", "label": "run"})
+        self.assertIn("tier2:dotted", ran_row["stages"])
+        self.assertIn("cumulative:tier1+tier2:label", ran_row["stages"])
         self.assertEqual(list(row["stages"]), ["push", "tier1", *(f"tier1.{hop}" for hop in crowding.TIER1_HOPS),
                                                "tier3@5", "tier3@10", "cumulative:tier1", "cumulative:tier1+tier3@5",
                                                "cumulative:tier1+tier3@10"])

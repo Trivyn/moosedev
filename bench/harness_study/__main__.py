@@ -69,6 +69,8 @@ def main(argv=None):
     command.add_argument("--binary-manifest", type=Path, required=True)
     command.add_argument("--parent-preflight", type=Path, required=True, help="ready preflight supplying the indexer and assets")
     command.add_argument("--plans", type=Path, required=True, help="JSON list of {name, summary, files} plans")
+    command.add_argument("--templates", nargs="+", default=["dotted"], choices=["dotted", "label", "component"],
+                         help="tier-2 question templates, one NLQ call per plan per template")
     command.add_argument("--lmstudio", default="http://127.0.0.1:1234",
                          help="LM Studio server; tier 2 runs only if the helper is already loaded there (never loads models)")
     command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
@@ -140,7 +142,7 @@ def main(argv=None):
         result = tier_diagnostics(scenario_id=args.scenario, binary_manifest=args.binary_manifest,
                                   parent_preflight=args.parent_preflight, output=args.output,
                                   plans=json.loads(args.plans.read_text()), deciding_fact=args.deciding_fact,
-                                  lmstudio=args.lmstudio)
+                                  lmstudio=args.lmstudio, templates=args.templates)
         print(json.dumps({"helper": result["helper"], "summary": tier_summary(result),
                           "evidence": str(args.output / "tiers.json")}))
         return 0
