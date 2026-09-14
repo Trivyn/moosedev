@@ -189,7 +189,7 @@ hashes change.
    narrow it at the cost of 6 more cells: Qwen3.5-35B-A3B is on disk; a dense
    8 to 14B model would need a download.
 
-8. **Thinking mode.** *Recommended:* pin the harness arm to reasoning off for
+8. **Thinking mode.** *Decided (maintainer, 2026-09-13):* pin the harness arm to reasoning off for
    both models (`MOOSEDEV_HARNESS_RESPONSE_POLICY=reasoning-off`) and disclose
    the arm difference. State on 2026-09-13: thinking is enabled in LM Studio
    for gemma-4-26b-a4b, and Qwen3.8-27B's provider default already thinks.
