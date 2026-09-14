@@ -2,7 +2,7 @@
 //! recoveries.
 use crate::harness::protocol::{AssociatePage, CaptureTypeResponse, CheckOutcome};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Edits outside the plan files replan autonomously this many times per task;
 /// the next one parks for human guidance.
@@ -47,6 +47,10 @@ pub struct SymbolicState {
     /// not address a governing rule. Reset when a plan is stored.
     #[serde(default)]
     pub coverage_returns: usize,
+    /// Digests of (file, grounding keys) whose grounding note was delivered;
+    /// the same edit proposed again goes through.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub grounded: BTreeSet<String>,
     /// The one final capture note and its typing; cleared by each applied edit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_note: Option<CaptureNoteState>,

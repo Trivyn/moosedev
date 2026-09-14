@@ -35,6 +35,27 @@ impl Runner {
         Ok(true)
     }
 
+    /// Read a file into the working set: refresh its governing knowledge, record
+    /// its source and journal the read. Leaves `last_response` to the caller.
+    pub(super) async fn read_into_working_set(&mut self, file: &str) -> Result<()> {
+        let file = file.to_string();
+        self.refresh(std::slice::from_ref(&file)).await?;
+        let source = self.workspace.read(&file)?;
+        if !self.task.read_files.contains(&file) {
+            anyhow::ensure!(
+                self.task.read_files.len() < MAX_FILES,
+                "working set exceeds {MAX_FILES} files; narrow the task"
+            );
+            self.task.read_files.push(file.clone());
+        }
+        self.event(format!(
+            "Read {file}: {}",
+            source.as_deref().unwrap_or("[file does not exist]")
+        ));
+        self.task.source.insert(file, source);
+        Ok(())
+    }
+
     pub async fn advance(&mut self) -> Result<()> {
         self.task.last_error = None;
         self.task.last_error_kind = None;
@@ -143,21 +164,8 @@ impl Runner {
                 );
             }
             Step::Read { file } => {
-                self.refresh(std::slice::from_ref(&file)).await?;
-                let source = self.workspace.read(&file)?;
-                if !self.task.read_files.contains(&file) {
-                    anyhow::ensure!(
-                        self.task.read_files.len() < MAX_FILES,
-                        "working set exceeds {MAX_FILES} files; narrow the task"
-                    );
-                    self.task.read_files.push(file.clone());
-                }
-                self.event(format!(
-                    "Read {file}: {}",
-                    source.as_deref().unwrap_or("[file does not exist]")
-                ));
+                self.read_into_working_set(&file).await?;
                 self.task.last_response = format!("Read {file} with its governing knowledge.");
-                self.task.source.insert(file, source);
             }
             Step::Search { query } => {
                 let knowledge = self.search_knowledge(&query).await?;
@@ -250,6 +258,14 @@ impl Runner {
             } => {
                 if !self.fresh_approval().await? {
                     return Ok(());
+                }
+                // Edits reach here only in Auto and only for files already read:
+                // the first-edit guard turns an unread edit into a read.
+                if self
+                    .ground_edit(&file, before.as_deref(), after.as_deref())
+                    .await
+                {
+                    return self.persist();
                 }
                 let context = self.refresh(std::slice::from_ref(&file)).await?;
                 let policy = &context.files[0].policy;

@@ -61,6 +61,9 @@ pub(super) struct Script {
     pub(super) context: Option<String>,
     /// Governing rules the full context returns.
     pub(super) governing_constraints: Vec<GoverningConstraint>,
+    /// What `ground` answers (default: nothing to ground), and what it was asked.
+    pub(super) ground_response: Option<GroundResponse>,
+    pub(super) ground_requests: Vec<GroundRequest>,
     /// Accepted knowledge an evidence-only (search) request returns.
     pub(super) search_knowledge: Option<String>,
     pub(super) replies: VecDeque<(&'static str, Value)>,
@@ -444,6 +447,7 @@ impl Fixture {
             .route("/api/v1/harness/review", post(review))
             .route("/api/v1/harness/checkpoint", post(checkpoint))
             .route("/api/v1/harness/intent/resolve", post(resolve))
+            .route("/api/v1/harness/ground", post(ground))
             .route("/api/v1/harness/intent/associate", post(associate))
             .route("/api/v1/harness/capture/type", post(capture_type))
             .route("/api/v1/harness/intent/link", post(link))
@@ -694,6 +698,16 @@ pub(super) fn existing_links(script: &Script, file: &str, symbol: &str) -> Vec<S
         .filter(|binding| binding.file == file && binding.symbol == symbol)
         .map(|binding| binding.record_iri.clone())
         .collect()
+}
+
+/// Mock of `ground`: the scripted answer, recording each request.
+pub(super) async fn ground(
+    State(state): State<Shared>,
+    Json(request): Json<GroundRequest>,
+) -> Json<GroundResponse> {
+    let mut script = state.lock().unwrap();
+    script.ground_requests.push(request);
+    Json(script.ground_response.clone().unwrap_or_default())
 }
 
 /// Mock of `intent/resolve`: every `def` in a plan file is an indexed Function

@@ -71,6 +71,12 @@ pub(super) fn changed_files(edits: &[PendingEdit]) -> Result<Vec<ChangedFile>> {
         .collect())
 }
 
+/// The after-side hunk ranges of one edit and whether they coalesced.
+pub(super) fn edit_ranges(before: &str, after: &str) -> (Vec<HarnessSourceRange>, bool) {
+    let hunks = hunks(before, after);
+    (hunks.after, hunks.coalesced)
+}
+
 /// One change's hunk ranges on each side, pairwise, or one prefix/suffix range
 /// per side when the change exceeds the hunk or line bound.
 struct Hunks {

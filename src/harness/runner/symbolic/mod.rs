@@ -5,6 +5,7 @@
 mod associate;
 mod capture_note;
 mod coverage;
+mod grounding;
 mod scope;
 mod state;
 

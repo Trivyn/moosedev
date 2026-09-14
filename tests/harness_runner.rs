@@ -274,6 +274,120 @@ async fn a_plan_that_addresses_each_rule_is_stored_at_once() {
         .all(|detail| detail.contains("\"covered\":true")));
 }
 
+fn grounding_answer(file: &str) -> GroundResponse {
+    GroundResponse {
+        keys: vec![GroundKey {
+            attribute: "channel".into(),
+            literals: vec!["cash".into()],
+        }],
+        definitions: vec![GroundDefinition {
+            key: "channel".into(),
+            name: "CHANNELS".into(),
+            file: file.into(),
+            symbol: "scip-python python fixture . catalog/CHANNELS.".into(),
+            role: "declaration".into(),
+            preview: "CHANNELS = {\"wire\", \"card\"}".into(),
+        }],
+        mismatches: vec![GroundMismatch {
+            key: "channel".into(),
+            literal: "cash".into(),
+            file: file.into(),
+            definition: "CHANNELS".into(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn edit_grounding_reads_the_defining_file_once_then_lets_the_same_edit_through() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("catalog.txt"), "wire\ncard\n").unwrap();
+    fixture.shared.lock().unwrap().ground_response = Some(grounding_answer("catalog.txt"));
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n",
+        "the grounded edit is held"
+    );
+    assert!(runner.task.read_files.contains(&"catalog.txt".into()));
+    assert!(runner.task.last_error.is_none());
+    assert!(
+        runner.task.recovery.is_none(),
+        "the repair budget is untouched"
+    );
+    assert_eq!(runner.task.mode, Mode::Auto, "approval stays valid");
+    let note = runner.task.last_response.clone();
+    assert!(note.contains("CHANNELS in catalog.txt"), "{note}");
+    assert!(
+        note.contains("'cash' does not appear among the values of CHANNELS"),
+        "{note}"
+    );
+    let grounded = |runner: &Runner| {
+        runner
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "edit_grounding")
+            .count()
+    };
+    assert_eq!(grounded(&runner), 1);
+
+    // The same edit proposed again goes through.
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(grounded(&runner), 1);
+    assert_eq!(fixture.shared.lock().unwrap().ground_requests.len(), 2);
+}
+
+#[tokio::test]
+async fn an_unread_edit_is_read_first_and_grounded_when_proposed_again() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("catalog.txt"), "wire\ncard\n").unwrap();
+    fixture.shared.lock().unwrap().ground_response = Some(grounding_answer("catalog.txt"));
+    let mut runner = fixture.approved_interactive().await;
+    runner.task.read_files.retain(|file| file != "code.txt");
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert!(
+        fixture.shared.lock().unwrap().ground_requests.is_empty(),
+        "the first-edit guard reads the file before any grounding"
+    );
+    assert!(runner.task.read_files.contains(&"code.txt".into()));
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().ground_requests.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n",
+        "the now-read edit is grounded and held"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_with_nothing_to_ground_applies_directly() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n"
+    );
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .all(|event| event.kind != "edit_grounding"));
+}
+
 #[tokio::test]
 async fn standing_guidance_is_snapshotted_capped_and_replayed() {
     let _env_lock = ENVIRONMENT.lock().await;

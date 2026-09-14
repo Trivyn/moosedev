@@ -122,6 +122,12 @@ impl Runner {
         Ok(response)
     }
 
+    /// Where the code index defines what an edit compares, and which compared
+    /// literals it does not define.
+    pub(super) async fn ground(&self, request: &GroundRequest) -> Result<GroundResponse> {
+        self.post("ground", request).await
+    }
+
     /// Accepted knowledge for a search query: the complete claims of the
     /// matching records, without the inventory or file dossiers. The current
     /// working context is left as it is.
