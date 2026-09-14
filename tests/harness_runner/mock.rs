@@ -172,7 +172,7 @@ pub(super) async fn context(
         return (
             StatusCode::OK,
             Json(ContextResponse {
-                capture_contracts: vec![2],
+                capture_contracts: vec![2, 3],
                 intent_contracts: vec![2],
                 project_root: script.root.to_string_lossy().into_owned(),
                 revision: script.revision.clone(),
@@ -196,7 +196,7 @@ pub(super) async fn context(
     (
         status,
         Json(ContextResponse {
-            capture_contracts: vec![2],
+            capture_contracts: vec![2, 3],
             intent_contracts: vec![2],
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),

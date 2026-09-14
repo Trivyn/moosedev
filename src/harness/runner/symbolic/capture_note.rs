@@ -182,6 +182,7 @@ impl Runner {
         self.task.capture_request = Some(CaptureRequest {
             operation_id: state.capture_operation_id,
             proposals,
+            changed: vec![],
         });
         self.persist()?;
         Ok(true)

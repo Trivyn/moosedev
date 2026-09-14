@@ -52,6 +52,7 @@ pub fn capture_v2_operation(
     let capture_request = CaptureRequest {
         operation_id: request.operation_id.clone(),
         proposals: request.proposals.clone(),
+        changed: request.changed.clone(),
     };
     if let Some(mut stored) = load::<Operation>(&path)? {
         anyhow::ensure!(

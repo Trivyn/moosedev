@@ -27,6 +27,18 @@ pub struct ChangedFile {
     #[serde(default)]
     pub after_digest: Option<String>,
     pub changed_ranges: Vec<HarnessSourceRange>,
+    /// The same hunks as `changed_ranges`, pairwise, in the pre-change
+    /// source's coordinates. Empty from producers before capture contract 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub before_ranges: Vec<HarnessSourceRange>,
+    /// The change exceeded the hunk bound, so one prefix/suffix range stands
+    /// in for its hunks on each side.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ranges_coalesced: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

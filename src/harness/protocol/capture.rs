@@ -2,6 +2,8 @@
 //! captured records and their human review.
 use serde::{Deserialize, Serialize};
 
+use super::scope::ChangedFile;
+
 /// The knowledge record classes the harness captures and reconciles.
 pub const RECORD_KINDS: [&str; 6] = [
     "ArchitecturalDecision",
@@ -75,6 +77,10 @@ pub struct CaptureRequest {
     /// Globally unique stable operation ID, reused verbatim after interruption.
     pub operation_id: String,
     pub proposals: Vec<KnowledgeProposal>,
+    /// The task's changed files with hunk geometry: capture anchors knowledge
+    /// to the definitions these hunks touch (capture contract 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<ChangedFile>,
 }
 
 impl CaptureRequest {
@@ -96,6 +102,8 @@ pub struct CaptureV2Request {
     pub operation_id: String,
     pub owner_id: String,
     pub proposals: Vec<KnowledgeProposal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<ChangedFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -140,8 +140,8 @@ At the final checkpoint the model answers one plain question about what it
 learned; the daemon types that note into proposals (see "How the harness
 decides"). Existing knowledge is not contemporaneous evidence, and a typed
 proposal does not establish that a claim is true: proposals still require human
-review. A daemon that does not advertise capture and intent contract 2 must be
-upgraded before a new task is created.
+review. A daemon that does not advertise capture contract 3 and intent contract 2
+must be upgraded before a new task is created.
 
 Every edit crosses the execution boundary. Intermediate checkpoints only
 journal; the final checkpoint produces the proposals for human review, and
@@ -263,8 +263,8 @@ working and one plain-prose `harness_capture_note` at the final checkpoint. Ever
 other decision is derived by the daemon from the approved plan, the diff and the
 graph, and journaled as an intent event; none is asked of the model. Task
 journals are schema 2. A journal written by an earlier build is refused with
-"start a new task", and a new task requires a daemon advertising capture and
-intent contract 2.
+"start a new task", and a new task requires a daemon advertising capture
+contract 3 and intent contract 2.
 
 - Obligations. `/approve` derives each plan file's obligations from the direct
   dossier records of its resolved definitions and takes the plan summary as the
@@ -302,8 +302,15 @@ intent contract 2.
   since replanning is how checks change.
 - Associations. After `finish`, `POST /api/v1/harness/intent/associate` binds the
   changed definitions to their governing records with the predicate the ontology
-  allows, skipping parameters, type members, locals and test paths
-  (`association_derived`, `association_none`, `association_skipped`). Bindings
+  allows (`association_derived`, `association_none`, `association_skipped`). The
+  runner sends one range per changed line hunk, in changed and original
+  coordinates; past 64 hunks or 2000 changed lines a file's change coalesces to
+  one prefix/suffix range per side (`ranges_coalesced`). Each hunk contributes
+  its leaf definitions, those it touches that enclose no other kept definition it
+  touches, so a method wins over its class. Parameters, type members, locals and
+  test paths are skipped; a module-level constant or table is kept. A producer
+  that leaves kinds unspecified (scip-python) is read by the SCIP symbol grammar.
+  Bindings
   enter the ordinary link review as `DerivedAssociation` cards; an unresolved or
   stale index is journaled (`unresolved_binding`), never parked. Steering during
   that review discards the pending bindings; they are re-derived at the next

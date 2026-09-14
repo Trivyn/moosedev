@@ -103,7 +103,7 @@ pub fn context_snapshot(
         context,
         files,
         evidence_iris,
-        capture_contracts: vec![2],
+        capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
     })
 }

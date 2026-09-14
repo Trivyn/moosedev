@@ -13,16 +13,17 @@ use oxigraph::model::NamedNode;
 use super::current_status;
 use super::revision::ensure_unchanged;
 use super::scope::{
-    changed_scopes, entity_record_context, index_revision, index_status, intersects, maybe_refresh,
+    changed_leaf_definitions, entity_record_context, index_revision, index_status, maybe_refresh,
     producer_label, prove_changed_source, validate_files, validate_source_ranges,
 };
 use crate::api::error::ApiError;
-use crate::code::substrate::{is_test_path, DefinitionEntry, DefinitionScope, SourceRange};
+use crate::code::substrate::DefinitionScope;
 use crate::graph::{self, AppState};
 use crate::harness::digest::sha256_json;
 use crate::harness::protocol::*;
 
-const MAX_RANGES: usize = 256;
+/// The runner's per-file hunk bound across the most files a request names.
+const MAX_RANGES: usize = 32 * 64;
 const MAX_SCOPES: usize = 256;
 const MAX_RECORDS_PER_FILE: usize = 16;
 
@@ -129,47 +130,27 @@ pub fn associate_page(
         if let Some(source) = current_source.as_deref() {
             validate_source_ranges(source, &changed.changed_ranges)?;
         }
-        let scopes = changed_scopes(&substrate, changed);
-        scope_count = scope_count.saturating_add(scopes.len());
+        // The leaves of every hunk: a method wins over the class whose body
+        // contains the same change, and each hunk contributes its own leaves.
+        let changed_leaves =
+            changed_leaf_definitions(&substrate, &changed.file, &changed.changed_ranges);
+        scope_count =
+            scope_count.saturating_add(changed_leaves.leaves.len() + changed_leaves.skipped.len());
         anyhow::ensure!(
             scope_count <= MAX_SCOPES,
             "association scope exceeds 256 definitions; narrow changed files or ranges"
         );
-        let mut kept = Vec::new();
-        for (scope, basis) in scopes {
-            match skip_reason(&scope.definition.entry) {
-                Some(reason) => skipped.push(skip(&changed.file, &scope, reason, None)),
-                None => kept.push((scope, basis)),
-            }
+        for (scope, reason) in &changed_leaves.skipped {
+            skipped.push(skip(&changed.file, scope, *reason, None));
         }
-        // One innermost kept definition per changed range: a method wins over
-        // the class whose body contains the same change.
-        let mut chosen: Vec<usize> = Vec::new();
-        for range in &changed.changed_ranges {
-            let range: SourceRange = (*range).into();
-            let best = kept
-                .iter()
-                .enumerate()
-                .filter(|(_, (scope, _))| intersects(span(scope), range))
-                .min_by_key(|(_, (scope, basis))| {
-                    (
-                        extent(span(scope)),
-                        *basis != IntentScopeBasis::ChangedDefinition,
-                    )
-                })
-                .map(|(index, _)| index);
-            if let Some(index) = best {
-                if !chosen.contains(&index) {
-                    chosen.push(index);
-                }
-            }
-        }
-        chosen.sort_unstable();
-        for (index, (scope, _)) in kept.iter().enumerate() {
-            if !chosen.contains(&index) {
-                skipped.push(skip(&changed.file, scope, SkipReason::Enclosing, None));
-            }
-        }
+        // Each binding is reviewed individually, so identical-span leaves are
+        // offered rather than guessed between.
+        let kept: Vec<(DefinitionScope, IntentScopeBasis)> = changed_leaves
+            .leaves
+            .into_iter()
+            .map(|leaf| (leaf.scope, leaf.basis))
+            .collect();
+        let chosen: Vec<usize> = (0..kept.len()).collect();
         let governing = request
             .governing
             .get(&changed.file)
@@ -312,23 +293,6 @@ pub fn associate_page(
     })
 }
 
-/// Definitions that never carry a knowledge link of their own: test code,
-/// parameters, type members and locals. Unknown kinds (syntactic anchors) are
-/// kept; the binding still requires human review.
-fn skip_reason(entry: &DefinitionEntry) -> Option<SkipReason> {
-    if is_test_path(&entry.file) {
-        return Some(SkipReason::TestPath);
-    }
-    if graph::is_type_member(entry) {
-        return Some(SkipReason::TypeMember);
-    }
-    match entry.kind.as_deref() {
-        Some("Parameter" | "TypeParameter") => Some(SkipReason::Parameter),
-        Some("Variable" | "Local" | "Constant" | "Property") => Some(SkipReason::Local),
-        _ => None,
-    }
-}
-
 fn skip(
     file: &str,
     scope: &DefinitionScope,
@@ -342,15 +306,4 @@ fn skip(
         reason,
         record_iri,
     }
-}
-
-fn span(scope: &DefinitionScope) -> SourceRange {
-    scope.enclosing_range.unwrap_or(scope.definition.range)
-}
-
-fn extent(range: SourceRange) -> (u32, u32) {
-    (
-        range.end.line.saturating_sub(range.start.line),
-        range.end.col.wrapping_sub(range.start.col),
-    )
 }

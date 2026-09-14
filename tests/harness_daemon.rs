@@ -76,6 +76,7 @@ fn request(id: &str, proposals: Vec<KnowledgeProposal>) -> CaptureV2Request {
         operation_id: id.into(),
         owner_id: "test-owner".into(),
         proposals,
+        changed: vec![],
     }
 }
 
@@ -1493,6 +1494,7 @@ async fn capture_v2_returns_typed_collision_without_creating_an_operation() {
             operation_id: "typed-collision".into(),
             owner_id: "task-a".into(),
             proposals: vec![proposal("Lesson", "Reuse the existing capture")],
+            changed: vec![],
         })
         .await;
     response.assert_status_ok();
@@ -1588,6 +1590,8 @@ fn associate_reports_deleted_files_as_unresolved_without_bindings() {
                 before_digest: Some(sha256_text(&source)),
                 after_digest: None,
                 changed_ranges: Vec::new(),
+                before_ranges: vec![],
+                ranges_coalesced: false,
             }],
             governing: [("labels.py".to_string(), vec![requirement])]
                 .into_iter()
@@ -1626,6 +1630,8 @@ fn unindexed_changed_file_yields_no_binding_and_a_stale_index() {
                     start: HarnessSourcePosition { line: 0, col: 0 },
                     end: HarnessSourcePosition { line: 1, col: 12 },
                 }],
+                before_ranges: vec![],
+                ranges_coalesced: false,
             }],
             governing: [("helper.py".to_string(), vec![requirement])]
                 .into_iter()
@@ -1723,6 +1729,8 @@ fn associate_rejects_non_utf8_boundary_columns() {
                     start: HarnessSourcePosition { line: 0, col: 1 },
                     end: HarnessSourcePosition { line: 0, col: 2 },
                 }],
+                before_ranges: vec![],
+                ranges_coalesced: false,
             }],
             governing: Default::default(),
             refresh_policy: IntentRefreshPolicy::None,
@@ -1739,7 +1747,7 @@ fn install_symbolic_index(fixture: &Fixture, state: &AppState) {
     use moosedev::code::substrate::{Substrate, SubstrateMeta};
     use protobuf::EnumOrUnknown;
     use scip::types::{symbol_information, Document, Index, Occurrence, SymbolInformation};
-    let source = "def render_name(name):\n    return name.strip()\n\ndef normalize(value):\n    return value\n";
+    let source = "def render_name(name):\n    return name.strip()\n\ndef normalize(value):\n    return value\n\nLIMIT = 80\n";
     let path = fixture.0.join("labels.py");
     std::fs::write(&path, source).unwrap();
     let tests_dir = fixture.0.join("tests");
@@ -1797,6 +1805,21 @@ fn install_symbolic_index(fixture: &Fixture, state: &AppState) {
             vec![3, 4, 13],
             vec![3, 0, 4, 16],
         ),
+        // scip-python emits no kind for parameters; the grammar still says so.
+        definition(
+            "scip-python python sample 1 labels/normalize().(value)",
+            "value",
+            symbol_information::Kind::UnspecifiedKind,
+            vec![3, 14, 19],
+            vec![],
+        ),
+        definition(
+            "scip-python python sample 1 labels/LIMIT.",
+            "LIMIT",
+            symbol_information::Kind::Constant,
+            vec![6, 0, 5],
+            vec![],
+        ),
     ] {
         labels.symbols.push(info);
         labels.occurrences.push(occurrence);
@@ -1849,6 +1872,8 @@ fn changed(file: &str, digest: &str, ranges: &[(u32, u32, u32, u32)]) -> Changed
                 },
             })
             .collect(),
+        before_ranges: vec![],
+        ranges_coalesced: false,
     }
 }
 
@@ -1904,11 +1929,12 @@ fn symbolic_association_filters_kinds_and_binds_by_legal_predicate() {
         sha256_text(&std::fs::read_to_string(fixture.0.join("tests/test_labels.py")).unwrap());
     let request = AssociateRequest {
         files: vec![
-            // The parameter token and the new helper's name token changed.
+            // A parameter token, the new helper's signature line (its name and
+            // its unspecified-kind parameter) and a module constant changed.
             changed(
                 "labels.py",
                 &labels_digest,
-                &[(0, 16, 0, 20), (3, 4, 3, 13)],
+                &[(0, 16, 0, 20), (3, 4, 3, 20), (6, 0, 7, 0)],
             ),
             changed("tests/test_labels.py", &tests_digest, &[(0, 4, 0, 15)]),
         ],
@@ -1977,6 +2003,19 @@ fn symbolic_association_filters_kinds_and_binds_by_legal_predicate() {
                 "concerns".to_string(),
                 "Obligation".to_string()
             ),
+            // A module-level constant is a knowledge anchor of its own.
+            (
+                "LIMIT".to_string(),
+                "Constraint".to_string(),
+                "constrains".to_string(),
+                "Obligation".to_string()
+            ),
+            (
+                "LIMIT".to_string(),
+                "Requirement".to_string(),
+                "concerns".to_string(),
+                "Obligation".to_string()
+            ),
         ],
         "{:#?}",
         page.bindings
@@ -2014,6 +2053,10 @@ fn symbolic_association_filters_kinds_and_binds_by_legal_predicate() {
     );
     assert!(
         skipped.contains(&("test_render().".to_string(), "TestPath".to_string())),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped.contains(&("normalize().(value)".to_string(), "Parameter".to_string())),
         "{skipped:?}"
     );
     assert!(
@@ -2388,6 +2431,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
             operation_id: "cap-1".into(),
             owner_id: "task-a".into(),
             proposals: vec![lesson.proposal.clone()],
+            changed: vec![],
         },
     )
     .unwrap();
@@ -2437,6 +2481,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
             operation_id: "cap-tampered".into(),
             owner_id: "task-a".into(),
             proposals: vec![tampered],
+            changed: vec![],
         },
     )
     .is_err());
@@ -2446,6 +2491,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
             operation_id: "cap-2".into(),
             owner_id: "task-a".into(),
             proposals: vec![refined.proposal.clone()],
+            changed: vec![],
         },
     )
     .unwrap();

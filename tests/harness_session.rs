@@ -49,7 +49,7 @@ async fn context(
     Json(request): Json<ContextRequest>,
 ) -> Json<ContextResponse> {
     Json(ContextResponse {
-        capture_contracts: vec![2],
+        capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),

@@ -92,6 +92,7 @@ impl Runner {
             operation_id: request.operation_id.clone(),
             owner_id: self.task.id.clone(),
             proposals: request.proposals.clone(),
+            changed: request.changed.clone(),
         };
         let response: CaptureResponse = match self.post("capture/v2", &submission).await {
             Ok(CaptureV2Response::Captured { capture }) => capture,

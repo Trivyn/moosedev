@@ -96,6 +96,7 @@ impl Runner {
             request: CaptureRequest {
                 operation_id: request.operation_id.clone(),
                 proposals: vec![],
+                changed: vec![],
             },
             response: CaptureResponse {
                 proposals: vec![CapturedProposal {

@@ -81,6 +81,48 @@ pub(crate) fn is_top_level_declaration(raw: &str) -> bool {
     ancestors.iter().all(is_namespace) && declares_an_entity(last)
 }
 
+/// Where a symbol's last descriptor sits, read from the SCIP grammar alone, for
+/// producers that leave `SymbolInformation.kind` unspecified (scip-python emits
+/// `UnspecifiedKind` for every symbol, parameters and attributes included).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DescriptorRole {
+    /// A parameter or type parameter of a declaration.
+    Parameter,
+    /// A term or meta descriptor under a type: a field, attribute or property.
+    TypeMember,
+    /// A term or meta descriptor under a method: a local binding.
+    Local,
+    /// Anything else: a type, a method, a macro, or a term under namespaces.
+    Declaration,
+}
+
+pub(crate) fn descriptor_role(raw: &str) -> Option<DescriptorRole> {
+    if raw.starts_with("ts:") || ::scip::symbol::is_local_symbol(raw) {
+        return None;
+    }
+    let symbol = parse_symbol(raw).ok()?;
+    let (last, ancestors) = symbol.descriptors.split_last()?;
+    let suffix = last.suffix.enum_value().ok()?;
+    // Compared by value, never pattern-matched (see `declares_an_entity`).
+    if suffix == descriptor::Suffix::Parameter || suffix == descriptor::Suffix::TypeParameter {
+        return Some(DescriptorRole::Parameter);
+    }
+    if suffix == descriptor::Suffix::Term || suffix == descriptor::Suffix::Meta {
+        let under = |wanted: descriptor::Suffix| {
+            ancestors
+                .iter()
+                .any(|ancestor| ancestor.suffix.enum_value().ok() == Some(wanted))
+        };
+        if under(descriptor::Suffix::Method) {
+            return Some(DescriptorRole::Local);
+        }
+        if under(descriptor::Suffix::Type) {
+            return Some(DescriptorRole::TypeMember);
+        }
+    }
+    Some(DescriptorRole::Declaration)
+}
+
 /// True when a descriptor names something declarable: a type (`#`), a term
 /// (`.`), a method (`().`), or a macro (`!`).
 ///
@@ -333,5 +375,38 @@ mod tests {
         assert_eq!(last_descriptor_name(method).as_deref(), Some("render"));
         assert!(!is_module_symbol(method));
         assert!(is_module_symbol(module));
+    }
+}
+
+#[cfg(test)]
+mod descriptor_role_tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_role_reads_unspecified_python_kinds_from_the_grammar() {
+        let role = |descriptors: &str| {
+            descriptor_role(&format!(
+                "scip-python python moosedev-intent-fixture 0.1.0 {descriptors}"
+            ))
+        };
+        assert_eq!(
+            role("accounts/SEGMENTS."),
+            Some(DescriptorRole::Declaration)
+        );
+        assert_eq!(role("accounts/Account#"), Some(DescriptorRole::Declaration));
+        assert_eq!(
+            role("fees/FeePolicy#late_fee()."),
+            Some(DescriptorRole::Declaration)
+        );
+        assert_eq!(
+            role("fees/FeePolicy#late_fee().(today)"),
+            Some(DescriptorRole::Parameter)
+        );
+        assert_eq!(
+            role("accounts/Account#segment."),
+            Some(DescriptorRole::TypeMember)
+        );
+        assert_eq!(role("fees/late_fee().rate."), Some(DescriptorRole::Local));
+        assert_eq!(descriptor_role("local 3"), None);
     }
 }
