@@ -22,6 +22,19 @@ pub struct FileContext {
     pub policy: PolicyDecision,
 }
 
+/// One governing rule of the requested files: an accepted Constraint linked to
+/// their code or reached by the linked-evidence walk. Past the claim limit a
+/// rule is named with an empty claim; it is never dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoverningConstraint {
+    pub iri: String,
+    pub label: String,
+    /// The claim body as the shared claim renderer prints it; empty past the limit.
+    pub claim: String,
+    /// The `via:` line naming what reached the rule.
+    pub via: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextResponse {
     pub project_root: String,
@@ -38,6 +51,10 @@ pub struct ContextResponse {
     /// Supported deterministic intent-discovery contracts.
     #[serde(default)]
     pub intent_contracts: Vec<u32>,
+    /// The governing rules of the requested files, direct rules first. The
+    /// runner renders them as Project rules; linked evidence points there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub governing_constraints: Vec<GoverningConstraint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

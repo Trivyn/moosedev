@@ -182,6 +182,7 @@ pub(super) async fn context(
                     .collect(),
                 context: knowledge.unwrap_or_default(),
                 files: vec![],
+                governing_constraints: vec![],
             }),
         );
     }
@@ -201,6 +202,7 @@ pub(super) async fn context(
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             evidence_iris: vec![],
+            governing_constraints: vec![],
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."
                     .into()

@@ -322,6 +322,48 @@ pub fn render_linked_evidence(records: &[LinkedRecord]) -> String {
     out
 }
 
+/// The line that replaces a governing Constraint's claim in linked evidence.
+pub const RULE_POINTER: &str = "claim under Project rules\n";
+
+/// The governing rules of the walked files: accepted Constraints linked directly
+/// to their code, then the Constraints the walk reached, in hop order. Every
+/// rule is named; past [`CONSTRAINT_CLAIM_LIMIT`] its claim is empty.
+pub fn governing_constraints(evidence: &LinkedEvidence) -> Vec<LinkedRecord> {
+    evidence
+        .direct_constraints
+        .iter()
+        .chain(
+            evidence
+                .records
+                .iter()
+                .filter(|record| record.kind == "Constraint"),
+        )
+        .enumerate()
+        .map(|(index, record)| {
+            let mut rule = record.clone();
+            if index >= CONSTRAINT_CLAIM_LIMIT {
+                rule.claim.clear();
+            }
+            rule
+        })
+        .collect()
+}
+
+/// The walk's records with each Constraint's claim replaced by a pointer to
+/// the Project rules, which carry it.
+pub fn with_rule_pointers(records: &[LinkedRecord]) -> Vec<LinkedRecord> {
+    records
+        .iter()
+        .map(|record| {
+            let mut record = record.clone();
+            if record.kind == "Constraint" {
+                record.claim = RULE_POINTER.to_string();
+            }
+            record
+        })
+        .collect()
+}
+
 /// Candidates for one hop, in the order they were found.
 fn push_candidates(
     out: &mut Vec<LinkedRecord>,
@@ -477,6 +519,37 @@ mod tests {
             rendered,
             "\n[Constraint] urn:np7 label (urn:np7)\nvia: component Billing\nhasDescription: claim of urn:np7\n"
         );
+    }
+
+    #[test]
+    fn governing_rules_list_direct_then_walked_constraints_and_cap_claims() {
+        let mut evidence = LinkedEvidence {
+            direct_constraints: vec![candidate("urn:d", "Constraint", Hop::Direct, "src/a.rs")],
+            ..Default::default()
+        };
+        for n in 0..26 {
+            evidence.records.push(candidate(
+                &format!("urn:c{n:02}"),
+                "Constraint",
+                Hop::ComponentConstraint,
+                "Uploads",
+            ));
+        }
+        evidence
+            .records
+            .push(candidate("urn:l", "Lesson", Hop::Lesson, "Decision"));
+        let rules = governing_constraints(&evidence);
+        assert_eq!(rules.len(), 27, "every Constraint named, no Lesson");
+        assert_eq!(rules[0].iri, "urn:d");
+        assert_eq!(rules[1].iri, "urn:c00");
+        assert_eq!(
+            rules.iter().filter(|rule| !rule.claim.is_empty()).count(),
+            24
+        );
+        assert!(rules[26].claim.is_empty());
+        let pointed = with_rule_pointers(&evidence.records);
+        assert_eq!(pointed[0].claim, RULE_POINTER);
+        assert_eq!(pointed[26].claim, "hasDescription: claim of urn:l\n");
     }
 
     #[test]

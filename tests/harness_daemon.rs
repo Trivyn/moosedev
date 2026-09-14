@@ -478,6 +478,12 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
     assert!(full
         .context
         .contains("search with words from a record name returns its complete claims."));
+    assert!(
+        !full.context.contains("get_relevant_context"),
+        "{}",
+        full.context
+    );
+    assert!(full.governing_constraints.is_empty());
     assert!(!full
         .context
         .contains("retrieve more context when scope expands"));
@@ -662,9 +668,27 @@ async fn linked_evidence_delivers_unlinked_component_constraint() {
     assert!(!response.context.contains("\nTopic evidence ("));
     assert!(
         evidence.contains(&format!(
-            "({np7})\nvia: component Billing\nhasDescription: No late fee may be charged to an account in a registered non-profit segment.\n"
+            "({np7})\nvia: component Billing\nclaim under Project rules\n"
         )),
         "{evidence}"
+    );
+    assert!(
+        !evidence.contains("No late fee may be charged"),
+        "{evidence}"
+    );
+    let rule = response
+        .governing_constraints
+        .iter()
+        .find(|rule| rule.iri == np7)
+        .expect("governing rule");
+    assert_eq!(rule.via, "via: component Billing");
+    // The shared claim renderer: literals, then relationship lines.
+    assert!(
+        rule.claim.starts_with(
+            "hasDescription: No late fee may be charged to an account in a registered non-profit segment.\nconcerns: "
+        ),
+        "{}",
+        rule.claim
     );
     for n in 0..3 {
         assert!(!response
@@ -775,8 +799,21 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
         "{evidence}"
     );
     assert!(evidence.contains(&format!(
-        "({driver})\nvia: motivates Harness current decision\nhasDescription: A driving constraint.\n"
+        "({driver})\nvia: motivates Harness current decision\nclaim under Project rules\n"
     )));
+    let governing: Vec<_> = response
+        .governing_constraints
+        .iter()
+        .map(|rule| (rule.iri.as_str(), rule.via.as_str()))
+        .collect();
+    assert_eq!(
+        governing,
+        vec![(driver.as_str(), "via: motivates Harness current decision")],
+        "proposed and rejected Constraints are never governing"
+    );
+    assert!(response.governing_constraints[0]
+        .claim
+        .starts_with("hasDescription: A driving constraint.\nmotivates: "));
     assert!(evidence.contains(&format!(
         "({lesson})\nvia: learned from Harness current decision\nhasDescription: Learned from the decision.\n"
     )));
@@ -843,8 +880,23 @@ async fn linked_evidence_never_drops_accepted_constraints() {
         evidence
             .matches("hasDescription: Cap constraint claim")
             .count(),
+        0
+    );
+    assert_eq!(evidence.matches("claim under Project rules\n").count(), 24);
+    assert_eq!(response.governing_constraints.len(), 30);
+    assert_eq!(
+        response
+            .governing_constraints
+            .iter()
+            .filter(|rule| rule
+                .claim
+                .starts_with("hasDescription: Cap constraint claim"))
+            .count(),
         24
     );
+    assert!(response.governing_constraints[24..]
+        .iter()
+        .all(|rule| rule.claim.is_empty()));
     assert_eq!(
         evidence.matches("hasDescription: Cap lesson claim").count(),
         6
@@ -886,9 +938,14 @@ async fn linked_evidence_walks_unindexed_file_by_component_path() {
     let evidence = evidence_section(&response.context);
     assert!(
         evidence.contains(&format!(
-            "({rule})\nvia: component Billing\nhasDescription: Fees round half up.\n"
+            "({rule})\nvia: component Billing\nclaim under Project rules\n"
         )),
         "{evidence}"
+    );
+    assert_eq!(response.governing_constraints.len(), 1);
+    assert_eq!(
+        response.governing_constraints[0].claim,
+        format!("hasDescription: Fees round half up.\nconcerns: {billing}\n")
     );
 }
 
@@ -924,6 +981,16 @@ async fn fallback_topic_evidence_excludes_dossier_claims() {
     assert!(response.files[0]
         .dossier
         .contains("hasDescription: Established Harness fallback constraint\n"));
+    let governing: Vec<_> = response
+        .governing_constraints
+        .iter()
+        .map(|rule| (rule.iri.as_str(), rule.via.as_str()))
+        .collect();
+    assert_eq!(
+        governing,
+        vec![(direct.as_str(), "via: linked to src/harness.rs")],
+        "fallback topic hits are never governing"
+    );
 
     // Without files nothing is excluded, so the fallback carries both.
     let bare = linked_context(&state, "harness fallback", &[]);
@@ -1853,6 +1920,7 @@ fn context_response_without_contract_fields_deserializes_with_empty_vectors() {
     let context: ContextResponse = serde_json::from_value(legacy).unwrap();
     assert!(context.capture_contracts.is_empty());
     assert!(context.intent_contracts.is_empty());
+    assert!(context.governing_constraints.is_empty());
 }
 
 #[tokio::test]

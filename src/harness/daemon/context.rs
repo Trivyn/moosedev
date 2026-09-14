@@ -27,6 +27,7 @@ pub fn context_snapshot(
     );
     state.try_ensure_enriched()?;
     let mut context = String::new();
+    let mut governing_constraints = Vec::new();
     let evidence_iris = if request.evidence_only {
         // An evidence-only request (the model's search) returns just the
         // topic's records with their complete claims.
@@ -35,7 +36,7 @@ pub fn context_snapshot(
         records.into_iter().map(|record| record.iri).collect()
     } else {
         let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
-        context.push_str("Recall: get_relevant_context(no topic, limit=100) inventory, then linked evidence: the governing records a structural walk reaches from the attached files' code and components (topic recall, limit=5, only when nothing is linked beyond the file dossiers).\nThe broad inventory is bounded and contains names only; search with words from a record name returns its complete claims. Attached file dossiers carry the complete claims of records linked to the file's code.\n\nCurrent knowledge inventory:\n");
+        context.push_str("Recall: the inventory lists current record names only; search with words from a record name returns its complete claims. A structural walk from the attached files' code and components supplies the linked evidence; topic recall appears only when nothing is linked beyond the file dossiers. Attached file dossiers carry the complete claims of records linked to the file's code, and governing Constraints appear with their claims under Project rules.\n\nCurrent knowledge inventory:\n");
         for record in inventory {
             context.push_str(&format!(
                 "[{}] {} ({})\n",
@@ -46,6 +47,15 @@ pub fn context_snapshot(
         // replaces similarity-ranked topic recall, which remains only as a
         // fallback when nothing is linked beyond what the dossiers print.
         let linked = graph::linked_evidence(state, &request.files)?;
+        governing_constraints = graph::governing_constraints(&linked)
+            .into_iter()
+            .map(|rule| GoverningConstraint {
+                via: rule.hop.via(&rule.source),
+                iri: rule.iri,
+                label: rule.label,
+                claim: rule.claim,
+            })
+            .collect();
         if linked.records.is_empty() {
             let fallback: Vec<_> =
                 graph::relevant_context_snapshot(state, Some(&request.topic), 5, false)?
@@ -56,7 +66,9 @@ pub fn context_snapshot(
             render_topic_records(&mut context, &fallback);
         } else {
             context.push_str("\nLinked evidence (records linked to the files' code and components; complete claims):\n");
-            context.push_str(&graph::render_linked_evidence(&linked.records));
+            context.push_str(&graph::render_linked_evidence(&graph::with_rule_pointers(
+                &linked.records,
+            )));
         }
         Vec::new()
     };
@@ -111,6 +123,7 @@ pub fn context_snapshot(
         evidence_iris,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
+        governing_constraints,
     })
 }
 

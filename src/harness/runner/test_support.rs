@@ -31,6 +31,7 @@ async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
         context: String::new(),
         files: vec![],
         evidence_iris: vec![],
+        governing_constraints: vec![],
     })
 }
 

@@ -340,6 +340,7 @@ mod tests {
             evidence_iris: vec![],
             capture_contracts,
             intent_contracts: vec![2],
+            governing_constraints: vec![],
         };
         let error = Runner::validate_daemon_contracts(&context(vec![2]))
             .unwrap_err()
