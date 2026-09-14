@@ -497,6 +497,25 @@ impl Substrate {
         definitions
     }
 
+    /// The whole-file module a producer synthesizes for this file (rust-analyzer's
+    /// module container spanning the file from 0:0), for anchoring file-level
+    /// knowledge only. It is never a position target: [`Self::resolve`] and
+    /// [`Self::definitions_in_file`] keep excluding it.
+    pub fn file_module_symbol(&self, relative_path: &str) -> Option<DefinitionEntry> {
+        let file = self.index.files.get(relative_path)?;
+        file.occurrences
+            .iter()
+            .filter(|occurrence| scip::is_definition_role(occurrence.symbol_roles))
+            .filter_map(|occurrence| {
+                let symbol = self.index.symbols.get(occurrence.symbol_id)?;
+                if !is_synthetic_whole_file_marker(symbol, occurrence.range) {
+                    return None;
+                }
+                definition_entry(symbol)
+            })
+            .min_by(|a, b| a.normalized_symbol.cmp(&b.normalized_symbol))
+    }
+
     pub fn definitions_in_file(&self, relative_path: &str) -> Vec<FileDefinition> {
         self.definition_scopes_in_file(relative_path)
             .into_iter()
@@ -1931,6 +1950,57 @@ mod tests {
                 end: Position { line: 7, col: 16 },
             }
         );
+    }
+
+    #[test]
+    fn file_module_symbol_exposes_the_whole_file_module_for_anchoring_only() {
+        let module = "rust-analyzer cargo moosedev 0.6.3 runtime/";
+        let function = "rust-analyzer cargo moosedev 0.6.3 runtime/build_server().";
+        let token_module = "rust-analyzer cargo moosedev 0.6.3 other/";
+        let mut index = Index::new();
+        let mut document = doc("src/runtime.rs");
+        document.symbols.push(info(
+            module,
+            "runtime",
+            symbol_information::Kind::Module,
+            "pub mod runtime",
+        ));
+        document.occurrences.push(occ(module, vec![0, 0, 30, 0], 1));
+        document.symbols.push(info(
+            function,
+            "build_server",
+            symbol_information::Kind::Function,
+            "pub fn build_server()",
+        ));
+        document.occurrences.push(occ(function, vec![7, 4, 16], 1));
+        index.documents.push(document);
+        // A real, single-line module name token is an ordinary definition.
+        let mut other = doc("src/other.rs");
+        other.symbols.push(info(
+            token_module,
+            "other",
+            symbol_information::Kind::Module,
+            "mod other",
+        ));
+        other.occurrences.push(occ(token_module, vec![0, 4, 9], 1));
+        index.documents.push(other);
+        let substrate = Substrate::from_index(index, meta(), false).unwrap();
+
+        let anchor = substrate
+            .file_module_symbol("src/runtime.rs")
+            .expect("whole-file module");
+        assert_eq!(anchor.symbol, module);
+        assert_eq!(anchor.file, "src/runtime.rs");
+        assert!(substrate.file_module_symbol("src/other.rs").is_none());
+        assert!(substrate.file_module_symbol("src/missing.rs").is_none());
+        // Anchoring only: never a file definition, never a position target.
+        assert!(substrate
+            .definitions_in_file("src/runtime.rs")
+            .iter()
+            .all(|definition| definition.entry.symbol != module));
+        assert!(substrate
+            .resolve("src/runtime.rs", Position { line: 0, col: 0 })
+            .is_none_or(|resolution| resolution.symbol != module));
     }
 
     #[test]

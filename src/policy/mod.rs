@@ -473,17 +473,27 @@ fn anchor_line_span(repo_root: &Path, file: &str, anchor: &str) -> Option<(u32, 
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Minted CodeEntity IRIs for every definition in one file.
+/// Minted CodeEntity IRIs for one file: its whole-file module, when the
+/// producer synthesizes one, then every definition.
 fn file_entity_iris(state: &AppState, file: &str) -> anyhow::Result<Vec<String>> {
     let Some(substrate) = state.substrate() else {
         return Ok(Vec::new());
     };
     let terms = CodeTerms::resolve(state)?;
     let entities = entities_by_symbol(state, &terms)?;
-    Ok(substrate
+    // A synthetic whole-file module (Rust) is never a position target, but
+    // knowledge anchored to it concerns the whole file, so it leads the push.
+    let module = substrate
+        .file_module_symbol(file)
+        .map(|entry| entry.normalized_symbol);
+    let definitions = substrate
         .definitions_in_file(file)
         .into_iter()
-        .filter_map(|def| entities.get(&def.entry.normalized_symbol).cloned())
+        .map(|def| def.entry.normalized_symbol);
+    Ok(module
+        .into_iter()
+        .chain(definitions)
+        .filter_map(|symbol| entities.get(&symbol).cloned())
         .collect())
 }
 

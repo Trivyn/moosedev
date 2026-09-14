@@ -21,6 +21,7 @@ use scip::types::{
 };
 
 const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
+const MODULE_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/";
 const ALPHA_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/alpha().";
 const BETA_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/beta().";
 const ALPHA_NORM: &str = "rust-analyzer cargo testpkg . foo/alpha().";
@@ -69,6 +70,18 @@ fn add_def(d: &mut Document, symbol: &str, name: &str, signature: &str, line: i3
 fn synthetic_substrate() -> Substrate {
     let mut index = Index::new();
     let mut module_doc = doc(FILE);
+    // rust-analyzer's synthetic whole-file module container.
+    let mut module = SymbolInformation::new();
+    module.symbol = MODULE_RAW.to_string();
+    module.display_name = "foo".to_string();
+    module.kind = EnumOrUnknown::new(symbol_information::Kind::Module);
+    module_doc.symbols.push(module);
+    let mut module_occ = Occurrence::new();
+    module_occ.symbol = MODULE_RAW.to_string();
+    module_occ.range = vec![0, 0, 2, 0];
+    module_occ.symbol_roles = 1;
+    module_occ.enclosing_range = vec![0, 0, 2, 0];
+    module_doc.occurrences.push(module_occ);
     add_def(&mut module_doc, ALPHA_RAW, "alpha", "pub fn alpha()", 0);
     add_def(&mut module_doc, BETA_RAW, "beta", "pub fn beta()", 1);
     index.documents.push(module_doc);
@@ -568,6 +581,48 @@ fn file_touch_within_max_bytes_shortens_later_sections_to_protected_knowledge() 
         bounded.ends_with("\n1 entity section shortened to direct records and accepted Constraints by the host's 1-byte bound: `beta`; retrieve it in full with get_entity_dossier\n"),
         "{bounded}"
     );
+}
+
+/// Rust's synthetic whole-file module is never a position target, but knowledge
+/// anchored to it reaches every push of its file.
+#[test]
+fn file_touch_pushes_knowledge_anchored_to_the_whole_file_module() {
+    let f = setup("policy-module-anchor");
+    let lesson = record(&f.state, "Lesson", "foo module gotcha", "accepted");
+    let module = graph::link_code(
+        &f.state,
+        &lesson,
+        "concerns",
+        &graph::CodeSelector::Symbol(MODULE_RAW.to_string()),
+        "tester",
+    )
+    .expect("link the module")
+    .entity_iri;
+
+    let touch = |line: Option<u32>, col: Option<u32>| {
+        let event = PolicyEvent::EntityTouched {
+            file: FILE.to_string(),
+            line,
+            col,
+            max_bytes: None,
+        };
+        evaluate(&f.state, &f.repo_root, &event).expect("evaluate")
+    };
+    let PolicyDecision::Inject {
+        dossier_markdown,
+        entities,
+        ..
+    } = touch(None, None)
+    else {
+        panic!("a file push carries the module's knowledge");
+    };
+    assert_eq!(entities, vec![module]);
+    assert!(
+        dossier_markdown.contains("foo module gotcha"),
+        "{dossier_markdown}"
+    );
+    // 1:1 is alpha's token, never the module container.
+    assert!(matches!(touch(Some(1), Some(1)), PolicyDecision::Allow));
 }
 
 #[test]
