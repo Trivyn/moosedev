@@ -3,7 +3,8 @@
 Status: exploratory probe package; draft for maintainer gold review; crowding
 gate V1 passed on the revision-2 package, V2 failed (no blind plan reaches NP-7;
 diagnostic only since plan-time recall was rejected, AD a238e9ba); blind audit
-round 1 done on the revision-1 package, push-only and B pending re-run. Runs use episode 1 only. Episodes e2 to e4 are
+round 1 done on the revision-1 package; push-only and B passed again in round 2
+on the revision-2 package. Runs use episode 1 only. Episodes e2 to e4 are
 copied from `late_fees` with renumbered seed pointers and are not run and not
 re-audited for distractors.
 
@@ -36,18 +37,18 @@ reason. The inventory lists only its neutral title.
 - Discrimination: **high** (only the seed carries it).
 - Gold record: `fees-np7`. Harness delivery: search (plan evidence would have required plan-time recall, rejected in AD a238e9ba). Gate, revision 2: not pushed (ranks 25 and 16). Gate V2 (diagnostic): no blind plan reaches it (ranks 28, 39, 30).
 - Negative: `charity_charged`.
-- Audit round 1 (revision-1 package): A wrong (500, determined, all three readers); push-only FAIL to decide (500, determined), as V1 requires; B PASS (0, determined, citing `fees-np7`); plan-push not built. Push-only and B: pending re-run on the revision-2 package.
+- Audit round 1 (revision-1 package): A wrong (500, determined, all three readers); push-only FAIL to decide (500, determined), as V1 requires; B PASS (0, determined, citing `fees-np7`); plan-push not built. Audit round 2 (revision-2 package): push-only FAIL to decide (500, determined), as V1 requires; B PASS (0, determined, citing `fees-np7` and the charity segment). Answers: `/Users/jcadam/.claude/jobs/7f3a44c1/tmp/probe/audit/answers/push-only-r2.json`, `/Users/jcadam/.claude/jobs/7f3a44c1/tmp/probe/audit/answers/B-r2.json`.
 
 ### e1-half-up: `LateFeeTests.test_percentage_rounds_half_up` (retention, measures correctness)
 - Deciding sentence: seed 5.
 - Code-plus-prompt default: Python `round`, which rounds 100.5 to 100.
 - Gold record: `fees-cents`. Harness delivery: dossier title in both builds (positive control); not in topic evidence for either gate topic.
 - Negative: `bankers_rounding`.
-- Audit round 1 (revision-1 package): A ambiguous (100 or 101, all three readers); push-only PASS (101, determined, citing the `fees.py` dossier title "Fees are integer cents rounded half up"), so the dossier title delivers it; B PASS (101, determined). Push-only and B: pending re-run on the revision-2 package.
+- Audit round 1 (revision-1 package): A ambiguous (100 or 101, all three readers); push-only PASS (101, determined, citing the `fees.py` dossier title "Fees are integer cents rounded half up"), so the dossier title delivers it; B PASS (101, determined). Audit round 2 (revision-2 package): push-only PASS (101, determined, citing the "Fees are integer cents rounded half up" title); B PASS (101, determined).
 
 ### e1-grace and e1-minimum (task)
 - Decided by the e1 prompt.
-- Audit round 1: right in A, push-only and B.
+- Audit round 1: right in A, push-only and B. Audit round 2: right in push-only and B.
 
 ## e2 to e4
 

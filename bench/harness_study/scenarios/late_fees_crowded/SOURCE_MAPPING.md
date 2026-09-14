@@ -116,9 +116,15 @@ task sentence, cross-checked. V2 (diagnostic only): plan ranks 28, 39, 30;
 package's hash: `target/harness-crowded-probe-v1/gate/final-v2/gate.json` and
 its reproduction `target/harness-crowded-probe-v1/gate/final-v2-repeat/gate.json`.
 
-The audit round 1 results below were measured on the round-1 package. The
-push-only and full-notes (B) verdicts are **pending re-run** on this package;
-condition A saw no seeds and is unaffected.
+Blind-audit round 2 (2026-09-13, fresh Claude Sonnet readers on packets rebuilt
+from this package and the `final-v2` gate response): **push-only passed**
+(e1-charity 500, determined, so today's push does not decide it, as V1
+requires; e1-half-up 101, determined, citing the "Fees are integer cents
+rounded half up" title; grace and minimum right; `/Users/jcadam/.claude/jobs/7f3a44c1/tmp/probe/audit/answers/push-only-r2.json`).
+**Full notes (B) passed** (all four right and determined; e1-charity 0, citing
+`fees-np7` and the charity segment; `/Users/jcadam/.claude/jobs/7f3a44c1/tmp/probe/audit/answers/B-r2.json`). Condition A saw no
+seeds, so its round-1 result stands. The round-1 results below were measured on
+the round-1 package.
 
 Blind-audit round 1 (2026-09-13, fresh Claude Sonnet readers, one per packet):
 
