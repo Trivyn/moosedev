@@ -147,6 +147,10 @@ pub struct Substrate {
     /// Lazy normalized symbol → definition, so a caller resolving many symbols
     /// pays one normalization pass over the index instead of one per lookup.
     definitions_by_symbol: std::sync::OnceLock<std::collections::HashMap<String, FileDefinition>>,
+    /// Lazy name key ([`definition_name_key`]) → definitions, for grounding
+    /// lookups by identifier across the whole index.
+    definitions_by_name:
+        std::sync::OnceLock<std::collections::HashMap<String, Vec<FileDefinition>>>,
     /// In-process cache for legacy/synthetic indexes without durable generation
     /// digests. Published generations retain the same proof in metadata.
     indexed_source_digests: std::sync::Mutex<std::collections::HashMap<String, String>>,
@@ -212,6 +216,7 @@ impl Substrate {
             churn,
             reference_counts: std::sync::OnceLock::new(),
             definitions_by_symbol: std::sync::OnceLock::new(),
+            definitions_by_name: std::sync::OnceLock::new(),
             indexed_source_digests: std::sync::Mutex::new(std::collections::HashMap::new()),
             canonical_root: std::sync::OnceLock::new(),
         })
@@ -679,6 +684,65 @@ impl Substrate {
         Some(FileDefinition { entry, range })
     }
 
+    /// Definitions whose name matches `name` case-insensitively with a trailing
+    /// plural `s` folded, across the whole index, in (file, symbol) order.
+    /// Locals and synthetic whole-file markers are never included.
+    pub fn definitions_named(&self, name: &str) -> Vec<FileDefinition> {
+        let key = definition_name_key(name);
+        if key.is_empty() {
+            return Vec::new();
+        }
+        self.definitions_by_name
+            .get_or_init(|| {
+                let mut map: std::collections::HashMap<String, Vec<FileDefinition>> =
+                    std::collections::HashMap::new();
+                for definition in self.definitions_by_symbol().values() {
+                    let Some(display) = definition.entry.display_name.clone() else {
+                        continue;
+                    };
+                    let key = definition_name_key(&display);
+                    if !key.is_empty() {
+                        map.entry(key).or_default().push(definition.clone());
+                    }
+                }
+                for definitions in map.values_mut() {
+                    definitions.sort_by(|a, b| {
+                        (&a.entry.file, &a.entry.symbol).cmp(&(&b.entry.file, &b.entry.symbol))
+                    });
+                }
+                map
+            })
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The first lines of a definition as proven indexed source: at most
+    /// `max_lines` lines and `max_bytes` bytes, cut on a character boundary.
+    /// `None` when the file cannot be proven to match the indexed generation.
+    pub fn definition_preview(
+        &self,
+        definition: &FileDefinition,
+        max_lines: usize,
+        max_bytes: usize,
+    ) -> Option<String> {
+        let request = SourceWindowRequest {
+            first_line: definition.range.start.line as usize,
+            max_lines,
+            max_bytes,
+        };
+        let (windows, _) = self.read_indexed_source_windows(&definition.entry.file, &[request])?;
+        let mut text = windows.into_iter().next()?.join("\n");
+        if text.len() > max_bytes {
+            let mut end = max_bytes;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        Some(text)
+    }
+
     /// Normalized symbol → definition, built once per loaded substrate.
     ///
     /// Building it normalizes each indexed symbol a single time, turning a
@@ -791,6 +855,7 @@ impl Substrate {
             churn: None,
             reference_counts: std::sync::OnceLock::new(),
             definitions_by_symbol: std::sync::OnceLock::new(),
+            definitions_by_name: std::sync::OnceLock::new(),
             indexed_source_digests: std::sync::Mutex::new(std::collections::HashMap::new()),
             canonical_root: std::sync::OnceLock::new(),
         })
@@ -887,6 +952,16 @@ impl Staleness {
 /// outrank out-of-scope ones, then lowest (file, symbol) wins. Minting filters
 /// to scope BEFORE deduping, so ordering alone would pick a definition that
 /// minting had already discarded.
+/// The lookup key for a definition name: lowercase, with a trailing plural `s`
+/// folded when the rest is still a word (`SEGMENTS` and `segment` share a key).
+pub fn definition_name_key(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    match lower.strip_suffix('s') {
+        Some(stem) if stem.len() >= 3 && !stem.ends_with('s') => stem.to_string(),
+        _ => lower,
+    }
+}
+
 fn collision_rank(entry: &DefinitionEntry) -> (bool, &str, &str) {
     let in_mint_scope = !super::is_test_path(&entry.file) && (entry.is_module || entry.is_public);
     (!in_mint_scope, &entry.file, &entry.symbol)
@@ -2513,6 +2588,60 @@ mod tests {
         index.documents.push(document);
 
         Substrate::from_index(index, meta(), true).unwrap()
+    }
+
+    #[test]
+    fn definitions_named_fold_case_and_plural_across_files() {
+        let constant = "scip-python python sample 1 channels/CHANNELS.";
+        let function = "scip-python python sample 1 routing/channel().";
+        let mut index = Index::new();
+        let mut channels = doc("channels.py");
+        channels.symbols.push(info(
+            constant,
+            "CHANNELS",
+            symbol_information::Kind::Constant,
+            "CHANNELS",
+        ));
+        channels.occurrences.push(occ(constant, vec![0, 0, 8], 1));
+        let mut routing = doc("routing.py");
+        routing.symbols.push(info(
+            function,
+            "channel",
+            symbol_information::Kind::Function,
+            "def channel()",
+        ));
+        routing.occurrences.push(occ(function, vec![2, 4, 11], 1));
+        index.documents.push(routing);
+        index.documents.push(channels);
+        let substrate = Substrate::from_index(index, meta_for("scip-python"), false).unwrap();
+
+        let found: Vec<(String, String)> = substrate
+            .definitions_named("Channel")
+            .iter()
+            .map(|definition| {
+                (
+                    definition.entry.file.clone(),
+                    definition.entry.symbol.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("channels.py".to_string(), constant.to_string()),
+                ("routing.py".to_string(), function.to_string()),
+            ]
+        );
+        assert_eq!(substrate.definitions_named("CHANNELS").len(), 2);
+        assert!(substrate.definitions_named("chan").is_empty());
+        assert!(substrate.definitions_named("").is_empty());
+        assert_eq!(super::definition_name_key("CHANNELS"), "channel");
+        assert_eq!(super::definition_name_key("class"), "class");
+        assert_eq!(super::definition_name_key("ids"), "ids");
+
+        // An unrooted index cannot prove any file current, so it previews nothing.
+        let definition = substrate.definitions_named("channel").remove(0);
+        assert_eq!(substrate.definition_preview(&definition, 12, 256), None);
     }
 
     fn doc(relative_path: &str) -> Document {

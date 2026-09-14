@@ -41,6 +41,20 @@ impl Default for TreeSitterFallback {
     }
 }
 
+/// Parse in-memory source with the grammar registered for `relative_path`'s
+/// extension, under the same size ceiling as file parsing. `None` for an
+/// unsupported extension, oversized source or a parser failure; a tree with
+/// syntax errors is returned and callers decide.
+pub fn parse_source(relative_path: &str, source: &str) -> Option<Tree> {
+    let fallback = lang::fallback_for_path(Path::new(relative_path))?;
+    if source.len() as u64 > MAX_PARSE_BYTES {
+        return None;
+    }
+    let mut parser = Parser::new();
+    parser.set_language(&(fallback.grammar)()).ok()?;
+    parser.parse(source, None)
+}
+
 impl TreeSitterFallback {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -429,6 +443,23 @@ mod tests {
         assert_eq!(parsed.path, FIXTURE_PATH);
         assert_eq!(parsed.kind, "fn");
         assert_eq!(parsed.qualified_name, "<Widget as Render>::render");
+    }
+
+    #[test]
+    fn parse_source_parses_in_memory_python_and_declines_the_rest() {
+        let tree = parse_source(
+            "pkg/routing.py",
+            "def route(order):\n    return order.channel\n",
+        )
+        .expect("python parses");
+        assert_eq!(tree.root_node().kind(), "module");
+        assert!(!tree.root_node().has_error());
+        let broken =
+            parse_source("pkg/routing.py", "def route(order)\n").expect("errors still parse");
+        assert!(broken.root_node().has_error());
+        assert!(parse_source("notes.txt", "plain text").is_none());
+        let oversized = "#".repeat(usize::try_from(MAX_PARSE_BYTES).unwrap() + 1);
+        assert!(parse_source("pkg/big.py", &oversized).is_none());
     }
 
     #[test]
