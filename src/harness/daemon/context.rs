@@ -26,34 +26,40 @@ pub fn context_snapshot(
         "an evidence-only context request takes no files"
     );
     state.try_ensure_enriched()?;
-    let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
-    // An evidence-only request (the model's search) returns just the topic's
-    // records with their complete claims.
-    let evidence_iris = if request.evidence_only {
-        records.iter().map(|record| record.iri.clone()).collect()
-    } else {
-        Vec::new()
-    };
     let mut context = String::new();
-    if !request.evidence_only {
+    let evidence_iris = if request.evidence_only {
+        // An evidence-only request (the model's search) returns just the
+        // topic's records with their complete claims.
+        let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
+        render_topic_records(&mut context, &records);
+        records.into_iter().map(|record| record.iri).collect()
+    } else {
         let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
-        context.push_str("Recall: get_relevant_context(no topic, limit=100) inventory, then topic recall (limit=12).\nThe broad inventory is bounded and contains names only; search with words from a record name returns its complete claims. Attached file dossiers carry the complete claims of records linked to the file's code.\n\nCurrent knowledge inventory:\n");
+        context.push_str("Recall: get_relevant_context(no topic, limit=100) inventory, then linked evidence: the governing records a structural walk reaches from the attached files' code and components (topic recall, limit=5, only when nothing is linked beyond the file dossiers).\nThe broad inventory is bounded and contains names only; search with words from a record name returns its complete claims. Attached file dossiers carry the complete claims of records linked to the file's code.\n\nCurrent knowledge inventory:\n");
         for record in inventory {
             context.push_str(&format!(
                 "[{}] {} ({})\n",
                 record.kind, record.label, record.iri
             ));
         }
-        context
-            .push_str("\nTopic evidence (complete claims; up to six relationships per record):\n");
-    }
-    for record in records {
-        context.push_str(&format!(
-            "\n[{}] {} ({})\n",
-            record.kind, record.label, record.iri
-        ));
-        graph::render_claim_body(&record, &mut context);
-    }
+        // Linked evidence leads (AD 85da8700): the walk from the files' code
+        // replaces similarity-ranked topic recall, which remains only as a
+        // fallback when nothing is linked beyond what the dossiers print.
+        let linked = graph::linked_evidence(state, &request.files)?;
+        if linked.records.is_empty() {
+            let fallback: Vec<_> =
+                graph::relevant_context_snapshot(state, Some(&request.topic), 5, false)?
+                    .into_iter()
+                    .filter(|record| !linked.excluded.contains(&record.iri))
+                    .collect();
+            context.push_str("\nTopic evidence (fallback; nothing is linked beyond the file dossiers; complete claims; up to six relationships per record):\n");
+            render_topic_records(&mut context, &fallback);
+        } else {
+            context.push_str("\nLinked evidence (records linked to the files' code and components; complete claims):\n");
+            context.push_str(&graph::render_linked_evidence(&linked.records));
+        }
+        Vec::new()
+    };
     let root = state.project_root();
     let mut files = Vec::new();
     for file in &request.files {
@@ -106,6 +112,17 @@ pub fn context_snapshot(
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
     })
+}
+
+/// Topic recall records: a header per record, then its claim body.
+fn render_topic_records(context: &mut String, records: &[graph::ContextItem]) {
+    for record in records {
+        context.push_str(&format!(
+            "\n[{}] {} ({})\n",
+            record.kind, record.label, record.iri
+        ));
+        graph::render_claim_body(record, context);
+    }
 }
 
 /// The current knowledge records offered to the link path: the bounded

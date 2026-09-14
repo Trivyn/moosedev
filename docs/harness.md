@@ -277,8 +277,21 @@ contract 3 and intent contract 2.
   that behaviour. `search(query)` asks the daemon for the query's accepted
   records (an evidence-only context request: complete claims, no inventory or
   dossiers) and returns them before repository matches (`knowledge_search`).
+- Linked evidence. Each step's context leads with the governing records a
+  deterministic walk reaches from the attached files' code: accepted
+  Constraints on the components that code belongs to (by `realizes`, declared
+  paths, or the components its linked records concern or constrain), the
+  records those linked records are motivated by, the current head of any chain
+  superseding them, and the Lessons learned from them. Each record renders its
+  header, a `via:` line naming how it was reached, and its complete claim.
+  Records the file dossiers already print are left out, and a record reached
+  twice is shown once. Every accepted Constraint is listed, the first 24 with
+  claims; other kinds stop at eight motivating records, eight supersession
+  heads and six Lessons, with one line counting what was left out. Topic
+  recall (limit 5, dossier records excluded) is used only when the walk finds
+  nothing, under a "Topic evidence (fallback" header.
 - Dossiers. A file dossier lists each knowledge-bearing entity's direct records
-  with their complete claims, rendered like topic evidence (superseded records
+  with their complete claims, rendered like linked evidence (superseded records
   show only their header line), and its component's records by title: accepted
   Constraints always, other kinds up to twelve, then a count. Each claim and
   each component list appears once per file dossier. The harness requests

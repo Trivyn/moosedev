@@ -482,6 +482,9 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
         .context
         .contains("retrieve more context when scope expands"));
     assert!(full.evidence_iris.is_empty());
+    // Nothing is linked, so the full context falls back to topic evidence.
+    assert!(full.context.contains("\nTopic evidence (fallback;"));
+    assert!(!full.context.contains("Linked evidence"));
 
     let evidence =
         daemon::context_snapshot(&state, &request("coding constraint", true, vec![])).unwrap();
@@ -557,6 +560,375 @@ async fn file_dossier_carries_the_topic_evidence_claim_body() {
         "{}",
         attached.files[0].dossier
     );
+}
+
+fn record_with(
+    state: &AppState,
+    kind: &str,
+    title: &str,
+    description: &str,
+    status: &str,
+) -> String {
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri: state.resolve_class(kind).unwrap(),
+            class_local: kind.into(),
+            properties: vec![
+                (state.capture.title.clone(), title.into()),
+                (state.capture.description.clone(), description.into()),
+                (state.capture.status.clone(), status.into()),
+            ],
+        },
+        "test-human",
+        Utc::now(),
+    )
+    .unwrap()
+}
+
+/// Full (not evidence-only) context for `files`.
+fn linked_context(state: &AppState, topic: &str, files: &[&str]) -> ContextResponse {
+    state.note_project_write();
+    daemon::context_snapshot(
+        state,
+        &ContextRequest {
+            topic: topic.into(),
+            files: files.iter().map(|file| file.to_string()).collect(),
+            evidence_only: false,
+        },
+    )
+    .unwrap()
+}
+
+/// The context from its evidence section header on, so inventory names do not count.
+fn evidence_section(context: &str) -> &str {
+    let start = context
+        .find("\nLinked evidence (")
+        .or_else(|| context.find("\nTopic evidence ("))
+        .expect("evidence section");
+    &context[start..]
+}
+
+/// An accepted ArchitecturalDecision linked to the module entity of `src/harness.rs`.
+fn direct_decision(state: &AppState, symbol: &str, title: &str) -> String {
+    let decision = record_with(
+        state,
+        "ArchitecturalDecision",
+        title,
+        &format!("Decided {title}"),
+        "accepted",
+    );
+    graph::link_code(
+        state,
+        &decision,
+        "concerns",
+        &graph::CodeSelector::Symbol(symbol.into()),
+        "test-human",
+    )
+    .unwrap();
+    decision
+}
+
+#[tokio::test]
+async fn linked_evidence_delivers_unlinked_component_constraint() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let billing = record(&state, "SystemComponent", "Billing");
+    let decision = direct_decision(&state, symbol, "Harness fee rules live in the policy");
+    graph::relate(&state, &decision, "concerns", &billing).unwrap();
+    // The deciding rule is linked to no code, only to the component.
+    let np7 = record_with(
+        &state,
+        "Constraint",
+        "Regulation NP-7 compliance for account billing",
+        "No late fee may be charged to an account in a registered non-profit segment.",
+        "accepted",
+    );
+    graph::relate(&state, &np7, "concerns", &billing).unwrap();
+    for n in 0..3 {
+        record_with(
+            &state,
+            "Constraint",
+            &format!("Harness fee rule {n}"),
+            &format!("Harness fee distractor claim {n}."),
+            "accepted",
+        );
+    }
+
+    let response = linked_context(&state, "harness fee rule", &["src/harness.rs"]);
+    let evidence = evidence_section(&response.context);
+    assert!(evidence.starts_with("\nLinked evidence ("), "{evidence}");
+    assert!(!response.context.contains("\nTopic evidence ("));
+    assert!(
+        evidence.contains(&format!(
+            "({np7})\nvia: component Billing\nhasDescription: No late fee may be charged to an account in a registered non-profit segment.\n"
+        )),
+        "{evidence}"
+    );
+    for n in 0..3 {
+        assert!(!response
+            .context
+            .contains(&format!("Harness fee distractor claim {n}.")));
+    }
+    // The direct record's claim is carried by the file dossier only.
+    assert!(!evidence.contains(&decision));
+    assert!(!evidence.contains("Decided Harness fee rules live in the policy"));
+    assert!(
+        response.files[0]
+            .dossier
+            .contains("hasDescription: Decided Harness fee rules live in the policy\n"),
+        "{}",
+        response.files[0].dossier
+    );
+}
+
+#[tokio::test]
+async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecycle() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let billing = record(&state, "SystemComponent", "Billing");
+    let decision = direct_decision(&state, symbol, "Harness current decision");
+    graph::relate(&state, &decision, "concerns", &billing).unwrap();
+    let need = record_with(
+        &state,
+        "Requirement",
+        "Harness need",
+        "The harness needs fees.",
+        "accepted",
+    );
+    graph::relate(&state, &decision, "isMotivatedBy", &need).unwrap();
+    // Only the inverse edge is asserted for this driver.
+    let driver = record_with(
+        &state,
+        "Constraint",
+        "Harness driver",
+        "A driving constraint.",
+        "accepted",
+    );
+    graph::relate(&state, &driver, "motivates", &decision).unwrap();
+    let lesson = record_with(
+        &state,
+        "Lesson",
+        "Harness lesson",
+        "Learned from the decision.",
+        "accepted",
+    );
+    graph::relate(&state, &lesson, "learnedFrom", &decision).unwrap();
+
+    let old = direct_decision(&state, symbol, "Harness old decision");
+    let replace = |from: &str, title: &str| {
+        graph::supersede_decision(
+            &state,
+            &graph::SupersedeInput {
+                superseded_iri: from.into(),
+                new: RecordInput {
+                    class_iri: state.resolve_class("ArchitecturalDecision").unwrap(),
+                    class_local: "ArchitecturalDecision".into(),
+                    properties: vec![
+                        (state.capture.title.clone(), title.into()),
+                        (
+                            state.capture.description.clone(),
+                            format!("Decided {title}"),
+                        ),
+                    ],
+                },
+                rationale: format!("Replaced by {title}"),
+            },
+            "test-human",
+            Utc::now(),
+        )
+        .unwrap()
+        .new_iri
+    };
+    let middle = replace(&old, "Harness middle decision");
+    let head = replace(&middle, "Harness head decision");
+
+    let proposed = record_with(
+        &state,
+        "Constraint",
+        "Harness proposed constraint",
+        "Proposed only.",
+        "proposed",
+    );
+    graph::relate(&state, &proposed, "concerns", &billing).unwrap();
+    let rejected = record_with(
+        &state,
+        "Constraint",
+        "Harness rejected constraint",
+        "Rejected only.",
+        "rejected",
+    );
+    graph::relate(&state, &rejected, "concerns", &billing).unwrap();
+    // A first read materializes inferred inverse edges; pin the revision after
+    // it, so the walk below is held to changing nothing.
+    linked_context(&state, "harness", &[]);
+    let revision = daemon::accepted_revision(&state).unwrap();
+
+    let response = linked_context(&state, "harness", &["src/harness.rs"]);
+    let evidence = evidence_section(&response.context);
+    assert!(
+        evidence.contains(&format!(
+            "({need})\nvia: motivates Harness current decision\nhasDescription: The harness needs fees.\n"
+        )),
+        "{evidence}"
+    );
+    assert!(evidence.contains(&format!(
+        "({driver})\nvia: motivates Harness current decision\nhasDescription: A driving constraint.\n"
+    )));
+    assert!(evidence.contains(&format!(
+        "({lesson})\nvia: learned from Harness current decision\nhasDescription: Learned from the decision.\n"
+    )));
+    assert!(evidence.contains(&format!(
+        "({head})\nvia: supersedes Harness old decision\nhasDescription: Decided Harness head decision\n"
+    )));
+    // The head's claim links back to what it supersedes; the intermediate
+    // record itself is never delivered.
+    assert!(
+        !evidence.contains(&format!("({middle})\nvia:")),
+        "only the chain's head is delivered"
+    );
+    assert!(!evidence.contains(&proposed));
+    assert!(!evidence.contains(&rejected));
+    assert!(!evidence.contains(&format!("({decision})")));
+    assert_eq!(response.revision, revision);
+    assert_eq!(
+        linked_context(&state, "harness", &["src/harness.rs"]).context,
+        response.context
+    );
+}
+
+#[tokio::test]
+async fn linked_evidence_never_drops_accepted_constraints() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let billing = record(&state, "SystemComponent", "Billing");
+    let decision = direct_decision(&state, symbol, "Harness cap decision");
+    graph::relate(&state, &decision, "concerns", &billing).unwrap();
+    let constraints: Vec<String> = (0..30)
+        .map(|n| {
+            let constraint = record_with(
+                &state,
+                "Constraint",
+                &format!("Harness cap constraint {n:02}"),
+                &format!("Cap constraint claim {n:02}."),
+                "accepted",
+            );
+            graph::relate(&state, &constraint, "concerns", &billing).unwrap();
+            constraint
+        })
+        .collect();
+    for n in 0..10 {
+        let lesson = record_with(
+            &state,
+            "Lesson",
+            &format!("Harness cap lesson {n}"),
+            &format!("Cap lesson claim {n}."),
+            "accepted",
+        );
+        graph::relate(&state, &lesson, "learnedFrom", &decision).unwrap();
+    }
+
+    let response = linked_context(&state, "harness cap", &["src/harness.rs"]);
+    let evidence = evidence_section(&response.context);
+    for constraint in &constraints {
+        assert!(
+            evidence.contains(&format!("({constraint})\nvia: component Billing\n")),
+            "{constraint} listed"
+        );
+    }
+    assert_eq!(
+        evidence
+            .matches("hasDescription: Cap constraint claim")
+            .count(),
+        24
+    );
+    assert_eq!(
+        evidence.matches("hasDescription: Cap lesson claim").count(),
+        6
+    );
+    assert!(
+        evidence.ends_with(
+            "\n10 further linked records not shown in full (Constraint: 6; Lesson: 4); search project knowledge for their claims\n"
+        ),
+        "{evidence}"
+    );
+    assert_eq!(
+        linked_context(&state, "harness cap", &["src/harness.rs"]).context,
+        response.context
+    );
+}
+
+#[tokio::test]
+async fn linked_evidence_walks_unindexed_file_by_component_path() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    std::fs::create_dir_all(fixture.0.join("src")).unwrap();
+    std::fs::write(
+        fixture.0.join("src/fees.py"),
+        "def late_fee():\n    return 0\n",
+    )
+    .unwrap();
+    let billing = record(&state, "SystemComponent", "Billing");
+    graph::declare_component_paths(&state, &billing, &["src/fees.py".into()]).unwrap();
+    let rule = record_with(
+        &state,
+        "Constraint",
+        "Billing path constraint",
+        "Fees round half up.",
+        "accepted",
+    );
+    graph::relate(&state, &rule, "concerns", &billing).unwrap();
+
+    let response = linked_context(&state, "unrelated topic words", &["src/fees.py"]);
+    let evidence = evidence_section(&response.context);
+    assert!(
+        evidence.contains(&format!(
+            "({rule})\nvia: component Billing\nhasDescription: Fees round half up.\n"
+        )),
+        "{evidence}"
+    );
+}
+
+#[tokio::test]
+async fn fallback_topic_evidence_excludes_dossier_claims() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let direct = record(&state, "Constraint", "Harness fallback constraint");
+    graph::link_code(
+        &state,
+        &direct,
+        "constrains",
+        &graph::CodeSelector::Symbol(symbol.into()),
+        "test-human",
+    )
+    .unwrap();
+    let other = record(&state, "Constraint", "Harness fallback guidance");
+
+    let response = linked_context(&state, "harness fallback", &["src/harness.rs"]);
+    let evidence = evidence_section(&response.context);
+    assert!(
+        evidence.starts_with("\nTopic evidence (fallback;"),
+        "{evidence}"
+    );
+    assert!(
+        evidence.contains(&format!(
+            "({other})\nhasDescription: Established Harness fallback guidance\n"
+        )),
+        "{evidence}"
+    );
+    assert!(!evidence.contains(&direct), "{evidence}");
+    assert!(response.files[0]
+        .dossier
+        .contains("hasDescription: Established Harness fallback constraint\n"));
+
+    // Without files nothing is excluded, so the fallback carries both.
+    let bare = linked_context(&state, "harness fallback", &[]);
+    let bare_evidence = evidence_section(&bare.context);
+    assert!(bare_evidence.contains(&direct) && bare_evidence.contains(&other));
 }
 
 #[tokio::test]
