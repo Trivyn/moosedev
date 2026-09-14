@@ -161,9 +161,12 @@ hashes change.
    knowledge is addressed by linking at capture or seeding (Lesson 6f238b1f).
    The probe's before cells still run on 1d31f454 to show whether models
    search when the push misses and how the native arm uses a large notes file.
-4. **Native no-notes floor arm.** Open. It adds 6 cells and a new guidance key,
-   and shows how much a well-kept notes file contributes. The alternative is
-   an offline calibration on single later episodes started from the reference.
+4. **Native no-notes floor arm.** *Decided (maintainer, 2026-09-13):* add a
+   native OpenCode arm with no notes file beside the native arm with
+   `PROJECT_NOTES.md` and the harness arm. It adds 6 cells and a new guidance
+   condition, and shows how much a well-kept notes file contributes, so the
+   harness is compared against both native floors. The long-horizon mode defines
+   the condition when it is built.
 5. **Block order and model roles.** *Recommended:* Qwen3.8-27B first. Qwen is
    the model of record: primary outcomes and conclusions rest on its cells,
    and its first harness cell is the pre-block harness-bug check. The point of
