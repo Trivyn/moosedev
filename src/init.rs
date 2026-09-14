@@ -1011,10 +1011,11 @@ fn set_executable(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The two `.gitignore` lines that keep the derived RocksDB/vector cache out of
-/// git while committing the canonical project-graph text, derived from the data
-/// dir. `None` for an absolute data dir (no single repo-relative rule applies).
-fn gitignore_lines(data_dir: &str) -> Option<[String; 2]> {
+/// The `.gitignore` lines that keep the derived RocksDB/vector cache out of git
+/// while committing the canonical project-graph text and the harness's
+/// user-editable standing guidance, derived from the data dir. `None` for an
+/// absolute data dir (no single repo-relative rule applies).
+fn gitignore_lines(data_dir: &str) -> Option<[String; 3]> {
     if Path::new(data_dir).is_absolute() {
         return None;
     }
@@ -1022,7 +1023,11 @@ fn gitignore_lines(data_dir: &str) -> Option<[String; 2]> {
     if dir.is_empty() {
         return None;
     }
-    Some([format!("/{dir}/*"), format!("!/{dir}/kg.nq")])
+    Some([
+        format!("/{dir}/*"),
+        format!("!/{dir}/kg.nq"),
+        format!("!/{dir}/GUIDANCE.md"),
+    ])
 }
 
 /// Append the cache-ignore lines to `.gitignore` iff missing (idempotent).
@@ -2523,9 +2528,40 @@ env = { MOOSEDEV_DATA_DIR = \"real-store\" }
     fn gitignore_lines_only_for_relative_dirs() {
         assert_eq!(
             gitignore_lines(".moosedev"),
-            Some(["/.moosedev/*".to_string(), "!/.moosedev/kg.nq".to_string()])
+            Some([
+                "/.moosedev/*".to_string(),
+                "!/.moosedev/kg.nq".to_string(),
+                "!/.moosedev/GUIDANCE.md".to_string(),
+            ])
         );
         assert_eq!(gitignore_lines("/abs/store"), None);
+    }
+
+    #[test]
+    fn standing_guidance_stays_trackable_and_the_cache_stays_ignored() {
+        let target = temp_project("guidance-trackable");
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&target)
+            .status()
+            .unwrap();
+        init_project(&opts(&target)).unwrap();
+        // Idempotent: a second run adds nothing.
+        init_project(&opts(&target)).unwrap();
+        let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
+        assert_eq!(gitignore.matches("!/.moosedev/GUIDANCE.md").count(), 1);
+        let ignored = |path: &str| {
+            std::process::Command::new("git")
+                .args(["check-ignore", "-q", path])
+                .current_dir(&target)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(!ignored(".moosedev/GUIDANCE.md"));
+        assert!(!ignored(".moosedev/kg.nq"));
+        assert!(ignored(".moosedev/instance-vectors.db"));
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]

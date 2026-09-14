@@ -105,6 +105,103 @@ async fn first_edit_guard_and_deny_gate_precede_any_write() {
 }
 
 #[tokio::test]
+async fn standing_guidance_is_snapshotted_capped_and_replayed() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let _env = Env::configure(&fixture.url);
+    let create = |objective: &str| {
+        Runner::create(fixture.root.clone(), fixture.url.clone(), objective.into())
+    };
+    let loaded = |runner: &Runner| {
+        runner
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "guidance_loaded")
+            .map(|event| event.detail.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let absent = create("Repair code.txt").await.unwrap();
+    let standing = absent.task.standing_guidance.clone().unwrap();
+    assert_eq!(standing.source, "default");
+    assert_eq!(
+        standing.text,
+        moosedev::harness::runner::DEFAULT_GUIDANCE.trim()
+    );
+    assert!(
+        loaded(&absent)[0].starts_with("default, "),
+        "{:?}",
+        loaded(&absent)
+    );
+    // One harness owns a workspace at a time.
+    drop(absent);
+
+    let guidance = fixture.root.join(".moosedev/GUIDANCE.md");
+    std::fs::write(&guidance, "Prefer small functions.\n").unwrap();
+    let present = create("Repair code.txt").await.unwrap();
+    let standing = present.task.standing_guidance.clone().unwrap();
+    assert_eq!(
+        (standing.source.as_str(), standing.text.as_str()),
+        ("file", "Prefer small functions.")
+    );
+    assert!(loaded(&present)[0].contains(&standing.sha256));
+
+    // Resume replays the snapshot even when the file changes afterwards.
+    std::fs::write(&guidance, "Something else entirely.\n").unwrap();
+    let id = present.task.id.clone();
+    drop(present);
+    let resumed = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(
+        resumed.task.standing_guidance.as_ref().unwrap().text,
+        "Prefer small functions."
+    );
+    drop(resumed);
+
+    std::fs::write(&guidance, "   \n").unwrap();
+    let empty = create("Repair code.txt").await.unwrap();
+    assert_eq!(
+        empty.task.standing_guidance.as_ref().unwrap().source,
+        "empty"
+    );
+    assert!(empty
+        .task
+        .standing_guidance
+        .as_ref()
+        .unwrap()
+        .text
+        .is_empty());
+
+    drop(empty);
+    std::fs::write(&guidance, "x".repeat(4097)).unwrap();
+    let Err(error) = create("Repair code.txt").await else {
+        panic!("an over-cap guidance file fails task creation");
+    };
+    let error = error.to_string();
+    assert!(error.contains("4096 bytes"), "{error}");
+
+    // A journal written before the guidance file resumes with the default.
+    std::fs::remove_file(&guidance).unwrap();
+    let old = create("Repair code.txt").await.unwrap();
+    let id = old.task.id.clone();
+    drop(old);
+    let journal = fixture
+        .root
+        .join(format!(".moosedev/harness/tasks/{id}.json"));
+    let mut value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&journal).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("standing_guidance");
+    value["intent_events"] = json!([]);
+    std::fs::write(&journal, serde_json::to_string(&value).unwrap()).unwrap();
+    let legacy = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(
+        legacy.task.standing_guidance.as_ref().unwrap().source,
+        "default"
+    );
+    assert_eq!(loaded(&legacy).len(), 1);
+}
+
+#[tokio::test]
 async fn frozen_capture_request_survives_restart_and_cancel() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;

@@ -144,6 +144,20 @@ pub struct Task {
     pub cleanup_pending: bool,
     /// Verbatim recent source for generation; historical evidence lives in events.
     pub(super) source: BTreeMap<String, Option<String>>,
+    /// The standing guidance this task was created with, replayed verbatim on
+    /// resume. `None` only in journals written before the guidance file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_guidance: Option<StandingGuidance>,
+}
+
+/// Standing guidance for the coding model: the project's `.moosedev/GUIDANCE.md`,
+/// or the compiled default when the file is absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingGuidance {
+    /// `file`, `empty` (the file exists but says nothing) or `default`.
+    pub source: String,
+    pub sha256: String,
+    pub text: String,
 }
 
 pub(super) fn fingerprint(value: &Option<String>) -> Option<String> {

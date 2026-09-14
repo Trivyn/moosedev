@@ -18,6 +18,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::harness::digest::sha256_hex;
+
 mod actions;
 mod approval;
 mod capture;
@@ -41,7 +43,9 @@ pub use recovery::{RecoveryStatus, RepairState};
 pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
 pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
-pub use task::{CheckResult, Event, Mode, PendingEdit, Phase, Plan, ReviewItem, Task};
+pub use task::{
+    CheckResult, Event, Mode, PendingEdit, Phase, Plan, ReviewItem, StandingGuidance, Task,
+};
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;
 
@@ -69,6 +73,53 @@ pub struct Runner {
     last_saved: Mutex<Option<[u8; 32]>>,
 }
 
+/// Compiled standing guidance used when a project has no `.moosedev/GUIDANCE.md`.
+pub const DEFAULT_GUIDANCE: &str = include_str!("../../templates/harness/GUIDANCE.md");
+/// Standing guidance is short by design; a larger file fails task creation.
+pub const MAX_GUIDANCE_BYTES: usize = 4096;
+
+fn guidance(source: &str, text: &str) -> StandingGuidance {
+    StandingGuidance {
+        source: source.into(),
+        sha256: sha256_hex(text),
+        text: text.into(),
+    }
+}
+
+/// Read the project's standing guidance: `.moosedev/GUIDANCE.md` (not a symlink,
+/// UTF-8, at most [`MAX_GUIDANCE_BYTES`]), empty when it holds only whitespace,
+/// or the compiled default when it does not exist.
+pub fn load_standing_guidance(root: &Path) -> Result<StandingGuidance> {
+    let path = root.join(".moosedev/GUIDANCE.md");
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(guidance("default", DEFAULT_GUIDANCE.trim()));
+        }
+        Err(error) => return Err(error).context("read .moosedev/GUIDANCE.md"),
+    };
+    anyhow::ensure!(
+        meta.is_file() && !meta.file_type().is_symlink(),
+        ".moosedev/GUIDANCE.md must be a regular file"
+    );
+    anyhow::ensure!(
+        meta.len() as usize <= MAX_GUIDANCE_BYTES,
+        ".moosedev/GUIDANCE.md is {} bytes; standing guidance must fit {MAX_GUIDANCE_BYTES} bytes",
+        meta.len()
+    );
+    let text =
+        String::from_utf8(std::fs::read(&path)?).context(".moosedev/GUIDANCE.md must be UTF-8")?;
+    anyhow::ensure!(
+        text.len() <= MAX_GUIDANCE_BYTES,
+        ".moosedev/GUIDANCE.md must fit {MAX_GUIDANCE_BYTES} bytes"
+    );
+    Ok(if text.trim().is_empty() {
+        guidance("empty", "")
+    } else {
+        guidance("file", text.trim())
+    })
+}
+
 pub fn default_daemon_url(root: &Path) -> Result<String> {
     let address = std::fs::read_to_string(root.join(".moosedev/http.addr"))
         .context("start the project daemon with moosedev --serve before using the harness")?;
@@ -90,6 +141,7 @@ impl Runner {
         let root = workspace.root().to_path_buf();
         let id = uuid::Uuid::new_v4().to_string();
         let (journal, lock) = Self::storage(&root, &id)?;
+        let standing_guidance = load_standing_guidance(&root)?;
         let task = Task {
             id,
             objective,
@@ -142,6 +194,7 @@ impl Runner {
             completion_pending: false,
             cleanup_pending: false,
             source: BTreeMap::new(),
+            standing_guidance: Some(standing_guidance),
         };
         let mut runner = Self {
             task,
@@ -161,6 +214,7 @@ impl Runner {
         let context = runner.refresh(&[]).await?;
         Self::validate_daemon_contracts(&context)?;
         runner.event("Task created in Plan mode; current project knowledge retrieved.");
+        runner.guidance_loaded();
         runner.persist()?;
         Ok(runner)
     }
@@ -185,7 +239,8 @@ impl Runner {
             "task identity or project mismatch"
         );
         task.token_usage.attach(&journal);
-        Ok(Self {
+        let missing_guidance = task.standing_guidance.is_none();
+        let mut runner = Self {
             task,
             workspace,
             http: Self::client(&daemon_url)?,
@@ -199,7 +254,29 @@ impl Runner {
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
-        })
+        };
+        if missing_guidance {
+            // A journal from before the guidance file gets the compiled default.
+            runner.task.standing_guidance = Some(guidance("default", DEFAULT_GUIDANCE.trim()));
+            runner.guidance_loaded();
+            runner.persist()?;
+        }
+        Ok(runner)
+    }
+
+    /// Journal which standing guidance the task carries.
+    fn guidance_loaded(&mut self) {
+        if let Some(standing) = self.task.standing_guidance.clone() {
+            self.intent_event(
+                "guidance_loaded",
+                &format!(
+                    "{}, {} bytes, sha256 {}",
+                    standing.source,
+                    standing.text.len(),
+                    standing.sha256
+                ),
+            );
+        }
     }
 
     pub fn configure(&mut self, config: LlmConfig, progress: Option<ProgressSender>) {
