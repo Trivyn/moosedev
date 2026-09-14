@@ -329,7 +329,7 @@ def gate(*, scenario_id, binary_manifest, parent_preflight, output, plans=(), de
     parent = json.loads(Path(parent_preflight).read_text())
     indexer = verify_indexer(parent["indexer"])
     assets = parent["assets"]
-    directory = Path(output)
+    directory = Path(output).absolute()
     directory.mkdir(parents=True)
     (directory / "responses").mkdir()
     workspace = directory / "workspace"
