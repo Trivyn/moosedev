@@ -47,6 +47,18 @@ def main(argv=None):
     command.add_argument("--approval", type=Path, required=True,
                          help="where the human field-check approval will be written; it need not exist yet")
     command.add_argument("--output", type=Path, required=True)
+    command = sub.add_parser("crowding-gate", help="seed a probe package with the frozen daemon and measure today's push; no model calls")
+    command.add_argument("--scenario", default="late_fees_crowded")
+    command.add_argument("--deciding-fact", default="fees-np7")
+    command.add_argument("--binary-manifest", type=Path, required=True)
+    command.add_argument("--parent-preflight", type=Path, required=True, help="ready preflight supplying the indexer and assets")
+    command.add_argument("--plans", type=Path, help="JSON list of {summary, files} plans whose topics are measured")
+    command.add_argument("--output", type=Path, required=True, help="new directory for the gate evidence")
+    command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
+    command.add_argument("runs", type=Path, nargs="+")
+    command.add_argument("--scenario", default="late_fees_crowded")
+    command.add_argument("--deciding-fact", default="fees-np7")
+    command.add_argument("--output", type=Path, required=True)
     command = sub.add_parser("build", help="build/freeze only this checkout's release binaries")
     command.add_argument("--indexer-manifest", type=Path)
     command = sub.add_parser("validate", help="execute reference and negative fixtures; no model calls")
@@ -86,6 +98,19 @@ def main(argv=None):
     elif args.command == "init-field-check":
         result = field_check_config(json.loads(args.parent_preflight.read_text()), args.binary_manifest,
                                     args.study_id, args.models, args.scenarios, args.approval)
+        write_new(args.output, result)
+    elif args.command == "crowding-gate":
+        from .crowding import gate
+        plans = json.loads(args.plans.read_text()) if args.plans else []
+        result = gate(scenario_id=args.scenario, binary_manifest=args.binary_manifest,
+                      parent_preflight=args.parent_preflight, output=args.output, plans=plans,
+                      deciding_fact=args.deciding_fact)
+        print(json.dumps({"v1": result["v1"], "v2": result["v2"], "ranks": result["ranks"],
+                          "evidence": str(args.output / "gate.json")}))
+        return 0
+    elif args.command == "crowding-report":
+        from .crowding import report as crowding_report
+        result = crowding_report(args.runs, scenario_id=args.scenario, deciding_fact=args.deciding_fact)
         write_new(args.output, result)
     elif args.command == "build":
         build = build_and_freeze(indexer_manifest=args.indexer_manifest)
