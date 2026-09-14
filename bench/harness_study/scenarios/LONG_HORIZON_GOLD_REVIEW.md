@@ -184,10 +184,14 @@ hashes change.
    reported separately, and a failure there is floor evidence, not a verdict
    on the harness. E4B stays at most an optional single-episode probe outside
    the comparison.
-7. **Further floor bracketing.** Open. If Qwen succeeds and gemma-4-26b-a4b
-   fails, the floor lies between 4B-active and 27B-dense. A third model would
-   narrow it at the cost of 6 more cells: Qwen3.5-35B-A3B is on disk; a dense
-   8 to 14B model would need a download.
+7. **Further floor bracketing.** *Decided (maintainer, 2026-09-13):* add
+   Qwen3.5-9B (dense 9B, 4-bit MLX) as a floor-bracketing model. It sits between
+   gemma-4-e4b (dense 4B, failed the retry-ledger harness task) and the models of
+   26B or more that passed it (gemma-4-26b-a4b, Qwen3.8-27B, gemma-4-31b-it), in
+   the same family as the model of record. It joins the model table once the
+   download completes and its weights are fingerprinted; its first run is a
+   retry-ledger field check under its own approved design, before any decision
+   to add it to the long-horizon comparison.
 
 8. **Thinking mode.** *Decided (maintainer, 2026-09-13):* pin the harness arm to reasoning off for
    both models (`MOOSEDEV_HARNESS_RESPONSE_POLICY=reasoning-off`) and disclose
