@@ -3,8 +3,8 @@
 #
 # Reports the touched file to the daemon's policy engine; when the verdict is
 # Inject, adds the returned dossier markdown as additionalContext — the same
-# bytes the editor hover shows, by construction. Zero policy lives here; any
-# failure fails OPEN (exit 0, no output).
+# exhaustive dossier the MCP get_entity_dossier tool renders, by construction.
+# Zero policy lives here; any failure fails OPEN (exit 0, no output).
 set -uo pipefail
 
 INPUT=$(cat 2>/dev/null) || exit 0
@@ -41,15 +41,21 @@ if [ -f "$STAMP" ]; then
 fi
 
 BODY=$(jq -cn --arg file "$REL" \
-  '{host: "claude-code", kind: "entity_touched", file: $file}')
+  '{host: "claude-code", kind: "entity_touched", file: $file, max_bytes: 5800}')
 VERDICT=$(curl -sS --max-time 5 -H 'Content-Type: application/json' \
   -d "$BODY" "http://$ADDR/api/v1/policy" 2>/dev/null) || exit 0
 
 DECISION=$(jq -r '.decision // empty' <<<"$VERDICT" 2>/dev/null) || exit 0
 [ "$DECISION" = "inject" ] || exit 0
-# Cap the payload: keep the entity-exact head, drop the long component tail.
-DOSSIER=$(jq -r '.dossier_markdown // empty' <<<"$VERDICT" | head -c 6000)
+# The engine bounds the dossier (max_bytes above) at entity-section boundaries
+# but never drops direct claims, so it can still run long. The hook's hard cap
+# is the last resort: cut at a line boundary and say so.
+DOSSIER=$(jq -r '.dossier_markdown // empty' <<<"$VERDICT" 2>/dev/null) || exit 0
 [ -n "$DOSSIER" ] || exit 0
+if [ "$(printf '%s' "$DOSSIER" | wc -c | tr -d ' ')" -gt 6000 ]; then
+  DOSSIER="$(printf '%s' "$DOSSIER" | head -c 5920 | sed '$d')
+[truncated by hook cap; call get_entity_dossier for the full dossier]"
+fi
 
 printf '%s\n' "$NOW" >"$STAMP"
 jq -n --arg context "$DOSSIER" '{

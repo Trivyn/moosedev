@@ -353,6 +353,7 @@ fn push_injects_hover_bytes_and_fires() {
         file: FILE.to_string(),
         line: Some(1),
         col: Some(1),
+        max_bytes: None,
     };
     let decision =
         evaluate_and_fire(&f.state, &f.repo_root, &event, "test-host").expect("evaluate");
@@ -396,6 +397,7 @@ fn file_touch_without_records_is_silent() {
         file: FILE.to_string(),
         line: None,
         col: None,
+        max_bytes: None,
     };
     let decision =
         evaluate_and_fire(&f.state, &f.repo_root, &event, "test-host").expect("evaluate");
@@ -415,6 +417,7 @@ fn file_touch_pushes_all_knowledge_bearing_entities() {
         file: FILE.to_string(),
         line: None,
         col: None,
+        max_bytes: None,
     };
     let decision = evaluate(&f.state, &f.repo_root, &event).expect("evaluate");
     let PolicyDecision::Inject {
@@ -446,6 +449,7 @@ fn file_touch_shows_a_shared_record_claim_once() {
         file: FILE.to_string(),
         line: None,
         col: None,
+        max_bytes: None,
     };
     let decision = evaluate(&f.state, &f.repo_root, &event).expect("evaluate");
     let PolicyDecision::Inject {
@@ -467,6 +471,102 @@ fn file_touch_shows_a_shared_record_claim_once() {
     assert!(
         dossier_markdown.contains("\nclaim shown above for `alpha`\n"),
         "{dossier_markdown}"
+    );
+}
+
+#[test]
+fn file_touch_within_max_bytes_shortens_later_sections_to_protected_knowledge() {
+    let f = setup("policy-max-bytes");
+    let component = graph::load_components(&f.state).unwrap()[0]
+        .iri
+        .clone()
+        .expect("component IRI");
+    // alpha carries the component's records directly, so beta's section is the
+    // first to list them as component context.
+    graph::relate(&f.state, &f.constraint, "constrains", &f.alpha).expect("constrains alpha");
+    let rule = record(&f.state, "Constraint", "foo component rule", "accepted");
+    let decision = record(
+        &f.state,
+        "ArchitecturalDecision",
+        "foo component decision",
+        "accepted",
+    );
+    for iri in [&rule, &decision] {
+        graph::relate(&f.state, iri, "concerns", &component).expect("concerns component");
+        graph::relate(&f.state, iri, "concerns", &f.alpha).expect("concerns alpha");
+    }
+    let lesson = record(&f.state, "Lesson", "beta gotcha", "accepted");
+    insert_quad(
+        &f.state,
+        &lesson,
+        &f.state.capture.description,
+        Literal::new_simple_literal("beta caches its input.").into(),
+    );
+    graph::relate(&f.state, &lesson, "concerns", &f.beta).expect("concerns beta");
+
+    let push = |max_bytes: Option<usize>| {
+        let event = PolicyEvent::EntityTouched {
+            file: FILE.to_string(),
+            line: None,
+            col: None,
+            max_bytes,
+        };
+        match evaluate(&f.state, &f.repo_root, &event).expect("evaluate") {
+            PolicyDecision::Inject {
+                dossier_markdown,
+                entities,
+                records,
+            } => (dossier_markdown, entities, records),
+            other => panic!("expected an inject, got {other:?}"),
+        }
+    };
+
+    let (whole, whole_entities, whole_records) = push(None);
+    assert_eq!(
+        push(Some(1_000_000)).0,
+        whole,
+        "a bound that fits changes nothing"
+    );
+    assert_eq!(
+        whole
+            .matches("- [ArchitecturalDecision] foo component decision")
+            .count(),
+        2,
+        "{whole}"
+    );
+
+    let (bounded, entities, records) = push(Some(1));
+    assert_eq!(entities, whole_entities, "every entity still renders");
+    assert_eq!(records.len(), whole_records.len());
+    // beta keeps its direct record, its claim and the component's accepted
+    // Constraint title; only the other component title is left out.
+    assert!(
+        bounded.contains("- [Lesson] beta gotcha - accepted"),
+        "{bounded}"
+    );
+    assert!(
+        bounded.contains("\nhasDescription: beta caches its input.\n"),
+        "{bounded}"
+    );
+    assert_eq!(
+        bounded.matches("- [Constraint] foo component rule").count(),
+        2,
+        "{bounded}"
+    );
+    assert_eq!(
+        bounded
+            .matches("- [ArchitecturalDecision] foo component decision")
+            .count(),
+        1,
+        "{bounded}"
+    );
+    assert!(
+        bounded.contains("\n1 further record concerns component foo (ArchitecturalDecision: 1), not necessarily this code; search project knowledge for records about foo\n"),
+        "{bounded}"
+    );
+    assert!(
+        bounded.ends_with("\n1 entity section shortened to direct records and accepted Constraints by the host's 1-byte bound: `beta`; retrieve it in full with get_entity_dossier\n"),
+        "{bounded}"
     );
 }
 

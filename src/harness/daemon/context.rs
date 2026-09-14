@@ -61,10 +61,12 @@ pub fn context_snapshot(
         let push = policy::evaluate(
             state,
             &root,
+            // No host bound: required context fails rather than truncating.
             &PolicyEvent::EntityTouched {
                 file: file.clone(),
                 line: None,
                 col: None,
+                max_bytes: None,
             },
         )?;
         let dossier = match push {

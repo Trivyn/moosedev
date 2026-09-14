@@ -1710,6 +1710,22 @@ async fn policy_endpoint_gates_pushes_and_fires() {
     assert_eq!(lines[1]["verb"], "push");
     assert_eq!(lines[0]["host"], "test-http");
 
+    // A host byte bound reaches the engine, which always keeps the first
+    // entity section whole.
+    let bounded = server
+        .post("/api/v1/policy")
+        .json(&json!({
+            "host": "test-http",
+            "kind": "entity_touched",
+            "file": "src/foo/a.rs",
+            "max_bytes": 1,
+        }))
+        .await;
+    bounded.assert_status_ok();
+    assert_eq!(
+        bounded.json::<Value>()["dossier_markdown"],
+        injected["dossier_markdown"]
+    );
 }
 
 #[tokio::test]

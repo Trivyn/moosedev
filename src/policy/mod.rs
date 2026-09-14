@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, first_literal, get_entity_dossier, local_name,
-    render_dossiers, resolve_target_entity, AppState, CodeTerms, DossierTarget, RecordSummary,
+    render_dossiers_within, resolve_target_entity, AppState, CodeTerms, DossierTarget,
+    RecordSummary,
 };
 
 use fires::{append_fire_best_effort, FireEvent};
@@ -40,6 +41,10 @@ pub enum PolicyEvent {
         line: Option<u32>,
         #[serde(default)]
         col: Option<u32>,
+        /// The host's byte bound for the injected markdown: entity sections past
+        /// it keep only what a bound never omits (see `render_dossiers_within`).
+        #[serde(default)]
+        max_bytes: Option<usize>,
     },
     /// The agent proposed an edit — the GATE verb's input. Hosts rarely have a
     /// cursor at hook time: `anchor` carries the edit's own text (e.g. the
@@ -115,9 +120,10 @@ pub enum PolicyDecision {
     /// Nothing to do — silence is the default (no fire is logged).
     Allow,
     /// PUSH: inject this dossier markdown. The bytes are the exhaustive render
-    /// (`get_entity_dossier` + `render_dossiers`) the MCP `get_entity_dossier`
-    /// tool returns for one entity, so push and that tool agree by construction.
-    /// Editor hover renders its own compact view.
+    /// (`get_entity_dossier` + `render_dossiers_within`) the MCP
+    /// `get_entity_dossier` tool returns for one entity, so push and that tool
+    /// agree by construction; a host byte bound only shortens later entity
+    /// sections of a file push. Editor hover renders its own compact view.
     Inject {
         dossier_markdown: String,
         entities: Vec<String>,
@@ -146,7 +152,12 @@ pub fn evaluate(
     event: &PolicyEvent,
 ) -> anyhow::Result<PolicyDecision> {
     match event {
-        PolicyEvent::EntityTouched { file, line, col } => push_decision(state, file, *line, *col),
+        PolicyEvent::EntityTouched {
+            file,
+            line,
+            col,
+            max_bytes,
+        } => push_decision(state, file, *line, *col, *max_bytes),
         PolicyEvent::EditProposed {
             file,
             line,
@@ -223,6 +234,7 @@ fn push_decision(
     file: &str,
     line: Option<u32>,
     col: Option<u32>,
+    max_bytes: Option<usize>,
 ) -> anyhow::Result<PolicyDecision> {
     let targets: Vec<DossierTarget> = match (line, col) {
         (Some(line), Some(col)) => vec![DossierTarget::Position {
@@ -246,7 +258,7 @@ fn push_decision(
         return Ok(PolicyDecision::Allow);
     }
     Ok(PolicyDecision::Inject {
-        dossier_markdown: render_dossiers(&dossiers),
+        dossier_markdown: render_dossiers_within(&dossiers, max_bytes),
         entities: dossiers.iter().map(|d| d.entity_iri.clone()).collect(),
         records: dossiers
             .iter()

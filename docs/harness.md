@@ -277,6 +277,13 @@ intent contract 2.
   that behaviour. `search(query)` asks the daemon for the query's accepted
   records (an evidence-only context request: complete claims, no inventory or
   dossiers) and returns them before repository matches (`knowledge_search`).
+- Dossiers. A file dossier lists each knowledge-bearing entity's direct records
+  with their complete claims, rendered like topic evidence (superseded records
+  show only their header line), and its component's records by title: accepted
+  Constraints always, other kinds up to twelve, then a count. Each claim and
+  each component list appears once per file dossier. The harness requests
+  dossiers without a byte bound; context that exceeds the prompt budget fails
+  instead of being truncated.
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). The first no-op edit runs the
