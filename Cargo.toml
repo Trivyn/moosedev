@@ -143,3 +143,8 @@ sparesults   = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="tri
 spareval     = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9.1" }
 spargebra    = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9.1" }
 sparopt      = { git = "https://github.com/Trivyn/oxigraph-trivyn.git", tag="trivyn-0.5.9.1" }
+
+# Test and dev builds optimise dependencies (moose, oxigraph, growl, candle) while this
+# crate stays a debug build: store bootstrap, reasoning and embedding dominate test time.
+[profile.dev.package."*"]
+opt-level = 3
