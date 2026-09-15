@@ -7,6 +7,8 @@ pub enum CompletionError {
     UsageReportingUnsupported,
     ReasoningOnly,
     MissingContent,
+    /// The provider refused `tool_choice: "required"` (or `parallel_tool_calls`).
+    ToolChoiceUnsupported(String),
     Incomplete(String),
     InvalidResponse(String),
     /// The connection failed or the provider went silent before a usable
@@ -23,6 +25,9 @@ impl std::fmt::Display for CompletionError {
             Self::StructuredOutputUnsupported => f.write_str("LLM provider does not support required JSON-schema output"),
             Self::ReasoningOnly => f.write_str("LLM completed with reasoning only and no executable message content; check the model response policy"),
             Self::MissingContent => f.write_str("LLM response missing message content"),
+            Self::ToolChoiceUnsupported(message) => {
+                write!(f, "LLM provider rejected a required tool choice: {message}")
+            }
             Self::Incomplete(message) | Self::InvalidResponse(message) | Self::Transport(message) => {
                 f.write_str(message)
             }
@@ -98,6 +103,176 @@ pub(super) fn complete_content(
     Ok(content.unwrap())
 }
 
+/// One function call a model requested; `arguments` is the raw JSON text it sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    pub id: Option<String>,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// A finished tool-contract response: prose content and every tool call, in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ToolCompletion {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    /// The provider message that made this request fall back from
+    /// `tool_choice: "required"` to `"auto"`, when it did.
+    pub tool_choice_fallback: Option<String>,
+}
+
+/// Finish reasons that end a tool-contract response successfully.
+fn tool_finish(reason: &str) -> bool {
+    matches!(reason, "stop" | "tool_calls" | "function_call")
+}
+
+fn tool_arguments(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// A non-streaming tool-contract response. Content may be empty; a response with
+/// neither content nor calls is returned empty (the caller repairs it), unless it
+/// carried only reasoning.
+pub(super) fn complete_tool_message(
+    value: &serde_json::Value,
+) -> Result<ToolCompletion, CompletionError> {
+    if let Some(error) = value.get("error") {
+        return Err(CompletionError::InvalidResponse(format!(
+            "LLM response error: {error}"
+        )));
+    }
+    let choice = &value["choices"][0];
+    let message = &choice["message"];
+    if !choice["finish_reason"].as_str().is_some_and(tool_finish) {
+        return Err(CompletionError::Incomplete(format!(
+            "LLM completion ended without successful stop: {}",
+            choice["finish_reason"]
+        )));
+    }
+    if has_payload(&message["refusal"]) {
+        return Err(CompletionError::InvalidResponse(
+            "LLM returned a refusal instead of content".into(),
+        ));
+    }
+    let content = message["content"].as_str().unwrap_or("").to_owned();
+    let tool_calls: Vec<ToolCall> = message["tool_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| ToolCall {
+            id: item["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(Into::into),
+            name: item["function"]["name"].as_str().unwrap_or("").to_owned(),
+            arguments: tool_arguments(&item["function"]["arguments"]),
+        })
+        .collect();
+    if content.trim().is_empty()
+        && tool_calls.is_empty()
+        && (has_payload(&message["reasoning_content"]) || has_payload(&message["reasoning"]))
+    {
+        return Err(CompletionError::ReasoningOnly);
+    }
+    Ok(ToolCompletion {
+        content,
+        tool_calls,
+        tool_choice_fallback: None,
+    })
+}
+
+/// A tool call some models write as text instead of a native call, e.g.
+/// `{"type":"function","name":"read","parameters":{...}}`. The whole text (after
+/// stripping a code fence) or its first balanced JSON object is tried. Accepted
+/// shapes: `{name, parameters}`, `{name, arguments}` (an object or a JSON-encoded
+/// string) and `{function: {name, arguments}}`. The name is not checked here.
+pub fn tool_call_from_text(text: &str) -> Option<ToolCall> {
+    let text = strip_code_fence(text.trim());
+    [Some(text), first_json_object(text)]
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| {
+            serde_json::from_str::<serde_json::Value>(candidate)
+                .ok()
+                .and_then(|value| call_from_value(&value))
+        })
+}
+
+fn strip_code_fence(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("```") else {
+        return text;
+    };
+    let body = rest.split_once('\n').map_or("", |(_, body)| body);
+    body.trim_end().strip_suffix("```").unwrap_or(body).trim()
+}
+
+fn first_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (offset, byte) in text.as_bytes()[start..].iter().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..=start + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn call_from_value(value: &serde_json::Value) -> Option<ToolCall> {
+    let object = value.as_object()?;
+    let (name, arguments) = match object.get("function").and_then(|f| f.as_object()) {
+        Some(function) => (
+            function.get("name")?,
+            function
+                .get("arguments")
+                .or_else(|| function.get("parameters"))?,
+        ),
+        None => (
+            object.get("name")?,
+            object
+                .get("parameters")
+                .or_else(|| object.get("arguments"))?,
+        ),
+    };
+    let name = name.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments = match arguments {
+        serde_json::Value::Object(_) => arguments.to_string(),
+        serde_json::Value::String(text) => {
+            let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+            parsed.is_object().then(|| parsed.to_string())?
+        }
+        _ => return None,
+    };
+    Some(ToolCall {
+        id: None,
+        name: name.to_owned(),
+        arguments,
+    })
+}
+
 pub(super) const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
 
 /// Parse SSE on byte boundaries, including CRLF and UTF-8 split across chunks.
@@ -111,9 +286,49 @@ pub(super) struct CompletionStream {
     pub(super) done: bool,
     pub(super) usage: Option<serde_json::Value>,
     saw_reasoning: bool,
+    /// Tool-contract streams accumulate `delta.tool_calls` by index instead of refusing them.
+    tools: bool,
+    tool_calls: std::collections::BTreeMap<u64, ToolCall>,
 }
 
 impl CompletionStream {
+    pub(super) fn for_tools() -> Self {
+        Self {
+            tools: true,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn into_tool_completion(self) -> ToolCompletion {
+        ToolCompletion {
+            content: self.content,
+            tool_calls: self.tool_calls.into_values().collect(),
+            tool_choice_fallback: None,
+        }
+    }
+
+    fn accumulate_tool_calls(&mut self, deltas: &serde_json::Value) {
+        for (position, delta) in deltas.as_array().into_iter().flatten().enumerate() {
+            let index = delta["index"].as_u64().unwrap_or(position as u64);
+            let call = self.tool_calls.entry(index).or_insert_with(|| ToolCall {
+                id: None,
+                name: String::new(),
+                arguments: String::new(),
+            });
+            if let Some(id) = delta["id"].as_str().filter(|id| !id.is_empty()) {
+                call.id = Some(id.to_owned());
+            }
+            if let Some(name) = delta["function"]["name"].as_str() {
+                call.name.push_str(name);
+            }
+            match &delta["function"]["arguments"] {
+                serde_json::Value::String(piece) => call.arguments.push_str(piece),
+                serde_json::Value::Null => {}
+                other => call.arguments = other.to_string(),
+            }
+        }
+    }
+
     pub(super) fn feed(
         &mut self,
         bytes: &[u8],
@@ -176,7 +391,14 @@ impl CompletionStream {
             }
             self.saw_reasoning |= has_payload(&choice["delta"]["reasoning_content"])
                 || has_payload(&choice["delta"]["reasoning"]);
-            if has_payload(&choice["delta"]["tool_calls"])
+            if self.tools {
+                if has_payload(&choice["delta"]["refusal"]) {
+                    return Err("LLM stream returned a refusal instead of content".into());
+                }
+                if has_payload(&choice["delta"]["tool_calls"]) {
+                    self.accumulate_tool_calls(&choice["delta"]["tool_calls"]);
+                }
+            } else if has_payload(&choice["delta"]["tool_calls"])
                 || has_payload(&choice["delta"]["refusal"])
             {
                 return Err("LLM stream returned tools or refusal instead of content".into());
@@ -193,7 +415,7 @@ impl CompletionStream {
                 }
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
-                if reason != "stop" {
+                if reason != "stop" && !(self.tools && tool_finish(reason)) {
                     return Err(CompletionError::Incomplete(format!(
                         "LLM stream ended with {reason}"
                     )));
@@ -210,12 +432,15 @@ impl CompletionStream {
                 "LLM stream interrupted before completion".into(),
             ));
         }
-        if self.content.trim().is_empty() {
-            return Err(if self.saw_reasoning {
-                CompletionError::ReasoningOnly
-            } else {
-                CompletionError::MissingContent
-            });
+        if self.content.trim().is_empty() && self.tool_calls.is_empty() {
+            if self.saw_reasoning {
+                return Err(CompletionError::ReasoningOnly);
+            }
+            // An empty tool-contract response is returned as such: the caller
+            // repairs it rather than re-sending the identical request.
+            if !self.tools {
+                return Err(CompletionError::MissingContent);
+            }
         }
         Ok(())
     }

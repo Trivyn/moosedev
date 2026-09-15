@@ -1,0 +1,8 @@
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1789455673, "model": "llama-3.3-70b-instruct", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "logprobs": null, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1789455673, "model": "llama-3.3-70b-instruct", "choices": [{"index": 0, "delta": {}, "logprobs": null, "finish_reason": "tool_calls"}]}
+
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "choices": [], "usage": {"prompt_tokens": 5409, "completion_tokens": 41, "total_tokens": 5450}}
+
+data: [DONE]
+

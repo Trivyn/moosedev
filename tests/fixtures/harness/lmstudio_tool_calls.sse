@@ -1,0 +1,16 @@
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"409289721","type":"function","function":{"name":"read","arguments":""}}]},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"arguments":"{\"filePath\":\"PROJECT_NOTES.md\"}"}}]},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"content":"\n"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"264459456","type":"function","function":{"name":"glob","arguments":""}}]},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"type":"function","function":{"arguments":"{\"pattern\":\"**/*.py\"}"}}]},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-4nrofuh6yfv9cnamc53iv8","object":"chat.completion.chunk","created":1789455673,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[],"usage":{"prompt_tokens":5409,"completion_tokens":69,"total_tokens":5478,"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]
+

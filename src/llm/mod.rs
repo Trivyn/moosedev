@@ -7,8 +7,8 @@
 
 mod completion;
 mod usage;
-pub use completion::CompletionError;
-use completion::{complete_content, CompletionStream, MAX_STREAM_BYTES};
+use completion::{complete_content, complete_tool_message, CompletionStream, MAX_STREAM_BYTES};
+pub use completion::{tool_call_from_text, CompletionError, ToolCall, ToolCompletion};
 use usage::{RequestObservation, UsageBinding};
 pub use usage::{RequestStatus, RequestUsage, TokenUsage, UsageContext, UsageObserver};
 
@@ -236,7 +236,48 @@ pub struct OpenAiCompatClient {
     request_allowance: Option<Arc<AtomicU8>>,
     usage_binding: Option<UsageBinding>,
     stream_usage_unsupported: Arc<AtomicU8>,
+    /// Set once the provider refuses `tool_choice: "required"`; later tool requests use `"auto"`.
+    tool_choice_required_unsupported: Arc<AtomicU8>,
     timeouts: LlmTimeouts,
+}
+
+/// What a request asks the provider for: plain or schema-constrained content, or tool calls.
+#[derive(Clone)]
+enum RequestShape {
+    Content(Option<serde_json::Value>),
+    Tools {
+        tools: serde_json::Value,
+        required: bool,
+    },
+}
+
+impl RequestShape {
+    fn apply(&self, body: &mut serde_json::Value) {
+        match self {
+            Self::Content(Some(format)) => body["response_format"] = format.clone(),
+            Self::Content(None) => {}
+            Self::Tools { tools, required } => {
+                body["tools"] = tools.clone();
+                if *required {
+                    body["tool_choice"] = json!("required");
+                    body["parallel_tool_calls"] = json!(false);
+                } else {
+                    body["tool_choice"] = json!("auto");
+                }
+            }
+        }
+    }
+
+    fn tools(&self) -> bool {
+        matches!(self, Self::Tools { .. })
+    }
+}
+
+/// A provider rejection naming the tool-choice options this client sent.
+fn tool_choice_refused(shape: &RequestShape, status: u16, lower: &str) -> bool {
+    matches!(shape, RequestShape::Tools { required: true, .. })
+        && matches!(status, 400 | 422)
+        && (lower.contains("tool_choice") || lower.contains("parallel_tool_calls"))
 }
 
 /// No total timeout: reqwest's would also cut a streamed body mid-generation.
@@ -273,6 +314,7 @@ impl OpenAiCompatClient {
             request_allowance: None,
             usage_binding: None,
             stream_usage_unsupported: Arc::new(AtomicU8::new(0)),
+            tool_choice_required_unsupported: Arc::new(AtomicU8::new(0)),
             timeouts,
         }
     }
@@ -357,6 +399,7 @@ impl OpenAiCompatClient {
             request_allowance: self.request_allowance.clone(),
             usage_binding: self.usage_binding.clone(),
             stream_usage_unsupported: self.stream_usage_unsupported.clone(),
+            tool_choice_required_unsupported: self.tool_choice_required_unsupported.clone(),
             timeouts: self.timeouts,
         }
     }
@@ -389,7 +432,10 @@ impl OpenAiCompatClient {
             || (self.structured_output_mode == StructuredOutputMode::Auto
                 && self.structured_output_capability.load(Ordering::Acquire) == 2)
         {
-            return self.request_completion(model, prompt, params, None).await;
+            return self
+                .request_completion(model, prompt, params, &RequestShape::Content(None))
+                .await
+                .map(|completion| completion.content);
         }
         let response_format = json!({
             "type": "json_schema",
@@ -400,13 +446,18 @@ impl OpenAiCompatClient {
             }
         });
         match self
-            .request_completion(model, prompt, params, Some(response_format))
+            .request_completion(
+                model,
+                prompt,
+                params,
+                &RequestShape::Content(Some(response_format)),
+            )
             .await
         {
-            Ok(text) => {
+            Ok(completion) => {
                 self.structured_output_capability
                     .store(1, Ordering::Release);
-                Ok(text)
+                Ok(completion.content)
             }
             Err(CompletionError::StructuredOutputUnsupported) => {
                 if self.structured_output_mode == StructuredOutputMode::Required {
@@ -414,7 +465,9 @@ impl OpenAiCompatClient {
                 }
                 self.structured_output_capability
                     .store(2, Ordering::Release);
-                self.request_completion(model, prompt, params, None).await
+                self.request_completion(model, prompt, params, &RequestShape::Content(None))
+                    .await
+                    .map(|completion| completion.content)
             }
             Err(error) => Err(error),
         }
@@ -462,25 +515,86 @@ impl OpenAiCompatClient {
             })
         });
         match self
-            .request_stream(model, prompt, params, format, &on_delta)
+            .request_stream(
+                model,
+                prompt,
+                params,
+                RequestShape::Content(format),
+                &on_delta,
+            )
             .await
         {
-            Ok(text) => {
+            Ok(completion) => {
                 if use_schema {
                     self.structured_output_capability
                         .store(1, Ordering::Release);
                 }
-                Ok(text)
+                Ok(completion.content)
             }
             Err(CompletionError::StructuredOutputUnsupported)
                 if self.structured_output_mode == StructuredOutputMode::Auto =>
             {
                 self.structured_output_capability
                     .store(2, Ordering::Release);
-                self.request_stream(model, prompt, params, None, &on_delta)
-                    .await
+                self.request_stream(
+                    model,
+                    prompt,
+                    params,
+                    RequestShape::Content(None),
+                    &on_delta,
+                )
+                .await
+                .map(|completion| completion.content)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Ask for exactly one native tool call (`tool_choice: "required"`, no parallel
+    /// calls, no `response_format`). A provider that refuses those options is asked
+    /// again with `tool_choice: "auto"`; the refusal is remembered for later requests
+    /// and reported on the completion that fell back. Text deltas are observed as
+    /// prose; tool calls are returned only once the response is complete.
+    pub async fn chat_completion_tools_checked(
+        &self,
+        model: &str,
+        prompt: &str,
+        tools: serde_json::Value,
+        stream: bool,
+        on_delta: impl Fn(&str) + Send + Sync,
+    ) -> Result<ToolCompletion, CompletionError> {
+        let required = self
+            .tool_choice_required_unsupported
+            .load(Ordering::Acquire)
+            == 0;
+        let shape = RequestShape::Tools {
+            tools: tools.clone(),
+            required,
+        };
+        let result = if stream {
+            self.request_stream(model, prompt, None, shape, &on_delta)
+                .await
+        } else {
+            self.request_completion(model, prompt, None, &shape).await
+        };
+        match result {
+            Err(CompletionError::ToolChoiceUnsupported(message)) => {
+                self.tool_choice_required_unsupported
+                    .store(1, Ordering::Release);
+                let shape = RequestShape::Tools {
+                    tools,
+                    required: false,
+                };
+                let mut completion = if stream {
+                    self.request_stream(model, prompt, None, shape, &on_delta)
+                        .await?
+                } else {
+                    self.request_completion(model, prompt, None, &shape).await?
+                };
+                completion.tool_choice_fallback = Some(message);
+                Ok(completion)
+            }
+            result => result,
         }
     }
 
@@ -489,16 +603,16 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         params: Option<&LlmParams>,
-        response_format: Option<serde_json::Value>,
+        shape: RequestShape,
         on_delta: &(impl Fn(&str) + Send + Sync),
-    ) -> Result<String, CompletionError> {
+    ) -> Result<ToolCompletion, CompletionError> {
         match self
-            .request_stream_once(model, prompt, params, response_format.clone(), on_delta)
+            .request_stream_once(model, prompt, params, &shape, on_delta)
             .await
         {
             Err(CompletionError::UsageReportingUnsupported) => {
                 self.stream_usage_unsupported.store(1, Ordering::Release);
-                self.request_stream_once(model, prompt, params, response_format, on_delta)
+                self.request_stream_once(model, prompt, params, &shape, on_delta)
                     .await
             }
             result => result,
@@ -510,9 +624,9 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         params: Option<&LlmParams>,
-        response_format: Option<serde_json::Value>,
+        shape: &RequestShape,
         on_delta: &(impl Fn(&str) + Send + Sync),
-    ) -> Result<String, CompletionError> {
+    ) -> Result<ToolCompletion, CompletionError> {
         let mut body = json!({
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -522,9 +636,7 @@ impl OpenAiCompatClient {
         if self.stream_usage_unsupported.load(Ordering::Acquire) == 0 {
             body["stream_options"] = json!({"include_usage": true});
         }
-        if let Some(format) = response_format {
-            body["response_format"] = format;
-        }
+        shape.apply(&mut body);
         self.reserve_request()?;
         self.apply_request_options(&mut body);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -582,6 +694,11 @@ impl OpenAiCompatClient {
                 {
                     return Err(CompletionError::UsageReportingUnsupported);
                 }
+                if tool_choice_refused(shape, status.as_u16(), &lower) {
+                    return Err(CompletionError::ToolChoiceUnsupported(
+                        text.chars().take(400).collect(),
+                    ));
+                }
                 if body.get("response_format").is_some()
                     && matches!(status.as_u16(), 400 | 404 | 422)
                     && (lower.contains("response_format")
@@ -599,7 +716,11 @@ impl OpenAiCompatClient {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.starts_with("application/json"));
-            let mut stream = CompletionStream::default();
+            let mut stream = if shape.tools() {
+                CompletionStream::for_tools()
+            } else {
+                CompletionStream::default()
+            };
             let mut json_body = Vec::new();
             let mut started = false;
             loop {
@@ -654,15 +775,24 @@ impl OpenAiCompatClient {
                     })?;
                 observation.observe(&value);
                 self.record_usage(&value);
-                let text = complete_content(&value, self.strict_content)?;
-                on_delta(text);
-                return Ok(text.to_owned());
+                let completion = if shape.tools() {
+                    complete_tool_message(&value)?
+                } else {
+                    ToolCompletion {
+                        content: complete_content(&value, self.strict_content)?.to_owned(),
+                        ..ToolCompletion::default()
+                    }
+                };
+                if !completion.content.is_empty() {
+                    on_delta(&completion.content);
+                }
+                return Ok(completion);
             }
             if let Some(usage) = &stream.usage {
                 self.record_usage(usage);
             }
             stream.finish()?;
-            Ok(stream.content)
+            Ok(stream.into_tool_completion())
         }
         .await;
         observation.finish(result.is_ok());
@@ -709,8 +839,8 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         params: Option<&LlmParams>,
-        response_format: Option<serde_json::Value>,
-    ) -> Result<String, CompletionError> {
+        shape: &RequestShape,
+    ) -> Result<ToolCompletion, CompletionError> {
         let temperature = params.and_then(|p| p.temperature).unwrap_or(0.0);
         let mut body = json!({
             "model": model,
@@ -718,9 +848,7 @@ impl OpenAiCompatClient {
             "temperature": temperature,
             "stream": false,
         });
-        if let Some(response_format) = response_format {
-            body["response_format"] = response_format;
-        }
+        shape.apply(&mut body);
         self.reserve_request()?;
         self.apply_request_options(&mut body);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -750,6 +878,11 @@ impl OpenAiCompatClient {
                         observation.observe(&value);
                     }
                     let lower = text.to_ascii_lowercase();
+                    if tool_choice_refused(shape, status.as_u16(), &lower) {
+                        return Err(CompletionError::ToolChoiceUnsupported(
+                            text.chars().take(400).collect(),
+                        ));
+                    }
                     if body.get("response_format").is_some()
                         && matches!(status.as_u16(), 400 | 404 | 422)
                         && (lower.contains("response_format")
@@ -779,7 +912,14 @@ impl OpenAiCompatClient {
                 })?;
                 observation.observe(&value);
                 self.record_usage(&value);
-                complete_content(&value, self.strict_content).map(str::to_owned)
+                if shape.tools() {
+                    complete_tool_message(&value)
+                } else {
+                    complete_content(&value, self.strict_content).map(|content| ToolCompletion {
+                        content: content.to_owned(),
+                        ..ToolCompletion::default()
+                    })
+                }
             },
         )
         .await
@@ -803,8 +943,9 @@ impl LlmClient for OpenAiCompatClient {
         prompt: &str,
         params: Option<&LlmParams>,
     ) -> Result<String, EngineError> {
-        self.request_completion(model, prompt, params, None)
+        self.request_completion(model, prompt, params, &RequestShape::Content(None))
             .await
+            .map(|completion| completion.content)
             .map_err(CompletionError::into_engine)
     }
 }
@@ -1305,5 +1446,188 @@ mod tests {
         let mut unchanged = json!({});
         base.apply_request_options(&mut unchanged);
         assert_eq!(unchanged, json!({}));
+    }
+
+    const LMSTUDIO_TOOL_CALLS: &str =
+        include_str!("../../tests/fixtures/harness/lmstudio_tool_calls.sse");
+    const LLAMA_TOOL_CALL_IN_CONTENT: &str =
+        include_str!("../../tests/fixtures/harness/llama_tool_call_in_content.sse");
+    const EMPTY_TOOL_CALLS_FINISH: &str =
+        include_str!("../../tests/fixtures/harness/empty_tool_calls_finish.sse");
+
+    #[test]
+    fn tool_call_stream_accumulates_every_call_by_index_at_any_chunking() {
+        for size in [1, 7, 64, LMSTUDIO_TOOL_CALLS.len()] {
+            let mut stream = CompletionStream::for_tools();
+            let prose = Mutex::new(String::new());
+            for chunk in LMSTUDIO_TOOL_CALLS.as_bytes().chunks(size) {
+                stream
+                    .feed(chunk, &|text| prose.lock().unwrap().push_str(text))
+                    .unwrap();
+            }
+            stream.finish().unwrap();
+            let completion = stream.into_tool_completion();
+            assert_eq!(completion.content, "\n");
+            assert_eq!(*prose.lock().unwrap(), "\n");
+            assert_eq!(
+                completion.tool_calls,
+                vec![
+                    ToolCall {
+                        id: Some("409289721".into()),
+                        name: "read".into(),
+                        arguments: "{\"filePath\":\"PROJECT_NOTES.md\"}".into(),
+                    },
+                    ToolCall {
+                        id: Some("264459456".into()),
+                        name: "glob".into(),
+                        arguments: "{\"pattern\":\"**/*.py\"}".into(),
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_call_written_as_text_stays_content_and_an_empty_tool_finish_is_empty() {
+        let mut stream = CompletionStream::for_tools();
+        stream
+            .feed(LLAMA_TOOL_CALL_IN_CONTENT.as_bytes(), &|_| {})
+            .unwrap();
+        stream.finish().unwrap();
+        let completion = stream.into_tool_completion();
+        assert!(completion.tool_calls.is_empty());
+        assert_eq!(
+            completion.content,
+            "{\"type\": \"function\", \"name\": \"read\", \"parameters\": {\"file\": \"fees.py\"}}"
+        );
+        let mut stream = CompletionStream::for_tools();
+        stream
+            .feed(EMPTY_TOOL_CALLS_FINISH.as_bytes(), &|_| {})
+            .unwrap();
+        stream.finish().unwrap();
+        let completion = stream.into_tool_completion();
+        assert!(completion.tool_calls.is_empty() && completion.content.is_empty());
+        // Reasoning alone is still not an answer.
+        let reasoning = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]})
+        );
+        let mut stream = CompletionStream::for_tools();
+        stream.feed(reasoning.as_bytes(), &|_| {}).unwrap();
+        stream
+            .feed(EMPTY_TOOL_CALLS_FINISH.as_bytes(), &|_| {})
+            .unwrap();
+        assert!(matches!(
+            stream.finish(),
+            Err(CompletionError::ReasoningOnly)
+        ));
+        // A content-mode stream still refuses tool calls.
+        let mut stream = CompletionStream::default();
+        assert!(stream
+            .feed(LMSTUDIO_TOOL_CALLS.as_bytes(), &|_| {})
+            .is_err());
+    }
+
+    #[test]
+    fn tool_calls_written_as_text_are_recognised_in_every_supported_shape() {
+        let parsed = |text: &str| {
+            tool_call_from_text(text).map(|call| {
+                (
+                    call.name,
+                    serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                )
+            })
+        };
+        let args = json!({"file":"fees.py"});
+        for text in [
+            r#"{"type": "function", "name": "read", "parameters": {"file": "fees.py"}}"#,
+            r#"{"name":"read","parameters":{"file":"fees.py"}}"#,
+            r#"{"name":"read","arguments":{"file":"fees.py"}}"#,
+            r#"{"name":"read","arguments":"{\"file\":\"fees.py\"}"}"#,
+            r#"{"function":{"name":"read","arguments":{"file":"fees.py"}}}"#,
+            "```json\n{\"name\":\"read\",\"parameters\":{\"file\":\"fees.py\"}}\n```",
+            "I will read it.\n{\"name\":\"read\",\"parameters\":{\"file\":\"fees.py\"}} then plan",
+        ] {
+            assert_eq!(
+                parsed(text),
+                Some(("read".to_string(), args.clone())),
+                "{text}"
+            );
+        }
+        for text in [
+            "",
+            "just prose",
+            r#"{"message":"hi","action":{"action":"read","file":"a"}}"#,
+            r#"{"name":"read"}"#,
+            r#"{"name":7,"parameters":{}}"#,
+            r#"{"name":"read","arguments":"not json"}"#,
+        ] {
+            assert_eq!(parsed(text), None, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_requests_require_one_call_and_fall_back_to_auto_when_required_is_refused() {
+        #[derive(Clone, Default)]
+        struct Requests(Arc<Mutex<Vec<serde_json::Value>>>);
+        async fn complete(
+            State(requests): State<Requests>,
+            Json(body): Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            requests.0.lock().unwrap().push(body.clone());
+            if body["tool_choice"] == "required" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"tool_choice 'required' is not supported"})),
+                )
+                    .into_response();
+            }
+            Json(json!({
+                "choices":[{"message":{"role":"assistant","content":"Reading.","tool_calls":[
+                    {"id":"c1","type":"function","function":{"name":"read","arguments":"{\"file\":\"a.py\"}"}}
+                ]},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":4,"completion_tokens":2}
+            }))
+            .into_response()
+        }
+        let requests = Requests::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(complete))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = OpenAiCompatClient::new(format!("http://{address}/v1"), "test");
+        let tools = json!([{"type":"function","function":{"name":"read","description":"Read a file.",
+            "parameters":{"type":"object","properties":{"file":{"type":"string"}},"required":["file"],"additionalProperties":false}}}]);
+        for stream in [false, true] {
+            let completion = client
+                .chat_completion_tools_checked("model", "prompt", tools.clone(), stream, |_| {})
+                .await
+                .unwrap();
+            assert_eq!(completion.content, "Reading.");
+            assert_eq!(completion.tool_calls.len(), 1);
+            assert_eq!(completion.tool_calls[0].name, "read");
+            assert_eq!(completion.tool_calls[0].arguments, "{\"file\":\"a.py\"}");
+            assert_eq!(
+                completion.tool_choice_fallback.is_some(),
+                !stream,
+                "only the request that fell back reports it"
+            );
+        }
+        let requests = requests.0.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["tool_choice"], "required");
+        assert_eq!(requests[0]["parallel_tool_calls"], false);
+        for request in requests.iter() {
+            assert!(request.get("response_format").is_none());
+            assert_eq!(request["tools"], tools);
+        }
+        assert_eq!(requests[1]["tool_choice"], "auto");
+        assert!(requests[1].get("parallel_tool_calls").is_none());
+        assert_eq!(requests[2]["tool_choice"], "auto");
+        assert_eq!(requests[2]["stream"], true);
+        assert_eq!(client.take_usage(), (8, 4));
+        server.abort();
     }
 }
