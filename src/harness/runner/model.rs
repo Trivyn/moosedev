@@ -24,7 +24,11 @@ const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief 
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
-const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, question, reply, plan, replan. Editing and execution require human plan approval.";
+/// While planning the model may only gather context, talk or propose the plan: editing,
+/// execution and finishing wait for approval, and a replan while planning changes nothing.
+const PLAN_MODE_ACTION_NAMES: [&str; 6] =
+    ["read", "search", "inspect", "question", "reply", "plan"];
+const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, question, reply, plan. Editing and execution require human plan approval.";
 const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
 
 /// The governing rules the daemon delivered, each with its `via:` line and claim.
@@ -602,18 +606,23 @@ fn navigation_context(files: &[String], budget: usize) -> String {
 }
 
 pub(super) fn conversational_schema(mode: Mode) -> Value {
-    let mut actions = action_schema();
-    actions["oneOf"].as_array_mut().unwrap().retain(|variant| {
-        let name = variant["properties"]["action"]["const"].as_str().unwrap();
-        match mode {
-            Mode::Plan => !matches!(name, "replace" | "write" | "command" | "finish"),
-            Mode::Auto => name != "plan",
-        }
-    });
+    let mut actions = action_schema(mode);
+    if mode == Mode::Auto {
+        retain_actions(&mut actions, |name| name != "plan");
+    }
     json!({"type":"object","additionalProperties":false,"required":["message","action"],"properties":{"message":{"type":"string"},"action":actions}})
 }
 
-pub(super) fn action_schema() -> Value {
+fn retain_actions(actions: &mut Value, keep: impl Fn(&str) -> bool) {
+    actions["oneOf"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|variant| keep(variant["properties"]["action"]["const"].as_str().unwrap()));
+}
+
+/// The single-action schema for `mode`. Plan mode offers only the planning actions;
+/// the runner still refuses anything else from a provider that ignores the schema.
+pub(super) fn action_schema(mode: Mode) -> Value {
     fn variant(name: &str, fields: &[(&str, Value)]) -> Value {
         let mut props = serde_json::Map::new();
         props.insert("action".into(), json!({"type":"string", "const":name}));
@@ -626,7 +635,11 @@ pub(super) fn action_schema() -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a)]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]})
+    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a)]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
+    if mode == Mode::Plan {
+        retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
+    }
+    actions
 }
 #[cfg(test)]
 mod tests {
@@ -701,24 +714,86 @@ mod tests {
         );
     }
 
+    fn variant_names(actions: &Value) -> Vec<&str> {
+        actions["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["properties"]["action"]["const"].as_str().unwrap())
+            .collect()
+    }
+
+    fn sorted<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The names an allowed-actions sentence promises.
+    fn listed(text: &str) -> Vec<&str> {
+        let list = text
+            .split("Allowed actions now: ")
+            .nth(1)
+            .and_then(|rest| rest.split('.').next())
+            .expect("an allowed-actions sentence");
+        sorted(list.split(", "))
+    }
+
+    const PLANNING: [&str; 6] = ["read", "search", "inspect", "question", "reply", "plan"];
+
     #[test]
-    fn conversational_schema_exposes_only_actions_for_current_mode() {
-        for mode in [Mode::Plan, Mode::Auto] {
-            let schema = conversational_schema(mode);
-            let names: Vec<_> = schema["properties"]["action"]["oneOf"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v["properties"]["action"]["const"].as_str().unwrap())
-                .collect();
-            assert_eq!(names.contains(&"plan"), mode == Mode::Plan);
-            for action in ["replace", "write", "command", "finish"] {
-                assert_eq!(names.contains(&action), mode == Mode::Auto);
-            }
-            assert!(
-                names.contains(&"replan") && names.contains(&"reply") && names.contains(&"read")
-            );
-        }
+    fn plan_mode_schemas_offer_only_planning_actions() {
+        assert_eq!(
+            sorted(variant_names(&action_schema(Mode::Plan))),
+            sorted(PLANNING)
+        );
+        let conversational = conversational_schema(Mode::Plan);
+        assert_eq!(
+            sorted(variant_names(&conversational["properties"]["action"])),
+            sorted(PLANNING)
+        );
+    }
+
+    #[test]
+    fn auto_mode_schemas_keep_every_action() {
+        assert_eq!(
+            variant_names(&action_schema(Mode::Auto)),
+            vec![
+                "inspect", "reply", "read", "search", "plan", "replace", "write", "command",
+                "question", "replan", "finish"
+            ]
+        );
+        let conversational = conversational_schema(Mode::Auto);
+        assert_eq!(
+            variant_names(&conversational["properties"]["action"]),
+            vec![
+                "inspect", "reply", "read", "search", "replace", "write", "command", "question",
+                "replan", "finish"
+            ]
+        );
+    }
+
+    #[test]
+    fn allowed_actions_text_promises_exactly_the_schema_actions() {
+        assert!(!PLAN_MODE_ACTIONS.contains("replan"));
+        assert_eq!(listed(PLAN_MODE_ACTIONS), sorted(PLANNING));
+        assert_eq!(
+            listed(PLAN_MODE_ACTIONS),
+            sorted(variant_names(&action_schema(Mode::Plan)))
+        );
+        assert_eq!(
+            listed(AUTO_MODE_ACTIONS),
+            sorted(variant_names(
+                &conversational_schema(Mode::Auto)["properties"]["action"]
+            ))
+        );
+        // The single-action path also accepts plan in Auto; the text never
+        // promises an action that schema lacks.
+        let direct_schema = action_schema(Mode::Auto);
+        let direct = variant_names(&direct_schema);
+        assert!(listed(AUTO_MODE_ACTIONS)
+            .iter()
+            .all(|name| direct.contains(name)));
     }
 
     #[test]

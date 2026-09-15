@@ -52,7 +52,7 @@ impl Runner {
         if self.task.batch_capture {
             conversational_schema(self.task.mode)
         } else {
-            action_schema()
+            action_schema(self.task.mode)
         }
     }
 

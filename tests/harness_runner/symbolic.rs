@@ -309,6 +309,60 @@ async fn symbolic_replan_after_a_human_answer_or_command_is_a_real_replan() {
     assert!(intent_details(&runner, "replan_continuation").is_empty());
 }
 
+/// The action names a recorded `harness_action` request's schema offered.
+fn offered_actions(request: &Value) -> Vec<String> {
+    let mut names: Vec<String> = request["body"]["response_format"]["json_schema"]["schema"]
+        ["properties"]["action"]["oneOf"]
+        .as_array()
+        .expect("a conversational action schema")
+        .iter()
+        .map(|variant| {
+            variant["properties"]["action"]["const"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+#[tokio::test]
+async fn model_requests_carry_the_action_schema_for_the_current_mode() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+
+    let actions: Vec<Value> = requests_of_kind(&fixture, "model")
+        .into_iter()
+        .filter(|request| request["schema"] == "harness_action")
+        .collect();
+    assert_eq!(
+        actions.len(),
+        3,
+        "read and plan while planning, then one edit"
+    );
+    let planning = ["inspect", "plan", "question", "read", "reply", "search"];
+    for request in &actions[..2] {
+        assert_eq!(offered_actions(request), planning);
+        let prompt = request["body"]["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            prompt.contains("Allowed actions now: read, search, inspect, question, reply, plan."),
+            "the planning prompt promises exactly the planning actions"
+        );
+    }
+    assert_eq!(
+        offered_actions(&actions[2]),
+        [
+            "command", "finish", "inspect", "question", "read", "replace", "replan", "reply",
+            "search", "write"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn symbolic_replan_in_plan_mode_is_a_noop() {
     let _env_lock = ENVIRONMENT.lock().await;

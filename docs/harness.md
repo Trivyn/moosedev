@@ -352,6 +352,11 @@ contract 3 and intent contract 2.
   instead of reopening planning (`replan_continuation`, unbounded); a replan
   while already planning changes nothing (`replan_noop`). A real replan keeps
   the files already read (`model_replan`).
+- Plan-mode actions. The action schema and the allowed-actions line follow the
+  task's mode: while planning the model is offered only read, search, inspect,
+  question, reply and plan, so replan, edits, commands and finish are not
+  choices. `replan_noop` and the Plan-mode edit refusal remain for providers
+  that ignore the schema. Auto mode offers its full set.
 - Plan grounding. The second replan continued in one approval cycle is a
   dispute the continuation note did not settle, so the harness grounds the
   approved plan once (`plan_grounding`). The plan summary and the replan reason
