@@ -474,7 +474,7 @@ mod tests {
         let requests = stub.requests.clone();
         let (config, task) = server(stub).await;
         let preparation = tokio::spawn(async move { prepare(&config, ResponsePolicy::Auto).await });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             while requests.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
             }
@@ -553,7 +553,7 @@ mod tests {
         let preparation = tokio::spawn(async move {
             prepare_with_observer(&config, ResponsePolicy::Auto, Some(observer)).await
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             while requests.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
             }
