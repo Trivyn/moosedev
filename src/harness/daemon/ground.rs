@@ -1,7 +1,9 @@
-//! Edit-time grounding: before an edit applies, find the attributes of function
-//! parameters it compares with string literals (`param.name`, or
-//! `getattr(param, 'name'[, default])` with a literal name), look those names up across the
-//! code index, and report where they are defined and whether a compared literal
+//! Grounding against the code index. Edit-time: before an edit applies, find the
+//! attributes of function parameters it compares with string literals
+//! (`param.name`, or `getattr(param, 'name'[, default])` with a literal name).
+//! Plan-time: read the same kinds of names, and the quoted literals written after
+//! them, from a disputed plan's text. Either way, look those names up across the
+//! code index and report where they are defined and whether a compared literal
 //! is missing from a definition's values. Deterministic and read-only: no model,
 //! no graph write. Python first; other languages yield no keys yet.
 use super::*;
@@ -14,6 +16,18 @@ const MAX_DEFINITIONS: usize = 3;
 const PREVIEW_LINES: usize = 12;
 const PREVIEW_BYTES: usize = 256;
 const PREVIEW_TOTAL_BYTES: usize = 1024;
+/// Plan text read for names; prose past this is ignored.
+const PLAN_TEXT_BYTES: usize = 16 * 1024;
+/// A quoted literal counts as compared with a name written at most this many
+/// bytes before it, in the same clause.
+const LITERAL_WINDOW: usize = 64;
+/// Longest quoted literal read from plan text.
+const LITERAL_BYTES: usize = 64;
+/// A dotted token ending in one of these is a file name, not an attribute.
+const FILE_EXTENSIONS: &[&str] = &[
+    "py", "rs", "ts", "tsx", "js", "jsx", "md", "txt", "json", "toml", "yaml", "yml", "cfg", "ini",
+    "html", "css", "sh",
+];
 
 pub async fn ground(
     State(state): State<Arc<AppState>>,
@@ -33,8 +47,47 @@ pub fn ground_edit(state: &AppState, request: &GroundRequest) -> anyhow::Result<
         return Ok(response);
     }
     response.keys = edit_keys(&request.file, &request.after, &request.ranges);
+    resolve_keys(state, &mut response, std::slice::from_ref(&request.file));
+    Ok(response)
+}
+
+pub async fn ground_plan(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PlanGroundRequest>,
+) -> Result<Json<GroundResponse>, ApiError> {
+    Ok(Json(
+        tokio::task::spawn_blocking(move || ground_plan_text(&state, &request))
+            .await
+            .map_err(anyhow::Error::from)??,
+    ))
+}
+
+/// Ground a disputed plan: the names its text reads and the literals it compares
+/// them with ([`plan_keys`]), resolved like an edit's keys. The plan's own files
+/// are the change, not what it compares against, so their definitions are
+/// skipped.
+pub fn ground_plan_text(
+    state: &AppState,
+    request: &PlanGroundRequest,
+) -> anyhow::Result<GroundResponse> {
+    for file in &request.files {
+        validate_path(file)?;
+    }
+    let mut response = GroundResponse {
+        keys: plan_keys(&request.text, &request.files),
+        ..GroundResponse::default()
+    };
+    resolve_keys(state, &mut response, &request.files);
+    Ok(response)
+}
+
+/// Look each key up by definition name, skipping definitions in `excluded`
+/// files: at most [`MAX_DEFINITIONS`], each previewed only from proven source,
+/// and a compared literal missing from a preview that quotes other values is a
+/// mismatch.
+fn resolve_keys(state: &AppState, response: &mut GroundResponse, excluded: &[String]) {
     let Some(substrate) = state.substrate() else {
-        return Ok(response);
+        return;
     };
     let mut preview_bytes = 0usize;
     'keys: for key in &response.keys {
@@ -42,7 +95,7 @@ pub fn ground_edit(state: &AppState, request: &GroundRequest) -> anyhow::Result<
             if response.definitions.len() >= MAX_DEFINITIONS {
                 break 'keys;
             }
-            let Some(found) = grounded_definition(&request.file, &definition) else {
+            let Some(found) = grounded_definition(excluded, &definition) else {
                 continue;
             };
             let budget = PREVIEW_BYTES.min(PREVIEW_TOTAL_BYTES.saturating_sub(preview_bytes));
@@ -77,17 +130,20 @@ pub fn ground_edit(state: &AppState, request: &GroundRequest) -> anyhow::Result<
             });
         }
     }
-    Ok(response)
 }
 
-/// A definition's name and role when it may ground an edit: not in the edited
-/// file, not test code or harness state, and not a parameter or local.
+/// A definition's name and role when it may ground: not in an excluded (edited
+/// or planned) file, not test code or harness state, and not a parameter or
+/// local.
 fn grounded_definition(
-    edited: &str,
+    excluded: &[String],
     definition: &FileDefinition,
 ) -> Option<(String, &'static str)> {
     let file = &definition.entry.file;
-    if file == edited || substrate::is_test_path(file) || file.starts_with(".moosedev") {
+    if excluded.iter().any(|excluded| excluded == file)
+        || substrate::is_test_path(file)
+        || file.starts_with(".moosedev")
+    {
         return None;
     }
     let role = match descriptor_role(&definition.entry.symbol) {
@@ -159,6 +215,200 @@ pub fn edit_keys(file: &str, source: &str, ranges: &[HarnessSourceRange]) -> Vec
         }
     }
     keys
+}
+
+/// Names a plan's prose says it reads, with the quoted literals it compares
+/// them with. Plan text is prose, so it is scanned, not parsed:
+/// - `x.name` (the last segment of a dotted token) and `getattr(x, 'name'[, default])`
+///   with a literal name read `name`, unless `x` is `self` or `cls`, the name is a
+///   single character, or the token is a file name (a plan file or a known
+///   extension);
+/// - a quoted literal (single or double quotes, no whitespace, not an apostrophe
+///   inside a word) is compared with the nearest name written at most
+///   [`LITERAL_WINDOW`] bytes before it in the same clause.
+///
+/// Names compared with a literal come first, in text order, then the rest; at
+/// most [`MAX_KEYS`].
+pub fn plan_keys(text: &str, files: &[String]) -> Vec<GroundKey> {
+    let mut end = text.len().min(PLAN_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let text = &text[..end];
+    let bytes = text.as_bytes();
+    // (start, end, name) of each read name; spans of getattr name literals.
+    let mut accesses: Vec<(usize, usize, String)> = Vec::new();
+    let mut name_literals: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let starts_word = is_identifier_start(bytes[i])
+            && (i == 0 || !(is_identifier(bytes[i - 1]) || bytes[i - 1] == b'.'));
+        if !starts_word {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = identifier_end(bytes, i);
+        let object = &text[start..j];
+        if object == "getattr" {
+            if let Some((end, owner, name, literal)) = getattr_access(text, j) {
+                if owner != "self" && owner != "cls" && name.len() > 1 {
+                    accesses.push((start, end, name));
+                }
+                name_literals.push(literal);
+                i = end;
+                continue;
+            }
+        }
+        let mut last = None;
+        while j + 1 < bytes.len() && bytes[j] == b'.' && is_identifier_start(bytes[j + 1]) {
+            let segment_end = identifier_end(bytes, j + 1);
+            last = Some((j + 1, segment_end));
+            j = segment_end;
+        }
+        if let Some((name_start, name_end)) = last {
+            let name = &text[name_start..name_end];
+            let token = &text[start..j];
+            let file_name = FILE_EXTENSIONS.contains(&name)
+                || files
+                    .iter()
+                    .any(|file| file == token || file.ends_with(&format!("/{token}")));
+            if object != "self" && object != "cls" && name.len() > 1 && !file_name {
+                accesses.push((start, j, name.to_string()));
+            }
+        }
+        i = j;
+    }
+    let mut compared: Vec<(usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        let opens =
+            (quote == b'\'' || quote == b'"') && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric());
+        if !opens {
+            i += 1;
+            continue;
+        }
+        let limit = (i + 1 + LITERAL_BYTES + 1).min(bytes.len());
+        let Some(close) = (i + 1..limit).find(|&k| bytes[k] == quote) else {
+            i += 1;
+            continue;
+        };
+        let content = &text[i + 1..close];
+        let closes = close + 1 == bytes.len() || !bytes[close + 1].is_ascii_alphanumeric();
+        let in_name = name_literals
+            .iter()
+            .any(|&(from, to)| i >= from && close < to);
+        if closes && !content.is_empty() && !content.chars().any(char::is_whitespace) && !in_name {
+            let owner = accesses
+                .iter()
+                .enumerate()
+                .filter(|(_, access)| access.1 <= i && i - access.1 <= LITERAL_WINDOW)
+                .filter(|(_, access)| !ends_clause(&text[access.1..i]))
+                .map(|(index, _)| index)
+                .next_back();
+            if let Some(owner) = owner {
+                compared.push((owner, content.to_string()));
+            }
+            i = close + 1;
+        } else {
+            i += 1;
+        }
+    }
+    let mut keys: Vec<GroundKey> = Vec::new();
+    for (index, (_, _, name)) in accesses.iter().enumerate() {
+        let literals = compared
+            .iter()
+            .filter(|(owner, _)| *owner == index)
+            .map(|(_, literal)| literal.clone());
+        let key = match keys.iter_mut().position(|key| &key.attribute == name) {
+            Some(position) => &mut keys[position],
+            None => {
+                keys.push(GroundKey {
+                    attribute: name.clone(),
+                    literals: Vec::new(),
+                });
+                keys.last_mut().expect("pushed")
+            }
+        };
+        for literal in literals {
+            if !key.literals.contains(&literal) {
+                key.literals.push(literal);
+            }
+        }
+    }
+    keys.sort_by_key(|key| key.literals.is_empty());
+    keys.truncate(MAX_KEYS);
+    keys
+}
+
+fn is_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_identifier(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn identifier_end(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < bytes.len() && is_identifier(bytes[end]) {
+        end += 1;
+    }
+    end
+}
+
+/// `getattr(owner, 'name'[, default])` starting just after the word `getattr`:
+/// the end of the call, the owner, the literal name and the span of its quotes.
+fn getattr_access(text: &str, from: usize) -> Option<(usize, String, String, (usize, usize))> {
+    let bytes = text.as_bytes();
+    let skip = |mut at: usize| {
+        while at < bytes.len() && bytes[at] == b' ' {
+            at += 1;
+        }
+        at
+    };
+    let mut at = skip(from);
+    if bytes.get(at) != Some(&b'(') {
+        return None;
+    }
+    at = skip(at + 1);
+    if !bytes.get(at).copied().is_some_and(is_identifier_start) {
+        return None;
+    }
+    let owner_end = identifier_end(bytes, at);
+    let owner = text[at..owner_end].to_string();
+    at = skip(owner_end);
+    if bytes.get(at) != Some(&b',') {
+        return None;
+    }
+    at = skip(at + 1);
+    let quote = *bytes.get(at)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let name_end = identifier_end(bytes, at + 1);
+    if name_end == at + 1 || bytes.get(name_end) != Some(&quote) {
+        return None;
+    }
+    let name = text[at + 1..name_end].to_string();
+    let literal = (at, name_end + 1);
+    let close = (name_end + 1..bytes.len().min(name_end + 1 + LITERAL_WINDOW))
+        .find(|&k| bytes[k] == b')')?;
+    Some((close + 1, owner, name, literal))
+}
+
+/// True when the text between a name and a literal crosses a clause boundary.
+fn ends_clause(between: &str) -> bool {
+    let bytes = between.as_bytes();
+    bytes.iter().enumerate().any(|(index, &byte)| {
+        byte == b';'
+            || byte == b'\n'
+            || (matches!(byte, b'.' | b'?' | b'!')
+                && bytes
+                    .get(index + 1)
+                    .is_none_or(|next| next.is_ascii_whitespace()))
+    })
 }
 
 fn text<'a>(node: Node, source: &'a str) -> &'a str {

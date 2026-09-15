@@ -62,6 +62,16 @@ pub struct GroundRequest {
     pub ranges_coalesced: bool,
 }
 
+/// A plan to ground against the code index: the approved plan's summary and the
+/// model's replan reason as one text, and the plan's own files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanGroundRequest {
+    pub text: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
 /// An attribute of a function parameter the edit compares with string literals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroundKey {

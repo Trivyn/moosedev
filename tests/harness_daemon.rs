@@ -4321,6 +4321,107 @@ fn grounding_reads_getattr_on_a_parameter_like_attribute_access() {
     let _ = std::fs::remove_dir_all(&fixture.0);
 }
 
+#[test]
+fn plan_grounding_reads_accesses_and_compared_literals_from_plan_text() {
+    use daemon::ground::{ground_plan_text, plan_keys};
+    use moosedev::harness::protocol::PlanGroundRequest;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    install_grounding_index(&fixture, &state);
+    let files = vec!["billing.py".to_string()];
+    let keys = |text: &str| -> Vec<(String, Vec<String>)> {
+        plan_keys(text, &files)
+            .into_iter()
+            .map(|key| (key.attribute, key.literals))
+            .collect()
+    };
+    let text = "Update billing.py so fee() returns 1 when `order.channel` is 'cash'; the model's note says 'NP-7' matters. Then check getattr(order, 'region') == \"north\", keep self.total and read order.amount, e.g. as before.";
+    assert_eq!(
+        keys(text),
+        vec![
+            ("channel".to_string(), vec!["cash".to_string()]),
+            ("region".to_string(), vec!["north".to_string()]),
+            ("amount".to_string(), vec![]),
+        ],
+        "file names, self, abbreviations, apostrophes and a literal in another clause are neither keys nor values"
+    );
+
+    let request = |text: &str, files: &[String]| PlanGroundRequest {
+        text: text.into(),
+        files: files.to_vec(),
+    };
+    let response = ground_plan_text(&state, &request(text, &files)).unwrap();
+    let definitions: Vec<(&str, &str)> = response
+        .definitions
+        .iter()
+        .map(|d| (d.file.as_str(), d.name.as_str()))
+        .collect();
+    assert_eq!(
+        definitions,
+        vec![("channels.py", "CHANNELS")],
+        "the plan's own files, parameters and test code never ground a plan"
+    );
+    assert!(response.definitions[0]
+        .preview
+        .starts_with("CHANNELS = {\"wire\", \"card\"}"));
+    let mismatches: Vec<(&str, &str, &str)> = response
+        .mismatches
+        .iter()
+        .map(|m| (m.key.as_str(), m.literal.as_str(), m.definition.as_str()))
+        .collect();
+    assert_eq!(mismatches, vec![("channel", "cash", "CHANNELS")]);
+
+    // A defined value is no mismatch.
+    let defined = ground_plan_text(
+        &state,
+        &request("Return 1 when `order.channel` == 'wire'", &files),
+    )
+    .unwrap();
+    assert_eq!(defined.definitions.len(), 1);
+    assert!(defined.mismatches.is_empty());
+
+    // At most eight keys; nothing to read yields nothing.
+    let many: String = (1..=10).map(|n| format!("order.field{n} ")).collect();
+    assert_eq!(plan_keys(&many, &files).len(), 8);
+    assert!(plan_keys("Keep the approved plan as it is.", &files).is_empty());
+
+    // Source the index cannot prove current is never previewed or compared.
+    std::fs::write(fixture.0.join("channels.py"), "CHANNELS = {\"cash\"}\n").unwrap();
+    let unproven = ground_plan_text(&state, &request(text, &files)).unwrap();
+    assert_eq!(unproven.definitions.len(), 1);
+    assert_eq!(unproven.definitions[0].preview, "");
+    assert!(unproven.mismatches.is_empty());
+    let _ = std::fs::remove_dir_all(&fixture.0);
+}
+
+#[tokio::test]
+async fn http_plan_ground_route_answers_and_rejects_escaping_paths_and_unknown_fields() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let server = TestServer::new(build_routes(state.clone())).unwrap();
+    let answered = server
+        .post("/api/v1/harness/ground/plan")
+        .json(&json!({"text": "Return 1 when `order.kind` is 'x'", "files": ["billing.py"]}))
+        .await;
+    answered.assert_status_ok();
+    let response: GroundResponse = answered.json();
+    assert_eq!(response.keys.len(), 1);
+    assert_eq!(response.keys[0].attribute, "kind");
+    assert!(response.definitions.is_empty(), "no index, no definitions");
+    for body in [
+        json!({"text": "x", "files": ["../outside.py"]}),
+        json!({"text": "x", "files": [], "extra": true}),
+    ] {
+        let rejected = server
+            .post("/api/v1/harness/ground/plan")
+            .json(&body)
+            .expect_failure()
+            .await;
+        assert!(!rejected.status_code().is_success(), "{body}");
+    }
+    let _ = std::fs::remove_dir_all(&fixture.0);
+}
+
 #[tokio::test]
 async fn http_ground_route_answers_keys_and_rejects_escaping_paths_and_unknown_fields() {
     let fixture = Fixture::new();
