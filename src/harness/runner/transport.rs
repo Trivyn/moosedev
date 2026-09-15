@@ -128,6 +128,15 @@ impl Runner {
         self.post("ground", request).await
     }
 
+    /// Where the code index defines what a disputed plan's text compares, and
+    /// which compared literals it does not define.
+    pub(super) async fn ground_plan(
+        &self,
+        request: &crate::harness::protocol::PlanGroundRequest,
+    ) -> Result<GroundResponse> {
+        self.post("ground/plan", request).await
+    }
+
     /// Accepted knowledge for a search query: the complete claims of the
     /// matching records, without the inventory or file dossiers. The current
     /// working context is left as it is.

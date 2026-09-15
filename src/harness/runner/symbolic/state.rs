@@ -31,6 +31,14 @@ pub struct SymbolicState {
     /// changed since approval. Unbounded; counted for the study.
     #[serde(default)]
     pub replan_continuations: usize,
+    /// Replan continuations in the current approval cycle; reset when a plan is
+    /// approved. The second one grounds the approved plan.
+    #[serde(default)]
+    pub cycle_replan_continuations: usize,
+    /// True once this approval cycle's plan grounding was attempted; reset when a
+    /// plan is approved.
+    #[serde(default)]
+    pub plan_grounded: bool,
     /// True from plan approval until the first applied edit, command, required
     /// check result or human answer. Reads do not end it. False by default, so
     /// an older journal never continues a replan it cannot prove unchanged.

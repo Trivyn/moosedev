@@ -893,3 +893,216 @@ async fn symbolic_restated_note_links_the_existing_record_through_one_capture() 
         "{link_reviews:?}"
     );
 }
+
+/// A plan approved over `labels.py` whose summary compares `account.segment`
+/// with a segment the code does not define; `accounts.py` holds the segment
+/// table and is never read.
+async fn disputed_plan_runner(fixture: &Fixture) -> Runner {
+    std::fs::write(
+        fixture.root.join("accounts.py"),
+        "SEGMENTS = {\"retail\": \"Retail\", \"charity\": \"Registered charity\"}\n",
+    )
+    .unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Render no label when `account.segment` is 'non-profit'; otherwise keep the name","files":["labels.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    runner
+}
+
+fn segment_grounding() -> GroundResponse {
+    GroundResponse {
+        keys: vec![GroundKey {
+            attribute: "segment".into(),
+            literals: vec!["non-profit".into()],
+        }],
+        definitions: vec![GroundDefinition {
+            key: "segment".into(),
+            name: "SEGMENTS".into(),
+            file: "accounts.py".into(),
+            symbol: "scip-python python fixture . accounts.py/SEGMENTS.".into(),
+            role: "declaration".into(),
+            preview: "SEGMENTS = {\"retail\": \"Retail\", \"charity\": \"Registered charity\"}"
+                .into(),
+        }],
+        mismatches: vec![GroundMismatch {
+            key: "segment".into(),
+            literal: "non-profit".into(),
+            file: "accounts.py".into(),
+            definition: "SEGMENTS".into(),
+        }],
+    }
+}
+
+async fn dispute(fixture: &Fixture, runner: &mut Runner, reason: &str) {
+    fixture.conversational(json!({"action":"replan","reason":reason}));
+    runner.advance().await.unwrap();
+}
+
+fn plan_ground_requests(fixture: &Fixture) -> Vec<PlanGroundRequest> {
+    fixture.shared.lock().unwrap().plan_ground_requests.clone()
+}
+
+#[tokio::test]
+async fn a_second_replan_dispute_reads_what_the_plan_compares_against_then_replans_for_real() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = disputed_plan_runner(&fixture).await;
+    fixture.shared.lock().unwrap().plan_ground_response = Some(segment_grounding());
+
+    dispute(&fixture, &mut runner, "The NP-7 check may be wrong").await;
+    assert!(
+        runner.task.last_response.starts_with("Replan not needed"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(
+        plan_ground_requests(&fixture).is_empty(),
+        "the first continuation in an approval cycle is unchanged"
+    );
+    assert!(intent_details(&runner, "plan_grounding").is_empty());
+
+    dispute(
+        &fixture,
+        &mut runner,
+        "The segment check against non-profit looks wrong",
+    )
+    .await;
+    let requests = plan_ground_requests(&fixture);
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .text
+            .contains("`account.segment` is 'non-profit'"),
+        "{}",
+        requests[0].text
+    );
+    assert!(requests[0]
+        .text
+        .contains("The segment check against non-profit looks wrong"));
+    assert_eq!(requests[0].files, vec!["labels.py".to_string()]);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.read_files.contains(&"accounts.py".to_string()));
+    assert!(runner.task.last_error.is_none());
+    assert!(runner.task.recovery.is_none());
+    let note = runner.task.last_response.clone();
+    assert!(note.contains("SEGMENTS in accounts.py"), "{note}");
+    assert!(
+        note.contains("'non-profit' does not appear among the values of SEGMENTS"),
+        "{note}"
+    );
+    assert_eq!(intent_details(&runner, "plan_grounding").len(), 1);
+    assert!(
+        !runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .unchanged_since_approval,
+        "the grounding note is new evidence"
+    );
+
+    dispute(
+        &fixture,
+        &mut runner,
+        "SEGMENTS has no non-profit segment; the plan must use charity",
+    )
+    .await;
+    assert_eq!(runner.task.mode, Mode::Plan, "the next replan is real");
+    assert_eq!(
+        intent_details(&runner, "model_replan"),
+        vec!["SEGMENTS has no non-profit segment; the plan must use charity"]
+    );
+    assert_eq!(intent_details(&runner, "replan_continuation").len(), 2);
+    assert_eq!(intent_details(&runner, "plan_grounding").len(), 1);
+    assert!(
+        runner.task.read_files.contains(&"accounts.py".to_string()),
+        "a real replan keeps the working set"
+    );
+}
+
+#[tokio::test]
+async fn a_second_replan_dispute_with_nothing_defined_keeps_the_continuation() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = disputed_plan_runner(&fixture).await;
+    fixture.shared.lock().unwrap().plan_ground_response = Some(GroundResponse {
+        keys: segment_grounding().keys,
+        ..GroundResponse::default()
+    });
+    dispute(&fixture, &mut runner, "Reconsider").await;
+    dispute(&fixture, &mut runner, "Reconsider the segment").await;
+    assert_eq!(plan_ground_requests(&fixture).len(), 1);
+    assert!(
+        runner.task.last_response.starts_with("Replan not needed"),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(
+        runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .unchanged_since_approval,
+        "nothing was shown, so the window stays open"
+    );
+    assert!(!runner.task.read_files.contains(&"accounts.py".to_string()));
+    let events = intent_details(&runner, "plan_grounding");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].contains("no definitions"), "{events:?}");
+
+    dispute(&fixture, &mut runner, "Reconsider once more").await;
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(
+        plan_ground_requests(&fixture).len(),
+        1,
+        "at most one plan grounding per approval cycle"
+    );
+    assert_eq!(intent_details(&runner, "replan_continuation").len(), 3);
+    assert_eq!(intent_details(&runner, "plan_grounding").len(), 1);
+}
+
+#[tokio::test]
+async fn plan_grounding_resets_when_a_new_plan_is_approved() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = disputed_plan_runner(&fixture).await;
+    fixture.shared.lock().unwrap().plan_ground_response = Some(segment_grounding());
+    dispute(&fixture, &mut runner, "Reconsider").await;
+    dispute(&fixture, &mut runner, "Reconsider the segment").await;
+    dispute(&fixture, &mut runner, "Use the charity segment").await;
+    assert_eq!(runner.task.mode, Mode::Plan);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    fixture.conversational(json!({"action":"plan","summary":"Render no label when `account.segment` is 'charity'; otherwise keep the name","files":["labels.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    let state = runner.task.symbolic.clone().unwrap();
+    assert_eq!(state.cycle_replan_continuations, 0);
+    assert!(!state.plan_grounded);
+
+    dispute(&fixture, &mut runner, "Reconsider again").await;
+    assert_eq!(plan_ground_requests(&fixture).len(), 1);
+    dispute(&fixture, &mut runner, "Reconsider the segment again").await;
+    assert_eq!(
+        plan_ground_requests(&fixture).len(),
+        2,
+        "a new approval cycle may ground its plan once"
+    );
+    assert_eq!(intent_details(&runner, "plan_grounding").len(), 2);
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    let state = runner.task.symbolic.clone().unwrap();
+    assert!(state.plan_grounded, "the memo survives resume");
+    assert_eq!(state.cycle_replan_continuations, 2);
+}

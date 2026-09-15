@@ -352,6 +352,20 @@ contract 3 and intent contract 2.
   instead of reopening planning (`replan_continuation`, unbounded); a replan
   while already planning changes nothing (`replan_noop`). A real replan keeps
   the files already read (`model_replan`).
+- Plan grounding. The second replan continued in one approval cycle is a
+  dispute the continuation note did not settle, so the harness grounds the
+  approved plan once (`plan_grounding`). The plan summary and the replan reason
+  go to `POST /api/v1/harness/ground/plan` with the plan files. Names read as
+  `x.name` or `getattr(x, 'name')` (not `self`/`cls`, not file names, not single
+  characters), and the quoted literals written within 64 bytes after them in
+  the same clause, become keys; names compared with a literal come first, at
+  most eight. Keys resolve like an edit's, skipping definitions in the plan's
+  own files. When definitions come back, up to two defining files join the
+  working set, the note lists the definitions, previews and any literal they do
+  not define, and the unchanged window ends, so a further replan reopens
+  planning. No definitions or a route error leaves the continuation note as it
+  was. The attempt is recorded once per approval cycle
+  (`cycle_replan_continuations`, `plan_grounded`, both reset at plan approval).
 - Edit grounding. In Auto, an edit to a Python file the task has already read
   is sent to `POST /api/v1/harness/ground` with its changed ranges before
   policy applies it. Keys are attributes of the enclosing function's

@@ -342,6 +342,7 @@ impl Runner {
             }
             Step::Replan { reason } if proposed_replan && self.replan_changes_nothing() => {
                 self.symbolic_replan_continuation(&reason);
+                self.ground_disputed_plan(&reason).await;
             }
             Step::Replan { reason } => {
                 if proposed_replan {

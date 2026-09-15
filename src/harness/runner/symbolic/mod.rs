@@ -165,6 +165,7 @@ impl Runner {
     pub(in crate::harness::runner) fn symbolic_replan_continuation(&mut self, reason: &str) {
         let state = self.symbolic_state_mut();
         state.replan_continuations += 1;
+        state.cycle_replan_continuations += 1;
         let count = state.replan_continuations;
         let files = self
             .task

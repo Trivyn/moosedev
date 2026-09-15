@@ -41,7 +41,10 @@ impl Runner {
             return self.persist();
         }
         self.derive_symbolic_scope(&context).await?;
-        self.symbolic_state_mut().unchanged_since_approval = true;
+        let state = self.symbolic_state_mut();
+        state.unchanged_since_approval = true;
+        state.cycle_replan_continuations = 0;
+        state.plan_grounded = false;
         self.task.approved_revision = Some(context.revision);
         self.task.completion_pending = false;
         self.task.mode = Mode::Auto;

@@ -71,9 +71,9 @@ SYMBOLIC_EVENT_KINDS = (
     "reconciled_restates", "reconciled_refines", "reconciled_distinct",
     "plan_check_rejected", "check_unrunnable", "replan_continuation", "replan_noop", "model_replan",
     "final_review_attested", "knowledge_search", "capture_anchored",
-    # Delivery nudges: the standing guidance snapshot, plan coverage returns and edit-time grounding.
-    # None is an autonomous recovery.
-    "guidance_loaded", "constraint_coverage", "constraint_coverage_unmet", "edit_grounding")
+    # Delivery nudges: the standing guidance snapshot, plan coverage returns, edit-time grounding and
+    # the grounding of a disputed approved plan. None is an autonomous recovery.
+    "guidance_loaded", "constraint_coverage", "constraint_coverage_unmet", "edit_grounding", "plan_grounding")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")

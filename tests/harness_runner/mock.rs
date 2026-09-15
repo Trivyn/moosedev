@@ -64,6 +64,9 @@ pub(super) struct Script {
     /// What `ground` answers (default: nothing to ground), and what it was asked.
     pub(super) ground_response: Option<GroundResponse>,
     pub(super) ground_requests: Vec<GroundRequest>,
+    /// What `ground/plan` answers (default: nothing defined), and what it was asked.
+    pub(super) plan_ground_response: Option<GroundResponse>,
+    pub(super) plan_ground_requests: Vec<PlanGroundRequest>,
     /// Accepted knowledge an evidence-only (search) request returns.
     pub(super) search_knowledge: Option<String>,
     pub(super) replies: VecDeque<(&'static str, Value)>,
@@ -448,6 +451,7 @@ impl Fixture {
             .route("/api/v1/harness/checkpoint", post(checkpoint))
             .route("/api/v1/harness/intent/resolve", post(resolve))
             .route("/api/v1/harness/ground", post(ground))
+            .route("/api/v1/harness/ground/plan", post(ground_plan))
             .route("/api/v1/harness/intent/associate", post(associate))
             .route("/api/v1/harness/capture/type", post(capture_type))
             .route("/api/v1/harness/intent/link", post(link))
@@ -708,6 +712,16 @@ pub(super) async fn ground(
     let mut script = state.lock().unwrap();
     script.ground_requests.push(request);
     Json(script.ground_response.clone().unwrap_or_default())
+}
+
+/// Mock of `ground/plan`: the scripted answer, recording each request.
+pub(super) async fn ground_plan(
+    State(state): State<Shared>,
+    Json(request): Json<PlanGroundRequest>,
+) -> Json<GroundResponse> {
+    let mut script = state.lock().unwrap();
+    script.plan_ground_requests.push(request);
+    Json(script.plan_ground_response.clone().unwrap_or_default())
 }
 
 /// Mock of `intent/resolve`: every `def` in a plan file is an indexed Function
