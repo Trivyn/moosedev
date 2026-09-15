@@ -79,24 +79,31 @@ moosedev-harness, but the hypothesis is it does better without it."
 
 | Tier | Model (table key) | Size | Thinking | Runtime |
 |---|---|---|---|---|
-| T1 | `gemma-4-e4b-it-mlx` | about 4B effective | off | LM Studio MLX, 4-bit |
-| T2 | `qwen/qwen3.5-9b` | dense 9B | off | LM Studio MLX, 4-bit |
-| T3 | `google/gemma-4-26b-a4b` | MoE 26B, about 4B active | off | LM Studio MLX, 5-bit |
-| T4 | `qwen/qwen3.8-27b` | dense 27B | off | LM Studio MLX, 5-bit |
-| T5 | `gemma-4-31b-it` | dense 31B | off | LM Studio MLX, 5-bit |
-| T6 | `nousresearch/hermes-4-70b` | dense 70B (Llama 3.1 base) | off | LM Studio MLX, 4-bit |
-| T6r | `nousresearch/hermes-4-70b` | dense 70B | on (LM Studio Enable Thinking) | LM Studio MLX, 4-bit |
+| T1 | `qwen/qwen3.5-9b` | dense 9B | off | LM Studio MLX, 4-bit |
+| T2 | `google/gemma-4-26b-a4b` | MoE 26B, about 4B active | off | LM Studio MLX, 5-bit |
+| T3 | `qwen/qwen3.8-27b` | dense 27B | off | LM Studio MLX, 5-bit |
+| T4 | `gemma-4-31b-it` | dense 31B | off | LM Studio MLX, 5-bit |
+| T5 | NVIDIA Nemotron-3-Super-120B-A12B (**qualification pending**) | MoE 121B, 12B active | hybrid; both settings (`<think>` in its template) | LM Studio MLX, 4-bit, 68 GB, runs alone |
 | TF | Sonnet via OpenRouter (**decision**: exact model ID) | frontier | provider default, matched across arms | hosted |
 
-Pinned local rows, fingerprints and runtime contexts are in `model_table.py`.
-Gemma E4B is also the daemon helper in every harness cell (Constraint
-`83c18bb9`).
+Dropped by the maintainer (2026-09-15): `gemma-4-e4b-it-mlx` as a tested tier (it stays the
+daemon helper in every harness cell, Constraint `83c18bb9`), and both 70B models.
+`llama-3.3-70b-instruct` and `nousresearch/hermes-4-70b` are excluded on evidence, not
+preference: Llama paid about 55 s of JSON-schema setup per harness request and LM Studio did
+not parse its tool calls (Lessons `9ef26b02`, `30a39e45`); Hermes made no tool-driven progress
+in four cells, thinking off or on (Lesson `ddbe810c`). Their `model_table.py` rows stay so that
+approved designs and existing evidence keep verifying.
 
-Excluded: `llama-3.3-70b-instruct`. On LM Studio MLX it paid about 55 s of JSON
-schema setup before every harness request (Lesson `9ef26b02`), and LM Studio did
-not parse its tool calls, so OpenCode re-sent one request 2,728 times (Lesson
-`30a39e45`). Neither cell measured the model. A tier enters the study only if its
-preflight tool-call and response probes pass on the sealed build.
+Gap: nothing separates total size from active size between T2 (26B/4B) and T5 (121B/12B).
+Qwen3.6-35B-A3B (35B total, 3B active, 21.6 GB MLX) would fill it in the Qwen tool format LM
+Studio already parses; not downloaded (**decision**).
+
+Pinned local rows, fingerprints and runtime contexts are in `model_table.py`.
+Gemma E4B remains the daemon helper in every harness cell (Constraint `83c18bb9`).
+
+A tier enters the study only after its preflight tool-call and response probes pass on the
+sealed build AND it completes one qualifying harness episode with a plan and an edit; a clean
+short probe is not sufficient (Lesson `ddbe810c`).
 
 ## Arms
 
@@ -108,7 +115,7 @@ preflight tool-call and response probes pass on the sealed build.
 Same model, same task prompts, clarifications and visible checks; the
 knowledge surface differs by design (table above). Thinking is
 matched by tier. The harness arm's response policy is `reasoning-off` for
-thinking-off tiers and `provider-default` for T6r and TF, which lets both arms
+thinking-off tiers and `provider-default` for T5 when run with thinking on, and for TF, which lets both arms
 inherit the runtime's setting (`field_check.RESPONSE_POLICIES`).
 
 ## Scenarios
@@ -146,8 +153,8 @@ episodes; the task used in earlier field checks) and
 
 A cell is (tier, arm, scenario). A run is one cell repetition with a fresh store
 and a new run ID. Proposed **n = 3** runs per cell, **n = 5** for tiers within
-one tier of the provisional floor, T2 and T3 on current evidence (**decision**).
-Schedule: grouped by tier to keep one model loaded (one 70B at a time),
+one tier of the provisional floor, T1 and T2 on current evidence (**decision**).
+Schedule: grouped by tier to keep one model loaded (T5 runs alone: 68 GB plus the 7 GB helper on 96 GiB),
 repetitions interleaved across arms within a tier so warm caches do not favour
 one arm.
 
@@ -229,9 +236,9 @@ killed at 1205 s. The budget below assumes 10 minutes per attempted episode
 
 | Matrix | Tiers (local) | Arms | Episodes per run | n | Episodes | Hours at 10 min |
 |---|---|---|---|---|---|---|
-| Full: all 7 packages | 7 | 2 | 25 | 3 | 1,050 | about 175 |
-| Proposed subset (4 packages, above) | 7 | 2 | 13 | 3, and 5 for T2-T3 | about 650 | about 108 |
-| Lean: `late_fees_crowded` (4) + `retry_ledger` e1 + `display_labels_maintenance` | 7 | 2 | 6 | 3 | 252 | about 42 |
+| Full: all 7 packages | 5 | 2 | 25 | 3 | 750 | about 125 |
+| Proposed subset (4 packages, above) | 5 | 2 | 13 | 3, and 5 for T1-T2 | 494 | about 82 |
+| Lean: `late_fees_crowded` (4) + `retry_ledger` e1 + `display_labels_maintenance` | 5 | 2 | 6 | 3 | 180 | about 30 |
 
 The frontier tier adds the same episode counts on hosted time and cost, capped
 by the budget decision.
@@ -303,6 +310,7 @@ unless noted; none is scored or pooled.
 | `ca733260` | gemma-4-26b-a4b leaked stray braces into replace text and exhausted repair |
 | `1cbc1917` | A 120 s total client timeout cut a long streamed action and ended a correct task |
 | `9ef26b02` | Llama-3.3-70B paid about 55 s of JSON schema setup per harness request |
+| `ddbe810c` | Hermes-4-70B made no tool-driven progress in four cells, thinking off or on |
 | `30a39e45` | LM Studio did not parse Llama-3.3's tool calls; OpenCode looped identical requests |
 
 ## Decisions needed from James
@@ -310,6 +318,6 @@ unless noted; none is scored or pooled.
 1. Threshold **T** and margin **M** for the floor rule (proposed 0.8 and 0.1).
 2. Repetitions: n per cell (proposed 3, and 5 for tiers near the floor).
 3. Scenario subset, including whether `late_fees_crowded` is promoted from exploratory or `late_fees` is used instead.
-4. Tier list: keep T1 (E4B) and T5 (gemma-4-31b-it); include both Hermes rows.
+4. Tier list: confirm the five local tiers above, and whether to add Qwen3.6-35B-A3B to separate total from active size between T2 and T5.
 5. Frontier model ID and cost cap.
 6. Whether the frontier arm runs at all, given that data leaves the machine.
