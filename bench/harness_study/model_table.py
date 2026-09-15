@@ -36,6 +36,12 @@ MODELS = {
         "runtime_context_tokens": 262144,
         "weights_sha256": "1952ccec586ce748a84783c67919ea70d18eeaf677f05b895d5ef46964338e36",
     },
+    "llama-3.3-70b-instruct": {
+        "weights": "mlx-community/Llama-3.3-70B-Instruct-4bit",
+        "description": "dense 70B, 4-bit MLX; upper size tier",
+        "runtime_context_tokens": 32768,
+        "weights_sha256": "39d2d119eaac71c81972fa908b007a40bc6b723a0e888e25d1fb8bbb6e9b2c75",
+    },
     "gemma-4-e4b-it-mlx": {
         "weights": "lmstudio-community/gemma-4-E4B-it-MLX-4bit",
         "description": "Gemma 4 E4B, 4-bit MLX; the daemon helper",
