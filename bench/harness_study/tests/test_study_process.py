@@ -443,7 +443,9 @@ sys.exit(2)''',
                           {"id": "q", "cycle": None, "kind": "constraint_coverage_unmet", "detail": "1 rule"},
                           {"id": "r", "cycle": "c1", "kind": "edit_grounding", "detail": "fees.py: 1 mismatch"},
                           {"id": "s", "cycle": "c1", "kind": "plan_grounding",
-                           "detail": "keys 1; definitions 1; mismatches 1; read accounts.py"}],
+                           "detail": "keys 1; definitions 1; mismatches 1; read accounts.py"},
+                          {"id": "t", "cycle": "c1", "kind": "replace_text_repair",
+                           "detail": "fees.py: trimmed old_text suffix \"}}\""}],
                       "events": [{"message": "Read labels.py: source"}],
                       "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
                                          {"purpose": "harness_capture_note", "attempt": 1, "decision_id": "d2"}]}
@@ -457,6 +459,7 @@ sys.exit(2)''',
                     "definition_anchors": 3, "module_anchors": 1, "unanchored_files": 1, "anchor_notes": 1,
                     "restated_links": 1, "capture_notes": 1, "guidance_loaded": 1, "constraint_coverage": 2,
                     "constraint_coverage_unmet": 1, "edit_grounding": 1, "plan_grounding": 1,
+                    "replace_text_repair": 1,
                     # Coverage returns and grounding conversions are nudges, not recoveries.
                     "structured_model_decisions": 0, "autonomous_recoveries": 2}
         self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,

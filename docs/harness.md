@@ -145,7 +145,14 @@ unfinished work. The CLI can reopen one with `moosedev-harness resume-session ID
 The runner retrieves project knowledge before planning and affected-file dossiers
 before edits. The model can request one unique literal replacement or supply
 whole new file content. The runner constructs the edit precondition from the exact
-source delivered for that request; ambiguous replacements are rejected. Concurrent
+source delivered for that request; ambiguous replacements are rejected. When
+`old_text` matches nowhere only because of stray junk at either end, at most 16
+bytes per end (closing braces or brackets, quotes, `$`, whitespace, or a
+special-token fragment such as `<|im_end|>`), the runner trims the smallest run
+whose remainder matches exactly once. It strips the identical junk from
+`new_text` when that text carries it at the same end, and journals a
+`replace_text_repair` intent event and an event naming what was removed. Two
+different remainders of that size are rejected as ambiguous. Concurrent
 file changes still invalidate approval or fail the executor's exact comparison.
 Deletion continues to require human approval. Legacy whole-file edit requests
 remain readable with their original strict semantics.

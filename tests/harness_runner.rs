@@ -2183,6 +2183,32 @@ async fn a_transport_timeout_retries_the_same_request_once_without_spending_a_re
 }
 
 #[tokio::test]
+async fn a_replace_with_stray_trailing_junk_is_trimmed_applied_and_journaled() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"original\n}}","new_text":"changed\n}}"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n"
+    );
+    let repairs = intent_details(&runner, "replace_text_repair");
+    assert_eq!(repairs.len(), 1, "{repairs:?}");
+    assert!(
+        repairs[0].starts_with("code.txt: ") && repairs[0].contains("\"}}\""),
+        "{repairs:?}"
+    );
+    assert!(runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("Replace text repair: ")
+            && event.message.contains("\"}}\"")));
+    assert!(runner.task.recovery.is_none());
+}
+
+#[tokio::test]
 async fn cancellation_during_generation_preserves_charged_candidate_on_resume() {
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;

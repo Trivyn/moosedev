@@ -183,14 +183,32 @@ impl Runner {
                     .as_deref()
                     .context("replace requires an existing file; use write to create one")?;
                 ensure!(!old_text.is_empty(), "replace old_text must not be empty");
-                // Count overlapping occurrences too: ambiguous matching must never
-                // choose an arbitrary location even when str::matches skips one.
-                let count = source
-                    .char_indices()
-                    .filter(|(i, _)| source[*i..].starts_with(&old_text))
-                    .take(2)
-                    .count();
-                ensure!(count == 1, "replace old_text must match exactly once; found {count}{}; use the supplied source to select a unique literal span", if count == 2 { " or more" } else { "" });
+                let count = occurrences(source, &old_text);
+                let (old_text, new_text) = match (count, repair_literal_span(source, &old_text)) {
+                    (0, Some(repair)) => {
+                        let trimmed_new = strip_same_junk(&new_text, &repair);
+                        let detail = super::bounded(
+                            &format!(
+                                "{file}: trimmed old_text prefix {:?} suffix {:?}; new_text {}",
+                                repair.prefix,
+                                repair.suffix,
+                                if trimmed_new == new_text {
+                                    "unchanged"
+                                } else {
+                                    "lost the same junk"
+                                }
+                            ),
+                            2000,
+                        );
+                        self.intent_event("replace_text_repair", &detail);
+                        self.event(format!("Replace text repair: {detail}. The trimmed old_text matches the supplied source exactly once."));
+                        (repair.span, trimmed_new)
+                    }
+                    _ => {
+                        ensure!(count == 1, "replace old_text must match exactly once; found {count}{}; use the supplied source to select a unique literal span", if count == 2 { " or more" } else { "" });
+                        (old_text, new_text)
+                    }
+                };
                 (file, Some(source.replacen(&old_text, &new_text, 1)))
             }
             Action::Write { file, content } => (file, content),
@@ -212,5 +230,210 @@ impl Runner {
             before,
             after,
         })
+    }
+}
+
+/// Occurrences of `literal` in `source`, counting overlaps, capped at two:
+/// ambiguous matching must never choose an arbitrary location even when
+/// str::matches would skip one.
+fn occurrences(source: &str, literal: &str) -> usize {
+    source
+        .char_indices()
+        .filter(|(i, _)| source[*i..].starts_with(literal))
+        .take(2)
+        .count()
+}
+
+/// The most stray bytes trimmed from either end of a literal span.
+const MAX_JUNK_BYTES: usize = 16;
+
+/// A literal span recovered by trimming stray junk from its ends.
+#[derive(Debug)]
+pub(super) struct SpanRepair {
+    pub(super) span: String,
+    pub(super) prefix: String,
+    pub(super) suffix: String,
+}
+
+/// Characters a model leaks into a string from its JSON envelope or template.
+fn is_junk_char(c: char) -> bool {
+    matches!(c, '}' | ']' | '"' | '\'' | '`' | '$') || c.is_whitespace()
+}
+
+fn token_fragment_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Byte lengths of trimmable junk prefixes, smallest first (always starting at 0).
+fn prefix_cuts(text: &str) -> Vec<usize> {
+    let mut cuts = vec![0];
+    let mut start = 0;
+    loop {
+        let rest = &text[start..];
+        let token = rest.strip_prefix("<|").and_then(|inner| {
+            let end = inner.find("|>")?;
+            inner[..end]
+                .chars()
+                .all(token_fragment_char)
+                .then_some(end + 4)
+        });
+        let unit = token.or_else(|| {
+            rest.chars()
+                .next()
+                .filter(|c| is_junk_char(*c))
+                .map(char::len_utf8)
+        });
+        match unit {
+            Some(unit) if start + unit <= MAX_JUNK_BYTES && start + unit < text.len() => {
+                start += unit;
+                cuts.push(start);
+            }
+            _ => return cuts,
+        }
+    }
+}
+
+/// Byte lengths of trimmable junk suffixes, smallest first (always starting at 0).
+/// A special-token fragment such as `<|im_end|>` or a dangling `<|` is one unit.
+fn suffix_cuts(text: &str) -> Vec<usize> {
+    let mut cuts = vec![0];
+    let mut end = text.len();
+    loop {
+        let rest = &text[..end];
+        let token = rest.rfind("<|").and_then(|start| {
+            rest[start + 2..]
+                .chars()
+                .all(|c| token_fragment_char(c) || matches!(c, '|' | '>'))
+                .then_some(rest.len() - start)
+        });
+        let unit = token.or_else(|| {
+            rest.chars()
+                .next_back()
+                .filter(|c| is_junk_char(*c))
+                .map(char::len_utf8)
+        });
+        match unit {
+            Some(unit) if text.len() - end + unit <= MAX_JUNK_BYTES && unit < end => {
+                end -= unit;
+                cuts.push(text.len() - end);
+            }
+            _ => return cuts,
+        }
+    }
+}
+
+/// Recover a literal that matches nowhere only because stray junk (closing
+/// braces or brackets, quotes, `$`, whitespace, special-token fragments) was
+/// leaked onto its ends. The smallest trim whose remainder occurs exactly once
+/// wins; two different remainders at that size are ambiguous and refused, as is
+/// any literal that already occurs or would need non-junk characters removed.
+pub(super) fn repair_literal_span(source: &str, literal: &str) -> Option<SpanRepair> {
+    if occurrences(source, literal) != 0 {
+        return None;
+    }
+    let prefixes = prefix_cuts(literal);
+    let suffixes = suffix_cuts(literal);
+    let mut candidates: Vec<(usize, usize, usize)> = prefixes
+        .iter()
+        .flat_map(|&p| suffixes.iter().map(move |&s| (p + s, p, s)))
+        .filter(|&(total, p, s)| total > 0 && p + s < literal.len())
+        .collect();
+    candidates.sort_unstable();
+    let mut found: Option<(usize, SpanRepair)> = None;
+    for (total, p, s) in candidates {
+        if found.as_ref().is_some_and(|(size, _)| total > *size) {
+            break;
+        }
+        let span = &literal[p..literal.len() - s];
+        if span.trim().is_empty() || occurrences(source, span) != 1 {
+            continue;
+        }
+        match &found {
+            Some((_, repair)) if repair.span != span => return None,
+            Some(_) => {}
+            None => {
+                found = Some((
+                    total,
+                    SpanRepair {
+                        span: span.to_owned(),
+                        prefix: literal[..p].to_owned(),
+                        suffix: literal[literal.len() - s..].to_owned(),
+                    },
+                ))
+            }
+        }
+    }
+    found.map(|(_, repair)| repair)
+}
+
+/// Remove from replacement text only the junk a repair removed from the old
+/// span, and only where it carries that exact junk at the same end.
+pub(super) fn strip_same_junk(text: &str, repair: &SpanRepair) -> String {
+    let mut text = text;
+    if !repair.suffix.is_empty() {
+        text = text.strip_suffix(repair.suffix.as_str()).unwrap_or(text);
+    }
+    if !repair.prefix.is_empty() {
+        text = text.strip_prefix(repair.prefix.as_str()).unwrap_or(text);
+    }
+    text.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trailing_envelope_braces_are_trimmed_to_the_unique_source_span() {
+        let source = "class FeePolicy:\n    def late_fee(self):\n        return 0\n";
+        let repair = repair_literal_span(
+            source,
+            "class FeePolicy:\n    def late_fee(self):\n        return 0\n}}",
+        )
+        .unwrap();
+        assert_eq!(repair.span, source);
+        assert_eq!(repair.prefix, "");
+        assert_eq!(repair.suffix, "}}");
+    }
+
+    #[test]
+    fn leading_junk_and_special_token_fragments_are_trimmed() {
+        let repair = repair_literal_span("fn x() {}\n", "\"$ fn x() {}").unwrap();
+        assert_eq!(repair.span, "fn x() {}");
+        assert_eq!(repair.prefix, "\"$ ");
+        assert_eq!(repair.suffix, "");
+        let repair = repair_literal_span("value = 1\n", "value = 1<|im_end|>").unwrap();
+        assert_eq!(repair.span, "value = 1");
+        assert_eq!(repair.suffix, "<|im_end|>");
+        // The smallest trim that matches wins: the stray newline stays in the span.
+        let repair = repair_literal_span("a\nreturn 0\nb", "return 0\n$}}} <|").unwrap();
+        assert_eq!(repair.span, "return 0\n");
+        assert_eq!(repair.suffix, "$}}} <|");
+    }
+
+    #[test]
+    fn ambiguous_unjunked_matching_or_oversized_trims_are_refused() {
+        // Two different trims of the same size each match once.
+        assert!(repair_literal_span("x} and }x", "}x}").is_none());
+        // No junk to remove: an ordinary mismatch stays a mismatch.
+        assert!(repair_literal_span("abc", "abd").is_none());
+        // Removing non-junk characters is never a repair.
+        assert!(repair_literal_span("abc", "abcdef").is_none());
+        // A literal that already matches needs no repair.
+        assert!(repair_literal_span("a}}", "a}}").is_none());
+        // A literal that matches more than once after trimming stays ambiguous.
+        assert!(repair_literal_span("ok ok", "ok}}").is_none());
+        // Junk runs are bounded.
+        assert!(repair_literal_span("ok\n", &format!("ok{}", "}".repeat(20))).is_none());
+    }
+
+    #[test]
+    fn new_text_loses_only_the_same_junk_at_the_same_end() {
+        let repair = repair_literal_span("original\n", "original\n}}").unwrap();
+        assert_eq!(strip_same_junk("changed\n}}", &repair), "changed\n");
+        assert_eq!(strip_same_junk("changed\n", &repair), "changed\n");
+        let repair = repair_literal_span("fn x() {}\n", "\"$ fn x() {}").unwrap();
+        assert_eq!(strip_same_junk("\"$ fn y() {}", &repair), "fn y() {}");
+        assert_eq!(strip_same_junk("fn y() {}", &repair), "fn y() {}");
     }
 }

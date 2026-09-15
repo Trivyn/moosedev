@@ -73,7 +73,10 @@ SYMBOLIC_EVENT_KINDS = (
     "final_review_attested", "knowledge_search", "capture_anchored",
     # Delivery nudges: the standing guidance snapshot, plan coverage returns, edit-time grounding and
     # the grounding of a disputed approved plan. None is an autonomous recovery.
-    "guidance_loaded", "constraint_coverage", "constraint_coverage_unmet", "edit_grounding", "plan_grounding")
+    "guidance_loaded", "constraint_coverage", "constraint_coverage_unmet", "edit_grounding", "plan_grounding",
+    # A replace whose stray envelope junk the harness trimmed before materializing the edit; not an
+    # autonomous recovery either.
+    "replace_text_repair")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")
