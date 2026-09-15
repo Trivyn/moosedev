@@ -445,7 +445,15 @@ sys.exit(2)''',
                           {"id": "s", "cycle": "c1", "kind": "plan_grounding",
                            "detail": "keys 1; definitions 1; mismatches 1; read accounts.py"},
                           {"id": "t", "cycle": "c1", "kind": "replace_text_repair",
-                           "detail": "fees.py: trimmed old_text suffix \"}}\""}],
+                           "detail": "fees.py: trimmed old_text suffix \"}}\""},
+                          {"id": "u", "cycle": "c1", "kind": "tool_arguments_repaired",
+                           "detail": "read: EOF while parsing; repaired {\"file\":\"fees.py\""},
+                          {"id": "v", "cycle": "c1", "kind": "extra_tool_calls_ignored",
+                           "detail": "ran read; ignored search"},
+                          {"id": "w", "cycle": "c1", "kind": "tool_call_from_content",
+                           "detail": "read: {\"name\": \"read\", \"parameters\": {\"file\": \"fees.py\"}}"},
+                          {"id": "x", "cycle": None, "kind": "tool_choice_fallback",
+                           "detail": "tool_choice 'required' is not supported"}],
                       "events": [{"message": "Read labels.py: source"}],
                       "model_requests": [{"purpose": "harness_action", "attempt": 1, "decision_id": "d1"},
                                          {"purpose": "harness_capture_note", "attempt": 1, "decision_id": "d2"}]}
@@ -459,8 +467,9 @@ sys.exit(2)''',
                     "definition_anchors": 3, "module_anchors": 1, "unanchored_files": 1, "anchor_notes": 1,
                     "restated_links": 1, "capture_notes": 1, "guidance_loaded": 1, "constraint_coverage": 2,
                     "constraint_coverage_unmet": 1, "edit_grounding": 1, "plan_grounding": 1,
-                    "replace_text_repair": 1,
-                    # Coverage returns and grounding conversions are nudges, not recoveries.
+                    "replace_text_repair": 1, "tool_arguments_repaired": 1, "extra_tool_calls_ignored": 1,
+                    "tool_call_from_content": 1, "tool_choice_fallback": 1,
+                    # Coverage returns, grounding conversions and tool-call decoding are nudges, not recoveries.
                     "structured_model_decisions": 0, "autonomous_recoveries": 2}
         self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,
                          "duplicate journal ids count once")

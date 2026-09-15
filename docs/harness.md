@@ -52,7 +52,7 @@ and validated JSON fallback otherwise. `required` rejects providers without
 native structured output. Complete model actions are validated before execution;
 streamed partial text never authorizes an edit or command.
 Before the first task generation, the harness verifies both streaming and
-nonstreaming structured responses with neutral connection probes. The harness-only
+nonstreaming responses for the action contract with neutral connection probes. The harness-only
 `MOOSEDEV_HARNESS_RESPONSE_POLICY` setting accepts `auto` (default),
 `provider-default`, or `reasoning-off`. Auto first tests the provider default; if a
 completed response contains only reasoning, it tests `reasoning_effort: "none"`.
@@ -60,6 +60,38 @@ The resolved mode must pass both content paths and is recorded in the session.
 This setting fixes the observed Qwen MLX response routing on LM Studio; it is not
 assumed to work on every provider. Reasoning text never becomes an executable
 action. A model/endpoint/settings change invalidates the compatibility cache.
+
+`MOOSEDEV_HARNESS_ACTION_CONTRACT` selects how the model answers action
+decisions: `tools` (default) or `json_schema`. Any other value is a configuration
+error. Under `tools`, each action request offers one function per action the
+current mode allows, derived from that mode's action schema, and sends
+`tool_choice: "required"` and `parallel_tool_calls: false` with no
+`response_format`. If the provider rejects the required choice (HTTP 400 or 422
+naming `tool_choice`), the harness resends with `tool_choice: "auto"` and no
+`parallel_tool_calls`, keeps that for the connection, and journals one
+`tool_choice_fallback` intent event per task. Streamed `delta.tool_calls` are
+accumulated by index; assistant text beside the call becomes the message, and
+reasoning text is ignored.
+
+Only the first call runs. Later calls are journaled as `extra_tool_calls_ignored`,
+and the session notes that one action runs per step. Arguments that are not valid
+JSON are repaired when possible (`tool_arguments_repaired`); otherwise the
+candidate is invalid output and spends a repair. Some models write the call as
+text instead, as Llama 3.3 does on LM Studio. When a response has no native call,
+the harness reads a JSON object from the text, fenced or not, in the
+`{"name", "parameters"}`, `{"name", "arguments"}` or `{"function": {...}}` shape.
+If the object names an offered tool, the call runs and `tool_call_from_content` is
+journaled. A response with no usable call spends a repair with the correction to
+call exactly one tool, including an empty response that finished with
+`tool_calls`. A tool the mode does not offer is corrected with the tools
+available now. A decoded call becomes the same action JSON the `json_schema`
+contract produces, so validation, repair budgets, `Model action:` events and
+`model_requests[].response` keep their shapes. Each model request records its
+`contract`, and under `tools` the calls it returned. Capture notes and the
+daemon helper always use `json_schema`. The `tools` compatibility probe asks for
+a single `ready` call with status `ok`, capped at 128 output tokens with
+reasoning off and 1024 under the provider default, and the receipt names the
+contract.
 
 Invalid JSON and repairable action/capture arguments share **three candidate
 outputs total** per action decision or capture note. The runner automatically

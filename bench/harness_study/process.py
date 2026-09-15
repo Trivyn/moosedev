@@ -76,7 +76,11 @@ SYMBOLIC_EVENT_KINDS = (
     "guidance_loaded", "constraint_coverage", "constraint_coverage_unmet", "edit_grounding", "plan_grounding",
     # A replace whose stray envelope junk the harness trimmed before materializing the edit; not an
     # autonomous recovery either.
-    "replace_text_repair")
+    "replace_text_repair",
+    # Tool-call decoding under the tools action contract: repaired arguments, extra calls that did not run,
+    # a call written as text, and the provider's refusal of a required tool choice. None is an autonomous
+    # recovery.
+    "tool_arguments_repaired", "extra_tool_calls_ignored", "tool_call_from_content", "tool_choice_fallback")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")
