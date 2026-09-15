@@ -42,6 +42,12 @@ MODELS = {
         "runtime_context_tokens": 32768,
         "weights_sha256": "39d2d119eaac71c81972fa908b007a40bc6b723a0e888e25d1fb8bbb6e9b2c75",
     },
+    "nousresearch/hermes-4-70b": {
+        "weights": "lmstudio-community/Hermes-4-70B-MLX-4bit",
+        "description": "dense 70B (Llama 3.1 base), 4-bit MLX; hybrid reasoning via LM Studio Enable Thinking",
+        "runtime_context_tokens": 32768,
+        "weights_sha256": "403475cefc3cb22c1da8e3e9e5b1cb9b08cff4ff2682dcdeded1cee6fed77ca7",
+    },
     "gemma-4-e4b-it-mlx": {
         "weights": "lmstudio-community/gemma-4-E4B-it-MLX-4bit",
         "description": "Gemma 4 E4B, 4-bit MLX; the daemon helper",

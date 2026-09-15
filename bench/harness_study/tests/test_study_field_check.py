@@ -31,6 +31,7 @@ SEALED_DOCS = {
 G31B = "gemma-4-31b-it"
 Q9B = "qwen/qwen3.5-9b"
 L70 = "llama-3.3-70b-instruct"
+H70 = "nousresearch/hermes-4-70b"
 A4B = "google/gemma-4-26b-a4b"
 QWEN = "qwen/qwen3.8-27b"
 HELPER = model_table.HELPER
@@ -70,7 +71,7 @@ class SealedIdentityTests(unittest.TestCase):
 class ModelTableTests(unittest.TestCase):
     def test_rows_entries_and_unknown_models(self):
         self.assertEqual(HELPER, intent.MODELS[1])
-        self.assertEqual(set(model_table.MODELS), {QWEN, A4B, G31B, Q9B, L70, HELPER})
+        self.assertEqual(set(model_table.MODELS), {QWEN, A4B, G31B, Q9B, L70, H70, HELPER})
         for model in intent.MODELS:
             self.assertIn(model, model_table.MODELS)
         for model, row in model_table.MODELS.items():
@@ -78,7 +79,7 @@ class ModelTableTests(unittest.TestCase):
             int(row["weights_sha256"], 16)
             self.assertIs(type(row["runtime_context_tokens"]), int)
         self.assertEqual({model: row["runtime_context_tokens"] for model, row in model_table.MODELS.items()},
-                         {QWEN: 262144, A4B: 262144, G31B: 262144, Q9B: 262144, L70: 32768, HELPER: 131072})
+                         {QWEN: 262144, A4B: 262144, G31B: 262144, Q9B: 262144, L70: 32768, H70: 32768, HELPER: 131072})
         self.assertEqual(model_table.models_root({"lmstudio_index": FIXTURE_INDEX}), FIXTURE_ROOT)
         self.assertEqual(model_table.config_entries([HELPER, HELPER], FIXTURE_ROOT), [
             {"id": HELPER, "weights": str(FIXTURE_ROOT / "lmstudio-community/gemma-4-E4B-it-MLX-4bit"),
