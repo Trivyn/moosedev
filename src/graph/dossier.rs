@@ -13,8 +13,8 @@ use crate::code::substrate::symbols::normalize_symbol;
 use crate::code::substrate::Position;
 
 use super::capture::asserted_project_types;
-use super::code_entities::{entities_by_symbol, CodeTerms};
-use super::context::{context_item_for_iri, first_literal, render_claim_body};
+use super::code_entities::{entities_by_symbol, file_entity_iris, CodeTerms};
+use super::context::{context_item_for_iri, first_literal, render_styled_claim_body, ClaimStyle};
 use super::lifecycle::in_working_set;
 use super::proposals::{judgments_for_entity, JudgmentSummary};
 use super::state::AppState;
@@ -130,7 +130,7 @@ pub fn get_entity_dossier(
     }
     for record in &mut direct_records {
         if in_working_set(&record.status) {
-            record.claim = record_claim(state, &record.iri);
+            record.claim = record_claim(state, &record.iri, ClaimStyle::Full);
         }
     }
 
@@ -320,6 +320,33 @@ pub(crate) fn render_dossiers_within(dossiers: &[Dossier], max_bytes: Option<usi
         ));
     }
     out
+}
+
+/// The harness's file dossier: the exhaustive view policy push renders for every
+/// knowledge-bearing entity in `file`, with harness-style claims and no
+/// workbench links. `None` when nothing is linked.
+///
+/// A scoped exception to Constraint 2ba76439: MCP, hover and policy push keep
+/// byte-identical full dossiers; only harness prompts use this rendering.
+pub fn harness_file_dossier(state: &AppState, file: &str) -> anyhow::Result<Option<String>> {
+    let mut dossiers = Vec::new();
+    for iri in file_entity_iris(state, file)? {
+        let Some(mut dossier) = get_entity_dossier(state, &DossierTarget::Iri(iri))? else {
+            continue;
+        };
+        for record in dossier
+            .direct_records
+            .iter_mut()
+            .chain(dossier.component_records.iter_mut())
+        {
+            record.workbench_url = None;
+            if record.claim.is_some() {
+                record.claim = record_claim(state, &record.iri, ClaimStyle::Harness);
+            }
+        }
+        dossiers.push(dossier);
+    }
+    Ok((!dossiers.is_empty()).then(|| render_dossiers(&dossiers)))
 }
 
 /// Render the editor-hover view with optional Story deep links for the exact
@@ -922,12 +949,12 @@ pub(super) fn summarize_record(
     })
 }
 
-/// The claim body topic recall renders for a record, or `None` when the record
-/// states nothing beyond its title and stamps.
-fn record_claim(state: &AppState, record_iri: &str) -> Option<String> {
+/// The claim body topic recall renders for a record in `style`, or `None` when
+/// the record states nothing beyond its title and stamps.
+fn record_claim(state: &AppState, record_iri: &str, style: ClaimStyle) -> Option<String> {
     let item = context_item_for_iri(state, record_iri, false)?;
     let mut claim = String::new();
-    render_claim_body(&item, &mut claim);
+    render_styled_claim_body(state, &item, style, &mut claim);
     (!claim.is_empty()).then_some(claim)
 }
 

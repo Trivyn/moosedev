@@ -33,7 +33,7 @@ pub fn context_snapshot(
         // An evidence-only request (the model's search) returns just the
         // topic's records with their complete claims.
         let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
-        render_topic_records(&mut context, &records);
+        render_topic_records(state, &mut context, &records);
         records.into_iter().map(|record| record.iri).collect()
     } else {
         // Linked evidence leads (AD 85da8700): the walk from the files' code
@@ -69,7 +69,7 @@ pub fn context_snapshot(
                     .filter(|record| !linked.excluded.contains(&record.iri))
                     .collect();
             context.push_str("\nTopic evidence (fallback; nothing is linked beyond the file dossiers; complete claims; up to six relationships per record):\n");
-            render_topic_records(&mut context, &fallback);
+            render_topic_records(state, &mut context, &fallback);
         } else {
             context.push_str("\nLinked evidence (records linked to the files' code and components; complete claims):\n");
             context.push_str(&graph::render_linked_evidence(&graph::with_rule_pointers(
@@ -82,24 +82,11 @@ pub fn context_snapshot(
     let mut files = Vec::new();
     for file in &request.files {
         validate_path(file)?;
-        let push = policy::evaluate(
-            state,
-            &root,
-            // No host bound: required context fails rather than truncating.
-            &PolicyEvent::EntityTouched {
-                file: file.clone(),
-                line: None,
-                col: None,
-                max_bytes: None,
-            },
-        )?;
-        let dossier = match push {
-            PolicyDecision::Inject {
-                dossier_markdown, ..
-            } => dossier_markdown,
-            _ => "No recorded entity knowledge is linked to this file. Topic recall still applies."
-                .into(),
-        };
+        // No host bound: required context fails rather than truncating.
+        let dossier = graph::harness_file_dossier(state, file)?.unwrap_or_else(|| {
+            "No recorded entity knowledge is linked to this file. Topic recall still applies."
+                .into()
+        });
         let policy = policy::evaluate(
             state,
             &root,
@@ -136,14 +123,14 @@ pub fn context_snapshot(
 /// How recall reaches claims, after the inventory sentence when it is listed.
 const RECALL: &str = "search with words from a record name returns its complete claims. A structural walk from the attached files' code and components supplies the linked evidence; topic recall appears only when nothing is linked beyond the file dossiers. Attached file dossiers carry the complete claims of records linked to the file's code, and governing Constraints appear with their claims under Project rules.";
 
-/// Topic recall records: a header per record, then its claim body.
-fn render_topic_records(context: &mut String, records: &[graph::ContextItem]) {
+/// Topic recall records: a header per record, then its harness-style claim body.
+fn render_topic_records(state: &AppState, context: &mut String, records: &[graph::ContextItem]) {
     for record in records {
         context.push_str(&format!(
             "\n[{}] {} ({})\n",
             record.kind, record.label, record.iri
         ));
-        graph::render_claim_body(record, context);
+        graph::render_styled_claim_body(state, record, graph::ClaimStyle::Harness, context);
     }
 }
 

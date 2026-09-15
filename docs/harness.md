@@ -337,7 +337,12 @@ contract 3 and intent contract 2.
   Constraints always, other kinds up to twelve, then a count. Each claim and
   each component list appears once per file dossier. The harness requests
   dossiers without a byte bound; context that exceeds the prompt budget fails
-  instead of being truncated.
+  instead of being truncated. Harness file dossiers, search results and topic
+  fallback render compact claims (`ClaimStyle::Harness`): each relationship line
+  names its target's title instead of its IRI, at most three are shown before
+  the omission line, and record lines carry no workbench links. This is a
+  harness-only exception to push == MCP: MCP, hover and policy push keep the
+  full claims, and linked evidence and Project rules keep the full renderer.
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). The first no-op edit runs the

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::protocol::*;
 use crate::api::error::ApiError;
 use crate::graph::{self, AppState, CaptureStamp, RecordInput, PROJECT_KG_GRAPH_IRI};
-use crate::policy::{self, PolicyDecision, PolicyEvent};
+use crate::policy::{self, PolicyEvent};
 
 mod anchors;
 pub mod associate;

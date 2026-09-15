@@ -1048,6 +1048,97 @@ async fn inventory_is_omitted_once_linked_evidence_is_supplied() {
 }
 
 #[tokio::test]
+async fn harness_claims_are_compact_while_push_keeps_full_claims() {
+    use moosedev::policy::{self, PolicyDecision, PolicyEvent};
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    state.publish_http_addr("127.0.0.1:7474".parse().unwrap());
+    let billing = record(&state, "SystemComponent", "Billing");
+    let decision = direct_decision(&state, symbol, "Harness compact decision");
+    graph::relate(&state, &decision, "concerns", &billing).unwrap();
+    let need = record_with(
+        &state,
+        "Requirement",
+        "Harness compact need",
+        "The harness needs short claims.",
+        "accepted",
+    );
+    graph::relate(&state, &decision, "isMotivatedBy", &need).unwrap();
+    let rule = record_with(
+        &state,
+        "Constraint",
+        "Harness compact rule",
+        "Claims stay short in small prompts.",
+        "accepted",
+    );
+    graph::relate(&state, &decision, "isConstrainedBy", &rule).unwrap();
+
+    // Search (evidence-only topic evidence) renders the compact claim: link
+    // lines name their targets' titles, at most three, then an omission line.
+    state.note_project_write();
+    let search = daemon::context_snapshot(
+        &state,
+        &ContextRequest {
+            topic: "harness compact decision".into(),
+            files: vec![],
+            evidence_only: true,
+        },
+    )
+    .unwrap();
+    let header = format!("({decision})\n");
+    let start = search.context.find(&header).expect("decision in search") + header.len();
+    let rest = &search.context[start..];
+    let body = &rest[..rest.find("\n[").unwrap_or(rest.len())];
+    let links: Vec<&str> = body
+        .lines()
+        .filter(|line| {
+            !line.starts_with("hasDescription: ") && !line.ends_with("retrieve them if relevant.")
+        })
+        .collect();
+    assert_eq!(links.len(), 3, "{body}");
+    assert!(body.contains("concerns: Billing\n"), "{body}");
+    assert!(!body.contains("://"), "{body}");
+    assert!(
+        body.ends_with("1 further relationships omitted; retrieve them if relevant.\n"),
+        "{body}"
+    );
+
+    // The harness file dossier carries the same bytes, without workbench links.
+    let attached = linked_context(&state, "harness compact decision", &["src/harness.rs"]);
+    let dossier = &attached.files[0].dossier;
+    assert!(dossier.contains(body), "{dossier}");
+    assert!(!dossier.contains("127.0.0.1:7474"), "{dossier}");
+
+    // Policy push, which MCP and hover share, keeps the full claim and link.
+    let push = policy::evaluate(
+        &state,
+        &state.project_root(),
+        &PolicyEvent::EntityTouched {
+            file: "src/harness.rs".into(),
+            line: None,
+            col: None,
+            max_bytes: None,
+        },
+    )
+    .unwrap();
+    let PolicyDecision::Inject {
+        dossier_markdown, ..
+    } = push
+    else {
+        panic!("push injects the dossier");
+    };
+    assert!(
+        dossier_markdown.contains(&format!("concerns: {billing}\n")),
+        "{dossier_markdown}"
+    );
+    assert!(
+        dossier_markdown.contains("127.0.0.1:7474"),
+        "{dossier_markdown}"
+    );
+}
+
+#[tokio::test]
 async fn governing_rules_alone_omit_the_inventory() {
     let fixture = Fixture::new();
     let state = fixture.state();

@@ -13,7 +13,7 @@ use super::capture::{
 };
 use super::lifecycle::{in_working_set, is_hidden_from_authoritative_reads, is_retired};
 use super::state::AppState;
-use super::util::{any_subclass_of, local_name};
+use super::util::{any_subclass_of, datatype_property_iri, local_name};
 use super::PROJECT_KG_GRAPH_IRI;
 
 /// A recorded knowledge item returned as structured context.
@@ -872,13 +872,63 @@ const NON_CLAIM_LITERALS: &[&str] = &[
 /// Links rendered per claim before an omission line.
 const CLAIM_LINK_LIMIT: usize = 6;
 
+/// Links a harness-style claim renders before its omission line.
+const HARNESS_CLAIM_LINK_LIMIT: usize = 3;
+
+/// How a claim body renders its relationship lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimStyle {
+    /// MCP, hover, policy push and linked evidence: up to six links, each
+    /// naming its target IRI.
+    Full,
+    /// Harness file dossiers and topic evidence: up to three links, each naming
+    /// its target's title. A scoped exception to Constraint 2ba76439; every
+    /// other surface keeps [`ClaimStyle::Full`] bytes.
+    Harness,
+}
+
 /// Render a record's claim body: every literal that states the claim
 /// (description, inlined rationale, other prose), then up to six links in
 /// edge-priority order and an omission line naming how many more exist.
 ///
-/// Topic evidence and claim-bearing dossiers both render through this, so a
-/// claim reads the same wherever the harness or an agent receives it.
+/// Topic recall, linked evidence and claim-bearing dossiers render through
+/// this, so a claim reads the same wherever an agent receives it.
 pub(crate) fn render_claim_body(item: &ContextItem, out: &mut String) {
+    write_claim_body(item, ClaimStyle::Full, &|iri: &str| iri.to_string(), out);
+}
+
+/// [`render_claim_body`] in `style`: the harness style names each link target
+/// by its title and keeps three links.
+pub(crate) fn render_styled_claim_body(
+    state: &AppState,
+    item: &ContextItem,
+    style: ClaimStyle,
+    out: &mut String,
+) {
+    write_claim_body(item, style, &|iri: &str| link_title(state, iri), out);
+}
+
+/// A link target's title: its record title, label or component name, then its
+/// IRI's local name.
+fn link_title(state: &AppState, iri: &str) -> String {
+    first_literal(&state.store, iri, &state.capture.title)
+        .or_else(|| first_literal(&state.store, iri, moose::RDFS_LABEL))
+        .or_else(|| {
+            datatype_property_iri(&state.arch_vocab, "hasComponentName")
+                .ok()
+                .and_then(|predicate| first_literal(&state.store, iri, &predicate))
+        })
+        .unwrap_or_else(|| local_name(iri).to_string())
+}
+
+/// Literals, then links in edge-priority order up to the style's limit; the
+/// harness style prints `title(target)` where the full style prints the IRI.
+fn write_claim_body(
+    item: &ContextItem,
+    style: ClaimStyle,
+    title: &dyn Fn(&str) -> String,
+    out: &mut String,
+) {
     for property in item.properties.iter().filter(|property| {
         property.is_literal && !NON_CLAIM_LITERALS.contains(&property.predicate.as_str())
     }) {
@@ -895,13 +945,21 @@ pub(crate) fn render_claim_body(item: &ContextItem, out: &mut String) {
             .then_with(|| a.predicate.cmp(&b.predicate))
             .then_with(|| a.value.cmp(&b.value))
     });
-    for link in links.iter().take(CLAIM_LINK_LIMIT) {
-        out.push_str(&format!("{}: {}\n", link.predicate, link.value));
+    let limit = match style {
+        ClaimStyle::Full => CLAIM_LINK_LIMIT,
+        ClaimStyle::Harness => HARNESS_CLAIM_LINK_LIMIT,
+    };
+    for link in links.iter().take(limit) {
+        let target = match style {
+            ClaimStyle::Full => link.value.clone(),
+            ClaimStyle::Harness => title(&link.value),
+        };
+        out.push_str(&format!("{}: {target}\n", link.predicate));
     }
-    if links.len() > CLAIM_LINK_LIMIT {
+    if links.len() > limit {
         out.push_str(&format!(
             "{} further relationships omitted; retrieve them if relevant.\n",
-            links.len() - CLAIM_LINK_LIMIT
+            links.len() - limit
         ));
     }
 }
@@ -931,10 +989,47 @@ pub(crate) fn first_literal(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_claim_body, ContextItem, ContextProperty};
+    use super::{render_claim_body, write_claim_body, ClaimStyle, ContextItem, ContextProperty};
+
+    #[test]
+    fn harness_claim_body_names_three_link_titles() {
+        let mut out = String::new();
+        write_claim_body(
+            &claim_fixture(),
+            ClaimStyle::Harness,
+            &|iri: &str| format!("Title {}", iri.trim_start_matches("urn:")),
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            "hasDescription: The rule and its reason.\n\
+             rationale: Why it holds.\n\
+             concerns: Title c\n\
+             constrains: Title k\n\
+             isMotivatedBy: Title m\n\
+             4 further relationships omitted; retrieve them if relevant.\n"
+        );
+    }
 
     #[test]
     fn claim_body_renders_literals_then_six_priority_links() {
+        let mut out = String::new();
+        render_claim_body(&claim_fixture(), &mut out);
+        assert_eq!(
+            out,
+            "hasDescription: The rule and its reason.\n\
+             rationale: Why it holds.\n\
+             concerns: urn:c\n\
+             constrains: urn:k\n\
+             isMotivatedBy: urn:m\n\
+             resultsIn: urn:r\n\
+             weighs: urn:w\n\
+             alpha: urn:a\n\
+             1 further relationships omitted; retrieve them if relevant.\n"
+        );
+    }
+
+    fn claim_fixture() -> ContextItem {
         let mut properties = vec![
             ContextProperty::literal("hasTitle", "Hidden title"),
             ContextProperty::literal("hasTimestamp", "2026-09-13T00:00:00Z"),
@@ -954,25 +1049,11 @@ mod tests {
         ] {
             properties.push(ContextProperty::link(predicate, value));
         }
-        let item = ContextItem {
+        ContextItem {
             iri: "urn:record".into(),
             kind: "Constraint".into(),
             label: "Record".into(),
             properties,
-        };
-        let mut out = String::new();
-        render_claim_body(&item, &mut out);
-        assert_eq!(
-            out,
-            "hasDescription: The rule and its reason.\n\
-             rationale: Why it holds.\n\
-             concerns: urn:c\n\
-             constrains: urn:k\n\
-             isMotivatedBy: urn:m\n\
-             resultsIn: urn:r\n\
-             weighs: urn:w\n\
-             alpha: urn:a\n\
-             1 further relationships omitted; retrieve them if relevant.\n"
-        );
+        }
     }
 }
