@@ -126,7 +126,8 @@ pub async fn prepare_with_observer(
         config.base_url.clone(),
         config.api_key.clone(),
         config.structured_output,
-    );
+    )
+    .with_timeouts(config.timeouts);
     if let Some(observer) = observer {
         base_client = base_client.with_usage_observer(
             observer,
@@ -154,7 +155,7 @@ pub async fn prepare_with_observer(
                 reasoning_off,
                 status: if result.is_ok() { "passed" } else { "failed" }.into(),
                 diagnostic: result.as_ref().err().map(|error| match error {
-                    CompletionError::Provider(_) => {
+                    CompletionError::Provider(_) | CompletionError::Transport(_) => {
                         "Provider request failed during the neutral probe".into()
                     }
                     error => error.to_string().replace(&config.api_key, "[redacted]"),
@@ -313,6 +314,7 @@ mod tests {
             configured: true,
             context_window_tokens: 32768,
             structured_output: StructuredOutputMode::Auto,
+            timeouts: Default::default(),
         };
         let task = tokio::spawn(async move {
             axum::serve(
@@ -606,6 +608,7 @@ mod tests {
                 configured: true,
                 context_window_tokens: 32768,
                 structured_output: StructuredOutputMode::Auto,
+                timeouts: Default::default(),
             };
             let (observer, receipts) = accounting_observer();
             let result = prepare_with_observer(&config, ResponsePolicy::Auto, Some(observer)).await;
@@ -687,6 +690,7 @@ mod tests {
                 configured: true,
                 context_window_tokens: 32768,
                 structured_output: StructuredOutputMode::Auto,
+                timeouts: Default::default(),
             };
             let result = prepare(&config, ResponsePolicy::Auto).await;
             let (passed, receipt) = match result {

@@ -3,7 +3,7 @@ use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningConstraint;
 use crate::harness::response::{self, ResponsePolicy};
-use crate::llm::{LlmConfig, OpenAiCompatClient, UsageContext};
+use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, UsageContext};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -237,45 +237,34 @@ impl Runner {
                 .collect();
             self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null}));
             self.persist()?;
-            let result = if self.task.batch_capture && name == "harness_action" {
-                let partial = Arc::new(Mutex::new(StreamedMessage::default()));
-                self.streaming = Some(partial.clone());
-                let progress = self.progress.clone();
-                client
-                    .chat_completion_json_schema_streaming_checked(
-                        &config.model,
-                        &request,
-                        None,
-                        name,
-                        schema.clone(),
-                        move |delta| {
-                            if let Ok(mut partial) = partial.lock() {
-                                partial.raw.push_str(delta);
-                                let decoded = message_prefix(&partial.raw);
-                                if decoded.starts_with(&partial.emitted)
-                                    && decoded.len() > partial.emitted.len()
-                                {
-                                    if let Some(progress) = &progress {
-                                        let _ = progress.send(Progress::AssistantDelta(
-                                            decoded[partial.emitted.len()..].to_owned(),
-                                        ));
-                                    }
-                                    partial.emitted = decoded;
-                                }
-                            }
-                        },
-                    )
-                    .await
-            } else {
-                client
-                    .chat_completion_json_schema_checked(
-                        &config.model,
-                        &request,
-                        None,
-                        name,
-                        schema.clone(),
-                    )
-                    .await
+            // A transport failure (connection, first output, idle stream) produced no
+            // candidate. Send the same request once more without spending a model
+            // repair attempt; a second failure is handled as before.
+            let mut transport_retries = 0;
+            let result = loop {
+                let result = self
+                    .generate_candidate(&client, &config.model, &request, name, &schema)
+                    .await;
+                match result {
+                    Err(error) if error.is_transport() && transport_retries == 0 => {
+                        transport_retries += 1;
+                        self.streaming = None;
+                        if let Some(entry) = self.task.model_requests.last_mut() {
+                            entry["transport_retries"] = json!(transport_retries);
+                        }
+                        let detail = format!("{name}: {}", super::bounded(&error.to_string(), 600));
+                        self.intent_event("transport_retry", &detail);
+                        let message = format!(
+                            "Model request interrupted by a transport failure; retrying the same request once. {detail}"
+                        );
+                        self.event(message.clone());
+                        if let Some(progress) = &self.progress {
+                            let _ = progress.send(Progress::Status(message));
+                        }
+                        self.persist()?;
+                    }
+                    result => break result,
+                }
             };
             let text = match result {
                 Ok(text) => {
@@ -294,6 +283,52 @@ impl Runner {
             serde_json::from_str::<T>(text.trim())
                 .context(InvalidModelOutput)
                 .context("model returned malformed output")
+        }
+    }
+
+    /// One physical generation of `request`: streamed when batch capture delivers
+    /// assistant text as it arrives, otherwise a single structured response.
+    async fn generate_candidate(
+        &mut self,
+        client: &OpenAiCompatClient,
+        model: &str,
+        request: &str,
+        name: &str,
+        schema: &Value,
+    ) -> Result<String, CompletionError> {
+        if self.task.batch_capture && name == "harness_action" {
+            let partial = Arc::new(Mutex::new(StreamedMessage::default()));
+            self.streaming = Some(partial.clone());
+            let progress = self.progress.clone();
+            client
+                .chat_completion_json_schema_streaming_checked(
+                    model,
+                    request,
+                    None,
+                    name,
+                    schema.clone(),
+                    move |delta| {
+                        if let Ok(mut partial) = partial.lock() {
+                            partial.raw.push_str(delta);
+                            let decoded = message_prefix(&partial.raw);
+                            if decoded.starts_with(&partial.emitted)
+                                && decoded.len() > partial.emitted.len()
+                            {
+                                if let Some(progress) = &progress {
+                                    let _ = progress.send(Progress::AssistantDelta(
+                                        decoded[partial.emitted.len()..].to_owned(),
+                                    ));
+                                }
+                                partial.emitted = decoded;
+                            }
+                        }
+                    },
+                )
+                .await
+        } else {
+            client
+                .chat_completion_json_schema_checked(model, request, None, name, schema.clone())
+                .await
         }
     }
 

@@ -236,7 +236,8 @@ impl AppState {
             llm_cfg.base_url,
             llm_cfg.api_key,
             llm_cfg.structured_output,
-        );
+        )
+        .with_timeouts(llm_cfg.timeouts);
         let ontology_resolver = MooseDevOntologyResolver::new();
 
         let engine_config = EngineConfig {

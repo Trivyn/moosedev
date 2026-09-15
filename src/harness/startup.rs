@@ -304,6 +304,7 @@ impl ProviderSettings {
                 configured: false,
                 context_window_tokens: crate::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
                 structured_output: crate::llm::StructuredOutputMode::Auto,
+                timeouts: Default::default(),
             },
         }
     }

@@ -24,6 +24,7 @@ impl Fixture {
             configured: false,
             context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
             structured_output: moosedev::llm::StructuredOutputMode::Auto,
+            timeouts: Default::default(),
         };
         AppState::bootstrap_with_llm_config(
             &self.0.join(".moosedev"),
@@ -3298,6 +3299,7 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
             configured: true,
             context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
             structured_output: moosedev::llm::StructuredOutputMode::Required,
+            timeouts: Default::default(),
         },
     )
     .unwrap();

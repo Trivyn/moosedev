@@ -9,6 +9,10 @@ pub enum CompletionError {
     MissingContent,
     Incomplete(String),
     InvalidResponse(String),
+    /// The connection failed or the provider went silent before a usable
+    /// response arrived. Nothing executable was produced, so the same request
+    /// may be sent again.
+    Transport(String),
     Provider(EngineError),
 }
 
@@ -19,7 +23,9 @@ impl std::fmt::Display for CompletionError {
             Self::StructuredOutputUnsupported => f.write_str("LLM provider does not support required JSON-schema output"),
             Self::ReasoningOnly => f.write_str("LLM completed with reasoning only and no executable message content; check the model response policy"),
             Self::MissingContent => f.write_str("LLM response missing message content"),
-            Self::Incomplete(message) | Self::InvalidResponse(message) => f.write_str(message),
+            Self::Incomplete(message) | Self::InvalidResponse(message) | Self::Transport(message) => {
+                f.write_str(message)
+            }
             Self::Provider(error) => std::fmt::Display::fmt(error, f),
         }
     }
@@ -29,6 +35,16 @@ impl std::error::Error for CompletionError {}
 impl CompletionError {
     pub(super) fn message(message: impl Into<String>) -> Self {
         Self::Provider(EngineError::InternalError(message.into()))
+    }
+
+    pub(super) fn transport(message: impl Into<String>) -> Self {
+        Self::Transport(message.into())
+    }
+
+    /// A connection, first-output or idle-read failure, as opposed to a provider
+    /// answer or an invalid response.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, Self::Transport(_))
     }
 
     pub(super) fn into_engine(self) -> EngineError {

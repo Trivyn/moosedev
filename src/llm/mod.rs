@@ -49,6 +49,95 @@ impl StructuredOutputMode {
     }
 }
 
+const DEFAULT_LLM_CONNECT_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_LLM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_LLM_IDLE_TIMEOUT_SECS: u64 = 120;
+const MAX_LLM_TIMEOUT_SECS: u64 = 86_400;
+
+/// Bounds on one provider request. A streaming completion has no total bound,
+/// because a slow local model may legitimately generate for minutes. Instead its
+/// response must begin within `first_chunk` (which covers prompt prefill) and
+/// then keep producing data, with no gap longer than `idle`. A non-streaming
+/// request produces nothing until generation ends, so `first_chunk` bounds it
+/// whole. `connect` bounds establishing the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmTimeouts {
+    pub connect: std::time::Duration,
+    pub first_chunk: std::time::Duration,
+    pub idle: std::time::Duration,
+}
+
+impl Default for LlmTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: std::time::Duration::from_secs(DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
+            first_chunk: std::time::Duration::from_secs(DEFAULT_LLM_FIRST_CHUNK_TIMEOUT_SECS),
+            idle: std::time::Duration::from_secs(DEFAULT_LLM_IDLE_TIMEOUT_SECS),
+        }
+    }
+}
+
+impl LlmTimeouts {
+    /// `MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS`, `MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS`
+    /// and `MOOSEDEV_LLM_IDLE_TIMEOUT_SECS`: whole seconds in 1..=86400. An invalid
+    /// value is an error, never a silent default.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_values(
+            std::env::var("MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS").ok(),
+            std::env::var("MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS").ok(),
+            std::env::var("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS").ok(),
+        )
+    }
+
+    fn from_values(
+        connect: Option<String>,
+        first_chunk: Option<String>,
+        idle: Option<String>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            connect: timeout_seconds(
+                "MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS",
+                connect,
+                DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
+            )?,
+            first_chunk: timeout_seconds(
+                "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS",
+                first_chunk,
+                DEFAULT_LLM_FIRST_CHUNK_TIMEOUT_SECS,
+            )?,
+            idle: timeout_seconds(
+                "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS",
+                idle,
+                DEFAULT_LLM_IDLE_TIMEOUT_SECS,
+            )?,
+        })
+    }
+}
+
+fn timeout_seconds(
+    name: &str,
+    value: Option<String>,
+    default: u64,
+) -> anyhow::Result<std::time::Duration> {
+    let Some(value) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(std::time::Duration::from_secs(default));
+    };
+    let seconds = value
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| (1..=MAX_LLM_TIMEOUT_SECS).contains(seconds))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{name} must be a whole number of seconds in 1..={MAX_LLM_TIMEOUT_SECS}; got {value:?}"
+            )
+        })?;
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
 /// Endpoint + model selection, read from the environment. A base URL is the
 /// explicit opt-in for LLM assistance; without it the server stays symbolic.
 #[derive(Debug, Clone)]
@@ -59,19 +148,23 @@ pub struct LlmConfig {
     pub configured: bool,
     pub context_window_tokens: usize,
     pub structured_output: StructuredOutputMode,
+    /// Request bounds; see [`LlmTimeouts`].
+    pub timeouts: LlmTimeouts,
 }
 
 impl LlmConfig {
     /// `MOOSEDEV_LLM_BASE_URL` / `MOOSEDEV_LLM_API_KEY` / `MOOSEDEV_LLM_MODEL`.
     /// `MOOSEDEV_LLM_BASE_URL` is required to enable LLM-assisted sensors.
     pub fn from_env() -> anyhow::Result<Self> {
-        Self::from_values(
+        let mut config = Self::from_values(
             std::env::var("MOOSEDEV_LLM_BASE_URL").ok(),
             std::env::var("MOOSEDEV_LLM_API_KEY").ok(),
             std::env::var("MOOSEDEV_LLM_MODEL").ok(),
             std::env::var("MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS").ok(),
             std::env::var("MOOSEDEV_LLM_STRUCTURED_OUTPUT").ok(),
-        )
+        )?;
+        config.timeouts = LlmTimeouts::from_env()?;
+        Ok(config)
     }
 
     fn from_values(
@@ -111,6 +204,7 @@ impl LlmConfig {
             configured,
             context_window_tokens,
             structured_output: StructuredOutputMode::parse(structured_output)?,
+            timeouts: LlmTimeouts::default(),
         })
     }
 }
@@ -142,6 +236,16 @@ pub struct OpenAiCompatClient {
     request_allowance: Option<Arc<AtomicU8>>,
     usage_binding: Option<UsageBinding>,
     stream_usage_unsupported: Arc<AtomicU8>,
+    timeouts: LlmTimeouts,
+}
+
+/// No total timeout: reqwest's would also cut a streamed body mid-generation.
+/// Output bounds are applied per request instead (see [`LlmTimeouts`]).
+fn http_client(timeouts: LlmTimeouts) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(timeouts.connect)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 impl OpenAiCompatClient {
@@ -154,10 +258,8 @@ impl OpenAiCompatClient {
         api_key: impl Into<String>,
         structured_output_mode: StructuredOutputMode,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let timeouts = LlmTimeouts::default();
+        let http = http_client(timeouts);
         Self {
             base_url: base_url.into(),
             api_key: api_key.into(),
@@ -171,7 +273,16 @@ impl OpenAiCompatClient {
             request_allowance: None,
             usage_binding: None,
             stream_usage_unsupported: Arc::new(AtomicU8::new(0)),
+            timeouts,
         }
+    }
+
+    /// Apply configured request bounds. This rebuilds the connection pool, so
+    /// apply it before cloning the client for concurrent use.
+    pub fn with_timeouts(mut self, timeouts: LlmTimeouts) -> Self {
+        self.http = http_client(timeouts);
+        self.timeouts = timeouts;
+        self
     }
 
     /// Observe each physical HTTP request with caller-owned attribution. The
@@ -246,6 +357,7 @@ impl OpenAiCompatClient {
             request_allowance: self.request_allowance.clone(),
             usage_binding: self.usage_binding.clone(),
             stream_usage_unsupported: self.stream_usage_unsupported.clone(),
+            timeouts: self.timeouts,
         }
     }
 
@@ -418,20 +530,33 @@ impl OpenAiCompatClient {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut observation =
             RequestObservation::start(self.usage_binding.as_ref(), &url, model, true);
+        let first_bound = self.timeouts.first_chunk;
+        let silent = |url: &str| {
+            CompletionError::transport(format!(
+                "LLM request to {url}: no model output within {}s (MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS)",
+                first_bound.as_secs()
+            ))
+        };
         let result = async {
             let request = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
-            let mut response = observation
-                .attribute(request)
-                .send()
-                .await
-                .map_err(|error| {
-                    CompletionError::message(format!("LLM request to {url}: {error}"))
-                })?;
+            // The response must begin, headers and first body data alike, within the
+            // first-chunk bound; after that only gaps between chunks are bounded.
+            let first_deadline = tokio::time::Instant::now() + first_bound;
+            let mut response =
+                tokio::time::timeout_at(first_deadline, observation.attribute(request).send())
+                    .await
+                    .map_err(|_| silent(&url))?
+                    .map_err(|error| {
+                        CompletionError::transport(format!("LLM request to {url}: {error}"))
+                    })?;
             observation.http_status(response.status());
             if !response.status().is_success() {
                 let status = response.status();
-                let received = response.text().await;
-                if received.is_ok() {
+                let received = tokio::time::timeout(self.timeouts.idle, response.text())
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+                if received.is_some() {
                     observation.response_complete();
                 }
                 let text = received.unwrap_or_default();
@@ -476,11 +601,30 @@ impl OpenAiCompatClient {
                 .is_some_and(|value| value.starts_with("application/json"));
             let mut stream = CompletionStream::default();
             let mut json_body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|error| CompletionError::message(format!("LLM stream read: {error}")))?
-            {
+            let mut started = false;
+            loop {
+                let next = if started {
+                    tokio::time::timeout(self.timeouts.idle, response.chunk()).await
+                } else {
+                    tokio::time::timeout_at(first_deadline, response.chunk()).await
+                };
+                let chunk = match next {
+                    Err(_) if started => {
+                        return Err(CompletionError::transport(format!(
+                            "LLM stream stalled: no data for {}s (MOOSEDEV_LLM_IDLE_TIMEOUT_SECS)",
+                            self.timeouts.idle.as_secs()
+                        )))
+                    }
+                    Err(_) => return Err(silent(&url)),
+                    Ok(Err(error)) => {
+                        return Err(CompletionError::transport(format!(
+                            "LLM stream read: {error}"
+                        )))
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Ok(Some(chunk))) => chunk,
+                };
+                started = true;
                 if is_json {
                     if json_body.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
                         return Err(CompletionError::message("LLM response exceeds size limit"));
@@ -582,7 +726,9 @@ impl OpenAiCompatClient {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut observation =
             RequestObservation::start(self.usage_binding.as_ref(), &url, model, false);
-        let result =
+        let bound = self.timeouts.first_chunk;
+        let result = match tokio::time::timeout(
+            bound,
             async {
                 let request = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
                 let mut resp = observation
@@ -590,9 +736,7 @@ impl OpenAiCompatClient {
                     .send()
                     .await
                     .map_err(|error| {
-                        CompletionError::Provider(EngineError::InternalError(format!(
-                            "LLM request to {url}: {error}"
-                        )))
+                        CompletionError::transport(format!("LLM request to {url}: {error}"))
                     })?;
                 observation.http_status(resp.status());
                 if !resp.status().is_success() {
@@ -620,7 +764,7 @@ impl OpenAiCompatClient {
                 }
                 let mut bytes = Vec::new();
                 while let Some(chunk) = resp.chunk().await.map_err(|error| {
-                    CompletionError::message(format!("LLM response read: {error}"))
+                    CompletionError::transport(format!("LLM response read: {error}"))
                 })? {
                     if bytes.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
                         return Err(CompletionError::InvalidResponse(
@@ -636,8 +780,16 @@ impl OpenAiCompatClient {
                 observation.observe(&value);
                 self.record_usage(&value);
                 complete_content(&value, self.strict_content).map(str::to_owned)
-            }
-            .await;
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(CompletionError::transport(format!(
+                "LLM request to {url}: no complete response within {}s (MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS bounds non-streaming requests)",
+                bound.as_secs()
+            ))),
+        };
         observation.finish(result.is_ok());
         result
     }
@@ -761,6 +913,177 @@ mod tests {
         );
         assert_eq!(client.take_usage(), (2, 3));
         server.abort();
+    }
+
+    fn short_timeouts() -> LlmTimeouts {
+        LlmTimeouts {
+            connect: std::time::Duration::from_secs(5),
+            first_chunk: std::time::Duration::from_secs(1),
+            idle: std::time::Duration::from_secs(1),
+        }
+    }
+
+    /// Serve one connection: write `prefix`, then either finish with `tail`
+    /// after paced pieces or hold the connection open forever.
+    async fn raw_stub(
+        prefix: &'static str,
+        pieces: Vec<String>,
+        pace: std::time::Duration,
+        tail: Option<String>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 16384];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(prefix.as_bytes()).await.unwrap();
+            for piece in pieces {
+                tokio::time::sleep(pace).await;
+                socket
+                    .write_all(format!("{:x}\r\n{piece}\r\n", piece.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            match tail {
+                Some(tail) => socket
+                    .write_all(format!("{:x}\r\n{tail}\r\n0\r\n\r\n", tail.len()).as_bytes())
+                    .await
+                    .unwrap(),
+                None => std::future::pending::<()>().await,
+            }
+        });
+        (endpoint, server)
+    }
+
+    const SSE_HEADERS: &str =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    fn sse_piece(content: &str) -> String {
+        format!(
+            "data: {}\r\n\r\n",
+            json!({"choices":[{"index":0,"delta":{"content":content}}]})
+        )
+    }
+
+    #[test]
+    fn llm_timeouts_default_parse_and_reject_invalid_values() {
+        let defaults = LlmTimeouts::from_values(None, None, None).unwrap();
+        assert_eq!(defaults, LlmTimeouts::default());
+        assert_eq!(defaults.connect, std::time::Duration::from_secs(10));
+        assert_eq!(defaults.first_chunk, std::time::Duration::from_secs(300));
+        assert_eq!(defaults.idle, std::time::Duration::from_secs(120));
+        let chosen =
+            LlmTimeouts::from_values(Some("7".into()), Some(" 600 ".into()), Some("".into()))
+                .unwrap();
+        assert_eq!(chosen.connect, std::time::Duration::from_secs(7));
+        assert_eq!(chosen.first_chunk, std::time::Duration::from_secs(600));
+        assert_eq!(chosen.idle, std::time::Duration::from_secs(120));
+        for invalid in ["0", "-1", "abc", "86401"] {
+            let error = LlmTimeouts::from_values(None, None, Some(invalid.into()))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS"),
+                "{invalid}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_outlasts_every_single_bound_still_completes() {
+        let pieces = ["{\"message\":", "\"slow", " but", " steady", "\"}"]
+            .iter()
+            .map(|piece| sse_piece(piece))
+            .collect();
+        let tail = format!(
+            "data: {}\r\n\r\ndata: [DONE]\r\n\r\n",
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+        );
+        let (endpoint, server) = raw_stub(
+            SSE_HEADERS,
+            pieces,
+            std::time::Duration::from_millis(450),
+            Some(tail),
+        )
+        .await;
+        let client = OpenAiCompatClient::new(endpoint, "test").with_timeouts(short_timeouts());
+        let started = std::time::Instant::now();
+        let text = client
+            .chat_completion_json_schema_streaming_checked(
+                "model",
+                "prompt",
+                None,
+                "shape",
+                json!({}),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(text, "{\"message\":\"slow but steady\"}");
+        assert!(
+            started.elapsed() > std::time::Duration::from_secs(2),
+            "the stream must outlast both the first-chunk and the idle bound"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_and_silent_providers_fail_as_bounded_transport_errors() {
+        let cases = [
+            (
+                SSE_HEADERS,
+                vec![sse_piece("{\"message\":")],
+                true,
+                "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS",
+            ),
+            (SSE_HEADERS, vec![], true, "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS"),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"cho",
+                vec![],
+                false,
+                "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS",
+            ),
+        ];
+        for (prefix, pieces, streaming, bound) in cases {
+            let (endpoint, server) =
+                raw_stub(prefix, pieces, std::time::Duration::from_millis(10), None).await;
+            let client = OpenAiCompatClient::new(endpoint, "test").with_timeouts(short_timeouts());
+            let started = std::time::Instant::now();
+            let error = if streaming {
+                client
+                    .chat_completion_json_schema_streaming_checked(
+                        "model",
+                        "prompt",
+                        None,
+                        "shape",
+                        json!({}),
+                        |_| {},
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                client
+                    .chat_completion_json_schema_checked(
+                        "model",
+                        "prompt",
+                        None,
+                        "shape",
+                        json!({}),
+                    )
+                    .await
+                    .unwrap_err()
+            };
+            assert!(error.is_transport(), "{bound}: {error}");
+            assert!(error.to_string().contains(bound), "{bound}: {error}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "{bound} took {:?}",
+                started.elapsed()
+            );
+            server.abort();
+        }
     }
 
     #[test]

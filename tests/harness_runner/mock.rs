@@ -631,6 +631,7 @@ impl Fixture {
             configured: true,
             context_window_tokens: 32768,
             structured_output: moosedev::llm::StructuredOutputMode::Required,
+            timeouts: Default::default(),
         }
     }
 

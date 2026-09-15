@@ -2132,6 +2132,57 @@ async fn source_change_during_generation_requires_fresh_approval_without_edit() 
 }
 
 #[tokio::test]
+async fn a_transport_timeout_retries_the_same_request_once_without_spending_a_repair() {
+    let fixture = Fixture::new().await;
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Repair code.txt while preserving behavior".into(),
+    )
+    .await
+    .unwrap();
+    let mut config = fixture.config();
+    config.timeouts = moosedev::llm::LlmTimeouts {
+        connect: std::time::Duration::from_secs(5),
+        first_chunk: std::time::Duration::from_secs(1),
+        idle: std::time::Duration::from_secs(1),
+    };
+    runner.configure(config, None);
+    runner.enable_interactive().unwrap();
+    let received = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    fixture.shared.lock().unwrap().held_response = Some((received, release.clone()));
+    // The held attempt consumes the first scripted answer and never returns it;
+    // the transport retry receives the second.
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    release.notify_one();
+    assert_eq!(runner.task.read_files, vec!["code.txt".to_string()]);
+    assert_eq!(fixture.model_calls(), 2);
+    let retries = intent_details(&runner, "transport_retry");
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    assert!(retries[0].starts_with("harness_action: "), "{retries:?}");
+    assert!(runner.task.recovery.is_none());
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("Correcting")));
+    let request = runner.task.model_requests.last().unwrap();
+    assert_eq!(
+        request["attempt"], 1,
+        "the retry spends no model repair attempt"
+    );
+    assert_eq!(request["transport_retries"], 1);
+    let decision = request["decision_id"].as_str().unwrap().to_owned();
+    let metered = metered_decision(&runner, &decision);
+    assert_eq!(metered.len(), 2, "{metered:?}");
+    assert_eq!(metered[0]["status"], "failed");
+    assert_eq!(metered[1]["status"], "completed");
+}
+
+#[tokio::test]
 async fn cancellation_during_generation_preserves_charged_candidate_on_resume() {
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;

@@ -77,6 +77,20 @@ tooling can separate daemon and transport faults from model faults. Intent
 events also mark `edit_applied` (every applied edit) and `repair_exhausted` (the
 purpose whose third candidate failed).
 
+A transport failure while generating a candidate produced no output: the
+connection failed, the response did not begin, or a stream went silent. The runner
+sends the same request once more, journals a `transport_retry` intent event and
+marks the model request with `transport_retries`, without spending a repair
+attempt. If the retry also fails, the step fails as before (`last_error_kind`
+`other`). Provider request bounds come from `MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS`
+(default 10), `MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS` (default 300: the response
+must begin within it, which covers prompt prefill on large local models) and
+`MOOSEDEV_LLM_IDLE_TIMEOUT_SECS` (default 120: the longest gap between streamed
+chunks). A streamed completion has no total bound, so a slow model may keep
+generating a long action. A non-streaming request yields nothing until
+generation ends, so the first-chunk bound limits it as a whole. Invalid values
+are configuration errors. The episode deadline still bounds everything.
+
 ## Request usage accounting
 
 Task journals expose `token_usage`, with one current receipt per explicit client
