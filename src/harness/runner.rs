@@ -3,7 +3,7 @@ use super::{
     executor::{self, Workspace},
     progress::{Progress, ProgressSender},
     protocol::*,
-    response::{ResponseKey, ResponsePolicy, ResponseReceipt},
+    response::{ActionContract, ResponseKey, ResponsePolicy, ResponseReceipt},
 };
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::policy::{GateDisposition, PolicyDecision};
@@ -34,6 +34,7 @@ mod symbolic;
 mod task;
 #[cfg(test)]
 mod test_support;
+mod tools;
 mod transport;
 mod usage;
 use actions::Step;
@@ -68,6 +69,7 @@ pub struct Runner {
     config: Option<LlmConfig>,
     model_client: Option<(ResponseKey, OpenAiCompatClient)>,
     response_policy: Option<ResponsePolicy>,
+    action_contract: Option<ActionContract>,
     progress: Option<ProgressSender>,
     streaming: Option<Arc<Mutex<StreamedMessage>>>,
     last_saved: Mutex<Option<[u8; 32]>>,
@@ -207,6 +209,7 @@ impl Runner {
             config: None,
             model_client: None,
             response_policy: None,
+            action_contract: None,
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
@@ -251,6 +254,7 @@ impl Runner {
             config: None,
             model_client: None,
             response_policy: None,
+            action_contract: None,
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
@@ -286,6 +290,12 @@ impl Runner {
 
     pub fn set_response_policy(&mut self, policy: ResponsePolicy) {
         self.response_policy = Some(policy);
+    }
+
+    /// Choose the action contract for this runner instead of reading
+    /// `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
+    pub fn set_action_contract(&mut self, contract: ActionContract) {
+        self.action_contract = Some(contract);
     }
 
     pub fn daemon_url(&self) -> &str {

@@ -2,8 +2,8 @@
 //! Probes are neutral, bounded, and cancellation-safe: dropping this future drops
 //! its HTTP request. No probe response is dispatched as a harness action.
 use crate::llm::{
-    CompletionError, LlmConfig, OpenAiCompatClient, StructuredOutputMode, UsageContext,
-    UsageObserver,
+    tool_call_from_text, CompletionError, LlmConfig, OpenAiCompatClient, StructuredOutputMode,
+    UsageContext, UsageObserver,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,6 +39,44 @@ impl ResponsePolicy {
     }
 }
 
+/// How the coding model returns its step action: native tool calls (the default)
+/// or one JSON object constrained by a response schema.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionContract {
+    #[default]
+    Tools,
+    JsonSchema,
+}
+
+impl ActionContract {
+    /// `MOOSEDEV_HARNESS_ACTION_CONTRACT`: `tools` (default) or `json_schema`.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::parse(
+            std::env::var("MOOSEDEV_HARNESS_ACTION_CONTRACT")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("tools") => Ok(Self::Tools),
+            Some("json_schema") => Ok(Self::JsonSchema),
+            Some(value) => anyhow::bail!(
+                "MOOSEDEV_HARNESS_ACTION_CONTRACT must be tools or json_schema; got {value:?}"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::JsonSchema => "json_schema",
+        }
+    }
+}
+
 /// This in-memory key contains credentials. Never serialize it into a receipt.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResponseKey {
@@ -48,9 +86,14 @@ pub struct ResponseKey {
     context_window_tokens: usize,
     structured_output: StructuredOutputMode,
     policy: ResponsePolicy,
+    contract: ActionContract,
 }
 
-pub fn cache_key(config: &LlmConfig, policy: ResponsePolicy) -> ResponseKey {
+pub fn cache_key(
+    config: &LlmConfig,
+    policy: ResponsePolicy,
+    contract: ActionContract,
+) -> ResponseKey {
     ResponseKey {
         base_url: config.base_url.clone(),
         model: config.model.clone(),
@@ -58,6 +101,7 @@ pub fn cache_key(config: &LlmConfig, policy: ResponsePolicy) -> ResponseKey {
         context_window_tokens: config.context_window_tokens,
         structured_output: config.structured_output,
         policy,
+        contract,
     }
 }
 
@@ -76,6 +120,9 @@ pub struct ResponseReceipt {
     pub requested: ResponsePolicy,
     pub resolved: Option<ResponsePolicy>,
     pub attempts: Vec<ProbeAttempt>,
+    /// The action contract the probes verified; absent in receipts from earlier builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<ActionContract>,
 }
 
 pub struct PreparedResponse {
@@ -115,13 +162,30 @@ pub async fn prepare_with_observer(
     policy: ResponsePolicy,
     observer: Option<UsageObserver>,
 ) -> Result<PreparedResponse, ProbeError> {
+    prepare_for_contract(config, policy, ActionContract::JsonSchema, observer).await
+}
+
+/// Probe the path the coding model's actions will use. Under the tools contract
+/// the probe asks for one call of a trivial `ready` tool; a thinking model under
+/// the provider default gets room (1024 tokens) to finish, reasoning-off keeps 128.
+/// A tool_choice fallback costs an extra request, so that contract's allowance is 6.
+pub async fn prepare_for_contract(
+    config: &LlmConfig,
+    policy: ResponsePolicy,
+    contract: ActionContract,
+    observer: Option<UsageObserver>,
+) -> Result<PreparedResponse, ProbeError> {
     let mut receipt = ResponseReceipt {
         requested: policy,
         resolved: None,
         attempts: vec![],
+        contract: Some(contract),
     };
     let mut reasoning_off = policy == ResponsePolicy::ReasoningOff;
-    let allowance = Arc::new(AtomicU8::new(4));
+    let allowance = Arc::new(AtomicU8::new(match contract {
+        ActionContract::Tools => 6,
+        ActionContract::JsonSchema => 4,
+    }));
     let mut base_client = OpenAiCompatClient::new_with_structured_output(
         config.base_url.clone(),
         config.api_key.clone(),
@@ -139,14 +203,18 @@ pub async fn prepare_with_observer(
         );
     }
     loop {
+        let limit = probe_output_limit(contract, reasoning_off);
         let client = base_client
             .clone()
             .for_harness(reasoning_off)
-            .with_output_limit(128)
+            .with_output_limit(limit)
             .with_request_allowance(Some(allowance.clone()));
         let mut failure = None;
         for stream in [false, true] {
-            let result = probe(&client, &config.model, stream).await;
+            let result = match contract {
+                ActionContract::JsonSchema => probe(&client, &config.model, stream).await,
+                ActionContract::Tools => probe_tools(&client, &config.model, stream, limit).await,
+            };
             let usage = client.take_usage_observation();
             let prompt_tokens = usage.map(|value| value.0);
             let completion_tokens = usage.map(|value| value.1);
@@ -188,6 +256,69 @@ pub async fn prepare_with_observer(
             Some(cause) => return Err(ProbeError { receipt, cause }),
         }
     }
+}
+
+fn probe_output_limit(contract: ActionContract, reasoning_off: bool) -> u32 {
+    match contract {
+        ActionContract::Tools if !reasoning_off => 1024,
+        _ => 128,
+    }
+}
+
+/// The wall-clock bound on one probe: 60 s for a 128-token answer, 300 s when a
+/// thinking model may spend up to 1024 tokens on a large local model.
+fn probe_time_bound(limit: u32) -> Duration {
+    Duration::from_secs(if limit > 128 { 300 } else { 60 })
+}
+
+async fn probe_tools(
+    client: &OpenAiCompatClient,
+    model: &str,
+    stream: bool,
+    limit: u32,
+) -> Result<(), CompletionError> {
+    const PROMPT: &str =
+        "This is a neutral connection test. Call the ready tool once with status \"ok\".";
+    let tools = json!([{"type":"function","function":{
+        "name":"ready",
+        "description":"Confirm the connection works.",
+        "parameters":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","enum":["ok"]}},"required":["status"]}
+    }}]);
+    let bound = probe_time_bound(limit);
+    let completion = tokio::time::timeout(
+        bound,
+        client.chat_completion_tools_checked(model, PROMPT, tools, stream, |_| {}),
+    )
+    .await
+    .map_err(|_| {
+        CompletionError::Incomplete(format!(
+            "Neutral response probe exceeded {} seconds",
+            bound.as_secs()
+        ))
+    })??;
+    // A model that writes its call as text is still usable: the runner reads
+    // such calls too.
+    let call = completion
+        .tool_calls
+        .first()
+        .cloned()
+        .or_else(|| tool_call_from_text(&completion.content))
+        .ok_or_else(|| {
+            CompletionError::InvalidResponse(
+                "Neutral response probe did not call the ready tool".into(),
+            )
+        })?;
+    let arguments: serde_json::Value = serde_json::from_str(&call.arguments).map_err(|_| {
+        CompletionError::InvalidResponse(
+            "Neutral response probe tool arguments were not valid JSON".into(),
+        )
+    })?;
+    if call.name != "ready" || arguments != json!({"status":"ok"}) {
+        return Err(CompletionError::InvalidResponse(
+            "Neutral response probe did not call ready with status ok".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn probe(
@@ -342,20 +473,31 @@ mod tests {
             ResponsePolicy::ProviderDefault
         );
         let mut config = LlmConfig::from_env().unwrap();
-        let key = cache_key(&config, ResponsePolicy::Auto);
-        assert!(key == cache_key(&config, ResponsePolicy::Auto));
-        assert!(key != cache_key(&config, ResponsePolicy::ProviderDefault));
+        let tools = ActionContract::Tools;
+        let key = cache_key(&config, ResponsePolicy::Auto, tools);
+        assert!(key == cache_key(&config, ResponsePolicy::Auto, tools));
+        assert!(key != cache_key(&config, ResponsePolicy::ProviderDefault, tools));
+        assert!(key != cache_key(&config, ResponsePolicy::Auto, ActionContract::JsonSchema));
         config.api_key.push('x');
-        assert!(key != cache_key(&config, ResponsePolicy::Auto));
+        assert!(key != cache_key(&config, ResponsePolicy::Auto, tools));
         config.api_key.pop();
         config.model.push('x');
-        assert!(key != cache_key(&config, ResponsePolicy::Auto));
+        assert!(key != cache_key(&config, ResponsePolicy::Auto, tools));
         config.model.pop();
         config.base_url.push('x');
-        assert!(key != cache_key(&config, ResponsePolicy::Auto));
+        assert!(key != cache_key(&config, ResponsePolicy::Auto, tools));
         config.base_url.pop();
         config.structured_output = StructuredOutputMode::Required;
-        assert!(key != cache_key(&config, ResponsePolicy::Auto));
+        assert!(key != cache_key(&config, ResponsePolicy::Auto, tools));
+        assert_eq!(ActionContract::parse(None).unwrap(), ActionContract::Tools);
+        assert_eq!(
+            ActionContract::parse(Some(" json_schema ")).unwrap(),
+            ActionContract::JsonSchema
+        );
+        assert!(ActionContract::parse(Some("json"))
+            .unwrap_err()
+            .to_string()
+            .contains("MOOSEDEV_HARNESS_ACTION_CONTRACT"));
     }
 
     #[tokio::test]
@@ -489,6 +631,113 @@ mod tests {
         assert_eq!(requests.lock().unwrap().len(), 1);
         task.abort();
     }
+    #[derive(Clone, Default)]
+    struct ToolStub {
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+        text_call: bool,
+    }
+
+    async fn tool_complete(
+        State(stub): State<ToolStub>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        stub.requests.lock().unwrap().push(body.clone());
+        let text = "{\"name\":\"ready\",\"parameters\":{\"status\":\"ok\"}}";
+        let call = json!({"id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}});
+        if body["stream"] == true {
+            let delta = if stub.text_call {
+                json!({"content":text})
+            } else {
+                json!({"tool_calls":[{"index":0,"id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}}]})
+            };
+            let events = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"index":0,"delta":delta}]}),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})
+            );
+            ([("content-type", "text/event-stream")], events).into_response()
+        } else {
+            let message = if stub.text_call {
+                json!({"content":text})
+            } else {
+                json!({"content":"","tool_calls":[call]})
+            };
+            Json(json!({"choices":[{"message":message,"finish_reason":"tool_calls"}]}))
+                .into_response()
+        }
+    }
+
+    async fn tool_server(stub: ToolStub) -> (LlmConfig, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = LlmConfig {
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            api_key: "test-secret".into(),
+            model: "fixture-model".into(),
+            configured: true,
+            context_window_tokens: 32768,
+            structured_output: StructuredOutputMode::Auto,
+            timeouts: Default::default(),
+        };
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/v1/chat/completions", post(tool_complete))
+                    .with_state(stub),
+            )
+            .await
+            .unwrap()
+        });
+        (config, task)
+    }
+
+    #[tokio::test]
+    async fn tool_contract_probes_call_the_ready_tool_within_policy_bounds() {
+        for (policy, limit) in [
+            (ResponsePolicy::ReasoningOff, 128),
+            (ResponsePolicy::ProviderDefault, 1024),
+        ] {
+            let stub = ToolStub::default();
+            let requests = stub.requests.clone();
+            let (config, task) = tool_server(stub).await;
+            let prepared = prepare_for_contract(&config, policy, ActionContract::Tools, None)
+                .await
+                .unwrap();
+            assert_eq!(prepared.receipt.contract, Some(ActionContract::Tools));
+            assert_eq!(prepared.receipt.resolved, Some(policy));
+            assert_eq!(prepared.receipt.attempts.len(), 2);
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                assert_eq!(request["max_tokens"], limit, "{policy:?}");
+                assert!(request.get("response_format").is_none());
+                assert_eq!(request["tool_choice"], "required");
+                assert_eq!(request["tools"][0]["function"]["name"], "ready");
+                assert_eq!(
+                    request.get("reasoning_effort").is_some(),
+                    policy == ResponsePolicy::ReasoningOff
+                );
+            }
+            task.abort();
+        }
+        // A model that writes the call as text (Llama on LM Studio) still passes.
+        let (config, task) = tool_server(ToolStub {
+            text_call: true,
+            ..ToolStub::default()
+        })
+        .await;
+        let prepared = prepare_for_contract(
+            &config,
+            ResponsePolicy::ReasoningOff,
+            ActionContract::Tools,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.receipt.attempts.len(), 2);
+        task.abort();
+    }
+
     fn accounting_observer() -> (UsageObserver, Arc<Mutex<Vec<crate::llm::RequestUsage>>>) {
         let receipts = Arc::new(Mutex::new(Vec::new()));
         let destination = receipts.clone();

@@ -1,9 +1,10 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
+use super::tools;
 use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningConstraint;
-use crate::harness::response::{self, ResponsePolicy};
-use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, UsageContext};
+use crate::harness::response::{self, ActionContract, ResponsePolicy};
+use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion, UsageContext};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,6 +23,8 @@ const RULES_HEADER: &str =
     "\nProject rules (hard requirements; your plan must satisfy each or say why it does not apply):\n";
 const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief user-facing prose, emitted first) and action (one typed action). Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
+const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
+const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
 const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
@@ -87,6 +90,13 @@ impl std::fmt::Display for NoopEdit {
     }
 }
 impl std::error::Error for NoopEdit {}
+
+/// One physical generation: action JSON text (json_schema contract, capture note)
+/// or a tool-contract completion still to be decoded.
+pub(super) enum Generated {
+    Content(String),
+    Tools(ToolCompletion),
+}
 pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     const NOTICE: &str =
         "\n[observation shortened; complete evidence is retained in the task journal]\n";
@@ -109,12 +119,21 @@ pub(super) fn observation_preview(text: &str, budget: usize) -> String {
 }
 
 impl Runner {
+    /// The action contract: the runner's explicit choice, else `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
+    pub(super) fn action_contract(&self) -> Result<ActionContract> {
+        match self.action_contract {
+            Some(contract) => Ok(contract),
+            None => ActionContract::from_env(),
+        }
+    }
+
     async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
         let policy = match self.response_policy {
             Some(policy) => policy,
             None => ResponsePolicy::from_env()?.unwrap_or_default(),
         };
-        let key = response::cache_key(config, policy);
+        let contract = self.action_contract()?;
+        let key = response::cache_key(config, policy, contract);
         if let Some((cached_key, client)) = &self.model_client {
             if *cached_key == key {
                 return Ok(client.clone());
@@ -125,9 +144,10 @@ impl Runner {
                 "Checking model response compatibility…".into(),
             ));
         }
-        let prepared = match response::prepare_with_observer(
+        let prepared = match response::prepare_for_contract(
             config,
             policy,
+            contract,
             Some(self.task.token_usage.observer(self.progress.clone())),
         )
         .await
@@ -196,12 +216,33 @@ impl Runner {
                 .saturating_mul(3),
         );
         anyhow::ensure!(prompt.len() <= limit, "required context is {} bytes (budget {limit}); narrow the working set or increase the configured context window", prompt.len());
-        let base_request_bytes = json_request_bytes(prompt, &schema)?;
-        let base_request = format!(
-            "{prompt}{JSON_SCHEMA_MARKER}{}",
-            serde_json::to_string(&schema)?
-        );
-        debug_assert_eq!(base_request.len(), base_request_bytes);
+        // Only the step action uses the configured contract; the capture note
+        // stays schema-constrained.
+        let contract = if name == "harness_action" {
+            self.action_contract()?
+        } else {
+            ActionContract::JsonSchema
+        };
+        let tool_definitions =
+            (contract == ActionContract::Tools).then(|| tools::definitions(&schema));
+        let (base_request, base_request_bytes) = match &tool_definitions {
+            Some(definitions) => (
+                prompt.to_owned(),
+                prompt
+                    .len()
+                    .checked_add(serde_json::to_vec(definitions)?.len())
+                    .context("model tool request byte count overflow")?,
+            ),
+            None => {
+                let bytes = json_request_bytes(prompt, &schema)?;
+                let request = format!(
+                    "{prompt}{JSON_SCHEMA_MARKER}{}",
+                    serde_json::to_string(&schema)?
+                );
+                debug_assert_eq!(request.len(), bytes);
+                (request, bytes)
+            }
+        };
         anyhow::ensure!(
             base_request_bytes <= limit.saturating_sub(REPAIR_RESERVE),
             "prompt plus output schema exceeds configured context budget"
@@ -223,7 +264,15 @@ impl Runner {
         let mut request = base_request;
         if let Some(repair) = &self.task.recovery {
             if !repair.diagnostic.is_empty() {
-                request.push_str(&format!("\nYour last candidate was rejected: {}. Correct it and return one JSON object matching the schema, without markdown.", repair.diagnostic));
+                let correction = if tool_definitions.is_some() {
+                    "Correct it and call exactly one allowed tool."
+                } else {
+                    "Correct it and return one JSON object matching the schema, without markdown."
+                };
+                request.push_str(&format!(
+                    "\nYour last candidate was rejected: {}. {correction}",
+                    repair.diagnostic
+                ));
             }
         }
         {
@@ -235,7 +284,7 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null}));
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null,"contract":contract.as_str()}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model
@@ -243,7 +292,14 @@ impl Runner {
             let mut transport_retries = 0;
             let result = loop {
                 let result = self
-                    .generate_candidate(&client, &config.model, &request, name, &schema)
+                    .generate_candidate(
+                        &client,
+                        &config.model,
+                        &request,
+                        name,
+                        &schema,
+                        tool_definitions.as_ref(),
+                    )
                     .await;
                 match result {
                     Err(error) if error.is_transport() && transport_retries == 0 => {
@@ -266,10 +322,10 @@ impl Runner {
                     result => break result,
                 }
             };
-            let text = match result {
-                Ok(text) => {
+            let generated = match result {
+                Ok(generated) => {
                     self.streaming = None;
-                    text
+                    generated
                 }
                 Err(error) => {
                     self.preserve_stream();
@@ -277,6 +333,10 @@ impl Runner {
                     self.persist()?;
                     return Err(error.into());
                 }
+            };
+            let text = match generated {
+                Generated::Content(text) => text,
+                Generated::Tools(completion) => self.decode_tool_completion(completion, &schema)?,
             };
             self.task.model_requests.last_mut().unwrap()["response"] = Value::String(text.clone());
             self.persist()?;
@@ -286,8 +346,77 @@ impl Runner {
         }
     }
 
+    /// Journal what a tool-contract response carried and decode it into action
+    /// JSON. An unusable response is invalid model output: it spends a repair
+    /// attempt and the next request carries the correction.
+    fn decode_tool_completion(
+        &mut self,
+        completion: ToolCompletion,
+        schema: &Value,
+    ) -> Result<String> {
+        if let Some(message) = &completion.tool_choice_fallback {
+            if !self
+                .task
+                .intent_events
+                .iter()
+                .any(|event| event.kind == "tool_choice_fallback")
+            {
+                self.intent_event("tool_choice_fallback", &super::bounded(message, 600));
+            }
+        }
+        if let Some(entry) = self.task.model_requests.last_mut() {
+            entry["tool_calls"] = json!(completion.tool_calls);
+        }
+        match tools::decode(&completion, schema, self.task.batch_capture) {
+            Ok(decoded) => {
+                if let Some(detail) = &decoded.repaired {
+                    self.intent_event("tool_arguments_repaired", detail);
+                }
+                if decoded.from_content {
+                    self.intent_event(
+                        "tool_call_from_content",
+                        &format!(
+                            "{}: {}",
+                            decoded.name,
+                            super::bounded(&completion.content, 400)
+                        ),
+                    );
+                }
+                if !decoded.ignored.is_empty() {
+                    let ignored = decoded.ignored.join(", ");
+                    self.intent_event(
+                        "extra_tool_calls_ignored",
+                        &format!("ran {}; ignored {ignored}", decoded.name),
+                    );
+                    self.event(format!(
+                        "Only the first tool call ran ({}); one action runs per step. Ignored: {ignored}.",
+                        decoded.name
+                    ));
+                }
+                Ok(decoded.text)
+            }
+            Err(diagnostic) => {
+                // The response keeps what came back, calls included, for the audit.
+                let raw = if completion.tool_calls.is_empty() {
+                    completion.content.clone()
+                } else {
+                    json!({"content": completion.content, "tool_calls": completion.tool_calls})
+                        .to_string()
+                };
+                if let Some(entry) = self.task.model_requests.last_mut() {
+                    entry["response"] = Value::String(raw);
+                }
+                self.persist()?;
+                Err(anyhow::anyhow!(diagnostic))
+                    .context(InvalidModelOutput)
+                    .context("model returned no usable tool call")
+            }
+        }
+    }
+
     /// One physical generation of `request`: streamed when batch capture delivers
     /// assistant text as it arrives, otherwise a single structured response.
+    /// Under the tools contract the request carries `tools` instead of a schema.
     async fn generate_candidate(
         &mut self,
         client: &OpenAiCompatClient,
@@ -295,8 +424,32 @@ impl Runner {
         request: &str,
         name: &str,
         schema: &Value,
-    ) -> Result<String, CompletionError> {
-        if self.task.batch_capture && name == "harness_action" {
+        tools: Option<&Value>,
+    ) -> Result<Generated, CompletionError> {
+        let streamed = self.task.batch_capture && name == "harness_action";
+        if let Some(tools) = tools {
+            if !streamed {
+                return client
+                    .chat_completion_tools_checked(model, request, tools.clone(), false, |_| {})
+                    .await
+                    .map(Generated::Tools);
+            }
+            let partial = Arc::new(Mutex::new(StreamedMessage::default()));
+            self.streaming = Some(partial.clone());
+            let progress = self.progress.clone();
+            return client
+                .chat_completion_tools_checked(model, request, tools.clone(), true, move |delta| {
+                    if let Ok(mut partial) = partial.lock() {
+                        partial.raw.push_str(delta);
+                    }
+                    if let Some(progress) = &progress {
+                        let _ = progress.send(Progress::AssistantDelta(delta.to_owned()));
+                    }
+                })
+                .await
+                .map(Generated::Tools);
+        }
+        if streamed {
             let partial = Arc::new(Mutex::new(StreamedMessage::default()));
             self.streaming = Some(partial.clone());
             let progress = self.progress.clone();
@@ -325,10 +478,12 @@ impl Runner {
                     },
                 )
                 .await
+                .map(Generated::Content)
         } else {
             client
                 .chat_completion_json_schema_checked(model, request, None, name, schema.clone())
                 .await
+                .map(Generated::Content)
         }
     }
 
@@ -361,10 +516,12 @@ impl Runner {
         }
         prompt.push_str(ROLE_BOUNDARY);
         prompt.push_str(&project_rules(&context.governing_constraints));
-        prompt.push_str(if self.task.batch_capture {
-            CONVERSATIONAL_OUTPUT
-        } else {
-            SINGLE_ACTION_OUTPUT
+        let contract = self.action_contract()?;
+        prompt.push_str(match (contract, self.task.batch_capture) {
+            (ActionContract::Tools, true) => TOOLS_CONVERSATIONAL_OUTPUT,
+            (ActionContract::Tools, false) => TOOLS_SINGLE_ACTION_OUTPUT,
+            (ActionContract::JsonSchema, true) => CONVERSATIONAL_OUTPUT,
+            (ActionContract::JsonSchema, false) => SINGLE_ACTION_OUTPUT,
         });
         prompt.push_str(ACTION_MEANINGS);
         prompt.push_str(JOB);
@@ -400,8 +557,12 @@ impl Runner {
         let schema = self.action_schema();
         let limit = self.prompt_budget()?;
         let required = prompt.len()
-            + "\nRequired JSON schema:\n".len()
-            + serde_json::to_string(&schema)?.len();
+            + match contract {
+                ActionContract::Tools => serde_json::to_string(&tools::definitions(&schema))?.len(),
+                ActionContract::JsonSchema => {
+                    JSON_SCHEMA_MARKER.len() + serde_json::to_string(&schema)?.len()
+                }
+            };
         let mut remaining = limit.saturating_sub(required);
         let outputs: Vec<_> = self
             .task

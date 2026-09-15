@@ -224,6 +224,13 @@ mod tests {
     use serde_json::{json, Value};
 
     async fn model(Json(body): Json<Value>) -> Json<Value> {
+        // The shared client's compatibility probe follows the action contract.
+        if body["tools"][0]["function"]["name"] == "ready" {
+            return Json(json!({"choices":[{"message":{"content":"","tool_calls":[{
+                "id":"probe","type":"function",
+                "function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}
+            }]},"finish_reason":"tool_calls"}]}));
+        }
         let name = body["response_format"]["json_schema"]["name"]
             .as_str()
             .unwrap();

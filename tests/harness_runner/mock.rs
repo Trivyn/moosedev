@@ -16,6 +16,7 @@ use moosedev::harness::daemon::intent::{
 };
 use moosedev::harness::digest::sha256_hex;
 use moosedev::harness::protocol::*;
+use moosedev::harness::response::ActionContract;
 use moosedev::harness::runner::{CheckResult, Phase, Runner};
 use moosedev::policy::{GateDisposition, PolicyDecision};
 use serde_json::{json, Value};
@@ -109,6 +110,8 @@ pub(super) struct Script {
     pub(super) fail_capture_type: bool,
     /// Every `capture/type` answers with this status instead of a typing.
     pub(super) capture_type_status: Option<u16>,
+    /// Action requests with `tool_choice: "required"` are refused (HTTP 400).
+    pub(super) reject_required_tool_choice: bool,
 }
 
 pub(super) type Shared = Arc<Mutex<Script>>;
@@ -117,7 +120,7 @@ pub(super) async fn model(
     State(state): State<Shared>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let held = if body["response_format"]["json_schema"]["name"] != "harness_response_probe" {
+    let held = if request_schema(&body) != "harness_response_probe" {
         state.lock().unwrap().held_response.take()
     } else {
         None
@@ -130,24 +133,109 @@ pub(super) async fn model(
     response
 }
 
+/// The sensor stage a model request is for: the probe's `ready` tool, other
+/// tool requests (actions), or the JSON schema name.
+pub(super) fn request_schema(body: &Value) -> String {
+    match body["tools"].as_array() {
+        Some(tools) if tools.iter().any(|tool| tool["function"]["name"] == "ready") => {
+            "harness_response_probe".into()
+        }
+        Some(_) => "harness_action".into(),
+        None => body["response_format"]["json_schema"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .into(),
+    }
+}
+
+/// The tool-contract form of a scripted answer. A raw `{content, tool_calls?,
+/// finish_reason?}` answer is sent as given; an action (conversational or single)
+/// becomes one native tool call; anything else is plain text content.
+pub(super) fn tool_message(answer: &Value) -> (Value, String) {
+    if let Some(raw) = answer
+        .as_object()
+        .filter(|raw| raw.contains_key("content") || raw.contains_key("tool_calls"))
+    {
+        let calls = raw.get("tool_calls").cloned().unwrap_or(json!([]));
+        let finish = raw
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if calls.as_array().is_some_and(|calls| !calls.is_empty()) {
+                    "tool_calls".into()
+                } else {
+                    "stop".into()
+                }
+            });
+        let content = raw.get("content").cloned().unwrap_or(json!(""));
+        return (
+            json!({"role":"assistant","content":content,"tool_calls":calls}),
+            finish,
+        );
+    }
+    let (message, action) = match answer.get("action") {
+        Some(Value::Object(action)) => (
+            answer.get("message").and_then(Value::as_str).unwrap_or(""),
+            Some(action.clone()),
+        ),
+        Some(Value::String(_)) => ("", answer.as_object().cloned()),
+        _ => ("", None),
+    };
+    let Some(mut action) = action else {
+        return (
+            json!({"role":"assistant","content":answer.to_string()}),
+            "stop".into(),
+        );
+    };
+    let name = action
+        .remove("action")
+        .and_then(|name| name.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    (
+        json!({"role":"assistant","content":message,"tool_calls":[{
+            "id":"call-0","type":"function",
+            "function":{"name":name,"arguments":Value::Object(action).to_string()}
+        }]}),
+        "tool_calls".into(),
+    )
+}
+
 pub(super) fn model_response(state: Shared, body: Value) -> (StatusCode, Json<Value>) {
     let mut script = state.lock().unwrap();
-    let name = body["response_format"]["json_schema"]["name"]
-        .as_str()
-        .unwrap_or("");
+    let schema = request_schema(&body);
+    let name = schema.as_str();
+    let tools = body["tools"].is_array();
     if name == "harness_response_probe" {
-        let mut response = json!({"choices":[{
-            "message":{"role":"assistant","content":"{\"status\":\"ok\"}"},
-            "finish_reason":"stop"
-        }]});
+        let mut response = if tools {
+            json!({"choices":[{
+                "message":{"role":"assistant","content":"","tool_calls":[{
+                    "id":"probe","type":"function",
+                    "function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]})
+        } else {
+            json!({"choices":[{
+                "message":{"role":"assistant","content":"{\"status\":\"ok\"}"},
+                "finish_reason":"stop"
+            }]})
+        };
         if let Some(usage) = &script.usage {
             response["usage"] = usage.clone();
         }
         return (StatusCode::OK, Json(response));
     }
+    let refuse = tools && script.reject_required_tool_choice && body["tool_choice"] == "required";
     script
         .requests
         .push(json!({"kind":"model","schema":name,"body":body}));
+    if refuse {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"tool_choice 'required' is not supported"})),
+        );
+    }
     let Some((expected, answer)) = script.replies.pop_front() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -160,7 +248,12 @@ pub(super) fn model_response(state: Shared, body: Value) -> (StatusCode, Json<Va
             std::fs::write(script.root.join("code.txt"), content).unwrap();
         }
     }
-    let mut response = json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()},"finish_reason":"stop"}]});
+    let mut response = if tools {
+        let (message, finish) = tool_message(&answer);
+        json!({"choices":[{"message":message,"finish_reason":finish}]})
+    } else {
+        json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()},"finish_reason":"stop"}]})
+    };
     if let Some(usage) = &script.usage {
         response["usage"] = usage.clone();
     }
@@ -491,7 +584,7 @@ impl Fixture {
     pub(super) fn edit(&self) {
         self.reply(
             "harness_action",
-            json!({"action":"edit","file":"code.txt","before":"original\n","after":"changed\n"}),
+            json!({"action":"replace","file":"code.txt","old_text":"original\n","new_text":"changed\n"}),
         );
     }
     pub(super) fn last_model_prompt(&self, schema: &str) -> String {
@@ -638,7 +731,13 @@ impl Fixture {
     /// Plan approved for `code.txt` in interactive mode. The plan checkpoint
     /// journals without a model call and lands directly on plan approval.
     pub(super) async fn approved_interactive(&self) -> Runner {
+        self.approved_interactive_with(ActionContract::Tools).await
+    }
+
+    /// The same approved task under an explicit action contract.
+    pub(super) async fn approved_interactive_with(&self, contract: ActionContract) -> Runner {
         let mut runner = self.interactive().await;
+        runner.set_action_contract(contract);
         self.conversational(json!({"action":"read","file":"code.txt"}));
         runner.advance().await.unwrap();
         self.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["true"]}));

@@ -75,10 +75,47 @@ async fn checkpoint() -> Json<CheckpointResponse> {
         pending: vec![],
     })
 }
+/// A scripted action as one native tool call, or plain content when it is not one.
+fn tool_message(answer: &Value) -> (Value, &'static str) {
+    let action = answer
+        .get("action")
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| {
+            answer
+                .get("action")
+                .and_then(Value::as_str)
+                .and(answer.as_object().cloned())
+        });
+    let Some(mut action) = action else {
+        return (
+            json!({"role":"assistant","content":answer.to_string()}),
+            "stop",
+        );
+    };
+    let message = answer.get("message").and_then(Value::as_str).unwrap_or("");
+    let name = action.remove("action").unwrap_or(Value::Null);
+    (
+        json!({"role":"assistant","content":message,"tool_calls":[{
+            "id":"call-0","type":"function",
+            "function":{"name":name,"arguments":Value::Object(action).to_string()}
+        }]}),
+        "tool_calls",
+    )
+}
+
 async fn model(State(state): State<Shared>, Json(request): Json<Value>) -> Json<Value> {
-    let schema = request["response_format"]["json_schema"]["name"]
-        .as_str()
-        .unwrap_or("");
+    let tools = request["tools"].as_array().cloned();
+    let probe = tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == "ready"));
+    let schema = if probe {
+        "harness_response_probe"
+    } else {
+        request["response_format"]["json_schema"]["name"]
+            .as_str()
+            .unwrap_or("")
+    };
     let answer = if schema == "harness_response_probe" {
         state.probe_calls.fetch_add(1, Ordering::SeqCst);
         json!({"status":"ok"})
@@ -93,6 +130,17 @@ async fn model(State(state): State<Shared>, Json(request): Json<Value>) -> Json<
         }
         state.replies.lock().unwrap().pop_front().unwrap_or_else(||json!({"message":"I will explain the project.","action":{"action":"reply","message":format!("Actual answer {}.",count+1)}}))
     };
+    if probe {
+        return Json(
+            json!({"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{
+            "id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}
+        }]},"finish_reason":"tool_calls"}]}),
+        );
+    }
+    if tools.is_some() {
+        let (message, finish) = tool_message(&answer);
+        return Json(json!({"choices":[{"message":message,"finish_reason":finish}]}));
+    }
     Json(
         json!({"choices":[{"message":{"role":"assistant","content":answer.to_string()},"finish_reason":"stop"}]}),
     )

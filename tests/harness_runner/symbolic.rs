@@ -309,19 +309,13 @@ async fn symbolic_replan_after_a_human_answer_or_command_is_a_real_replan() {
     assert!(intent_details(&runner, "replan_continuation").is_empty());
 }
 
-/// The action names a recorded `harness_action` request's schema offered.
+/// The action names a recorded `harness_action` request offered as tools.
 fn offered_actions(request: &Value) -> Vec<String> {
-    let mut names: Vec<String> = request["body"]["response_format"]["json_schema"]["schema"]
-        ["properties"]["action"]["oneOf"]
+    let mut names: Vec<String> = request["body"]["tools"]
         .as_array()
-        .expect("a conversational action schema")
+        .expect("tool definitions")
         .iter()
-        .map(|variant| {
-            variant["properties"]["action"]["const"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
+        .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
         .collect();
     names.sort_unstable();
     names
@@ -368,6 +362,8 @@ async fn symbolic_replan_in_plan_mode_is_a_noop() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = fixture.interactive().await;
+    // A replan while planning is refused only for providers that ignore the schema.
+    runner.set_action_contract(moosedev::harness::response::ActionContract::JsonSchema);
     fixture.conversational(json!({"action":"read","file":"labels.py"}));
     runner.advance().await.unwrap();
     let cycles = intent_details(&runner, "cycle_ended").len();
