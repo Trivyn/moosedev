@@ -290,7 +290,10 @@ contract 3 and intent contract 2.
   claims; other kinds stop at eight motivating records, eight supersession
   heads and six Lessons, with one line counting what was left out. Topic
   recall (limit 5, dossier records excluded) is used only when the walk finds
-  nothing, under a "Topic evidence (fallback" header.
+  nothing, under a "Topic evidence (fallback" header. The current record
+  inventory (up to 100 record names) is listed only while the walk supplies no
+  linked evidence and no Project rules, as on the first request with no files;
+  otherwise the recall preamble omits it.
 - Guidance. `Runner::create` snapshots `.moosedev/GUIDANCE.md` into the task
   (`standing_guidance`: source, sha256 and text) and journals
   `guidance_loaded`; a resumed task replays its snapshot, so editing the file

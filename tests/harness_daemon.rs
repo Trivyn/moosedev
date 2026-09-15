@@ -999,6 +999,85 @@ async fn fallback_topic_evidence_excludes_dossier_claims() {
 }
 
 #[tokio::test]
+async fn inventory_is_omitted_once_linked_evidence_is_supplied() {
+    const INVENTORY: &str = "Current knowledge inventory:\n";
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let decision = direct_decision(&state, symbol, "Harness inventory decision");
+
+    // The first request (no files) and a walk that adds nothing beyond the
+    // file dossier keep the inventory and the preamble that names it.
+    let first = linked_context(&state, "harness inventory", &[]);
+    assert!(first.context.contains(INVENTORY), "{}", first.context);
+    assert!(first
+        .context
+        .contains("the inventory lists current record names only"));
+    let dossier_only = linked_context(&state, "harness inventory", &["src/harness.rs"]);
+    assert!(dossier_only.governing_constraints.is_empty());
+    assert!(
+        dossier_only.context.contains(INVENTORY),
+        "{}",
+        dossier_only.context
+    );
+
+    // Linked evidence omits it, and the preamble no longer names it.
+    let need = record_with(
+        &state,
+        "Requirement",
+        "Harness inventory need",
+        "The harness needs its motivating record.",
+        "accepted",
+    );
+    graph::relate(&state, &decision, "isMotivatedBy", &need).unwrap();
+    let linked = linked_context(&state, "harness inventory", &["src/harness.rs"]);
+    assert!(linked.governing_constraints.is_empty());
+    assert!(
+        linked.context.contains("\nLinked evidence ("),
+        "{}",
+        linked.context
+    );
+    assert!(!linked.context.contains(INVENTORY), "{}", linked.context);
+    let preamble = linked.context.lines().next().unwrap_or_default();
+    assert!(preamble.starts_with("Recall: "), "{preamble}");
+    assert!(!preamble.contains("inventory"), "{preamble}");
+    // The first request still lists every record name.
+    assert!(linked_context(&state, "harness inventory", &[])
+        .context
+        .contains(INVENTORY));
+}
+
+#[tokio::test]
+async fn governing_rules_alone_omit_the_inventory() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let rule = record_with(
+        &state,
+        "Constraint",
+        "Harness inventory rule",
+        "Record names are omitted once rules arrive.",
+        "accepted",
+    );
+    graph::link_code(
+        &state,
+        &rule,
+        "constrains",
+        &graph::CodeSelector::Symbol(symbol.into()),
+        "test-human",
+    )
+    .unwrap();
+    let response = linked_context(&state, "harness inventory", &["src/harness.rs"]);
+    assert_eq!(response.governing_constraints.len(), 1);
+    assert!(!response.context.contains("\nLinked evidence ("));
+    assert!(
+        !response.context.contains("Current knowledge inventory:"),
+        "{}",
+        response.context
+    );
+}
+
+#[tokio::test]
 async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
     let fixture = Fixture::new();
     let state = Arc::new(fixture.state());

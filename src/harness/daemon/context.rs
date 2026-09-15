@@ -1,6 +1,7 @@
 //! Context for the runner: the governing knowledge of the files it reads,
 //! the accepted-revision fingerprint every later operation is pinned to, and
-//! the current record inventory the link path chooses from.
+//! the current record inventory the link path chooses from (listed in the
+//! context only while the walk supplies no rules or linked evidence).
 use super::*;
 use crate::harness::digest::sha256_hex;
 
@@ -35,14 +36,6 @@ pub fn context_snapshot(
         render_topic_records(&mut context, &records);
         records.into_iter().map(|record| record.iri).collect()
     } else {
-        let inventory = graph::relevant_context_snapshot(state, None, 100, false)?;
-        context.push_str("Recall: the inventory lists current record names only; search with words from a record name returns its complete claims. A structural walk from the attached files' code and components supplies the linked evidence; topic recall appears only when nothing is linked beyond the file dossiers. Attached file dossiers carry the complete claims of records linked to the file's code, and governing Constraints appear with their claims under Project rules.\n\nCurrent knowledge inventory:\n");
-        for record in inventory {
-            context.push_str(&format!(
-                "[{}] {} ({})\n",
-                record.kind, record.label, record.iri
-            ));
-        }
         // Linked evidence leads (AD 85da8700): the walk from the files' code
         // replaces similarity-ranked topic recall, which remains only as a
         // fallback when nothing is linked beyond what the dossiers print.
@@ -56,6 +49,19 @@ pub fn context_snapshot(
                 claim: rule.claim,
             })
             .collect();
+        // The record-name inventory stays only while the walk supplies no
+        // rules and no linked evidence, as on the first request with no files.
+        if linked.records.is_empty() && governing_constraints.is_empty() {
+            context.push_str(&format!("Recall: the inventory lists current record names only; {RECALL}\n\nCurrent knowledge inventory:\n"));
+            for record in graph::relevant_context_snapshot(state, None, 100, false)? {
+                context.push_str(&format!(
+                    "[{}] {} ({})\n",
+                    record.kind, record.label, record.iri
+                ));
+            }
+        } else {
+            context.push_str(&format!("Recall: {RECALL}\n"));
+        }
         if linked.records.is_empty() {
             let fallback: Vec<_> =
                 graph::relevant_context_snapshot(state, Some(&request.topic), 5, false)?
@@ -126,6 +132,9 @@ pub fn context_snapshot(
         governing_constraints,
     })
 }
+
+/// How recall reaches claims, after the inventory sentence when it is listed.
+const RECALL: &str = "search with words from a record name returns its complete claims. A structural walk from the attached files' code and components supplies the linked evidence; topic recall appears only when nothing is linked beyond the file dossiers. Attached file dossiers carry the complete claims of records linked to the file's code, and governing Constraints appear with their claims under Project rules.";
 
 /// Topic recall records: a header per record, then its claim body.
 fn render_topic_records(context: &mut String, records: &[graph::ContextItem]) {
