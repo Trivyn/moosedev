@@ -1,5 +1,6 @@
 //! Edit-time grounding: before an edit applies, find the attributes of function
-//! parameters it compares with string literals, look those names up across the
+//! parameters it compares with string literals (`param.name`, or
+//! `getattr(param, 'name'[, default])` with a literal name), look those names up across the
 //! code index, and report where they are defined and whether a compared literal
 //! is missing from a definition's values. Deterministic and read-only: no model,
 //! no graph write. Python first; other languages yield no keys yet.
@@ -100,7 +101,8 @@ fn grounded_definition(
     ))
 }
 
-/// Attributes of the enclosing function's parameters that the changed ranges
+/// Attributes of the enclosing function's parameters, read as `param.name` or as
+/// `getattr(param, 'name'[, default])` with a literal name, that the changed ranges
 /// compare with string literals (`==`, `!=`, `in`, `not in`, `match`/`case`),
 /// deduplicated in source order, at most [`MAX_KEYS`]. A syntax error or no
 /// ranges yields no keys.
@@ -118,13 +120,7 @@ pub fn edit_keys(file: &str, source: &str, ranges: &[HarnessSourceRange]) -> Vec
         let mut cursor = node.walk();
         let children: Vec<Node> = node.children(&mut cursor).collect();
         stack.extend(children.into_iter().rev());
-        if node.kind() != "attribute" {
-            continue;
-        }
-        let (Some(object), Some(attribute)) = (
-            node.child_by_field_name("object"),
-            node.child_by_field_name("attribute"),
-        ) else {
+        let Some((object, name)) = accessed_attribute(node, source) else {
             continue;
         };
         let owner = text(object, source);
@@ -149,7 +145,6 @@ pub fn edit_keys(file: &str, source: &str, ranges: &[HarnessSourceRange]) -> Vec
         if literals.is_empty() {
             continue;
         }
-        let name = text(attribute, source).to_string();
         if let Some(existing) = keys.iter_mut().find(|key| key.attribute == name) {
             for literal in literals {
                 if !existing.literals.contains(&literal) {
@@ -168,6 +163,44 @@ pub fn edit_keys(file: &str, source: &str, ranges: &[HarnessSourceRange]) -> Vec
 
 fn text<'a>(node: Node, source: &'a str) -> &'a str {
     &source[node.byte_range()]
+}
+
+/// The object and attribute name of an attribute access (`order.channel`) or of
+/// a `getattr` whose name is a plain string literal (`getattr(order, 'channel')`,
+/// with or without a default). A computed or interpolated name reads nothing.
+fn accessed_attribute<'tree>(node: Node<'tree>, source: &str) -> Option<(Node<'tree>, String)> {
+    match node.kind() {
+        "attribute" => {
+            let object = node.child_by_field_name("object")?;
+            let attribute = node.child_by_field_name("attribute")?;
+            Some((object, text(attribute, source).to_string()))
+        }
+        "call" => {
+            let function = node.child_by_field_name("function")?;
+            if function.kind() != "identifier" || text(function, source) != "getattr" {
+                return None;
+            }
+            let arguments = node.child_by_field_name("arguments")?;
+            let mut cursor = arguments.walk();
+            let operands: Vec<Node> = arguments.named_children(&mut cursor).collect();
+            if !(2..=3).contains(&operands.len()) || operands[1].kind() != "string" {
+                return None;
+            }
+            let mut parts = operands[1].walk();
+            let mut name = String::new();
+            for part in operands[1].named_children(&mut parts) {
+                match part.kind() {
+                    "string_content" => name.push_str(text(part, source)),
+                    "string_start" | "string_end" => {}
+                    _ => return None,
+                }
+            }
+            let identifier =
+                !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+            identifier.then_some((operands[0], name))
+        }
+        _ => None,
+    }
 }
 
 /// Parameter names of the nearest enclosing function definition.
@@ -201,8 +234,8 @@ fn enclosing_parameters(node: Node, source: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// String literals the attribute is compared with: the other operands of its
-/// comparison, or the case patterns of a match on it.
+/// String literals the attribute access (or `getattr` call) is compared with: the
+/// other operands of its comparison, or the case patterns of a match on it.
 fn compared_literals(attribute: Node, source: &str) -> Vec<String> {
     let Some(parent) = attribute.parent() else {
         return Vec::new();

@@ -355,7 +355,8 @@ contract 3 and intent contract 2.
 - Edit grounding. In Auto, an edit to a Python file the task has already read
   is sent to `POST /api/v1/harness/ground` with its changed ranges before
   policy applies it. Keys are attributes of the enclosing function's
-  parameters, inside the changed ranges, that are compared with string
+  parameters, read as `param.name` or `getattr(param, 'name'[, default])` with
+  a literal name, inside the changed ranges, that are compared with string
   literals (`==`, `!=`, `in`, `not in`, `match`/`case`), at most eight; a
   syntax error or coalesced ranges yields none. Each key is looked up by
   definition name (lowercased, plural folded), skipping parameters, locals, the

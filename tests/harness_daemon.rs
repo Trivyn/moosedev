@@ -4245,6 +4245,82 @@ fn grounding_names_proven_definitions_and_literal_mismatches() {
     let _ = std::fs::remove_dir_all(&fixture.0);
 }
 
+#[test]
+fn grounding_reads_getattr_on_a_parameter_like_attribute_access() {
+    use daemon::ground::ground_edit;
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    install_grounding_index(&fixture, &state);
+    let ground = |after: &str| {
+        ground_edit(
+            &state,
+            &GroundRequest {
+                file: "billing.py".into(),
+                after: after.into(),
+                ranges: ground_lines(1, 3),
+                ranges_coalesced: false,
+            },
+        )
+        .unwrap()
+    };
+    type Summary = (
+        Vec<(String, Vec<String>)>,
+        Vec<(String, String, String)>,
+        Vec<(String, String, String, String)>,
+    );
+    let summary = |response: &moosedev::harness::protocol::GroundResponse| -> Summary {
+        (
+            response
+                .keys
+                .iter()
+                .map(|key| (key.attribute.clone(), key.literals.clone()))
+                .collect(),
+            response
+                .definitions
+                .iter()
+                .map(|d| (d.file.clone(), d.name.clone(), d.role.clone()))
+                .collect(),
+            response
+                .mismatches
+                .iter()
+                .map(|m| {
+                    (
+                        m.key.clone(),
+                        m.literal.clone(),
+                        m.file.clone(),
+                        m.definition.clone(),
+                    )
+                })
+                .collect(),
+        )
+    };
+    let attribute = ground(
+        "def fee(order):\n    if order.channel == \"cash\":\n        return 1\n    return 0\n",
+    );
+    assert!(!attribute.keys.is_empty() && !attribute.mismatches.is_empty());
+    for form in [
+        "getattr(order, 'channel', None)",
+        "getattr(order, \"channel\")",
+    ] {
+        let response = ground(&format!(
+            "def fee(order):\n    if {form} == \"cash\":\n        return 1\n    return 0\n"
+        ));
+        assert_eq!(summary(&response), summary(&attribute), "{form}");
+    }
+    // Only a parameter and a literal attribute name make a key.
+    for form in [
+        "getattr(order, field)",
+        "getattr(order, f\"chan{suffix}\")",
+        "getattr(note, 'channel')",
+    ] {
+        let response = ground(&format!(
+            "def fee(order, field, suffix):\n    note = order\n    if {form} == \"cash\":\n        return 1\n    return 0\n"
+        ));
+        assert!(response.keys.is_empty(), "{form}: {:?}", response.keys);
+    }
+    let _ = std::fs::remove_dir_all(&fixture.0);
+}
+
 #[tokio::test]
 async fn http_ground_route_answers_keys_and_rejects_escaping_paths_and_unknown_fields() {
     let fixture = Fixture::new();
