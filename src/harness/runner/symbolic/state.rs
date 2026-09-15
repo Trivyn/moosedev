@@ -51,6 +51,13 @@ pub struct SymbolicState {
     /// the same edit proposed again goes through.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub grounded: BTreeSet<String>,
+    /// Content fingerprint of each file the model read in this task, taken at
+    /// the read. Storing a plan narrows the working set to its files; a file
+    /// read before that whose content is unchanged has still been seen, so
+    /// grounding does not hold an edit to show it again. Cleared when the
+    /// human restarts planning.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub read_snapshots: BTreeMap<String, Option<String>>,
     /// The one final capture note and its typing; cleared by each applied edit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_note: Option<CaptureNoteState>,

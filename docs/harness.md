@@ -363,7 +363,10 @@ contract 3 and intent contract 2.
   a source preview of up to 256 B (1 KB in total) only when the index proves the
   file current. A compared literal missing from a preview that quotes other
   values is a mismatch. The edit is held only on a mismatch or when a key is
-  defined in a file the task has not read: up to two defining files join the
+  defined in a file the task has not read. A file read earlier in the task
+  still counts as read after a stored plan narrows the working set, as long as
+  its content is unchanged since that read (`read_snapshots`, cleared when the
+  human restarts planning). On a hold, up to two defining files join the
   working set, the note lists the definitions, previews and mismatches, and
   `edit_grounding` is journaled. The same file and keys proposed again apply,
   also after a replan. A grounding route error is journaled and the edit

@@ -1,7 +1,8 @@
 //! Edit-time grounding in the runner: before a policy-checked edit applies, ask
 //! the daemon where the code index defines what the edit compares. When a
 //! compared literal is missing from a definition, or a compared name is defined
-//! in a file the model has not read, the edit is held once: the defining files
+//! in a file the model has not read (or has changed since it read it), the edit
+//! is held once: the defining files
 //! join the working set and a note names the definitions. The same edit proposed
 //! again goes through. Never a halt, a repair or a new decision.
 use super::super::Runner;
@@ -59,7 +60,9 @@ impl Runner {
             .definitions
             .iter()
             .map(|definition| definition.file.clone())
-            .filter(|defining| !self.task.read_files.contains(defining))
+            .filter(|defining| {
+                !self.task.read_files.contains(defining) && !self.read_is_current(defining)
+            })
             .collect();
         if response.mismatches.is_empty() && unread.is_empty() {
             return false;
@@ -128,5 +131,24 @@ impl Runner {
         self.event(note.clone());
         self.task.last_response = note;
         true
+    }
+
+    /// True when the model read `file` earlier in this task and its content is
+    /// unchanged since that read, even if a stored plan has since narrowed the
+    /// working set.
+    fn read_is_current(&self, file: &str) -> bool {
+        let Some(read) = self
+            .task
+            .symbolic
+            .as_ref()
+            .and_then(|state| state.read_snapshots.get(file))
+        else {
+            return false;
+        };
+        self.snapshot(&[file.to_string()])
+            .ok()
+            .and_then(|now| now.get(file).cloned())
+            .as_ref()
+            == Some(read)
     }
 }

@@ -48,6 +48,9 @@ impl Runner {
             );
             self.task.read_files.push(file.clone());
         }
+        self.symbolic_state_mut()
+            .read_snapshots
+            .insert(file.clone(), fingerprint(&source));
         self.event(format!(
             "Read {file}: {}",
             source.as_deref().unwrap_or("[file does not exist]")

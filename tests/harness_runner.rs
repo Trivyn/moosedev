@@ -388,6 +388,78 @@ async fn an_edit_with_nothing_to_ground_applies_directly() {
         .all(|event| event.kind != "edit_grounding"));
 }
 
+fn grounding_without_mismatch(file: &str) -> GroundResponse {
+    GroundResponse {
+        mismatches: Vec::new(),
+        ..grounding_answer(file)
+    }
+}
+
+/// Reads `catalog.txt`, then plans over `code.txt` alone: storing the plan
+/// narrows the working set to its files, so `catalog.txt` leaves it.
+async fn approved_after_reading_catalog(fixture: &Fixture) -> Runner {
+    std::fs::write(fixture.root.join("catalog.txt"), "wire\ncard\n").unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"catalog.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    assert!(
+        !runner.task.read_files.contains(&"catalog.txt".into()),
+        "storing the plan narrows the working set to its files"
+    );
+    fixture.shared.lock().unwrap().ground_response =
+        Some(grounding_without_mismatch("catalog.txt"));
+    runner
+}
+
+fn grounding_holds(runner: &Runner) -> usize {
+    runner
+        .task
+        .intent_events
+        .iter()
+        .filter(|event| event.kind == "edit_grounding")
+        .count()
+}
+
+#[tokio::test]
+async fn a_definition_read_before_planning_does_not_hold_the_edit() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = approved_after_reading_catalog(&fixture).await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().ground_requests.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n",
+        "a defining file read earlier in the task and unchanged since counts as read"
+    );
+    assert_eq!(grounding_holds(&runner), 0);
+}
+
+#[tokio::test]
+async fn a_definition_changed_since_it_was_read_still_holds_the_edit() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = approved_after_reading_catalog(&fixture).await;
+    std::fs::write(fixture.root.join("catalog.txt"), "wire\ncard\ncash\n").unwrap();
+    fixture.edit();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.shared.lock().unwrap().ground_requests.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\n",
+        "a defining file changed since the model read it is unread again"
+    );
+    assert_eq!(grounding_holds(&runner), 1);
+    assert!(runner.task.read_files.contains(&"catalog.txt".into()));
+}
+
 #[tokio::test]
 async fn standing_guidance_is_snapshotted_capped_and_replayed() {
     let _env_lock = ENVIRONMENT.lock().await;

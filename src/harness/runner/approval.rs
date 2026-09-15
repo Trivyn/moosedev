@@ -171,6 +171,9 @@ impl Runner {
         self.task.after_review = Phase::Planning;
         self.task.read_files.clear();
         self.task.source.clear();
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.read_snapshots.clear();
+        }
         if self.task.phase == Phase::AwaitingReview {
             self.task.review_continuation = Some(Phase::Planning);
         } else {
@@ -213,6 +216,9 @@ impl Runner {
         self.task.after_review = Phase::Planning;
         self.task.read_files.clear();
         self.task.source.clear();
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.read_snapshots.clear();
+        }
         self.task.steps = 0;
         self.end_intent_cycle("human replan");
         self.event("Human returned the task to Plan.");
