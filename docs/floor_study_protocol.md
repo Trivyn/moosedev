@@ -83,8 +83,12 @@ moosedev-harness, but the hypothesis is it does better without it."
 | T2 | `google/gemma-4-26b-a4b` | MoE 26B, about 4B active | off | LM Studio MLX, 5-bit |
 | T3 | `qwen/qwen3.8-27b` | dense 27B | off | LM Studio MLX, 5-bit |
 | T4 | `gemma-4-31b-it` | dense 31B | off | LM Studio MLX, 5-bit |
-| T5 | NVIDIA Nemotron-3-Super-120B-A12B (**qualification pending**) | MoE 121B, 12B active | hybrid; both settings (`<think>` in its template) | LM Studio MLX, 4-bit, 68 GB, runs alone |
-| TF | Sonnet via OpenRouter (**decision**: exact model ID) | frontier | provider default, matched across arms | hosted |
+
+**Sealed 2026-09-15**: the study runs these four local tiers, in this order.
+Nemotron-3-Super-120B-A12B and a Sonnet frontier anchor are deferred to their
+own later identities: the first is not yet qualified and runs alone at 68 GB,
+the second needs hosted model-table rows, hosted traffic recording and an egress
+decision no local tier requires. Adding either here would be a new identity.
 
 Dropped by the maintainer (2026-09-15): `gemma-4-e4b-it-mlx` as a tested tier (it stays the
 daemon helper in every harness cell, Constraint `83c18bb9`), and both 70B models.
@@ -94,9 +98,10 @@ not parse its tool calls (Lessons `9ef26b02`, `30a39e45`); Hermes made no tool-d
 in four cells, thinking off or on (Lesson `ddbe810c`). Their `model_table.py` rows stay so that
 approved designs and existing evidence keep verifying.
 
-Gap: nothing separates total size from active size between T2 (26B/4B) and T5 (121B/12B).
-Qwen3.6-35B-A3B (35B total, 3B active, 21.6 GB MLX) would fill it in the Qwen tool format LM
-Studio already parses; not downloaded (**decision**).
+Known gap, accepted: nothing separates total size from active size above T2 (26B
+total, about 4B active). Qwen3.6-35B-A3B (35B total, 3B active, 21.6 GB MLX)
+would fill it in a tool format LM Studio already parses; it is not downloaded and
+is deferred with the larger tiers.
 
 Pinned local rows, fingerprints and runtime contexts are in `model_table.py`.
 Gemma E4B remains the daemon helper in every harness cell (Constraint `83c18bb9`).
@@ -104,6 +109,18 @@ Gemma E4B remains the daemon helper in every harness cell (Constraint `83c18bb9`
 A tier enters the study only after its preflight tool-call and response probes pass on the
 sealed build AND it completes one qualifying harness episode with a plan and an edit; a clean
 short probe is not sufficient (Lesson `ddbe810c`).
+
+Sealed build: **`98d0bfa455d845c8`** (build G, native tool calls, AD `84dfd153`).
+Qualification evidence, single harness cells on `late_fees_crowded`, episode 1:
+
+| Tier | Qualifying cell | Result |
+|---|---|---|
+| T1 | `harness-variant-g-v1/cells-q9b` | completed, hidden probes failed, 211 s |
+| T2 | `harness-variant-g-v1/cells-pair` | passed, 68 s |
+| T3 | `harness-variant-g-v1/cells-pair` | passed 247 s; repeat passed 370 s |
+| T4 | `harness-g31b-qualify-g-v1` | passed 327 s, first edit 177 s (Lesson `d23a37c1`) |
+
+Completing the episode is the bar, not passing it; T1 qualifies on completion.
 
 ## Arms
 
@@ -114,9 +131,16 @@ short probe is not sufficient (Lesson `ddbe810c`).
 
 Same model, same task prompts, clarifications and visible checks; the
 knowledge surface differs by design (table above). Thinking is
-matched by tier. The harness arm's response policy is `reasoning-off` for
-thinking-off tiers and `provider-default` for T5 when run with thinking on, and for TF, which lets both arms
-inherit the runtime's setting (`field_check.RESPONSE_POLICIES`).
+matched by tier. All four sealed tiers are thinking-off, so every tier's harness
+response policy is `reasoning-off`; the per-tier policy field exists for the
+deferred hybrid-reasoning tiers (`floor_study.RESPONSE_POLICIES`).
+
+**Two arms, sealed 2026-09-15.** The native no-notes floor arm decided on
+2026-09-13 (AD `ba086e95`) is deliberately **not** in this study: it is a third
+arm costing 50% more compute, and it answers how much a well-kept notes file
+contributes — a question about the native baseline, not about the floor. It is
+deferred to a separate, cheaper study at one tier. This amends decision 4 of
+`scenarios/LONG_HORIZON_GOLD_REVIEW.md`.
 
 ## Scenarios
 
@@ -138,25 +162,36 @@ current prompt (regression); `retention` is decided by an earlier reason or a
 seed record and measures `correctness` or `cost`; `currency` is behaviour under
 a superseding rule.
 
-Gold status: the long-horizon review says no approval file exists and no
-campaign may start until its decisions are settled. `late_fees_crowded` is
-declared exploratory and never enters the long-horizon campaign; including it
-here requires James to promote it.
+**Sealed subset, 2026-09-15**: `late_fees` (4 episodes), `supplier_quotes` (5),
+`retry_ledger` (3) and `display_labels_maintenance` (1) — 13 episodes per run.
+This keeps one inherited and one accumulation package carrying retention and
+currency probes, with the two short packages as anchors.
 
-Proposed subset (**decision**): `late_fees_crowded` or `late_fees` (all 4
-episodes; rule delivery, retention, currency), `supplier_quotes` (5 episodes;
-accumulation track, cost and correctness retention), `retry_ledger` (3
-episodes; the task used in earlier field checks) and
-`display_labels_maintenance` (1 episode; maintenance).
+`late_fees_crowded` stays exploratory and is **not** scored here, for a reason
+that matters more than its crowding: every harness lever from build B through
+build G was developed and tuned against it (Lessons `7206b8a1`, `672acdbc`,
+`de463373`, `cb5cbfb0`, `ca733260`). Scoring a confirmatory study on the package
+its treatment was tuned on would inflate the result. `late_fees` carries the same
+probe counts (7 / 3 / 7 / 1, 8 negatives) and the same deciding rule without that
+history. The cost, stated plainly: this study makes no confirmatory claim about
+the crowded-graph condition, only about delivery in a two-seed graph.
+
+The gold of the four sealed packages is bound by the study's schema-4 approval,
+which records the maintainer's review of their package and gold hashes.
 
 ## Cells and repetitions
 
 A cell is (tier, arm, scenario). A run is one cell repetition with a fresh store
-and a new run ID. Proposed **n = 3** runs per cell, **n = 5** for tiers within
-one tier of the provisional floor, T1 and T2 on current evidence (**decision**).
-Schedule: grouped by tier to keep one model loaded (T5 runs alone: 68 GB plus the 7 GB helper on 96 GiB),
-repetitions interleaved across arms within a tier so warm caches do not favour
-one arm.
+and a new run ID. **Sealed: n = 3 for every tier**, uniformly. Repetitions cannot
+be topped up adaptively — more runs is a new identity — so n is fixed before the
+first scored cell rather than raised at the boundary tier later.
+
+That gives 4 tiers x 4 scenarios x 3 repetitions x 2 arms = **96 cells**, and 13
+episodes per run = **312 attempted episodes**.
+
+Schedule: tiers stay contiguous so exactly one coding model is loaded at a time,
+and within each repetition the arms alternate per scenario so a warm cache cannot
+favour one arm.
 
 ## Episode policy
 
@@ -204,11 +239,13 @@ new mode must implement this policy.
 - Per tier and arm: run pass rate pooled over the scenario subset, with an exact
   (Clopper-Pearson) 95% interval. Per tier and scenario: the paired difference
   harness minus native.
-- H5 floor rule (**decision** for T and M): the smallest tier where the harness
-  pooled pass rate is at least **T = 0.8** and the harness rate is at least the
-  native rate minus **M = 0.1**. Report the interval beside the point estimate;
-  with n = 3 over 4 scenarios (12 runs) an 11/12 rate has a lower bound near
-  0.62, so the floor is stated as a tier, not a parameter count.
+- H5 floor rule, **sealed at T = 0.8 and M = 0.1**: the smallest tier where the
+  harness pooled pass rate is at least T and is not below the native rate by more
+  than M. Both thresholds are hashed into the design identity, so changing either
+  is a new identity, never a rescoring. Report the interval beside the point
+  estimate; with n = 3 over 4 scenarios (12 runs per tier per arm) an 11/12 rate
+  has an exact lower bound of 0.6152, so the floor is stated as a tier, not a
+  parameter count.
 - H6 is tested two-sided on the four headline frontier comparisons. Rates get
   exact (Clopper-Pearson) intervals on the harness-minus-native difference.
   Tokens and wall time per passed task are reported with their per-run
@@ -234,16 +271,19 @@ the 1200 s deadline; native Qwen3.5-9B took 62 s; the Llama native cell was
 killed at 1205 s. The budget below assumes 10 minutes per attempted episode
 (passes near 4-8 minutes, failures at 20).
 
-| Matrix | Tiers (local) | Arms | Episodes per run | n | Episodes | Hours at 10 min |
-|---|---|---|---|---|---|---|
-| Full: all 7 packages | 5 | 2 | 25 | 3 | 750 | about 125 |
-| Proposed subset (4 packages, above) | 5 | 2 | 13 | 3, and 5 for T1-T2 | 494 | about 82 |
-| Lean: `late_fees_crowded` (4) + `retry_ledger` e1 + `display_labels_maintenance` | 5 | 2 | 6 | 3 | 180 | about 30 |
+| Matrix | Tiers | Arms | Episodes per run | n | Cells | Episodes | Hours at 10 min |
+|---|---|---|---|---|---|---|---|
+| **Sealed: 4 packages, 4 local tiers** | 4 | 2 | 13 | 3 | 96 | 312 | about 52 |
+| Considered: all 7 packages | 4 | 2 | 25 | 3 | 96 | 600 | about 100 |
+| Considered: plus the no-notes third arm | 4 | 3 | 13 | 3 | 144 | 468 | about 78 |
 
-The frontier tier adds the same episode counts on hosted time and cost, capped
-by the budget decision.
+The deferred frontier and Nemotron tiers carry their own episode counts under
+their own identities, and are not part of this budget.
 
-## Frontier anchor
+## Frontier anchor (deferred)
+
+**Not part of this identity (2026-09-15).** Retained below as the design for a
+later, separate study, so H6 stays pre-registered before that study runs.
 
 - Provider: OpenRouter, an OpenAI-compatible endpoint; model ID pinned in the
   design (**decision**).
@@ -313,11 +353,17 @@ unless noted; none is scored or pooled.
 | `ddbe810c` | Hermes-4-70B made no tool-driven progress in four cells, thinking off or on |
 | `30a39e45` | LM Studio did not parse Llama-3.3's tool calls; OpenCode looped identical requests |
 
-## Decisions needed from James
+## Decisions settled by James, 2026-09-15
 
-1. Threshold **T** and margin **M** for the floor rule (proposed 0.8 and 0.1).
-2. Repetitions: n per cell (proposed 3, and 5 for tiers near the floor).
-3. Scenario subset, including whether `late_fees_crowded` is promoted from exploratory or `late_fees` is used instead.
-4. Tier list: confirm the five local tiers above, and whether to add Qwen3.6-35B-A3B to separate total from active size between T2 and T5.
-5. Frontier model ID and cost cap.
-6. Whether the frontier arm runs at all, given that data leaves the machine.
+1. **T and M**: 0.8 and 0.1, hashed into the design identity.
+2. **Repetitions**: n = 3 for every tier, uniformly.
+3. **Scenario subset**: `late_fees`, `supplier_quotes`, `retry_ledger`,
+   `display_labels_maintenance`. `late_fees_crowded` stays exploratory and is not
+   promoted, because the harness levers were tuned on it.
+4. **Tiers**: the four local tiers T1-T4, all qualified on build `98d0bfa4`.
+   Qwen3.6-35B-A3B is not downloaded and is deferred.
+5. **Frontier arm**: deferred to its own identity, with Nemotron.
+6. **No-notes third arm**: deferred, amending decision 4 of the long-horizon
+   review.
+
+No decision here may change after the first scored cell; each is a new identity.
