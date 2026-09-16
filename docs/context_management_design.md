@@ -69,6 +69,41 @@ The resolution is to **bound by scope, not by truncation**:
 This is also what invariant #5 asks for — external, queryable memory rather than
 stuffing the window — which the harness currently violates on its own behalf.
 
+## What already exists, and why it does not help yet
+
+The MCP tooling needed dossier pruning and got it. `render_dossiers_within`
+bounds a push: sections render whole while they fit; one that does not keeps its
+heading, its direct records with claims and its component's accepted Constraint
+titles, and a closing line names what was shortened and says to retrieve it with
+`get_entity_dossier`. That is already the scope-not-truncation pattern this
+document argues for, implemented and tested.
+
+**The harness does not use it.** `harness_file_dossier` takes no bound and ends
+with `render_dossiers(&dossiers)`, which is `render_dossiers_within(dossiers,
+None)`. MCP threads a caller's `max_bytes` through; the harness path has no
+parameter for one.
+
+But wiring it through is not the fix on its own, because the growth is in direct
+records carrying full claims, and that is precisely what the bound must protect
+under Constraint `212a2026`. The protected core is what grows.
+
+**One clean win is available first.** AD `21855a2a` promises a record already
+shown in the same push renders as a pointer, and it does, within one file.
+`harness_file_dossier` is called once per file with fresh dedup state, while the
+prompt carries several file dossiers. Measured on late-episode prompts:
+
+| cell | record headers | full claim bodies | distinct records |
+|---|---|---|---|
+| 48 e4 | 56 | 38 | 18 |
+| 42 e5 | 119 | 33 | 19 |
+
+In cell 48, `tests/test_visible.py` contributed 23,318 bytes re-rendering claims
+`fees.py` had already rendered in the same prompt. Roughly 30-40% of late-episode
+dossier bytes are full claims the prompt already contains elsewhere. Carrying one
+`ShownInPush` across every file dossier in a prompt removes that, drops no
+knowledge, and does not touch `212a2026`'s protected core. Do this before
+reaching for a byte bound.
+
 ## Proposed module
 
 A `context` module owning one question: **given a budget, what does this step's
