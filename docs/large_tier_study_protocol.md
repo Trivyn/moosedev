@@ -81,6 +81,38 @@ and is reported as such, not explained away.
 Both directions are reported with exact intervals. A harness advantage at 122B
 is a reportable result.
 
+### The peak hypothesis (James, 2026-09-16)
+
+"Could be there's an 'ideal size' somewhere between tiny model and frontier
+model." Stated here **before** these tiers run, so it is a prediction rather
+than a pattern found afterwards.
+
+The mechanism it proposes: below the floor a model cannot act on delivered
+knowledge at all; far above it a model finds the knowledge itself and pays only
+the harness's control costs; in between sits a band capable enough to use
+grounding and not yet capable enough to do without it. That is Requirement
+`e9166711`'s grounding-versus-control split expressed as a curve rather than a
+ladder.
+
+Floor-study evidence so far is consistent with the *rising* half only. The
+harness-minus-native horizon gap runs -0.09 at 9B, +0.33 at 26B-A4B and +0.80 at
+27B (T3 partial). Nothing yet shows a decline, and a peak requires one. **L1 and
+L2 measure whether the curve turns over.** The prediction: the gap is smaller at
+72B and 122B than at 27B-31B, and at least one of the two shows native ahead.
+
+Two caveats that bound any such claim:
+
+- **The context budget is pinned at 32,768 tokens while these models load at
+  131072 and 262144.** The harness is using a fraction of the window, so a large
+  model's structural advantage is neutralised by the study's own configuration.
+  A peak observed here is conditioned on that budget, and says nothing about a
+  large model given its full context. Naming the budget in the result is not
+  optional.
+- **This is not the floor study's pre-registered question.** The floor study asks
+  where the floor is; it cannot confirm a peak without turning an observation
+  into its own hypothesis. If these two tiers support the prediction, that is a
+  result of *this* study, stated against the expectation written above.
+
 ## Compute
 
 Rough budget at 10 minutes per attempted episode: **about 26 hours**, likely
