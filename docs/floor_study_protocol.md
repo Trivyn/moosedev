@@ -260,8 +260,8 @@ by the budget decision.
 
 | Need | Files | Current state |
 |---|---|---|
-| Confirmatory mode with its own design identity, schedule with repetitions, pooled scoring allowed | new `floor_study.py`; `config.py` (derivation, `verify_config`, approval payload); `__main__.py` (`init-floor-study`); `grading.py` (report per tier with intervals, pooling only within this identity) | modes are pilot, intent, evolution stages and field check; field check is episode 1 only and never scored |
-| Long-horizon episode policy (continue after hidden-check failure) | `run.py`, `cause.py` | driver stops on any hidden-check failure |
+| Confirmatory mode with its own design identity, schedule with repetitions, pooled scoring allowed | new `floor_study.py`; `config.py` (derivation, `verify_config`, approval payload); `__main__.py` (`init-floor-study`); `grading.py` (report per tier with intervals, pooling only within this identity) | **built**: `floor_study.py` (`local-harness-floor-study`), `config.floor_study_config`, `init-floor-study`, schema-4 approval, and a pooled per-tier report with exact Clopper-Pearson intervals. Tiers are ordered smallest first and each carries its own repetitions and response policy; the floor rule's T and M are hashed into the identity, so changing a threshold is a new identity |
+| Long-horizon episode policy (continue after hidden-check failure) | `run.py` | **built**: under this mode the driver continues to the next episode when a completed episode fails only its hidden check, and stops when an episode fails to complete; a run passes only when every attempted episode passes. A grading process that fails to start is not a hidden-check failure and still stops the run |
 | Hosted tier rows (provider, model ID, no weights fingerprint) | `model_table.py`, `config.py` preflight | every row requires weights and a fingerprint |
 | Hosted model traffic for the harness and OpenCode arms | `proxy.py` or a new recorder, `run.py`, `adapters.py` | `ModelProxy` accepts only `http://127.0.0.1:PORT/v1`; `DomainProxy` is CONNECT-only (TLS opaque) and used only for Codex backends; `run.py` requires the cell model to be loaded in LM Studio for non-Codex backends; OpenCode's provider is `@ai-sdk/openai-compatible` pointed at the local endpoint with a placeholder key |
 | Tool-call compatibility probe per tier on the sealed build | `native_contracts.py`, `src/harness/response.rs` | the probe exercises the JSON response contract; build G adds a tool variant |
@@ -270,7 +270,7 @@ by the budget decision.
 Sealing steps:
 1. James settles the decisions below.
 2. Freeze the final build (build G after its regression cells) and qualify it.
-3. Implement the mode and tests.
+3. Implement the mode and tests. **Done**; the mode is unsealed until step 6.
 4. Approve the selected packages' gold.
 5. Hash this document into the design identity.
 6. James runs `approve-gold` for the study configuration.

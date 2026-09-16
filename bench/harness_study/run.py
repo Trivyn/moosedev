@@ -16,7 +16,7 @@ from .clients import verify_client
 from .client_archive import archive_clients
 from .config import (HARNESS_MODES, configuration_hash, frozen_arms, inventory, model_associations, required_clients,
                      schedule, verify_approval)
-from . import field_check
+from . import field_check, floor_study
 from .daemon import OwnedDaemon
 from .isolation import sandbox_command
 from .process import observe
@@ -250,6 +250,10 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
             store.put_bytes(run, "evolution-design.json", canonical_json(evolution.design_identity(config["evaluation_mode"])))
         elif config.get("evaluation_mode") == field_check.MODE:
             store.put_bytes(run, "field-check-design.json", canonical_json(config["field_check_design"]))
+        elif config.get("evaluation_mode") == floor_study.MODE:
+            store.put_bytes(run, "floor-study-design.json", canonical_json(config["floor_study_design"]))
+            # The pre-registration travels with the evidence it decides.
+            store.put_bytes(run, "floor-study-protocol.md", floor_study.DOCUMENT.read_bytes())
         store.put_bytes(run, "scenario.json", canonical_json(scenario))
         snapshot(store, run, SCENARIOS / scenario["id"], "scenario")
         snapshot(store, run, REPO / "bench/harness_study", "driver")
@@ -367,7 +371,8 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                     endpoint=endpoint, daemon_url=daemon.url if daemon else None,
                     daemon_exe=Path(binaries["binaries"]["daemon"]),
                     daemon_socket=daemon.socket if daemon else None, context_tokens=config["context_tokens"],
-                    harness_response_policy=config.get("harness_response_policy", "auto"),
+                    harness_response_policy=(cell.get("harness_response_policy")
+                                             or config.get("harness_response_policy", "auto")),
                     **({"harness_intent_policy": cell["intent_policy"]} if harness_cell else {}),
                     postedit_association_contract=evolution.postedit_association_contract(
                         config.get("evaluation_mode")),
@@ -444,15 +449,24 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
             result.update(id=episode_id, checks=[check])
             if result["status"] == "success" and not check["passed"]:
                 result["status"] = check["status"]
+                # The episode ran to completion and gold judged its work. A grading
+                # process that failed to start is not that, and never continues.
+                result["hidden_check_failed"] = check["status"] == "agent_failure"
             if harness_cell and scenario["id"] == intent.MAINTENANCE:
                 result["intent_primary"] = intent.primary_outcome(result)
             if config.get("evaluation_mode") in evolution.MODES:
                 result["evolution_constituents"] = evolution.outcome_constituents(result)
             outcome["episodes"].append(result)
-            outcome["status"] = result["status"]
+            # A run passes only when every attempted episode passed: the first
+            # failure stands, and a later success never erases it.
+            outcome["status"] = next((episode["status"] for episode in outcome["episodes"]
+                                      if episode["status"] != "success"), result["status"])
             store.put_bytes(run, f"episodes/{episode_id}/outcome.json", canonical_json(result))
             active_episode = None
-            if result["status"] != "success":
+            # The long-horizon policy continues past a failed hidden check and stops
+            # only when an episode fails to complete; every other mode stops at once.
+            if result["status"] != "success" and not (mode == floor_study.MODE
+                                                      and result.get("hidden_check_failed")):
                 break
             reset_episode(workspace)
         pad_unattempted(outcome, scenario, config.get("episode_limit"))

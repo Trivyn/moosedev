@@ -348,6 +348,131 @@ def _terminal_summary(outcomes):
             "first_edit_seconds": [v for v in seconds if type(v) in (int, float) and math.isfinite(v)]}
 
 
+def _log_beta(a, b):
+    return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+
+
+def _beta_continued_fraction(a, b, x, iterations=300, epsilon=1e-15):
+    """Lentz's continued fraction for the incomplete beta function."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (tiny if abs(d) < tiny else d)
+    h = d
+    for m in range(1, iterations + 1):
+        m2 = 2 * m
+        for numerator in (m * (b - m) * x / ((qam + m2) * (a + m2)),
+                          -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))):
+            d = 1.0 + numerator * d
+            d = tiny if abs(d) < tiny else d
+            c = 1.0 + numerator / c
+            c = tiny if abs(c) < tiny else c
+            d = 1.0 / d
+            h *= d * c
+        if abs(d * c - 1.0) < epsilon:
+            break
+    return h
+
+
+def regularized_incomplete_beta(a, b, x):
+    """I_x(a, b), the regularized incomplete beta function."""
+    if not 0.0 <= x <= 1.0:
+        raise ValueError("x must be within 0..1")
+    if x in (0.0, 1.0):
+        return x
+    front = math.exp(a * math.log(x) + b * math.log1p(-x) - _log_beta(a, b))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+
+def beta_quantile(probability, a, b, iterations=200):
+    """Inverse of `regularized_incomplete_beta` by bisection; deterministic and dependency-free."""
+    low, high = 0.0, 1.0
+    for _ in range(iterations):
+        middle = (low + high) / 2.0
+        if regularized_incomplete_beta(a, b, middle) < probability:
+            low = middle
+        else:
+            high = middle
+    return (low + high) / 2.0
+
+
+def clopper_pearson(successes, trials, confidence=0.95):
+    """The exact binomial interval, computed here so the study driver needs no scipy."""
+    if (type(successes) is not int or type(trials) is not int
+            or trials < 1 or not 0 <= successes <= trials):
+        raise ValueError("clopper_pearson requires integers with 0 <= successes <= trials and trials >= 1")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be within 0..1")
+    alpha = (1.0 - confidence) / 2.0
+    return [0.0 if successes == 0 else beta_quantile(alpha, successes, trials - successes + 1),
+            1.0 if successes == trials else beta_quantile(1.0 - alpha, successes + 1, trials - successes)]
+
+
+def horizon_reached(outcome):
+    """The long-horizon primary outcome: the run of leading passing episodes."""
+    reached = 0
+    for episode in (outcome or {}).get("episodes", []):
+        if episode.get("status") != "success":
+            break
+        reached += 1
+    return reached
+
+
+def floor_summary(attempts, design):
+    """Score a floor study against the rule its own sealed design pre-registered."""
+    from .floor_study import MODE as FLOOR_STUDY_MODE
+    payload = (design or {}).get("payload") or {}
+    rule, tiers = payload.get("floor_rule"), payload.get("tiers")
+    if not isinstance(rule, dict) or not isinstance(tiers, list) or not tiers:
+        raise ValueError("floor-study report requires the sealed design and its pre-registered floor rule")
+    threshold, margin = rule["pass_rate_threshold"], rule["native_margin"]
+    confidence = rule.get("confidence", 0.95)
+    runs = [item for item in attempts
+            if (item["manifest"] or {}).get("evaluation_mode") == FLOOR_STUDY_MODE]
+
+    def measure(members):
+        # Infrastructure and preflight failures are repeated, never counted as
+        # model failures; unsealed evidence never earns a success.
+        scored = [item for item in members
+                  if item["integrity"] == "sealed" and item["status"] in ("success", "agent_failure")]
+        passed = sum(item["status"] == "success" for item in scored)
+        horizons = [horizon_reached(item["outcome"]) for item in scored]
+        return {"runs": len(members), "scored": len(scored), "excluded": len(members) - len(scored),
+                "passed": passed, "pass_rate": passed / len(scored) if scored else None,
+                "interval": clopper_pearson(passed, len(scored), confidence) if scored else None,
+                "horizon_reached": horizons,
+                "mean_horizon_reached": sum(horizons) / len(horizons) if horizons else None}
+
+    def arms(members):
+        return {"harness": measure([i for i in members if (i["manifest"] or {}).get("backend") == "harness"]),
+                "native": measure([i for i in members if (i["manifest"] or {}).get("backend") != "harness"])}
+
+    summary, floor = [], None
+    for tier in tiers:
+        members = [i for i in runs if (i["manifest"] or {}).get("tier") == tier["tier"]]
+        measured = arms(members)
+        harness, native = measured["harness"]["pass_rate"], measured["native"]["pass_rate"]
+        difference = None if harness is None or native is None else harness - native
+        meets = harness is not None and harness >= threshold
+        within = difference is not None and difference >= -margin
+        names = sorted({(i["manifest"] or {}).get("scenario_id") for i in members} - {None})
+        entry = {"tier": tier["tier"], "model": tier["model"]["id"], "repetitions": tier["repetitions"],
+                 "harness_response_policy": tier["harness_response_policy"], "arms": measured,
+                 "difference": difference, "meets_threshold": meets, "within_native_margin": within,
+                 "qualifies": bool(meets and within),
+                 "scenarios": {name: arms([i for i in members
+                                           if (i["manifest"] or {}).get("scenario_id") == name])
+                               for name in names}}
+        if entry["qualifies"] and floor is None:
+            floor = tier["tier"]
+        summary.append(entry)
+    return {"schema_version": 1, "floor_rule": rule, "tiers": summary, "floor_tier": floor,
+            "interpretation": ("the floor is reported as a tier, never as a parameter count; "
+                               "intervals are exact Clopper-Pearson at the registered confidence")}
+
+
 def report(store_root):
     """Inventory all attempts. Invalid/unsealed evidence never earns a success."""
     # Refuse nonexistent roots: a typo must not manufacture an empty study.
@@ -425,6 +550,9 @@ def report(store_root):
                for item in attempts}
     if len(studies) > 1 and any(mode == FIELD_CHECK_MODE for mode, _ in studies):
         raise ValueError("field-check runs are never pooled with another study")
+    from .floor_study import MODE as FLOOR_STUDY_MODE
+    if len(studies) > 1 and any(mode == FLOOR_STUDY_MODE for mode, _ in studies):
+        raise ValueError("floor-study runs are pooled only with the runs of their own identity")
     build_ids = {(item["manifest"] or {}).get("build_id") for item in attempts}
     if len(build_ids) > 1:
         raise ValueError("report pools runs from multiple build_ids: "
@@ -442,6 +570,14 @@ def report(store_root):
                        "episode_metrics": _metric_summary(outcomes),
                        "episode_terminals": _terminal_summary(outcomes),
                        "semantic_reviewed_runs": sum(m["semantic"]["status"] == "reviewed" for m in members)})
-    return {"schema_version": 1, "attempt_count": len(attempts),
-            "integrity_counts": dict(Counter(item["integrity"] for item in attempts)),
-            "groups": groups, "runs": attempts, "warnings": warnings}
+    result = {"schema_version": 1, "attempt_count": len(attempts),
+              "integrity_counts": dict(Counter(item["integrity"] for item in attempts)),
+              "groups": groups, "runs": attempts, "warnings": warnings}
+    floor_runs = [item for item in attempts
+                  if (item["manifest"] or {}).get("evaluation_mode") == FLOOR_STUDY_MODE]
+    if floor_runs:
+        # Thresholds come from the design sealed into the evidence, never from
+        # today's module defaults: a pre-registered rule must not drift.
+        result["floor_study"] = floor_summary(
+            attempts, _read_json(root / "runs" / floor_runs[0]["run_id"] / "floor-study-design.json"))
+    return result

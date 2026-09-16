@@ -65,7 +65,7 @@ class SealedIdentityTests(unittest.TestCase):
         self.assertIs(field_check.ARMS, evolution.ARMS[evolution.SYMBOLIC_BASELINE_MODE])
         self.assertEqual(set(evolution.ARMS), {evolution.STAGE2_BASELINE_MODE, evolution.SYMBOLIC_BASELINE_MODE})
         self.assertIn(field_check.MODE, config.HARNESS_MODES)
-        self.assertEqual(config.HARNESS_MODES[:-1], (intent.MODE, *evolution.MODES))
+        self.assertEqual(config.HARNESS_MODES[:-2], (intent.MODE, *evolution.MODES))
 
 
 class ModelTableTests(unittest.TestCase):

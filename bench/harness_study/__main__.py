@@ -7,12 +7,24 @@ import sys
 
 from .artifacts import ArtifactStore, canonical_json
 from .binaries import REPO, build_and_freeze
-from .config import approval_payload, development_config, evolution_config, field_check_config, preflight, template
-from . import evolution, field_check, intent, model_table
+from .config import (approval_payload, development_config, evolution_config, field_check_config,
+                     floor_study_config, preflight, template)
+from . import evolution, field_check, floor_study, intent, model_table
 from .grading import record_review, report
 from .validation import validate_fixtures
 
 DEFAULT_STORE = REPO / "target/harness-study/evidence"
+
+
+def tier_overrides(items, cast, what):
+    """`--x-override T2=value` pairs; the tier labels are checked against the study's own tiers."""
+    result = {}
+    for item in items:
+        label, separator, value = item.partition("=")
+        if not separator or label in result:
+            raise SystemExit(f"invalid or repeated {what} override: {item}")
+        result[label] = cast(value)
+    return result
 
 
 def write_new(path, value):
@@ -46,6 +58,28 @@ def main(argv=None):
     command.add_argument("--scenarios", nargs="+", choices=list(field_check.SCENARIOS), required=True)
     command.add_argument("--approval", type=Path, required=True,
                          help="where the human field-check approval will be written; it need not exist yet")
+    command.add_argument("--output", type=Path, required=True)
+    command = sub.add_parser("init-floor-study", help="derive the confirmatory floor study: ordered tiers, repetitions, scored and pooled")
+    command.add_argument("parent_preflight", type=Path)
+    command.add_argument("--binary-manifest", type=Path, required=True)
+    command.add_argument("--study-id", required=True)
+    command.add_argument("--tiers", nargs="+", choices=list(model_table.MODELS), required=True,
+                         help="tier models in ascending capability order; the first is T1")
+    command.add_argument("--scenarios", nargs="+", choices=list(floor_study.SCENARIOS), required=True)
+    command.add_argument("--repetitions", type=int, default=floor_study.REPETITIONS_DEFAULT,
+                         help="runs per cell; the default for every tier")
+    command.add_argument("--repetition-override", action="append", default=[], metavar="TIER=N",
+                         help="more runs for a tier near the expected floor, e.g. T1=5")
+    command.add_argument("--response-policy", choices=list(floor_study.RESPONSE_POLICIES),
+                         default=floor_study.RESPONSE_POLICY)
+    command.add_argument("--response-policy-override", action="append", default=[], metavar="TIER=POLICY",
+                         help="a hybrid-reasoning tier run at provider-default, e.g. T5=provider-default")
+    command.add_argument("--pass-rate-threshold", type=float, default=floor_study.FLOOR_PASS_RATE,
+                         help="pre-registered floor rule T")
+    command.add_argument("--native-margin", type=float, default=floor_study.FLOOR_NATIVE_MARGIN,
+                         help="pre-registered floor rule M")
+    command.add_argument("--approval", type=Path, required=True,
+                         help="where the human floor-study approval will be written; it need not exist yet")
     command.add_argument("--output", type=Path, required=True)
     command = sub.add_parser("crowding-gate", help="seed a probe package with the frozen daemon and measure today's push; no model calls")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -127,6 +161,16 @@ def main(argv=None):
     elif args.command == "init-field-check":
         result = field_check_config(json.loads(args.parent_preflight.read_text()), args.binary_manifest,
                                     args.study_id, args.models, args.scenarios, args.approval)
+        write_new(args.output, result)
+    elif args.command == "init-floor-study":
+        labels = [floor_study.tier_label(index) for index in range(len(args.tiers))]
+        result = floor_study_config(
+            json.loads(args.parent_preflight.read_text()), args.binary_manifest, args.study_id,
+            args.tiers, args.scenarios, args.approval, response_policy=args.response_policy,
+            repetitions={**dict.fromkeys(labels, args.repetitions),
+                         **tier_overrides(args.repetition_override, int, "repetition")},
+            response_policies=tier_overrides(args.response_policy_override, str, "response policy"),
+            rule={"pass_rate_threshold": args.pass_rate_threshold, "native_margin": args.native_margin})
         write_new(args.output, result)
     elif args.command == "crowding-gate":
         from .crowding import gate
