@@ -20,9 +20,13 @@ STAGE = Path(__file__).resolve().parent
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=Path, default=STAGE / "evidence-pooled")
+    parser.add_argument("--stage", type=Path, default=STAGE,
+                        help="directory holding store-cell-* (default: beside this script)")
+    parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--fresh", action="store_true", help="rebuild from scratch")
     args = parser.parse_args()
+    stage = args.stage.resolve()
+    args.out = args.out or stage / "evidence-pooled"
     if args.fresh and args.out.exists():
         shutil.rmtree(args.out)
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
@@ -39,7 +43,7 @@ def main():
         if not target.exists():
             shutil.copy2(source, target)
             print(f"  copied asset {source.name[:12]}... ({target.stat().st_size / 1e6:.0f} MB)")
-    for store in sorted(STAGE.glob("store-cell-*")):
+    for store in sorted(stage.glob("store-cell-*")):
         for run in sorted((store / "runs").glob("*")):
             if not (run / "seal.json").is_file():
                 skipped += 1           # still running, or never sealed
