@@ -30,8 +30,10 @@ nothing there separates total parameters from active parameters above T2
 
 | Tier | Model | Size | Runtime | State |
 |---|---|---|---|---|
-| L1 | `kimi-dev-72b-dwq` | dense 72B | LM Studio MLX, 4-bit DWQ, 41 GB | downloaded, indexed |
-| L2 | Qwen3.5-122B-A10B | MoE 122B, about 10B active | LM Studio MLX, 4-bit, about 61 GB | **downloading** |
+| L1 | `kimi-dev-72b-dwq` | dense 72B | MLX 4-bit DWQ, 41 GB, `qwen2`, 131072 ctx | ready |
+| L2 | `qwen3.5-122b-a10b` | MoE 122B, about 10B active | MLX 4-bit, 70 GB, `qwen3_5_moe`, 262144 ctx | ready |
+
+Both confirmed indexed by LM Studio on 2026-09-16 with `trained_for_tool_use: true`.
 
 Ordered by capability as the mode requires; L1 is dense, L2 is the mixture of
 experts, so the pair separates total from active capacity at one size class.
@@ -84,15 +86,24 @@ is a reportable result.
 Rough budget at 10 minutes per attempted episode: **about 26 hours**, likely
 more, since these models are slower per token than every floor-study tier.
 
-Each tier runs **alone**: 41 to 61 GB of weights plus the 7 GB helper against
+Each tier runs **alone**: 41 to 70 GB of weights plus the 7 GB helper against
 96 GiB of machine memory. Neither can share the machine with another campaign,
 so this study is strictly serial with the floor study.
+
+L2 is the tight one: 70 GB plus the 7 GB helper is 77 GB against 96 GiB, leaving
+about 19 GiB for the operating system, the daemon and the driver. Confirm the
+pair actually loads together before the qualification cell, since every harness
+cell needs the helper resident at the same time as the coding model. If it does
+not fit, L2 cannot run the harness arm on this machine at all, which is a
+finding about the machine rather than about the model, and must be reported as
+such rather than as a model failure.
 
 ## What must be built before sealing
 
 | Need | State |
 |---|---|
-| Qwen3.5-122B-A10B download | incomplete at last check (9 of 14 shards) |
+| Qwen3.5-122B-A10B download | complete, 14 of 14 shards, indexed |
+| L2 plus helper co-residency at 96 GiB | unverified; 77 GB of weights, check before the qualification cell |
 | `model_table.py` rows with pinned weights fingerprints | not written; the edit changes the driver fingerprint, so it must land between campaign tiers or after the campaign, then a fresh preflight |
 | A qualifying harness episode per tier | not run |
 | Per-study protocol document hashing | `floor_study.DOCUMENT` is hardcoded to the floor protocol; make it selectable per design, or fold this section into that document once no campaign is running |
