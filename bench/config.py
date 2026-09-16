@@ -133,6 +133,19 @@ CORPORA = {
         "agent_exclude": ["docs-dev", "spec", "doc", "doc-dist", "tasks", "CONVENTIONS.md",
                           "README.md", "CLAUDE.md", "AGENTS.md", "agents.md", ".grok", ".claude"],
     },
+    "trivyn-cap-2026-09": {
+        # FROZEN capability-experiment snapshot of the trivyn-trial graph, hydrated from `kg.nq`
+        # alone (sha256 1d00735c..., 15,181,815 bytes, taken 2026-09-16). Never point capability
+        # tooling at a `*-trial` store: those are LIVE (AD 07415633) and opening a store WRITES —
+        # ensure_enriched materialises inverse and sub-property edges on first read — while the B2
+        # arms hand the agent record_important_decision/relate/link_code. Copying only the canonical
+        # export shares no mutable state with the trial, and a frozen corpus keeps the experiment
+        # reproducible while the trial keeps moving. Q&A only; capability tasks set
+        # materialize_tree:false, so `repo` is recorded for provenance rather than materialised.
+        "data_dir": str(Path.home() / ".moosedev-stores" / "trivyn-cap-2026-09"),
+        "repo": str(Path.home() / "code" / "trivyn"),
+        "private": True,
+    },
     "moose-trial": {
         # LIVE in-anger trial store (AD 07415633): moose bootstrapped from scratch, kept current by
         # real-work capture. repo = the LIVE moose checkout (NO pinned sha) -> B0 sees current HEAD.
