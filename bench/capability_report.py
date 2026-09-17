@@ -69,6 +69,19 @@ def load(model: str = None, mode: str = None) -> list[dict]:
         print(f"[excluded {len(broken)} infrastructure failure(s): the agent never received the "
               f"prompt — {sorted({r.get('agent_model') or '?' for r in broken})}]")
     rows = [r for r in rows if r not in broken]
+    # A timed-out cell scores like a wrong answer but means "did not finish in the
+    # wall-clock budget". The budget is a fair control only while it is disclosed:
+    # averaged in silently it reads as a capability gap when it is a throughput one.
+    timed = [r for r in rows if r.get("timed_out")]
+    if timed:
+        per_model = collections.Counter((r.get("agent_model") or "?").split("/")[-1]
+                                        for r in timed)
+        total = collections.Counter((r.get("agent_model") or "?").split("/")[-1]
+                                    for r in rows)
+        note = ", ".join(f"{m} {per_model[m]}/{total[m]}" for m in sorted(per_model))
+        print(f"[TIMED OUT at the cell budget, counted in the means below: {note} — "
+              f"a timeout is 'did not finish', not 'could not answer'; read any gap "
+              f"that tracks these counts as throughput, not capability]")
     if model:  # never pool two agent models: model size is a variable under test, not noise
         rows = [r for r in rows if model in (r.get("agent_model") or "")]
     if mode:   # nor two delivery modes: tooluse vs oracle IS the question
