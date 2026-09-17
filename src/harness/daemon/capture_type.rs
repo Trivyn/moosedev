@@ -89,6 +89,54 @@ fn normalized(title: &str) -> String {
         .to_lowercase()
 }
 
+/// Minimum length for a note's first sentence to serve as a record title; below
+/// this it is an acknowledgement ("Done.", "Fixed it."), not a claim.
+const MIN_CLAIM_TITLE_CHARS: usize = 12;
+
+/// The note's first sentence.
+///
+/// A sentence ends at `.`/`!`/`?` FOLLOWED BY WHITESPACE, so `service.py` and
+/// `0.10` stay inside the sentence instead of ending it. A newline ends one too,
+/// for a note written as bullets.
+fn first_sentence(text: &str) -> &str {
+    let text = text.trim();
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        let ends = match ch {
+            '\n' => true,
+            '.' | '!' | '?' => chars
+                .peek()
+                .is_none_or(|(_, next)| next.is_whitespace()),
+            _ => false,
+        };
+        if ends {
+            return text[..index + ch.len_utf8()].trim_end();
+        }
+    }
+    text
+}
+
+/// Title for the deterministic decision proposal: the claim the note makes, not
+/// the task that prompted it.
+///
+/// The plan summary names the WORK ("Fix the `process` method in `service.py` to
+/// implement idempotent retries…") — what a task tracker records, not what a
+/// decision record should be called. Every harness-captured ArchitecturalDecision
+/// in the archived field checks was titled that way while the note beside it
+/// carried the real claim ("The fix implements idempotency by checking for an
+/// existing receipt with the same request_id before processing…"). The note is
+/// the only claim-bearing text capture holds deterministically, so the title
+/// comes from it, and falls back to the plan summary only when no note names a
+/// claim — losing the record entirely would be worse than naming it poorly.
+fn claim_title(note: &str, plan_summary: &str) -> String {
+    let claim = first_sentence(note);
+    if claim.chars().count() >= MIN_CLAIM_TITLE_CHARS {
+        cap_title(claim)
+    } else {
+        cap_title(plan_summary)
+    }
+}
+
 fn base_proposal(
     kind: &str,
     title: String,
@@ -178,7 +226,7 @@ async fn type_note(
         raw.push((
             base_proposal(
                 "ArchitecturalDecision",
-                cap_title(&request.plan_summary),
+                claim_title(note, &request.plan_summary),
                 description,
                 decision_evidence,
                 request.changed_files.clone(),
@@ -545,4 +593,62 @@ async fn sensor_tiebreak(
         .ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     value["verdict"].as_str().map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{claim_title, first_sentence};
+
+    /// A filename or a version number is not a sentence boundary: the archived
+    /// capture whose title regressed was about `service.py`, so cutting at that
+    /// dot would have reintroduced a different truncation of the same defect.
+    #[test]
+    fn a_dot_inside_a_word_does_not_end_the_sentence() {
+        assert_eq!(
+            first_sentence("The fix guards `service.py` against retries. A second claim."),
+            "The fix guards `service.py` against retries."
+        );
+        assert_eq!(first_sentence("Recall rose to 0.36 overall."), "Recall rose to 0.36 overall.");
+    }
+
+    #[test]
+    fn a_newline_ends_the_sentence_so_a_bulleted_note_still_titles() {
+        assert_eq!(
+            first_sentence("Idempotency now short-circuits on a stored receipt\n- tests updated"),
+            "Idempotency now short-circuits on a stored receipt"
+        );
+    }
+
+    #[test]
+    fn a_note_without_terminal_punctuation_is_its_own_sentence() {
+        assert_eq!(first_sentence("Retries return the stored receipt"), "Retries return the stored receipt");
+    }
+
+    /// The defect this replaces: the decision was named after the task.
+    #[test]
+    fn the_title_names_the_notes_claim_not_the_task() {
+        let note = "The fix implements idempotency by checking for an existing receipt \
+                    with the same request_id before processing. A key discovery was that \
+                    the original code recalculated totals on every call.";
+        let plan = "Fix the `process` method in `service.py` to implement idempotent retries.";
+        let title = claim_title(note, plan);
+        assert!(title.starts_with("The fix implements idempotency"), "got {title}");
+        assert!(!title.contains("service.py"), "title still names the task: {title}");
+    }
+
+    /// Falling back keeps the record. Losing it would be worse than naming it badly.
+    #[test]
+    fn an_acknowledgement_falls_back_to_the_plan_summary() {
+        for note in ["", "   ", "Done.", "Fixed it."] {
+            assert_eq!(claim_title(note, "Add a retry guard"), "Add a retry guard", "note {note:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_claim_is_capped_with_an_ellipsis() {
+        let note = format!("{} and more", "a claim that runs on ".repeat(12));
+        let title = claim_title(&note, "plan");
+        assert!(title.chars().count() <= super::MAX_TITLE_CHARS, "{} chars", title.chars().count());
+        assert!(title.ends_with('…'), "got {title}");
+    }
 }
