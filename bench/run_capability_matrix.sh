@@ -59,6 +59,11 @@ PY
 .venv/bin/python - "${MODELS[@]}" <<'PREFLIGHT' || exit 1
 import json, sys, urllib.request
 wanted = {m.split("/", 1)[1] for m in sys.argv[1:] if "/" in m}
+# The daemon's internal NLQ model too: when it is absent every moosedev_query
+# call 400s and B2 runs with its symbolic-answer path dead, which is invisible
+# in the scores and cost a whole campaign once.
+import os
+wanted.add(os.environ.get("MOOSEDEV_LLM_MODEL", "google/gemma-4-26b-a4b-qat"))
 served = urllib.request.urlopen("http://localhost:1234/api/v1/models", timeout=10).read()
 loaded = {m["key"] for m in json.loads(served)["models"] if m.get("loaded_instances")}
 missing = sorted(wanted - loaded)
