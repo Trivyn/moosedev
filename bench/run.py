@@ -75,7 +75,43 @@ def load_task(corpus: str, task_id: str) -> dict:
     return json.loads((config.corpus_tasks_path(corpus) / f"{task_id}.json").read_text())
 
 
-def arm_opencode_config(arm: str, corpus: str, mode: str = "tooluse") -> dict:
+def local_provider(model: str) -> dict:
+    """Run-local provider definition for a model served by the local LM Studio.
+
+    opencode resolves a bare `lmstudio/...` model against the USER's global config and the
+    models.dev catalog. Both lag the machine's real inventory — this LM Studio build serves an
+    EMPTY /v1/models so opencode can discover nothing, and the global entry points at a different
+    host — so a cell either dies with ProviderModelNotFoundError or, worse, quietly runs somewhere
+    else. Pinning endpoint and model id per run is the same insulation `--pure` buys for plugins.
+    """
+    provider, _, model_id = model.partition("/")
+    if provider != "lmstudio" or not model_id:
+        return {}
+    return {provider: {
+        "npm": "@ai-sdk/openai-compatible", "name": "Local LM Studio",
+        "options": {"baseURL": config.LLM_BASE_URL, "apiKey": config.LLM_API_KEY},
+        "models": {model_id: {"id": model_id, "name": model_id, "limit": {
+            "context": config.LOCAL_CONTEXT, "output": config.LOCAL_OUTPUT}}},
+    }}
+
+
+# A pure-memory Q&A carries no source tree, so ANY filesystem or shell route is an escape hatch,
+# not a capability under test: a 27B smoke cell found `moosedev` on PATH and tried to export and
+# grep the graph, and missed only because MOOSEDEV_DATA_DIR was unset so it read the empty workdir.
+# Scoring that as memory would be scoring luck, so every WRITE and every route off the workdir is
+# denied. read/glob/grep stay allowed deliberately: the workdir is empty, so they cannot substitute
+# for memory, and a model that greps an empty tree instead of calling its memory tool is exhibiting
+# the exact failure the harness exists to prevent — a distractor to measure, not to remove.
+# Deny by NAME, never `"*": "deny"` with an allow-list. A wildcard deny also covers the arm's MCP
+# tools, which would make every tooluse cell record zero memory calls — reading in the table as
+# "the model would not call its memory tool" when the config forbade it. That is the finding this
+# matrix exists to establish, so the rig must not be able to manufacture it.
+SEALED_PERMISSION = {"bash": "deny", "edit": "deny", "write": "deny", "patch": "deny",
+                     "webfetch": "deny", "websearch": "deny", "external_directory": "deny"}
+
+
+def arm_opencode_config(arm: str, corpus: str, mode: str = "tooluse",
+                        model: str = None, sealed: bool = False) -> dict:
     """Project-local opencode.json: disable the global omni MCP, add the arm's memory MCP (if any).
     In ORACLE mode the harness prepends retrieved knowledge to the prompt instead, so no live memory
     tool is given — isolating knowledge-value from the agent's willingness to call the tool (H8)."""
@@ -114,6 +150,8 @@ def arm_opencode_config(arm: str, corpus: str, mode: str = "tooluse") -> dict:
         # summarizes when full; reserved keeps headroom so compaction fires before overflow.
         "compaction": {"auto": True, "prune": True, "reserved": 16384},
         "mcp": mcp,
+        **({"permission": SEALED_PERMISSION} if sealed else {}),
+        **({"provider": provider} if (provider := local_provider(model or "")) else {}),
     }
 
 
@@ -201,13 +239,16 @@ def git_baseline(wd):
     subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", "baseline"], cwd=wd, check=True)
 
 
-def prepare_workdir(run_id: str, arm: str, corpus: str, task: dict, mode: str = "tooluse"):
+def prepare_workdir(run_id: str, arm: str, corpus: str, task: dict, mode: str = "tooluse",
+                    model: str = None):
+    sealed = task["type"] == "capability_qa"
     wd = config.WORK_ROOT / run_id
     wd.mkdir(parents=True, exist_ok=True)
     if task["type"] in TREE_TASK_TYPES and task.get("materialize_tree", True):
         materialize_tree(corpus, wd)  # a task may opt out (e.g. a pure memory-currency Q&A)
     shutil.copy(config.BENCH / "arms" / arm / "AGENTS.md", wd / "AGENTS.md")
-    (wd / "opencode.json").write_text(json.dumps(arm_opencode_config(arm, corpus, mode), indent=2))
+    (wd / "opencode.json").write_text(
+        json.dumps(arm_opencode_config(arm, corpus, mode, model, sealed), indent=2))
     if arm == "B1-md":
         write_markdown_corpus(corpus, wd)
     if arm == "B1-notes":
@@ -339,16 +380,22 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         # B1 arms get the FREE-TEXT push (BM25 over the export, currency-blind); B2 gets the
         # structured get_relevant_context (current-only). This is the only thing that makes push
         # differentiate B1 from B2 — see the currency test (oracle is otherwise arm-independent).
+        # k=6 is right for a code task (a handful of records bear on the edit). A capability
+        # question asks for a SET of 7-203 records, so 6 would cripple push by construction rather
+        # than measure it. Capability cells push at the retrieval tool's own ceiling — push's
+        # genuine best case. It still cannot deliver an exhaustive set, and that is the FINDING
+        # (push is retrieval; completeness is a symbolic query), not a defect of the setup.
+        k = 100 if task["type"] == "capability_qa" else 6
         if arm in ("B1-md", "B1-rag"):
-            ctx = freetext_oracle_context(corpus, topic, k=6)
+            ctx = freetext_oracle_context(corpus, topic, k=k)
         else:
-            ctx = oracle_context(corpus, topic, k=6)
+            ctx = oracle_context(corpus, topic, k=k)
         prompt = ("Relevant recorded project knowledge (architectural decisions, lessons, constraints) "
                   "retrieved from project memory — consult it where it applies:\n\n"
                   f"{ctx}\n\n---\n\nTask:\n\n{task['prompt']}")
     if prompt_prefix:  # diagnostic: forceful in-prompt guidance (e.g. "call get_relevant_context first")
         prompt = f"{prompt_prefix}\n\n{prompt}"
-    wd = prepare_workdir(run_id, arm, corpus, task, mode)
+    wd = prepare_workdir(run_id, arm, corpus, task, mode, model)
     final_file = wd / "_codex_final.txt"  # codex -o canonical final message
     if backend == "codex":
         # codex CLI harness (codex subscription; more reliable GPT tool-calling). MCP per arm via

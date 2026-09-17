@@ -36,13 +36,44 @@ def klass(r: dict) -> str:
     return r.get("capability_class") or _class_of(r["task_id"])
 
 
-def load() -> list[dict]:
+def memory_tool_calls(r: dict) -> int:
+    """Calls the row made to its arm's MEMORY server, as opposed to filesystem/shell tools.
+
+    This is the diagnostic the whole matrix turns on. A tooluse cell that scores 0 with zero memory
+    calls failed to FETCH; one that scores 0 having called is a failure to USE. Only the first is
+    an argument for pushing knowledge instead of offering a tool."""
+    # opencode prefixes an MCP tool with its server name (moosedev_sparql); codex exposes it bare
+    # (sparql). Matching only the prefixed form silently reports every codex row as zero calls —
+    # which is the exact claim this number is used to make, so both spellings must count.
+    bare = {"get_relevant_context", "query", "sparql", "get_entity_dossier", "get_provenance",
+            "export_graph", "suggest_mappings", "search", "recall", "ping"}
+    counts = r.get("tool_counts") or {}
+    return sum(n for name, n in counts.items()
+               if name.lower() in bare
+               or any(k in name.lower() for k in ("moosedev", "freetext", "mem0", "memory")))
+
+
+def load(model: str = None, mode: str = None) -> list[dict]:
     d = config.corpus_runs_path(CORPUS)
     p = d / "runs_regraded.jsonl"
     if not p.exists():
         p = d / "runs.jsonl"
     rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
-    return [r for r in rows if r.get("task_type") == "capability_qa"]
+    rows = [r for r in rows if r.get("task_type") == "capability_qa"]
+    # A cell whose agent never received the prompt (provider not found, model not loaded, backend
+    # down) is an INFRASTRUCTURE failure. run.py still writes a row, and its score is 0.0 — which
+    # reads as "the model could not answer" when in truth no model ever ran. Pooling those into a
+    # mean is how a broken rig gets published as a result, so they are excluded and counted aloud.
+    broken = [r for r in rows if (r.get("tokens") or {}).get("agent_prompt", 0) == 0]
+    if broken:
+        print(f"[excluded {len(broken)} infrastructure failure(s): the agent never received the "
+              f"prompt — {sorted({r.get('agent_model') or '?' for r in broken})}]")
+    rows = [r for r in rows if r not in broken]
+    if model:  # never pool two agent models: model size is a variable under test, not noise
+        rows = [r for r in rows if model in (r.get("agent_model") or "")]
+    if mode:   # nor two delivery modes: tooluse vs oracle IS the question
+        rows = [r for r in rows if r.get("mode") == mode]
+    return rows
 
 
 def _agent_tok(r):
@@ -79,13 +110,53 @@ def agg(rows: list[dict]) -> dict | None:
     }
 
 
+def premise(rows: list[dict]) -> None:
+    """Does the harness's premise hold — do small models fail to CALL the memory tooling?
+
+    Per model and arm: tooluse F1 beside oracle F1, with the median memory-tool calls the tooluse
+    cells actually made. The premise is supported where tooluse F1 is low, memory calls are ~0, and
+    oracle F1 is materially higher — the knowledge was usable, the model just never fetched it.
+    Where tooluse already calls and still fails, pushing the same knowledge will not rescue it."""
+    models = sorted({r.get("agent_model") or "?" for r in rows})
+    print("\n=== PREMISE: fetch failure or use failure? ===")
+    print("tooluse F1 vs oracle F1, with the memory-tool calls the TOOLUSE cells made.")
+    print("premise supported = low tooluse F1 + ~0 memory calls + materially higher oracle F1.\n")
+    print(f"{'model':<26}{'class':<17}{'arm':<8}{'tool_F1':>8}{'orac_F1':>8}{'Δ':>7}"
+          f"{'mem_calls':>10}{'n':>4}")
+    for model in models:
+        mrows = [r for r in rows if (r.get("agent_model") or "?") == model]
+        for c in [k for k in CLASSES if any(klass(r) == k for r in mrows)]:
+            for arm in [a for a in config.ARMS if any(r["arm"] == a for r in mrows)]:
+                sel = [r for r in mrows if klass(r) == c and r["arm"] == arm]
+                tl = [r for r in sel if r.get("mode") == "tooluse"]
+                orc = [r for r in sel if r.get("mode") == "oracle"]
+                if not tl and not orc:
+                    continue
+                f1 = lambda xs: (sum(x.get("score", 0.0) for x in xs) / len(xs)) if xs else float("nan")
+                calls = _med([memory_tool_calls(r) for r in tl]) if tl else float("nan")
+                delta = f1(orc) - f1(tl) if (tl and orc) else float("nan")
+                print(f"{model.split('/')[-1]:<26}{c:<17}{arm:<8}{f1(tl):>8.2f}{f1(orc):>8.2f}"
+                      f"{delta:>+7.2f}{calls:>10.1f}{len(sel):>4}")
+        print()
+
+
 def main() -> None:
     global CORPUS
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", default=CORPUS)
-    CORPUS = ap.parse_args().corpus
-    rows = load()
+    ap.add_argument("--model", help="restrict to one agent model (substring)")
+    ap.add_argument("--mode", choices=["tooluse", "oracle"], help="restrict to one delivery mode")
+    ap.add_argument("--premise", action="store_true",
+                    help="tooluse-vs-oracle summary per model: did it fail to fetch, or to use?")
+    args = ap.parse_args()
+    CORPUS = args.corpus
+    if args.premise:
+        premise(load())
+        return
+    rows = load(args.model, args.mode)
+    if args.model or args.mode:
+        print(f"\n[slice: model={args.model or 'all'} mode={args.mode or 'all'}]")
     if not rows:
         print("no capability_qa rows yet (run the matrix first)")
         return

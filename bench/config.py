@@ -38,6 +38,10 @@ ONTOLOGY_DIR = os.environ.get("MOOSEDEV_ONTOLOGY_DIR", str(REPO / "ontologies"))
 LLM_BASE_URL = os.environ.get("MOOSEDEV_LLM_BASE_URL", "http://localhost:1234/v1")
 LLM_API_KEY = os.environ.get("MOOSEDEV_LLM_API_KEY", "lmstudio")
 NLQ_MODEL = os.environ.get("MOOSEDEV_LLM_MODEL", "google/gemma-4-26b-a4b-qat")   # MOOSEDev internal NLQ
+# Declared window for a locally served model. opencode uses these only for its own compaction
+# accounting, so they must be <= what LM Studio actually loaded the model with.
+LOCAL_CONTEXT = int(os.environ.get("BENCH_LOCAL_CONTEXT", "65536"))
+LOCAL_OUTPUT = int(os.environ.get("BENCH_LOCAL_OUTPUT", "16384"))
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "lmstudio/qwen3.6-35b-a3b-mlx")   # opencode provider/model
 
 VENV_PY = BENCH / ".venv" / "bin" / "python"
