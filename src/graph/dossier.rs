@@ -274,7 +274,21 @@ pub fn render_dossiers(dossiers: &[Dossier]) -> String {
 /// A closing line names the shortened entities. That core always renders, so
 /// the result can exceed the bound; `None` renders every section whole.
 pub(crate) fn render_dossiers_within(dossiers: &[Dossier], max_bytes: Option<usize>) -> String {
-    let mut shown = ShownInPush::default();
+    render_dossiers_sharing(dossiers, max_bytes, &mut ShownInPush::default())
+}
+
+/// [`render_dossiers_within`] continuing a caller-owned [`ShownInPush`].
+///
+/// One harness prompt renders several file dossiers through separate calls;
+/// sharing the state across them keeps the "claim shown above" guarantee that
+/// already holds within a single call, so a record linked from two files shows
+/// its claim body once per prompt instead of once per file. Every other surface
+/// passes a fresh state and is byte-identical to before.
+pub(crate) fn render_dossiers_sharing(
+    dossiers: &[Dossier],
+    max_bytes: Option<usize>,
+    shown: &mut ShownInPush,
+) -> String {
     let mut out = String::new();
     let mut shortened = Vec::new();
     for dossier in dossiers {
@@ -291,13 +305,13 @@ pub(crate) fn render_dossiers_within(dossiers: &[Dossier], max_bytes: Option<usi
             || max_bytes.is_none_or(|max| out.len() + separator.len() + whole.len() <= max);
         out.push_str(separator);
         if fits {
-            shown = whole_shown;
+            *shown = whole_shown;
             out.push_str(&whole);
         } else {
             let core = render_dossier_markdown_with_records(
                 dossier,
                 DossierRecordRendering::Exhaustive {
-                    shown: &mut shown,
+                    shown: &mut *shown,
                     core_only: true,
                 },
             );
@@ -328,7 +342,15 @@ pub(crate) fn render_dossiers_within(dossiers: &[Dossier], max_bytes: Option<usi
 ///
 /// A scoped exception to Constraint 2ba76439: MCP, hover and policy push keep
 /// byte-identical full dossiers; only harness prompts use this rendering.
-pub fn harness_file_dossier(state: &AppState, file: &str) -> anyhow::Result<Option<String>> {
+///
+/// `shown` is owned by the caller and carried across every file of one prompt,
+/// so a record linked from several files renders its claim once rather than
+/// once per file.
+pub fn harness_file_dossier(
+    state: &AppState,
+    file: &str,
+    shown: &mut ShownInPush,
+) -> anyhow::Result<Option<String>> {
     let mut dossiers = Vec::new();
     for iri in file_entity_iris(state, file)? {
         let Some(mut dossier) = get_entity_dossier(state, &DossierTarget::Iri(iri))? else {
@@ -346,7 +368,7 @@ pub fn harness_file_dossier(state: &AppState, file: &str) -> anyhow::Result<Opti
         }
         dossiers.push(dossier);
     }
-    Ok((!dossiers.is_empty()).then(|| render_dossiers(&dossiers)))
+    Ok((!dossiers.is_empty()).then(|| render_dossiers_sharing(&dossiers, None, shown)))
 }
 
 /// Render the editor-hover view with optional Story deep links for the exact
@@ -372,8 +394,11 @@ pub fn render_dossier_markdown(
 
 /// What earlier sections of one push rendered: claim and component IRIs, each
 /// mapped to the display name of the entity whose section showed it.
+///
+/// Public so a caller rendering several dossiers in separate calls, as the
+/// harness does per file, can carry one state across the whole push.
 #[derive(Clone, Default)]
-struct ShownInPush {
+pub struct ShownInPush {
     claims: BTreeMap<String, String>,
     components: BTreeMap<String, String>,
 }

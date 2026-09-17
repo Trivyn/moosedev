@@ -4463,3 +4463,97 @@ async fn http_ground_route_answers_keys_and_rejects_escaping_paths_and_unknown_f
     assert!(!unknown.status_code().is_success());
     let _ = std::fs::remove_dir_all(&fixture.0);
 }
+
+/// A two-module rust-analyzer index, so one rule can govern code in two files
+/// and the cross-file behaviour of a single prompt becomes observable.
+fn install_two_module_index(state: &AppState) -> (&'static str, &'static str) {
+    use moosedev::code::substrate::{Substrate, SubstrateMeta};
+    use protobuf::EnumOrUnknown;
+    use scip::types::{symbol_information, Document, Index, Occurrence, SymbolInformation};
+    let modules = [
+        (
+            "rust-analyzer cargo sample 0.1.0 harness/",
+            "harness",
+            "src/harness.rs",
+        ),
+        (
+            "rust-analyzer cargo sample 0.1.0 gateway/",
+            "gateway",
+            "src/gateway.rs",
+        ),
+    ];
+    let mut index = Index::new();
+    for (symbol, display_name, path) in modules {
+        let mut info = SymbolInformation::new();
+        info.symbol = symbol.into();
+        info.display_name = display_name.into();
+        info.kind = EnumOrUnknown::new(symbol_information::Kind::Module);
+        let mut occurrence = Occurrence::new();
+        occurrence.symbol = symbol.into();
+        occurrence.symbol_roles = 1;
+        occurrence.range = vec![0, 0, 10];
+        occurrence.enclosing_range = vec![0, 0, 10];
+        let mut document = Document::new();
+        document.relative_path = path.into();
+        document.symbols.push(info);
+        document.occurrences.push(occurrence);
+        index.documents.push(document);
+    }
+    state.set_substrate(Arc::new(
+        Substrate::from_index(
+            index,
+            SubstrateMeta::single("rust-analyzer", "test", Utc::now(), 1, 2),
+            false,
+        )
+        .unwrap(),
+    ));
+    (modules[0].0, modules[1].0)
+}
+
+/// One prompt renders a dossier per file but the model reads them together, so a
+/// rule governing code in two files must arrive with its claim body once. In the
+/// floor study this repetition was roughly 30-40% of late-episode dossier bytes,
+/// and the prompt is what eventually exceeded the context budget.
+#[tokio::test]
+async fn one_prompt_carries_a_shared_claim_once_across_its_files() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let (harness_symbol, gateway_symbol) = install_two_module_index(&state);
+    let rule = record_with(
+        &state,
+        "Constraint",
+        "Listener binds before serving",
+        "Serve only after the listener binds.",
+        "accepted",
+    );
+    for symbol in [harness_symbol, gateway_symbol] {
+        graph::link_code(
+            &state,
+            &rule,
+            "constrains",
+            &graph::CodeSelector::Symbol(symbol.into()),
+            "test-human",
+        )
+        .unwrap();
+    }
+
+    let response = linked_context(&state, "listener", &["src/harness.rs", "src/gateway.rs"]);
+    assert_eq!(response.files.len(), 2);
+    let first = &response.files[0].dossier;
+    let second = &response.files[1].dossier;
+    let claim = "hasDescription: Serve only after the listener binds.";
+    assert_eq!(first.matches(claim).count(), 1, "{first}");
+    assert_eq!(
+        second.matches(claim).count(),
+        0,
+        "the second file repeated a claim body this prompt already carries: {second}"
+    );
+    assert!(
+        second.contains("claim shown above for `harness`"),
+        "{second}"
+    );
+    assert!(
+        second.contains("- [Constraint] Listener binds before serving"),
+        "the header still names the rule under every file it governs: {second}"
+    );
+}

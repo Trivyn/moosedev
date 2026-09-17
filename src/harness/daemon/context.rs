@@ -80,10 +80,15 @@ pub fn context_snapshot(
     };
     let root = state.project_root();
     let mut files = Vec::new();
+    // One dedup state for the whole prompt, not one per file: these dossiers are
+    // rendered separately but reach the model together, so a record linked from
+    // several files should show its claim body once, as it already does within a
+    // single file's render.
+    let mut shown = graph::ShownInPush::default();
     for file in &request.files {
         validate_path(file)?;
         // No host bound: required context fails rather than truncating.
-        let dossier = graph::harness_file_dossier(state, file)?.unwrap_or_else(|| {
+        let dossier = graph::harness_file_dossier(state, file, &mut shown)?.unwrap_or_else(|| {
             "No recorded entity knowledge is linked to this file. Topic recall still applies."
                 .into()
         });

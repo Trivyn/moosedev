@@ -1156,3 +1156,111 @@ fn hover_render_is_byte_stable_and_carries_no_claim() {
     );
     assert!(!hover.contains("claim"), "{hover}");
 }
+
+const GATEWAY_SYMBOL: &str = "rust-analyzer cargo moosedev 0.6.3 gateway/serve_gateway().";
+
+/// Synthetic SCIP index spanning two files, so one record can link to a
+/// definition in each and the harness push can be observed across files.
+fn two_file_substrate() -> Substrate {
+    let mut index = Index::new();
+    let mut runtime = doc("src/runtime.rs");
+    runtime.symbols.push(info(
+        PUBLIC_SYMBOL,
+        "build_server",
+        symbol_information::Kind::Function,
+        "pub fn build_server()",
+    ));
+    runtime
+        .occurrences
+        .push(occ(PUBLIC_SYMBOL, vec![7, 4, 16], 1));
+    index.documents.push(runtime);
+
+    let mut gateway = doc("src/gateway.rs");
+    gateway.symbols.push(info(
+        GATEWAY_SYMBOL,
+        "serve_gateway",
+        symbol_information::Kind::Function,
+        "pub fn serve_gateway()",
+    ));
+    gateway
+        .occurrences
+        .push(occ(GATEWAY_SYMBOL, vec![4, 4, 17], 1));
+    index.documents.push(gateway);
+
+    Substrate::from_index(index, meta(), false).expect("two-file substrate")
+}
+
+/// A harness prompt renders one dossier per file, but the model reads them
+/// together. A record linked from two files must therefore show its claim body
+/// once for the whole prompt, with the later file pointing back — while every
+/// other surface, which pushes one file at a time with its own state, still
+/// renders the claim whole.
+#[test]
+fn harness_dossiers_show_a_shared_claim_once_across_the_files_of_one_prompt() {
+    let state = bootstrap("harness-cross-file-dedup");
+    state.set_substrate(Arc::new(two_file_substrate()));
+    seed_component(&state, "runtime component", "src/");
+    let shared = record_with_description(
+        &state,
+        "Constraint",
+        "Shared gateway constraint",
+        Some("Serve only after the listener binds."),
+    );
+    for (file, line) in [("src/runtime.rs", 8), ("src/gateway.rs", 5)] {
+        graph::link_code(
+            &state,
+            &shared,
+            "constrains",
+            &CodeSelector::Position {
+                file: file.to_string(),
+                line,
+                col: 5,
+            },
+            "tester",
+        )
+        .expect("link code");
+    }
+    let claim = "hasDescription: Serve only after the listener binds.";
+
+    let mut shown = graph::ShownInPush::default();
+    let runtime = graph::harness_file_dossier(&state, "src/runtime.rs", &mut shown)
+        .expect("runtime dossier")
+        .expect("runtime knowledge");
+    let gateway = graph::harness_file_dossier(&state, "src/gateway.rs", &mut shown)
+        .expect("gateway dossier")
+        .expect("gateway knowledge");
+
+    assert_eq!(runtime.matches(claim).count(), 1, "{runtime}");
+    assert_eq!(
+        gateway.matches(claim).count(),
+        0,
+        "the second file repeated a claim body the prompt already carries: {gateway}"
+    );
+    assert!(
+        gateway.contains("claim shown above for `build_server`"),
+        "{gateway}"
+    );
+    assert!(
+        gateway.contains("- [Constraint] Shared gateway constraint"),
+        "the header still names the record under every file it governs: {gateway}"
+    );
+
+    // Independent pushes are what MCP, hover and policy push perform.
+    let alone_runtime =
+        graph::harness_file_dossier(&state, "src/runtime.rs", &mut graph::ShownInPush::default())
+            .expect("runtime dossier")
+            .expect("runtime knowledge");
+    let alone_gateway =
+        graph::harness_file_dossier(&state, "src/gateway.rs", &mut graph::ShownInPush::default())
+            .expect("gateway dossier")
+            .expect("gateway knowledge");
+    assert_eq!(
+        alone_runtime, runtime,
+        "the first file of a prompt is unaffected by sharing"
+    );
+    assert_eq!(
+        alone_gateway.matches(claim).count(),
+        1,
+        "a push with its own state must still carry the claim whole: {alone_gateway}"
+    );
+}
