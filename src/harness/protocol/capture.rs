@@ -44,6 +44,12 @@ pub struct KnowledgeProposal {
     pub supersedes: Option<String>,
     #[serde(default)]
     pub retracts: Option<String>,
+    /// The ArchitecturalDecision or AntiPattern a captured Lesson was learned
+    /// from, derived from the approved plan's obligations. Sibling of
+    /// `requirement` (which carries `isMotivatedBy`): both are written through
+    /// the ordinary relation path, so neither makes the proposal governing.
+    #[serde(default)]
+    pub learned_from: Option<String>,
     /// Relations the daemon derived for this proposal from a durable
     /// reconciliation receipt (today only `refines`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

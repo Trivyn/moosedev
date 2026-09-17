@@ -25,6 +25,17 @@ pub struct CaptureTypeRequest {
     pub changed_files: Vec<String>,
     pub check_history: Vec<CheckOutcome>,
     pub knowledge_revision: String,
+    /// The records governing the plan's files, as the runner derived them at
+    /// approval. Capture derives `isMotivatedBy`/`learnedFrom` from these, so
+    /// the edge is drawn from the obligations the human actually approved
+    /// against rather than recomputed against a graph that may have moved.
+    /// `#[serde(default)]`: an older runner omits it and simply derives nothing.
+    #[serde(default)]
+    pub obligation_iris: Vec<String>,
+    /// The digest of that obligation set at approval, carried so a derived
+    /// edge can be tied back to the approval it came from.
+    #[serde(default)]
+    pub obligations_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +87,23 @@ pub struct TypedProposal {
     pub disposition: TypedDisposition,
     /// `symbolic`, or `llm_sensor` when a band tiebreak was resolved by the sensor.
     pub resolved_by: String,
+    /// What the obligation-based derivation decided for this proposal, drawn or
+    /// not. Journaled so a record without `isMotivatedBy` can be read as "the
+    /// plan offered two and choosing was a judgement call" rather than "nothing
+    /// was tried" — the two were indistinguishable before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived: Vec<DerivedRelation>,
+}
+
+/// One obligation-derived relation decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedRelation {
+    pub predicate: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    pub candidates_considered: usize,
+    /// `asserted`, `none_legal`, or `ambiguous`.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

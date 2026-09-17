@@ -97,6 +97,21 @@ impl Runner {
                         .map(|state| state.check_history.clone())
                         .unwrap_or_default(),
                     knowledge_revision: self.task.knowledge_revision.clone(),
+                    // The obligations the human approved this plan against, not
+                    // a fresh derivation: the edge capture draws must point at
+                    // what was actually on the table at approval.
+                    obligation_iris: self
+                        .task
+                        .approved_change_scope
+                        .as_ref()
+                        .map(|scope| scope.obligation_iris.clone())
+                        .unwrap_or_default(),
+                    obligations_digest: self
+                        .task
+                        .symbolic
+                        .as_ref()
+                        .map(|state| state.obligations_digest.clone())
+                        .unwrap_or_default(),
                 };
                 let response: CaptureTypeResponse = self.post("capture/type", &request).await?;
                 anyhow::ensure!(

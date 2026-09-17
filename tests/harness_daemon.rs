@@ -68,6 +68,7 @@ fn proposal(kind: &str, title: &str) -> KnowledgeProposal {
         requirement: None,
         supersedes: None,
         retracts: None,
+        learned_from: None,
         reconciled: vec![],
     }
 }
@@ -2953,6 +2954,8 @@ fn typing_request(
             })
             .collect(),
         knowledge_revision: revision.into(),
+        obligation_iris: vec![],
+        obligations_digest: String::new(),
     }
 }
 

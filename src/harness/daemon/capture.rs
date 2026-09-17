@@ -204,6 +204,13 @@ fn prepare(
         if let Some(requirement) = &proposal.requirement {
             relations.push(("isMotivatedBy".into(), requirement.clone()));
         }
+        // Travels the same ordinary path as isMotivatedBy: validated by
+        // `plan_relation_args` against the ontology's domain and range, frozen
+        // into `entry.relations`, and therefore already expected by review's
+        // exact-match check without any change there.
+        if let Some(source) = &proposal.learned_from {
+            relations.push(("learnedFrom".into(), source.clone()));
+        }
         for reconciled in &proposal.reconciled {
             anyhow::ensure!(
                 reconciled.predicate == "refines",

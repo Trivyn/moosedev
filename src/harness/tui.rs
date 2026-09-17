@@ -365,6 +365,17 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
                                 proposal.components.join(", ")
                             ));
                         }
+                        // Derived from the approved plan's obligations. Shown
+                        // because accepting the note accepts these edges too,
+                        // and neither was rendered before — isMotivatedBy has
+                        // been writable since the field existed and a reviewer
+                        // could never see it.
+                        if let Some(record) = &proposal.requirement {
+                            text.push_str(&format!("Motivated by: {record}\n"));
+                        }
+                        if let Some(record) = &proposal.learned_from {
+                            text.push_str(&format!("Learned from: {record}\n"));
+                        }
                         if let Some(record) = &proposal.supersedes {
                             text.push_str(&format!("Replaces: {record}\n"));
                         }

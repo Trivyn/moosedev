@@ -89,52 +89,96 @@ fn normalized(title: &str) -> String {
         .to_lowercase()
 }
 
-/// Minimum length for a note's first sentence to serve as a record title; below
-/// this it is an acknowledgement ("Done.", "Fixed it."), not a claim.
-const MIN_CLAIM_TITLE_CHARS: usize = 12;
+/// Legal `isMotivatedBy` targets for a captured ArchitecturalDecision, per the
+/// ontology's range (`software-architecture.ttl`). Picking an illegal target
+/// would fail SHACL in `plan_relation_args` and take the whole capture with it.
+const MOTIVATION_KINDS: [&str; 2] = ["Requirement", "Constraint"];
 
-/// The note's first sentence.
+/// Legal `learnedFrom` sources for a captured Lesson. Requirements and
+/// Constraints are deliberately absent: the ontology range excludes them.
+const LESSON_SOURCE_KINDS: [&str; 2] = ["ArchitecturalDecision", "AntiPattern"];
+
+/// The one obligation that legally motivates this record, or nothing.
 ///
-/// A sentence ends at `.`/`!`/`?` FOLLOWED BY WHITESPACE, so `service.py` and
-/// `0.10` stay inside the sentence instead of ending it. A newline ends one too,
-/// for a note written as bullets.
-fn first_sentence(text: &str) -> &str {
-    let text = text.trim();
-    let mut chars = text.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        let ends = match ch {
-            '\n' => true,
-            '.' | '!' | '?' => chars
-                .peek()
-                .is_none_or(|(_, next)| next.is_whitespace()),
-            _ => false,
-        };
-        if ends {
-            return text[..index + ch.len_utf8()].trim_end();
+/// The approved plan's obligations are every record governing its files, of
+/// every kind and in no priority order (`symbolic/scope.rs` flattens the
+/// dossier's kind ranking away). The ontology range is what narrows them: an
+/// ArchitecturalDecision may only be motivated by a Requirement or Constraint,
+/// a Lesson may only be learned from an ArchitecturalDecision or AntiPattern.
+///
+/// After that filter, exactly one candidate is not a judgement call — the human
+/// approved the plan against that obligation, and the approval is the
+/// ratification. Two or more IS a judgement call, so nothing is drawn: the
+/// record keeps its SHACL `minCount` warning, which `under_linked_records`
+/// already reports and `suggest_links` already offers candidates for, at
+/// leisure and without paging anyone.
+/// The rule itself, over a caller-supplied kind lookup so it can be tested
+/// without a live graph. `kind_of` returns None for an IRI that is not a
+/// current, ratified InformationRecord — that record is not a candidate.
+fn derive_relation(
+    predicate: &'static str,
+    legal_kinds: &[&str],
+    obligations: &[String],
+    kind_of: impl Fn(&str) -> Option<String>,
+) -> DerivedRelation {
+    let mut legal: Vec<String> = Vec::new();
+    for iri in obligations {
+        let Some(kind) = kind_of(iri) else { continue };
+        if legal_kinds.contains(&kind.as_str()) && !legal.contains(iri) {
+            legal.push(iri.clone());
         }
     }
-    text
+    match legal.len() {
+        1 => DerivedRelation {
+            predicate: predicate.into(),
+            chosen: legal.pop(),
+            candidates_considered: 1,
+            reason: "asserted".into(),
+        },
+        0 => DerivedRelation {
+            predicate: predicate.into(),
+            chosen: None,
+            candidates_considered: 0,
+            reason: "none_legal".into(),
+        },
+        n => DerivedRelation {
+            predicate: predicate.into(),
+            chosen: None,
+            candidates_considered: n,
+            reason: "ambiguous".into(),
+        },
+    }
 }
 
-/// Title for the deterministic decision proposal: the claim the note makes, not
-/// the task that prompted it.
-///
-/// The plan summary names the WORK ("Fix the `process` method in `service.py` to
-/// implement idempotent retries…") — what a task tracker records, not what a
-/// decision record should be called. Every harness-captured ArchitecturalDecision
-/// in the archived field checks was titled that way while the note beside it
-/// carried the real claim ("The fix implements idempotency by checking for an
-/// existing receipt with the same request_id before processing…"). The note is
-/// the only claim-bearing text capture holds deterministically, so the title
-/// comes from it, and falls back to the plan summary only when no note names a
-/// claim — losing the record entirely would be worse than naming it poorly.
-fn claim_title(note: &str, plan_summary: &str) -> String {
-    let claim = first_sentence(note);
-    if claim.chars().count() >= MIN_CLAIM_TITLE_CHARS {
-        cap_title(claim)
-    } else {
-        cap_title(plan_summary)
+/// Draw the relations the approved plan's obligations support for one proposal.
+/// Nothing here can make a proposal governing: both predicates travel the
+/// ordinary relation path, never the lifecycle fields.
+pub(super) fn derive_relations(
+    proposal: &mut KnowledgeProposal,
+    obligations: &[String],
+    kind_of: impl Fn(&str) -> Option<String>,
+) -> Vec<DerivedRelation> {
+    // Nothing to decide, so nothing to journal. `none_legal` means the plan
+    // carried obligations and none were legal for this predicate — a real
+    // signal. An empty list means no obligations were supplied at all (a plan
+    // over ungoverned files, or a runner older than this field), which is not
+    // the same thing and must not read as one.
+    if obligations.is_empty() {
+        return vec![];
     }
+    let (predicate, kinds) = match proposal.kind.as_str() {
+        "ArchitecturalDecision" => ("isMotivatedBy", &MOTIVATION_KINDS[..]),
+        "Lesson" => ("learnedFrom", &LESSON_SOURCE_KINDS[..]),
+        _ => return vec![],
+    };
+    let derived = derive_relation(predicate, kinds, obligations, kind_of);
+    if let Some(target) = derived.chosen.clone() {
+        match predicate {
+            "isMotivatedBy" => proposal.requirement = Some(target),
+            _ => proposal.learned_from = Some(target),
+        }
+    }
+    vec![derived]
 }
 
 fn base_proposal(
@@ -154,6 +198,7 @@ fn base_proposal(
         requirement: None,
         supersedes: None,
         retracts: None,
+        learned_from: None,
         reconciled: vec![],
     }
 }
@@ -226,7 +271,7 @@ async fn type_note(
         raw.push((
             base_proposal(
                 "ArchitecturalDecision",
-                claim_title(note, &request.plan_summary),
+                cap_title(&request.plan_summary),
                 description,
                 decision_evidence,
                 request.changed_files.clone(),
@@ -322,6 +367,18 @@ async fn type_note(
         && state.engine_config.llm_assist_level == LlmAssistLevel::SensorWithFallback;
     let mut proposals = Vec::new();
     for (index, (mut proposal, origin)) in raw.into_iter().enumerate() {
+        // Before scoring, draw what the approved plan's obligations support.
+        // This only ever sets `requirement`/`learned_from`, never a lifecycle
+        // field, so a derived edge can never make the capture governing.
+        let derived = derive_relations(&mut proposal, &request.obligation_iris, |iri| {
+            // Re-validate rather than trust the runner's IRIs: the daemon owns
+            // what reaches the graph, as it does for lifecycle targets. An IRI
+            // that is not current ratified knowledge is simply not a candidate.
+            let node = oxigraph::model::NamedNode::new(iri).ok()?;
+            let class = graph::require_information_record(state, &node).ok()?;
+            graph::in_working_set(&current_status(state, iri).unwrap_or_default())
+                .then(|| class.rsplit(['#', '/']).next().unwrap_or_default().to_string())
+        });
         let scored = score_proposal(state, &request.owner_id, &proposal, thresholds)?;
         let receipt_id = format!("{}-r{index}", request.operation_id);
         let mut resolved_by = "symbolic".to_string();
@@ -490,6 +547,7 @@ async fn type_note(
             origin,
             disposition: typed,
             resolved_by,
+            derived,
         });
     }
     ensure_unchanged(
@@ -597,58 +655,153 @@ async fn sensor_tiebreak(
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_title, first_sentence};
+    use super::{derive_relation, derive_relations};
+    use crate::harness::protocol::KnowledgeProposal;
 
-    /// A filename or a version number is not a sentence boundary: the archived
-    /// capture whose title regressed was about `service.py`, so cutting at that
-    /// dot would have reintroduced a different truncation of the same defect.
-    #[test]
-    fn a_dot_inside_a_word_does_not_end_the_sentence() {
-        assert_eq!(
-            first_sentence("The fix guards `service.py` against retries. A second claim."),
-            "The fix guards `service.py` against retries."
-        );
-        assert_eq!(first_sentence("Recall rose to 0.36 overall."), "Recall rose to 0.36 overall.");
-    }
+    const REQ: &str = "https://moosedev.dev/kg/Requirement/r1";
+    const REQ2: &str = "https://moosedev.dev/kg/Requirement/r2";
+    const AD: &str = "https://moosedev.dev/kg/ArchitecturalDecision/a1";
+    const LESSON: &str = "https://moosedev.dev/kg/Lesson/l1";
 
-    #[test]
-    fn a_newline_ends_the_sentence_so_a_bulleted_note_still_titles() {
-        assert_eq!(
-            first_sentence("Idempotency now short-circuits on a stored receipt\n- tests updated"),
-            "Idempotency now short-circuits on a stored receipt"
-        );
-    }
-
-    #[test]
-    fn a_note_without_terminal_punctuation_is_its_own_sentence() {
-        assert_eq!(first_sentence("Retries return the stored receipt"), "Retries return the stored receipt");
-    }
-
-    /// The defect this replaces: the decision was named after the task.
-    #[test]
-    fn the_title_names_the_notes_claim_not_the_task() {
-        let note = "The fix implements idempotency by checking for an existing receipt \
-                    with the same request_id before processing. A key discovery was that \
-                    the original code recalculated totals on every call.";
-        let plan = "Fix the `process` method in `service.py` to implement idempotent retries.";
-        let title = claim_title(note, plan);
-        assert!(title.starts_with("The fix implements idempotency"), "got {title}");
-        assert!(!title.contains("service.py"), "title still names the task: {title}");
-    }
-
-    /// Falling back keeps the record. Losing it would be worse than naming it badly.
-    #[test]
-    fn an_acknowledgement_falls_back_to_the_plan_summary() {
-        for note in ["", "   ", "Done.", "Fixed it."] {
-            assert_eq!(claim_title(note, "Add a retry guard"), "Add a retry guard", "note {note:?}");
+    /// Kinds keyed by IRI; anything absent stands for a record that is not
+    /// current ratified knowledge and is therefore not a candidate.
+    fn kinds(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+        let map: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(iri, kind)| ((*iri).to_string(), (*kind).to_string()))
+            .collect();
+        move |iri: &str| {
+            map.iter()
+                .find(|(key, _)| key == iri)
+                .map(|(_, kind)| kind.clone())
         }
     }
 
+    fn proposal(kind: &str) -> KnowledgeProposal {
+        KnowledgeProposal {
+            kind: kind.into(),
+            title: "t".into(),
+            description: "d".into(),
+            evidence: vec![],
+            files: vec![],
+            components: vec![],
+            requirement: None,
+            supersedes: None,
+            retracts: None,
+            learned_from: None,
+            reconciled: vec![],
+        }
+    }
+
+    /// One legal candidate is not a judgement call: the human approved the plan
+    /// against that obligation.
     #[test]
-    fn a_long_claim_is_capped_with_an_ellipsis() {
-        let note = format!("{} and more", "a claim that runs on ".repeat(12));
-        let title = claim_title(&note, "plan");
-        assert!(title.chars().count() <= super::MAX_TITLE_CHARS, "{} chars", title.chars().count());
-        assert!(title.ends_with('…'), "got {title}");
+    fn exactly_one_legal_obligation_is_asserted() {
+        let derived = derive_relation(
+            "isMotivatedBy",
+            &["Requirement", "Constraint"],
+            &[REQ.into(), AD.into()],
+            kinds(&[(REQ, "Requirement"), (AD, "ArchitecturalDecision")]),
+        );
+        assert_eq!(derived.chosen.as_deref(), Some(REQ));
+        assert_eq!(derived.reason, "asserted");
+        assert_eq!(derived.candidates_considered, 1, "the AD is not a legal target");
+    }
+
+    /// Two is a judgement call, so nothing is drawn — the record keeps its SHACL
+    /// warning for `under_linked_records` and `suggest_links` to surface later.
+    #[test]
+    fn two_legal_obligations_are_ambiguous_and_draw_nothing() {
+        let derived = derive_relation(
+            "isMotivatedBy",
+            &["Requirement", "Constraint"],
+            &[REQ.into(), REQ2.into()],
+            kinds(&[(REQ, "Requirement"), (REQ2, "Requirement")]),
+        );
+        assert_eq!(derived.chosen, None);
+        assert_eq!(derived.reason, "ambiguous");
+        assert_eq!(derived.candidates_considered, 2, "both are journaled");
+    }
+
+    #[test]
+    fn no_legal_obligation_draws_nothing() {
+        let derived = derive_relation(
+            "isMotivatedBy",
+            &["Requirement", "Constraint"],
+            &[AD.into()],
+            kinds(&[(AD, "ArchitecturalDecision")]),
+        );
+        assert_eq!(derived.chosen, None);
+        assert_eq!(derived.reason, "none_legal");
+        assert_eq!(derived.candidates_considered, 0);
+    }
+
+    /// An obligation the daemon cannot resolve as current ratified knowledge is
+    /// skipped: runner-supplied IRIs are re-validated, never trusted.
+    #[test]
+    fn an_unresolvable_obligation_is_not_a_candidate() {
+        let derived = derive_relation(
+            "isMotivatedBy",
+            &["Requirement", "Constraint"],
+            &[REQ.into(), "https://moosedev.dev/kg/Requirement/gone".into()],
+            kinds(&[(REQ, "Requirement")]),
+        );
+        assert_eq!(derived.chosen.as_deref(), Some(REQ), "{derived:?}");
+    }
+
+    /// The ontology range for learnedFrom excludes Requirement and Constraint;
+    /// choosing one would fail SHACL and take the whole capture down with it.
+    #[test]
+    fn a_requirement_is_never_a_learned_from_source() {
+        let mut lesson = proposal("Lesson");
+        let derived = derive_relations(&mut lesson, &[REQ.into(), AD.into()], |iri| {
+            kinds(&[(REQ, "Requirement"), (AD, "ArchitecturalDecision")])(iri)
+        });
+        assert_eq!(lesson.learned_from.as_deref(), Some(AD));
+        assert_eq!(derived[0].predicate, "learnedFrom");
+        assert!(lesson.requirement.is_none(), "a Lesson takes no isMotivatedBy");
+    }
+
+    /// A plan over ungoverned files, or a runner older than the obligations
+    /// field, must journal nothing rather than a misleading `none_legal`.
+    #[test]
+    fn no_obligations_at_all_journals_nothing() {
+        let mut decision = proposal("ArchitecturalDecision");
+        let derived = derive_relations(&mut decision, &[], |_| None);
+        assert!(derived.is_empty(), "{derived:?}");
+        assert!(decision.requirement.is_none());
+    }
+
+    #[test]
+    fn a_kind_with_no_derivation_draws_nothing() {
+        let mut constraint = proposal("Constraint");
+        let derived = derive_relations(&mut constraint, &[REQ.into()], |iri| {
+            kinds(&[(REQ, "Requirement")])(iri)
+        });
+        assert!(derived.is_empty());
+        assert!(constraint.requirement.is_none() && constraint.learned_from.is_none());
+    }
+
+    /// James's ruling as a test: a derived relation must never gate a task.
+    /// Both predicates travel the ordinary relation path, so neither may reach
+    /// `changes_lifecycle` — only `supersedes`/`retracts` do, and derivation
+    /// never sets them.
+    #[test]
+    fn derived_relations_never_make_a_proposal_governing() {
+        let mut decision = proposal("ArchitecturalDecision");
+        decision.requirement = Some(REQ.into());
+        decision.learned_from = Some(AD.into());
+        assert!(!decision.changes_lifecycle());
+        assert!(!decision.is_governing());
+
+        let mut lesson = proposal("Lesson");
+        lesson.learned_from = Some(AD.into());
+        assert!(!lesson.is_governing());
+
+        // The contrast: a lifecycle field is what governs, and derivation never
+        // sets one.
+        let mut superseding = proposal("ArchitecturalDecision");
+        superseding.supersedes = Some(LESSON.into());
+        assert!(superseding.is_governing(), "guard still works for real lifecycle change");
     }
 }
