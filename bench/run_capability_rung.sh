@@ -13,8 +13,23 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-KEY="${1:?usage: run_capability_rung.sh <lms-model-key> [corpus]}"
+KEY="${1:?usage: run_capability_rung.sh <model-key> [corpus]}"
 CORPUS="${2:-trivyn-cap-2026-09}"
+# Externally-served models (mlx-optiq serving the OptiQ quants on its own port, started by
+# hand) set RUNG_BASE_URL. LM Studio cannot load them, so the presence check, the unload sweep
+# and `lms load` are all skipped — running them anyway would report success while managing a
+# completely different inventory. RUNG_MODEL_ID is the id the server answers to (mlx-optiq uses
+# the model's filesystem path); KEY stays the short handle that names the rung and its rows.
+EXTERNAL="${RUNG_BASE_URL:+1}"
+ADMIN_URL="${RUNG_BASE_URL:-http://localhost:1234}"
+MODEL_ID="${RUNG_MODEL_ID:-$KEY}"
+if [ -n "$EXTERNAL" ]; then
+  MODEL_ARG="local/$KEY"
+  export BENCH_LOCAL_BASE_URL="${RUNG_BASE_URL%/}/v1"
+  export BENCH_LOCAL_MODEL_ID="$MODEL_ID"
+else
+  MODEL_ARG="lmstudio/$KEY"
+fi
 DD="$HOME/.moosedev-stores/$CORPUS"
 BIN="$HOME/code/moosedev/target/release/moosedev"
 ONTO="$HOME/code/moosedev/ontologies"
@@ -29,7 +44,10 @@ OUT="${RUNG_REPORT:-$HOME/.claude/jobs/rung-${KEY//\//_}.txt}"
 say() { echo "$@" | tee -a "$OUT"; }
 : > "$OUT"; say "=== rung: $KEY on $CORPUS — $(date) ==="
 
-# --- one resident model ------------------------------------------------------
+# --- one resident model (LM Studio only) -------------------------------------
+if [ -n "$EXTERNAL" ]; then
+  say "externally served: $MODEL_ID @ $ADMIN_URL (no LM Studio management)"
+else
 curl -s http://localhost:1234/api/v1/models \
   | python3 -c "
 import json,sys
@@ -45,12 +63,13 @@ for m in json.load(sys.stdin).get('models',[]):
 done
 lms load "$KEY" -y --context-length "$CTX" >/dev/null 2>&1 || { say "FAILED to load $KEY"; exit 1; }
 say "loaded (context $CTX)"
+fi
 
 # --- the probe: can this model act at all? -----------------------------------
 say ""; say "--- tool-call probe ---"
-VERDICT=$(curl -s -m 300 http://localhost:1234/v1/chat/completions \
+VERDICT=$(curl -s -m 900 "$ADMIN_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' -d "{
-   \"model\":\"$KEY\",
+   \"model\":\"$MODEL_ID\",
    \"messages\":[{\"role\":\"user\",\"content\":\"List every Constraint in the project knowledge graph. Use the tool.\"}],
    \"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"moosedev_sparql\",
      \"description\":\"Run a read-only SPARQL query over the project knowledge graph\",
@@ -95,8 +114,8 @@ TDIR=$(.venv/bin/python -c "import config;print(config.corpus_tasks_path('$CORPU
 for t in $(ls "$TDIR"/*.json | xargs -n1 basename | sed 's/\.json$//' | grep -E '^set_') \
          $(ls "$TDIR"/*.json | xargs -n1 basename | sed 's/\.json$//' | grep -E '^(neg_|sup_)'); do
   line=$(.venv/bin/python run.py --corpus "$CORPUS" --task "$t" --arm B2 --mode tooluse \
-           --backend opencode --model "lmstudio/$KEY" 2>&1 \
-         | grep -oE "score=[0-9.]+ passed=[A-Za-z]+|wall=[0-9]+ms" | tr '\n' ' ')
+           --backend opencode --model "$MODEL_ARG" 2>&1 \
+         | grep -oE "score=[0-9.]+ passed=[A-Za-z]+|ABORTED\\[[^]]*\\]|wall=[0-9]+ms" | tr '\n' ' ')
   say "  $(printf '%-30s' "$t") ${line:-(no row)}"
 done
 say ""; say "=== rung complete $(date) ==="

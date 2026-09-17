@@ -15,7 +15,9 @@ import re
 import shlex
 from collections import Counter
 import shutil
+import signal
 import subprocess
+import threading
 from pathlib import Path
 import time
 import urllib.request
@@ -99,17 +101,37 @@ def local_provider(model: str) -> dict:
                      config.LOCAL_CONTEXT, config.LOCAL_OUTPUT),
         "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1",
                        os.environ.get("OPENROUTER_API_KEY", ""), 200_000, 32_000),
+        # Not every local model can be served by LM Studio: the OptiQ quants run under
+        # mlx-optiq, started by hand on its own port. `local/<alias>` points a cell at any
+        # OpenAI-compatible server without pretending it is LM Studio — which matters, because
+        # the rung's model management (load, unload, presence check) is LM Studio's alone and
+        # would silently do nothing here.
+        "local": ("Local OpenAI-compatible server",
+                  os.environ.get("BENCH_LOCAL_BASE_URL", ""),
+                  # mlx-optiq rejects any bearer token not prefixed `sk-optiq-`; servers that
+                  # ignore the header entirely are unaffected by the default, and anything else
+                  # sets BENCH_LOCAL_API_KEY.
+                  os.environ.get("BENCH_LOCAL_API_KEY", "sk-optiq-local"),
+                  config.LOCAL_CONTEXT, config.LOCAL_OUTPUT),
     }
     if provider not in endpoints:
         return {}
     name, base_url, api_key, context, output = endpoints[provider]
+    if not base_url:
+        raise SystemExit(f"{provider} needs BENCH_LOCAL_BASE_URL in the environment; refusing "
+                         f"to run a cell with no endpoint to run it against")
     if not api_key:
         raise SystemExit(f"{provider} needs its API key in the environment; refusing to run "
                          f"a cell whose endpoint is not the one it claims")
+    # The id on the wire may differ from the id on the command line: mlx-optiq serves a model
+    # under its filesystem path, and a path cannot survive opencode's `provider/model` split.
+    # So `local/qwen122b` is the handle, BENCH_LOCAL_MODEL_ID is what the server is actually
+    # asked for, and the row records the handle either way.
+    wire_id = os.environ.get("BENCH_LOCAL_MODEL_ID") if provider == "local" else None
     return {provider: {
         "npm": "@ai-sdk/openai-compatible", "name": name,
         "options": {"baseURL": base_url, "apiKey": api_key},
-        "models": {model_id: {"id": model_id, "name": model_id,
+        "models": {model_id: {"id": wire_id or model_id, "name": model_id,
                               "limit": {"context": context, "output": output}}},
     }}
 
@@ -129,6 +151,13 @@ SEALED_PERMISSION = {"bash": "deny", "edit": "deny", "write": "deny", "patch": "
                      "webfetch": "deny", "websearch": "deny", "external_directory": "deny"}
 
 
+def memory_server_arm(arm: str, mode: str) -> bool:
+    """True when the cell is actually handed the moosedev MCP. Defined once and used both to
+    install the server and to arm the abort rule that watches for its abandonment, so the two
+    cannot drift apart into a rule that fires in a cell which never had the tool."""
+    return arm == "B2" and mode not in ("oracle", "walk")
+
+
 def arm_opencode_config(arm: str, corpus: str, mode: str = "tooluse",
                         model: str = None, sealed: bool = False) -> dict:
     """Project-local opencode.json: disable the global omni MCP, add the arm's memory MCP (if any).
@@ -136,27 +165,26 @@ def arm_opencode_config(arm: str, corpus: str, mode: str = "tooluse",
     tool is given — isolating knowledge-value from the agent's willingness to call the tool (H8)."""
     c = config.CORPORA[corpus]
     mcp = {"omni": {"type": "local", "command": ["/opt/homebrew/bin/omni", "--mcp"], "enabled": False}}
-    if mode != "oracle":
-        if arm == "B1-rag":
-            mcp["freetext-recall"] = {
-                "type": "local",
-                "command": [str(config.VENV_PY), str(config.BENCH / "freetext_mcp" / "server.py")],
-                "environment": {"FREETEXT_CORPUS": str(config.corpus_chunks_path(corpus))},
-                "enabled": True,
-            }
-        elif arm == "B2":
-            mcp["moosedev"] = {
-                "type": "local",
-                "command": [config.MOOSEDEV_BIN, "--connect"],
-                "environment": {
-                    "MOOSEDEV_DATA_DIR": c["data_dir"],
-                    "MOOSEDEV_NO_AUTOSPAWN": "1",  # the harness owns the backend; never auto-spawn
-                    "MOOSEDEV_LLM_BASE_URL": config.LLM_BASE_URL,
-                    "MOOSEDEV_LLM_API_KEY": config.LLM_API_KEY,
-                    "MOOSEDEV_LLM_MODEL": config.NLQ_MODEL,
-                },
-                "enabled": True,
-            }
+    if mode not in ("oracle", "walk") and arm == "B1-rag":
+        mcp["freetext-recall"] = {
+            "type": "local",
+            "command": [str(config.VENV_PY), str(config.BENCH / "freetext_mcp" / "server.py")],
+            "environment": {"FREETEXT_CORPUS": str(config.corpus_chunks_path(corpus))},
+            "enabled": True,
+        }
+    elif memory_server_arm(arm, mode):
+        mcp["moosedev"] = {
+            "type": "local",
+            "command": [config.MOOSEDEV_BIN, "--connect"],
+            "environment": {
+                "MOOSEDEV_DATA_DIR": c["data_dir"],
+                "MOOSEDEV_NO_AUTOSPAWN": "1",  # the harness owns the backend; never auto-spawn
+                "MOOSEDEV_LLM_BASE_URL": config.LLM_BASE_URL,
+                "MOOSEDEV_LLM_API_KEY": config.LLM_API_KEY,
+                "MOOSEDEV_LLM_MODEL": config.NLQ_MODEL,
+            },
+            "enabled": True,
+        }
     return {
         "$schema": "https://opencode.ai/config.json",
         # Frozen, IDENTICAL context management across all arms so MEMORY is the only variable.
@@ -172,6 +200,44 @@ def arm_opencode_config(arm: str, corpus: str, mode: str = "tooluse",
         **({"permission": SEALED_PERMISSION} if sealed else {}),
         **({"provider": provider} if (provider := local_provider(model or "")) else {}),
     }
+
+
+def walk_context(corpus: str, task: dict) -> str:
+    """WALK/push: exactly what the harness pushes, from POST /harness/context.
+
+    Not `get_entity_dossier`. That was the first attempt and it is a lookalike,
+    not the product: the MCP dossier LISTS a superseded record beside its
+    replacement, while the harness's walk resolves supersession to its head
+    (`Hop::SupersessionHead`, rendered "via: supersedes ...") and leads with the
+    linked evidence of the files' code. Measuring the MCP dossier and calling it
+    the harness would have tested the wrong mechanism — verified by pushing all
+    eight currency anchors through it and finding the stale record present in
+    8/8.
+    """
+    import urllib.request
+    addr = os.environ.get("MOOSEDEV_HARNESS_HTTP", "127.0.0.1:7475")
+    body = json.dumps({
+        "topic": task["prompt"][:200],
+        "files": [task["anchor_file"]] if task.get("anchor_file") else [],
+        "evidence_only": not task.get("anchor_file"),
+    }).encode()
+    req = urllib.request.Request(f"http://{addr}/api/v1/harness/context", data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as response:
+        payload = json.loads(response.read())
+    # The runner builds its prompt from THREE fields, not one: `context` carries the
+    # walk, `governing_constraints` the Project rules, and `files[].dossier` the direct
+    # records of each file's code. Reading only `context` drops every direct record —
+    # which made the push look as though it withheld the current knowledge as well as
+    # the stale, and nearly produced a report of a product defect that was a bug here.
+    parts = [payload.get("context", "")]
+    rules = payload.get("governing_constraints") or []
+    if rules:
+        parts.append("\n\nProject rules:\n" + "\n".join(
+            f"- [{r.get('label','')}] {r.get('claim','')} ({r.get('via','')})" for r in rules))
+    for entry in payload.get("files") or []:
+        parts.append(f"\n\nEntity dossier for {entry.get('file','')}:\n{entry.get('dossier','')}")
+    return "".join(parts)
 
 
 def oracle_context(corpus: str, topic: str, k: int = 4) -> str:
@@ -275,6 +341,168 @@ def prepare_workdir(run_id: str, arm: str, corpus: str, task: dict, mode: str = 
     if task["type"] in CODE_TASK_TYPES:
         git_baseline(wd)  # overlays (AGENTS.md, docs/) are baseline too -> excluded from the diff
     return wd
+
+
+# --- no-progress abort -------------------------------------------------------
+# The tool-call probe qualifies a model that CAN emit a call; it cannot see one that
+# stops making progress. Hermes-4-70B made a single memory call, then repeated two grep
+# signatures 94 and 93 times against the empty workdir — 193 calls carrying just 8
+# distinct signatures, 4.97M prompt tokens, 28 minutes — and concluded the graph was
+# empty while 74 Lessons sat one sparql call away (Lesson 65d330ac). Cutting at the 8th
+# repeat costs about one of those 28 minutes; over a 13-cell rung it is the difference
+# between a fast disqualification and a lost day.
+ABORT_REPEAT = int(os.environ.get("BENCH_ABORT_REPEAT", "8"))
+ABORT_SILENT = int(os.environ.get("BENCH_ABORT_SILENT", "40"))
+
+
+class NoProgress:
+    """Names the first pathology in the agent's tool stream, or stays quiet.
+
+    Armed ONLY for sealed capability_qa cells, and the scope is load-bearing rather than
+    incidental: both rules assume the environment cannot change under the agent, which is true
+    only where every write is denied and the workdir is empty. In a code cell neither rule is
+    sound — see the caller.
+
+    Within that scope both describe an agent that has stopped acquiring information, which is
+    the only thing a cell's remaining minutes can buy, and both are written to be unable to
+    fire on a healthy cell: a false abort would silently turn a scoring cell into a zero and
+    corrupt the very comparison the matrix exists to make.
+
+    `repeat` — an IDENTICAL (tool, arguments) signature returns an identical result, so the
+    Nth is information-free by construction, whatever the model intended.
+
+    `no_memory` — only after the agent has ALREADY used the memory server successfully, so it
+    fires on abandoning a tool known to work, never on a model that simply never calls it.
+    That latter case is the matrix's own headline finding and must be allowed to run and score.
+    """
+
+    def __init__(self, memory_arm: bool):
+        self.memory_arm = memory_arm
+        self.sigs = Counter()
+        self.since_memory = 0
+        self.saw_memory = False
+        self.reason = None
+        self.detail = None
+
+    def observe(self, tool, args):
+        if self.reason or not tool:
+            return self.reason
+        if args is not None:
+            sig = (tool, json.dumps(args, sort_keys=True, default=str))
+            self.sigs[sig] += 1
+            if self.sigs[sig] >= ABORT_REPEAT:
+                self.reason = "repeat"
+                self.detail = f"{tool} called {self.sigs[sig]}x with identical arguments"
+                return self.reason
+        if tool.startswith("moosedev_"):
+            self.saw_memory, self.since_memory = True, 0
+        else:
+            self.since_memory += 1
+            if self.memory_arm and self.saw_memory and self.since_memory >= ABORT_SILENT:
+                self.reason = "no_memory"
+                self.detail = (f"{self.since_memory} consecutive non-memory calls after the "
+                               f"agent had already used the memory server")
+        return self.reason
+
+    def feed(self, line: str):
+        """One opencode JSONL line in; an abort reason out, or None. opencode emits exactly
+        one `tool_use` event per call, always at status `completed`, with the arguments under
+        part.state.input — verified against the Hermes traces this exists to catch."""
+        line = line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if e.get("type") != "tool_use":
+            return None
+        part = e.get("part") or {}
+        return self.observe(part.get("tool"), (part.get("state") or {}).get("input"))
+
+
+def _terminate(proc):
+    """Kill the agent's whole process group: opencode spawns the arm's MCP servers as children,
+    and signalling only the parent leaves them holding the store's RocksDB LOCK, so the next
+    cell cannot open it."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, PermissionError):
+            (proc.terminate if sig == signal.SIGTERM else proc.kill)()
+        try:
+            proc.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def agent_errors(stdout: str) -> list:
+    """opencode reports a provider failure as a JSON `error` event on STDOUT, not on stderr:
+    a bad endpoint, a rejected key or an unknown model all arrive this way, seconds in, with
+    zero steps. Surfacing them is the difference between "this model scored 0.0" and "this
+    cell never reached the model" — the pilot that motivated this was a 401 from a key prefix,
+    and it presented as a clean zero."""
+    out = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{") or '"error"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") != "error":
+            continue
+        err = e.get("error") or {}
+        msg = ((err.get("data") or {}).get("message")) or err.get("message") or str(err)[:200]
+        out.append(f"{err.get('name', 'error')}: {msg}")
+    return out
+
+
+def run_agent(cmd, cwd, timeout, watch=None):
+    """Run the agent and stream its JSONL, so a cell can be cut short while it still has
+    minutes left to waste. subprocess.run hands back stdout only at exit, which is far too
+    late to notice a loop. Returns (stdout, returncode, timed_out, aborted_reason).
+
+    The deadline runs on a timer rather than inside the read loop: a model that stalls
+    silently produces no lines, so a loop-body check would never fire.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, text=True, bufsize=1,
+                            cwd=cwd, start_new_session=True)
+    state = {"timed_out": False}
+
+    def on_deadline():
+        state["timed_out"] = True
+        _terminate(proc)
+
+    timer = threading.Timer(timeout, on_deadline)
+    timer.start()
+    # stderr is drained by a thread: leaving it unread deadlocks the child once the pipe fills.
+    err = []
+    drain = threading.Thread(target=lambda: err.append(proc.stderr.read() or ""), daemon=True)
+    drain.start()
+    lines, aborted = [], None
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            if watch is not None and watch.feed(line):
+                aborted = watch.reason
+                _terminate(proc)
+                break
+    finally:
+        timer.cancel()
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        rc = proc.wait()
+        drain.join(timeout=5)
+    return ("".join(lines), (124 if state["timed_out"] else rc), state["timed_out"], aborted,
+            "".join(err))
 
 
 def parse_events(stdout: str) -> dict:
@@ -391,7 +619,16 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         # B1-notes is the agent-grep-the-real-docs baseline -> tooluse only. Oracle-over-notes (a
         # retriever pushing chunks of the real docs) is the future B1-rag-notes variant (AD b3205dcb).
         raise SystemExit("B1-notes is tooluse-only; oracle-over-notes is not implemented (use B1-rag).")
-    if mode == "oracle" and arm != "B0":  # inject what the agent's memory tool would have returned
+    if mode == "walk":
+        # push what the harness pushes: this entity's dossier, nothing else
+        if not task.get("anchor_file"):
+            raise SystemExit("walk mode needs an anchor_file on the task "
+                             "(currency_build.py writes one)")
+        ctx = walk_context(corpus, task)
+        prompt = ("Recorded project knowledge for the code in question, pushed from the "
+                  "project graph (current knowledge only):\n\n"
+                  f"{ctx}\n\n---\n\nTask:\n\n{task['prompt']}")
+    elif mode == "oracle" and arm != "B0":  # inject what the agent's memory tool would have returned
         # Best-case retrieval: a focused topic (the task subject, NOT the answer), so a null is
         # unambiguous — the relevant record is front-and-center, isolating knowledge-value from both
         # fetch-willingness (H8) and query-quality (a verbose prompt dilutes BM25 and buries it).
@@ -433,24 +670,34 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         if variant:  # provider reasoning effort (e.g. high|max|minimal)
             cmd += ["--variant", variant]
         cmd += [prompt]
+    # The no-progress watcher reads opencode's event shape, which is verified against real
+    # traces; codex runs unwatched rather than on a guessed schema, and the frontier control
+    # it carries has never shown this pathology. stdin=DEVNULL throughout: `codex exec` reads
+    # extra instructions from stdin when stdin is piped (not a TTY) and BLOCKS on EOF, so an
+    # unattended launch hangs the full CELL_TIMEOUT with zero output. The prompt is always an
+    # arg, so the agent never needs stdin. (Masked under an interactive `!` TTY.)
+    # Both rules assume an IMMUTABLE environment: that the Nth identical call cannot return
+    # anything new, and that a long run of filesystem calls cannot be the real work. Neither
+    # holds in a code cell, where the workdir is writable — re-running one test command after
+    # an edit is correct behaviour, and so is a burst of file calls after a single memory
+    # lookup. Replaying all 1,314 traces on disk showed exactly that, and only that: the sole
+    # false positives were code cells, one of them a score=1.0 frontier run. A sealed
+    # capability_qa cell denies every write and carries an empty workdir, so there the premise
+    # holds by construction and an identical call really is information-free.
+    watch = (NoProgress(memory_server_arm(arm, mode))
+             if backend == "opencode" and task["type"] == "capability_qa" else None)
     t0 = time.time()
-    timed_out = False
-    try:
-        # stdin=DEVNULL: `codex exec` reads extra instructions from stdin when stdin is piped (not a
-        # TTY) and BLOCKS on EOF — so an unattended/agent launch (no TTY) hangs the full CELL_TIMEOUT
-        # with zero output. The prompt is always passed as an arg, so the agent never needs stdin.
-        # (Masked when launched via the user's interactive `!` TTY; surfaces under automation.)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=config.CELL_TIMEOUT,
-                              stdin=subprocess.DEVNULL,
-                              cwd=str(wd) if backend == "codex" else None)
-        stdout, returncode = proc.stdout, proc.returncode
-    except subprocess.TimeoutExpired as e:
-        # A hung/slow cell is a RESULT, not a crash: record it and grade whatever the agent wrote
-        # on disk so far (a partial patch is still signal — e.g. a violating import already added).
-        timed_out = True
-        out = e.stdout
-        stdout = out.decode() if isinstance(out, (bytes, bytearray)) else (out or "")
-        returncode = 124
+    # A hung, slow or looping cell is a RESULT, not a crash: record it and grade whatever the
+    # agent wrote on disk so far (a partial patch is still signal).
+    stdout, returncode, timed_out, aborted, stderr = run_agent(
+        cmd, str(wd) if backend == "codex" else None, config.CELL_TIMEOUT, watch)
+    # A cell that dies before its first step produced no events to explain itself, so its
+    # score is a rig failure wearing a measurement's clothes. Keep the agent's own words:
+    # swallowing them is what turns a config typo into an afternoon of model-blaming.
+    cell_errors = agent_errors(stdout)
+    if returncode != 0:
+        for msg in cell_errors[:3] or [(stderr or "(no stderr)").strip()[-1200:]]:
+            print(f"  CELL FAILED exit={returncode}: {msg}", flush=True)
     wall_ms = int((time.time() - t0) * 1000)
     if backend == "codex":
         ev = parse_codex_events(stdout)
@@ -503,6 +750,13 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         "wall_clock_ms": wall_ms, "agent_steps": ev["steps"], "tool_calls": ev["tools"],
         "tool_counts": dict(Counter(ev["tools"])), "n_tool_calls": len(ev["tools"]),
         "final_text": ev["final_text"], "opencode_exit": returncode, "timed_out": timed_out,
+        # An aborted cell was CUT, not answered: its score is a floor, not a measurement, and
+        # reports must be able to tell the two apart. A scored zero says the model tried and
+        # failed; this says the rig stopped it, and why.
+        "aborted": bool(aborted), "abort_reason": aborted,
+        "abort_detail": watch.detail if (watch and aborted) else None,
+        "cell_errors": cell_errors or None,
+        "stderr_tail": (stderr or "").strip()[-2000:] if returncode != 0 else None,
     }
     with open(runs_dir / "runs.jsonl", "a") as f:
         f.write(json.dumps(row) + "\n")
@@ -519,7 +773,7 @@ def main():
     ap.add_argument("--model", default=None, help="agent model; defaults per backend")
     ap.add_argument("--backend", default="opencode", choices=["opencode", "codex"],
                     help="agent harness: opencode (default) or the codex CLI")
-    ap.add_argument("--mode", default="tooluse", choices=["tooluse", "oracle"])
+    ap.add_argument("--mode", default="tooluse", choices=["tooluse", "oracle", "walk"])
     ap.add_argument("--agent", default=None, help="opencode agent/mode: build|plan|general|explore")
     ap.add_argument("--variant", default=None, help="reasoning effort, e.g. high|max (opencode) | low|medium (codex)")
     ap.add_argument("--prompt-prefix", default="", help="diagnostic: text prepended to the task prompt")
@@ -562,6 +816,8 @@ def main():
         tk = row["tokens"]
         metrics = " ".join(f"{k}={v}" for k, v in row["metrics"].items() if k != "files")
         to = " TIMEOUT" if row.get("timed_out") else ""
+        if row.get("aborted"):  # visible in the rung's line, so a cut cell is never read as a score
+            to += f" ABORTED[{row['abort_reason']}: {row['abort_detail']}]"
         print(f"  score={row['score']} passed={row['passed']} {metrics}{to} "
               f"steps={row['agent_steps']} tools={row['tool_calls']}")
         print(f"  agent_tokens={tk['agent_prompt']}+{tk['agent_completion']} "
