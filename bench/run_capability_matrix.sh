@@ -65,18 +65,17 @@ wanted = {m.split("/", 1)[1] for m in sys.argv[1:] if "/" in m}
 import os
 wanted.add(os.environ.get("MOOSEDEV_LLM_MODEL", "google/gemma-4-26b-a4b-qat"))
 served = urllib.request.urlopen("http://localhost:1234/api/v1/models", timeout=10).read()
-loaded = {m["key"] for m in json.loads(served)["models"] if m.get("loaded_instances")}
-missing = sorted(wanted - loaded)
+present = {m["key"] for m in json.loads(served)["models"]}
+missing = sorted(wanted - present)
 if missing:
-    sys.exit("REFUSING: not loaded in LM Studio (JIT is off): " + ", ".join(missing)
-             + "\n  load with: lms load <key> -y")
-print("models loaded:", ", ".join(sorted(wanted)))
+    sys.exit("REFUSING: not present in LM Studio: " + ", ".join(missing))
+print("models present:", ", ".join(sorted(wanted)))
 PREFLIGHT
 
 SERVE=""
 serve_up()   { rm -f "$DD/moosedev.sock"
   MOOSEDEV_DATA_DIR="$DD" MOOSEDEV_ONTOLOGY_DIR="$ONTO" \
-    MOOSEDEV_LLM_BASE_URL="${MOOSEDEV_LLM_BASE_URL:-http://localhost:1234/v1}" \
+    MOOSEDEV_LLM_BASE_URL="${MOOSEDEV_LLM_BASE_URL:-http://yavin:1234/v1}" \
     MOOSEDEV_LLM_API_KEY="${MOOSEDEV_LLM_API_KEY:-lmstudio}" \
     MOOSEDEV_LLM_MODEL="${MOOSEDEV_LLM_MODEL:-google/gemma-4-26b-a4b-qat}" \
     nohup "$BIN" --serve > "/tmp/capability_matrix_serve.log" 2>&1 &
@@ -95,7 +94,25 @@ TOTAL=$(( ${#MODELS[@]} * ${#CELLS[@]} * ${#TASKS[@]} * N )); DONE=0
 echo "=== capability matrix: ${#MODELS[@]} models x ${#CELLS[@]} cells x ${#TASKS[@]} tasks x N=$N = $TOTAL runs ==="
 START=$(date +%s)
 
-for i in $(seq 1 "$N"); do for model in "${MODELS[@]}"; do for cell in "${CELLS[@]}"; do
+# Hold exactly one agent model in memory at a time. Keeping every model resident is what
+# starved the machine and killed the per-cell `moosedev --connect` children mid-campaign,
+# silently voiding 14 cells; a cell only ever needs its own model, and the daemon's NLQ now
+# lives on another host entirely.
+resident=""
+hold_only() {
+  [ "$resident" = "$1" ] && return 0
+  for other in "${MODELS[@]}"; do
+    key="${other#lmstudio/}"; [ "$key" = "$1" ] && continue
+    lms unload "$key" >/dev/null 2>&1
+  done
+  lms load "$1" -y --context-length "${BENCH_LOCAL_CONTEXT:-65536}" >/dev/null 2>&1 \
+    || { echo "!!! could not load $1 — its cells will fail"; return 1; }
+  resident="$1"
+}
+
+for i in $(seq 1 "$N"); do for model in "${MODELS[@]}"; do
+  hold_only "${model#lmstudio/}"
+  for cell in "${CELLS[@]}"; do
   arm="${cell%%:*}"; mode="${cell##*:}"
   for task in "${TASKS[@]}"; do
     DONE=$((DONE+1)); EL=$(( $(date +%s) - START ))
