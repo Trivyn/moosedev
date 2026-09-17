@@ -10,6 +10,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 from collections import Counter
@@ -85,13 +86,31 @@ def local_provider(model: str) -> dict:
     else. Pinning endpoint and model id per run is the same insulation `--pure` buys for plugins.
     """
     provider, _, model_id = model.partition("/")
-    if provider != "lmstudio" or not model_id:
+    if not model_id:
         return {}
+    # OpenRouter is pinned for the same reason LM Studio is: the published
+    # capability numbers were produced through it, and a comparison is only a
+    # comparison if the endpoint is the one we think it is. Routing the frontier
+    # control through opencode (rather than codex, as the paper did) holds the
+    # BACKEND constant with the local-model cells, so the model is the only thing
+    # that differs between them.
+    endpoints = {
+        "lmstudio": ("Local LM Studio", config.LLM_BASE_URL, config.LLM_API_KEY,
+                     config.LOCAL_CONTEXT, config.LOCAL_OUTPUT),
+        "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1",
+                       os.environ.get("OPENROUTER_API_KEY", ""), 200_000, 32_000),
+    }
+    if provider not in endpoints:
+        return {}
+    name, base_url, api_key, context, output = endpoints[provider]
+    if not api_key:
+        raise SystemExit(f"{provider} needs its API key in the environment; refusing to run "
+                         f"a cell whose endpoint is not the one it claims")
     return {provider: {
-        "npm": "@ai-sdk/openai-compatible", "name": "Local LM Studio",
-        "options": {"baseURL": config.LLM_BASE_URL, "apiKey": config.LLM_API_KEY},
-        "models": {model_id: {"id": model_id, "name": model_id, "limit": {
-            "context": config.LOCAL_CONTEXT, "output": config.LOCAL_OUTPUT}}},
+        "npm": "@ai-sdk/openai-compatible", "name": name,
+        "options": {"baseURL": base_url, "apiKey": api_key},
+        "models": {model_id: {"id": model_id, "name": model_id,
+                              "limit": {"context": context, "output": output}}},
     }}
 
 
