@@ -72,6 +72,23 @@ def load(model: str = None, mode: str = None) -> list[dict]:
     # A timed-out cell scores like a wrong answer but means "did not finish in the
     # wall-clock budget". The budget is a fair control only while it is disclosed:
     # averaged in silently it reads as a capability gap when it is a throughput one.
+    # A tooluse cell in a memory arm that never called its memory server is ambiguous in a way
+    # that matters: either the model declined to fetch — which is the premise finding this report
+    # exists to detect — or the server was unreachable and the cell measured nothing. They must not
+    # be silently excluded (that would erase the finding) nor silently averaged (that would invent
+    # one). Surfaced with their window so the transcripts can settle it: a contiguous block across
+    # consecutive cells, with neighbouring models fine, is infrastructure, not behaviour.
+    MEM_ARMS = {"B2", "B1-rag", "B1-mem0"}
+    mute = [r for r in rows if r.get("arm") in MEM_ARMS and r.get("mode") == "tooluse"
+            and not any(k in t for t in (r.get("tool_counts") or {})
+                        for k in ("moosedev", "freetext", "mem0"))]
+    if mute:
+        span = f"{min(r['ts'] for r in mute)[11:19]}..{max(r['ts'] for r in mute)[11:19]}"
+        who = ", ".join(sorted({(r.get("agent_model") or "?").split("/")[-1] for r in mute}))
+        print(f"[{len(mute)} tooluse cell(s) in a memory arm recorded NO call to their memory "
+              f"server ({who}, {span}). Counted in the means below. Check the transcripts before "
+              f"reading them as 'the model would not fetch' — a contiguous run of them is the "
+              f"server being unreachable, not the model declining.]")
     timed = [r for r in rows if r.get("timed_out")]
     if timed:
         per_model = collections.Counter((r.get("agent_model") or "?").split("/")[-1]
