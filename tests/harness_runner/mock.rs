@@ -650,6 +650,7 @@ pub(super) fn distinct_proposal(kind: &str, title: &str) -> TypedProposal {
             requirement: None,
             supersedes: None,
             retracts: None,
+            learned_from: None,
             reconciled: vec![],
         },
         origin: ProposalOrigin::SymbolicDecision,
@@ -659,6 +660,7 @@ pub(super) fn distinct_proposal(kind: &str, title: &str) -> TypedProposal {
             receipt_operation_id: "fixture-receipt".into(),
         },
         resolved_by: "symbolic".into(),
+        derived: vec![],
     }
 }
 
@@ -1088,6 +1090,7 @@ pub(super) async fn capture_type(
                 requirement: None,
                 supersedes: None,
                 retracts: None,
+                learned_from: None,
                 reconciled: vec![],
             },
             origin: ProposalOrigin::SymbolicDecision,
@@ -1097,6 +1100,7 @@ pub(super) async fn capture_type(
                 receipt_operation_id: format!("{}-r0", request.operation_id),
             },
             resolved_by: "symbolic".into(),
+            derived: vec![],
         }],
     };
     (

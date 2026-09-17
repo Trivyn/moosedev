@@ -259,6 +259,7 @@ mod tests {
                     requirement: None,
                     supersedes: None,
                     retracts: None,
+                    learned_from: None,
                     reconciled: vec![],
                 },
                 origin: ProposalOrigin::SymbolicDecision,
@@ -268,6 +269,7 @@ mod tests {
                     receipt_operation_id: format!("{}-r0", request.operation_id),
                 },
                 resolved_by: "symbolic".into(),
+                derived: vec![],
             }],
         })
     }

@@ -819,6 +819,7 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
             requirement: None,
             supersedes: None,
             retracts: None,
+            learned_from: None,
             reconciled: vec![],
         },
         origin: ProposalOrigin::SymbolicDecision,
@@ -829,6 +830,7 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
             receipt_operation_id: "receipt-r0".into(),
         },
         resolved_by: "symbolic".into(),
+        derived: vec![],
     }]);
     fixture.note("Labels keep their display form.");
     runner.advance().await.unwrap();
@@ -900,6 +902,7 @@ async fn symbolic_restated_note_links_the_existing_record_through_one_capture() 
             requirement: None,
             supersedes: None,
             retracts: None,
+            learned_from: None,
             reconciled: vec![],
         },
         origin: ProposalOrigin::SymbolicDecision,
@@ -910,6 +913,7 @@ async fn symbolic_restated_note_links_the_existing_record_through_one_capture() 
             receipt_operation_id: "receipt-r0".into(),
         },
         resolved_by: "symbolic".into(),
+        derived: vec![],
     }]);
     fixture.note("Labels keep their display form.");
     runner.advance().await.unwrap();
