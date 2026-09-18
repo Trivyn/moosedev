@@ -1264,3 +1264,90 @@ fn harness_dossiers_show_a_shared_claim_once_across_the_files_of_one_prompt() {
         "a push with its own state must still carry the claim whole: {alone_gateway}"
     );
 }
+
+/// A claim budget binds CLAIMS and never record LINES (task #43).
+///
+/// The line carries kind, title, lifecycle status, timestamp and linking predicate —
+/// everything set-completeness, negation and currency questions rest on — while the claim
+/// is prose that costs roughly an order of magnitude more and can be fetched on demand.
+/// Bounding the inventory instead would shrink exactly what the harness exists to deliver,
+/// so this pins that the inventory survives a budget far too small for the claims.
+#[test]
+fn a_claim_budget_withholds_claims_and_never_records() {
+    let state = bootstrap("harness-claim-budget");
+    state.set_substrate(Arc::new(two_file_substrate()));
+    seed_component(&state, "runtime component", "src/");
+    // One accepted and one superseded record, because currency is the capability most
+    // easily broken by a bound: the model must still see BOTH and tell them apart.
+    let current = record_with_description_and_status(
+        &state,
+        "Lesson",
+        "Per-project index lock serializes every producer",
+        Some(&format!("The current claim. {}", "x".repeat(4_000))),
+        "accepted",
+    );
+    let stale = record_with_description_and_status(
+        &state,
+        "Lesson",
+        "Concurrent index runs race",
+        Some(&format!("The superseded claim. {}", "y".repeat(4_000))),
+        "superseded",
+    );
+    for iri in [&current, &stale] {
+        graph::link_code(
+            &state,
+            iri,
+            "concerns",
+            &CodeSelector::Position {
+                file: "src/runtime.rs".to_string(),
+                line: 8,
+                col: 5,
+            },
+            "tester",
+        )
+        .expect("link code");
+    }
+
+    // A budget smaller than a single claim: nothing prose-sized can be afforded.
+    let mut bounded = graph::ShownInPush::with_claim_budget(100);
+    let push = graph::harness_file_dossier(&state, "src/runtime.rs", &mut bounded)
+        .expect("dossier")
+        .expect("knowledge");
+
+    for title in [
+        "Per-project index lock serializes every producer",
+        "Concurrent index runs race",
+    ] {
+        assert!(
+            push.contains(title),
+            "a bound must never drop a record from the inventory: {push}"
+        );
+    }
+    // The lifecycle markers are what make a currency question answerable at all.
+    assert!(push.contains("- accepted,"), "{push}");
+    assert!(push.contains("- superseded,"), "{push}");
+    assert!(
+        !push.contains(&"x".repeat(4_000)),
+        "the oversized claim was spent despite the bound: {push}"
+    );
+    assert!(
+        bounded.claims_withheld() > 0,
+        "withheld claims must be counted so the push can disclose them"
+    );
+
+    // No budget is the default every other surface takes, and it must render as before.
+    let mut unbounded = graph::ShownInPush::default();
+    let whole = graph::harness_file_dossier(&state, "src/runtime.rs", &mut unbounded)
+        .expect("dossier")
+        .expect("knowledge");
+    assert!(whole.contains(&"x".repeat(4_000)), "{whole}");
+    assert_eq!(
+        unbounded.claims_withheld(),
+        0,
+        "an unbounded push withholds nothing"
+    );
+    assert!(
+        whole.len() > push.len(),
+        "the bound must actually shrink the push"
+    );
+}

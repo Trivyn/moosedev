@@ -401,6 +401,45 @@ pub fn render_dossier_markdown(
 pub struct ShownInPush {
     claims: BTreeMap<String, String>,
     components: BTreeMap<String, String>,
+    /// Bytes left for record CLAIMS in this prompt. `None` — the default every other
+    /// surface takes — spends without limit and renders byte-identically to before.
+    claim_budget: Option<usize>,
+    /// Claims withheld once the budget ran out, counted BY KIND so the push can name
+    /// what was shortened rather than only how much — a bare total leaves the model
+    /// unable to tell whether a Constraint or a stale Lesson lost its prose.
+    claims_withheld: BTreeMap<String, usize>,
+}
+
+impl ShownInPush {
+    /// A push that spends at most `bytes` on record claims.
+    ///
+    /// Claims are bounded and record LINES never are, because the line is the part the
+    /// study's capabilities actually rest on: it carries kind, title, **lifecycle
+    /// status**, timestamp and the linking predicate, so set-completeness, negation and
+    /// currency all survive the bound intact. The claim is prose — about 1,000 bytes
+    /// against 150 for a line, and retrievable on demand with get_entity_dossier.
+    /// Dropping records instead would shrink the inventory the harness exists to
+    /// deliver, which is the one thing a bound here must never do.
+    pub fn with_claim_budget(bytes: usize) -> Self {
+        Self {
+            claim_budget: Some(bytes),
+            ..Default::default()
+        }
+    }
+
+    /// How many claims the budget withheld across this prompt.
+    pub fn claims_withheld(&self) -> usize {
+        self.claims_withheld.values().sum()
+    }
+
+    /// The withheld claims as `Kind: n` in kind order, for the push's receipt.
+    pub fn claims_withheld_by_kind(&self) -> String {
+        self.claims_withheld
+            .iter()
+            .map(|(kind, n)| format!("{kind}: {n}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 enum DossierRecordRendering<'a> {
@@ -555,12 +594,29 @@ fn render_record_claim(
     };
     if let Some(first) = shown.claims.get(&record.iri) {
         out.push_str(&format!("claim shown above for `{first}`\n"));
-    } else {
-        out.push_str(claim);
-        shown
-            .claims
-            .insert(record.iri.clone(), entity_name.to_string());
+        return;
     }
+    // A claim budget — set only by the harness, per AD 21855a2a's allowance for a byte
+    // bound with an explicit notice — is spent here and never on record lines. The fit is
+    // greedy rather than a hard stop: one oversized claim is skipped while the remaining
+    // budget still buys the smaller claims after it, which delivers strictly more
+    // knowledge than stopping at the first claim that does not fit.
+    if let Some(remaining) = shown.claim_budget.as_mut() {
+        if claim.len() > *remaining {
+            *shown
+                .claims_withheld
+                .entry(record.kind.clone())
+                .or_default() += 1;
+            return;
+        }
+        *remaining -= claim.len();
+    }
+    out.push_str(claim);
+    // Only a claim actually rendered may be pointed at later; recording a withheld one
+    // would leave a "claim shown above" pointing at text no prompt ever contained.
+    shown
+        .claims
+        .insert(record.iri.clone(), entity_name.to_string());
 }
 
 /// Component records listed by title before the omission line; accepted

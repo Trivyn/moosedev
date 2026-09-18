@@ -12,6 +12,16 @@ pub async fn context(
     Ok(Json(context_snapshot(&state, &request)?))
 }
 
+/// Bytes one prompt may spend on record claims, tunable so the floor study can sweep it.
+/// The default leaves room for the task, plan and history in a 64k window once record
+/// lines (the inventory, never bounded) are paid for.
+fn claim_budget() -> usize {
+    std::env::var("MOOSEDEV_HARNESS_CLAIM_BUDGET")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(12_000)
+}
+
 pub fn context_snapshot(
     state: &AppState,
     request: &ContextRequest,
@@ -84,10 +94,24 @@ pub fn context_snapshot(
     // rendered separately but reach the model together, so a record linked from
     // several files should show its claim body once, as it already does within a
     // single file's render.
-    let mut shown = graph::ShownInPush::default();
+    // …and one claim budget for the whole prompt (task #43). The file dossiers were the
+    // only unbounded section of the push: file_entity_iris returns EVERY definition in a
+    // file, direct_records is capped nowhere, and this path alone passed no byte bound —
+    // one file measured 86,693 bytes. Because model.rs counts dossiers as MANDATORY, that
+    // growth evicted history, observations and navigation before overflowing the window,
+    // which is the study's dominant harness-specific failure (Lesson af16b95e).
+    //
+    // The budget binds CLAIMS only, never record lines. The line carries kind, title,
+    // lifecycle status, timestamp and linking predicate, so set-completeness, negation and
+    // currency all survive it intact; the claim is prose, roughly 1,000 bytes against 150,
+    // and retrievable on demand. Bounding the inventory instead would shrink exactly what
+    // the harness exists to deliver. AD 21855a2a allows a byte bound with an explicit
+    // notice, which the response carries below; the bound is computed here in the daemon,
+    // so no surface grows its own policy (Constraint 2ba76439).
+    let mut shown = graph::ShownInPush::with_claim_budget(claim_budget());
     for file in &request.files {
         validate_path(file)?;
-        // No host bound: required context fails rather than truncating.
+        // Records are never dropped; only their claims are bounded, and the push says so.
         let dossier = graph::harness_file_dossier(state, file, &mut shown)?.unwrap_or_else(|| {
             "No recorded entity knowledge is linked to this file. Topic recall still applies."
                 .into()
@@ -107,6 +131,18 @@ pub fn context_snapshot(
             dossier,
             policy,
         });
+    }
+    // The explicit notice AD 21855a2a requires. Without it a shorter dossier reads as a
+    // smaller graph — the same misreading that had two models report an empty graph.
+    if shown.claims_withheld() > 0 {
+        context.push_str(&format!(
+            "\n\n{} record claim(s) withheld by the {}-byte push bound ({}). Every record above \
+             is still listed with its kind, title and lifecycle status; retrieve any claim in full \
+             with get_entity_dossier.\n",
+            shown.claims_withheld(),
+            claim_budget(),
+            shown.claims_withheld_by_kind()
+        ));
     }
     let revision = accepted_revision(state)?;
     anyhow::ensure!(
