@@ -137,6 +137,14 @@ CORPORA = {
         "agent_exclude": ["docs-dev", "spec", "doc", "doc-dist", "tasks", "CONVENTIONS.md",
                           "README.md", "CLAUDE.md", "AGENTS.md", "agents.md", ".grok", ".claude"],
     },
+    # A snapshot of THIS repo's own dogfooding graph, taken because the currency
+    # questions need record->code links and the trivyn capture corpus has 30 in
+    # total. Snapshot, never the live store: this session writes to that graph.
+    # Not a neutral corpus — any published claim must say it is MOOSEDev's own.
+    "moosedev-currency-2026-09": {
+        "data_dir": os.path.expanduser("~/.moosedev-stores/moosedev-currency-2026-09"),
+        "private": True,
+    },
     "trivyn-cap-2026-09": {
         # FROZEN capability-experiment snapshot of the trivyn-trial graph, hydrated from `kg.nq`
         # alone (sha256 1d00735c..., 15,181,815 bytes, taken 2026-09-16). Never point capability
