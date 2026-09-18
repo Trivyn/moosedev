@@ -259,3 +259,94 @@ fn insert_iri(state: &AppState, subject_iri: &str, predicate_iri: &str, object_i
         ))
         .unwrap();
 }
+
+/// A `supersedes` edge whose target was never flipped to `superseded` leaves a
+/// replaced record in the working set, so recall returns it as current. SHACL
+/// cannot express this — snarl is SHACL Core, with no `sh:sparql` — so it is
+/// checked in Rust until that support lands. Three live instances existed across
+/// the stores when this was written, two unnoticed for a month.
+#[test]
+fn unflipped_supersession_breaks_conformance() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-validation-unflipped-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let replacement = record_accepted(&state, "The replacement");
+    let predecessor = record_accepted(&state, "The predecessor");
+    assert!(
+        validation::validate_project(&state)
+            .expect("validate")
+            .conforms(),
+        "two ordinary accepted records must conform before the drift is introduced"
+    );
+
+    // Raw insert: the write path now refuses this, which is the point of the guard —
+    // only a pre-existing store (or a direct quad write) can still hold one.
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+    insert_iri(&state, &replacement, &supersedes, &predecessor);
+
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        !report.conforms(),
+        "an unflipped supersession must break conformance:\n{}",
+        validation::format_report(&report)
+    );
+    let drift = report
+        .violations
+        .iter()
+        .find(|v| v.kind == ViolationKind::Other("UnflippedSupersession".to_string()))
+        .expect("the unflipped supersession is reported");
+    assert_eq!(drift.node, predecessor, "the PREDECESSOR is the drifted node");
+    assert!(
+        drift.detail.contains("repair_unflipped_supersessions"),
+        "the violation names its repair: {}",
+        drift.detail
+    );
+
+    // Flipping the predecessor is exactly what the two supported write paths do.
+    insert_literal(&state, &predecessor, &state.capture.status, "superseded");
+    remove_literal(&state, &predecessor, &state.capture.status, "accepted");
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        report.conforms(),
+        "a flipped supersession conforms again:\n{}",
+        validation::format_report(&report)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn record_accepted(state: &AppState, title: &str) -> String {
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record decision")
+}
+
+fn remove_literal(state: &AppState, subject_iri: &str, predicate_iri: &str, value: &str) {
+    state
+        .store
+        .remove(&Quad::new(
+            NamedNode::new(subject_iri).unwrap(),
+            NamedNode::new(predicate_iri).unwrap(),
+            Literal::new_simple_literal(value),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+}

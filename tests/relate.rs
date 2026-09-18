@@ -171,3 +171,112 @@ fn system_component_capture_uses_declared_label_property_and_validates() {
         validation::format_report(&report)
     );
 }
+
+/// A `supersedes` edge decides another record's lifecycle, and nothing will ever
+/// ratify one asserted on a record that is already accepted — the predecessor keeps
+/// its status, stays in the working set, and recall returns a replaced record as
+/// current. Diagnosed 2026-08-10, recorded as still open in AD 28646610, and by the
+/// time it was closed it had produced three live instances across the stores.
+#[test]
+fn relate_refuses_supersedes_from_an_accepted_record_and_writes_nothing() {
+    let state = bootstrap("supersedes-accepted");
+    let replacement = record(&state, "ArchitecturalDecision", "The replacement");
+    let predecessor = record(&state, "ArchitecturalDecision", "The predecessor");
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+
+    let err = match graph::relate(&state, &replacement, "supersedes", &predecessor) {
+        Ok(_) => panic!("a supersedes edge from an accepted record must be refused"),
+        Err(err) => err,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("supersede_decision") && msg.contains("proposed"),
+        "the refusal must name both supported routes: {msg}"
+    );
+    assert!(
+        !has_edge(&state, &replacement, &supersedes, &predecessor),
+        "a refused supersedes must not write the edge"
+    );
+    // The whole point: the predecessor was never quietly left mid-supersession.
+    assert_eq!(
+        status_of(&state, &predecessor),
+        "accepted",
+        "predecessor status must be untouched by a refused edge"
+    );
+}
+
+/// The deferred path's input. A PROPOSED replacement may carry the edge, because
+/// accepting it flips the predecessor in the same transaction
+/// (`proposals::accept_proposed_supersession`). Refusing this would break the
+/// human-ratified amendment workflow.
+#[test]
+fn relate_allows_supersedes_from_a_proposed_record() {
+    let state = bootstrap("supersedes-proposed");
+    let replacement = record_with_status(
+        &state,
+        "ArchitecturalDecision",
+        "The proposed replacement",
+        "proposed",
+    );
+    let predecessor = record(&state, "ArchitecturalDecision", "The predecessor");
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+
+    graph::relate(&state, &replacement, "supersedes", &predecessor)
+        .expect("a proposed replacement may carry the edge ratification will complete");
+    assert!(has_edge(&state, &replacement, &supersedes, &predecessor));
+}
+
+/// `isSupersededBy` is the reasoner-materialized inverse; asserting it directly
+/// retires nothing because the status is left untouched.
+#[test]
+fn relate_refuses_the_inverse_outright() {
+    let state = bootstrap("supersedes-inverse");
+    let predecessor = record(&state, "ArchitecturalDecision", "Retired by hand");
+    let replacement = record(&state, "ArchitecturalDecision", "Its successor");
+
+    let err = match graph::relate(&state, &predecessor, "isSupersededBy", &replacement) {
+        Ok(_) => panic!("the inverse is never asserted directly"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("supersede_decision"),
+        "the refusal must point at the owning write path: {err}"
+    );
+}
+
+fn record_with_status(state: &AppState, kind: &str, title: &str, status: &str) -> String {
+    let class_iri = state.resolve_class(kind).expect("known class");
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: kind.to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.status.clone(), status.to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("record item")
+}
+
+fn status_of(state: &AppState, iri: &str) -> String {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap();
+    state
+        .store
+        .quads_for_pattern(
+            Some(NamedNodeRef::new(iri).unwrap().into()),
+            Some(NamedNodeRef::new(&state.capture.status).unwrap()),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .filter_map(|quad| match quad.ok()?.object {
+            Term::Literal(literal) => Some(literal.value().to_string()),
+            _ => None,
+        })
+        .next()
+        .unwrap_or_default()
+}

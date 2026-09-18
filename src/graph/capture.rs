@@ -163,6 +163,19 @@ pub(crate) fn plan_relation_args(
                 "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
             )
         })?;
+        // The same lifecycle rule relate enforces, against the status this record is
+        // being captured WITH — the subject does not exist yet to be read. Capture is
+        // the second write path that could plant a supersedes edge nothing will flip;
+        // supersede_decision's own inline relations already refuse it outright
+        // (`reject_managed_relation_args`), but this path had no guard at all.
+        super::lifecycle::guard_supersession_edge(
+            predicate_local,
+            input
+                .properties
+                .iter()
+                .find(|(predicate, _)| predicate == &state.capture.status)
+                .map(|(_, status)| status.as_str()),
+        )?;
         let object_iri = resolve_relation_target(state, target, &predicate_iri)?;
         let object = NamedNode::new(&object_iri)
             .map_err(|e| anyhow::anyhow!("invalid target IRI {object_iri:?}: {e}"))?;
