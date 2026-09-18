@@ -91,9 +91,36 @@ pub fn explain_empty_result(store: &Store, query: &str, output: &str) -> Option<
     out.push_str(
         "An empty result does NOT mean the graph holds no such knowledge — a query over terms \
          this graph never uses always matches nothing. List the real vocabulary with:\n  \
-         SELECT DISTINCT ?p WHERE { ?s ?p ?o }\n  SELECT DISTINCT ?c WHERE { ?s a ?c }",
+         SELECT DISTINCT ?p WHERE { ?s ?p ?o }\n  SELECT DISTINCT ?c WHERE { ?s a ?c }\n\
+         Then re-run YOUR ORIGINAL query with the corrected terms. This was a vocabulary \
+         problem, not a scope problem — widening the query to compensate returns far more \
+         than was asked for.",
     );
     Some(out)
+}
+
+/// Explain a query that never ran.
+///
+/// [`explain_empty_result`] only reaches a query that PARSED; one that fails to parse
+/// returns early with the raw parser expectation set, which reads as a wall of character
+/// classes with the real cause buried inside — Qwen3.5-9B received
+/// `expected one of Prefix not found, ['%'], ['-' | '0' ..= '9' | …]` six times in one
+/// cell, never recovered, and fell back to grepping the filesystem, despite recall having
+/// already handed it the full answer. An undeclared prefix is the most common cause and
+/// is cheap to name exactly.
+pub fn explain_parse_error(query: &str) -> Option<String> {
+    let (_, undeclared) = scan_query(query);
+    if undeclared.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = undeclared.iter().map(|p| format!("{p}:")).collect();
+    Some(format!(
+        "The query uses {} that it never declares: {}. Add a PREFIX line for each, or write \
+         the term as a full IRI in angle brackets. This graph's real vocabulary is:\n  \
+         SELECT DISTINCT ?p WHERE {{ ?s ?p ?o }}\n  SELECT DISTINCT ?c WHERE {{ ?s a ?c }}",
+        if undeclared.len() == 1 { "a prefix" } else { "prefixes" },
+        names.join(", ")
+    ))
 }
 
 /// True when a serialized result carries nothing — no solutions, a false ASK, or no
@@ -108,6 +135,11 @@ fn is_empty_result(output: &str) -> bool {
 /// Full IRIs a query names: `<...>` terms plus prefixed names expanded against the
 /// query's own PREFIX declarations. Variables, literals and blank nodes are not terms.
 fn query_terms(query: &str) -> Vec<String> {
+    scan_query(query).0
+}
+
+/// Full IRIs a query names, and the prefixes it uses but never declares.
+fn scan_query(query: &str) -> (Vec<String>, std::collections::BTreeSet<String>) {
     let mut iris: Vec<String> = Vec::new();
     let mut prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let bytes: Vec<char> = query.chars().collect();
@@ -157,20 +189,28 @@ fn query_terms(query: &str) -> Vec<String> {
             }
         }
     }
+    let mut undeclared = std::collections::BTreeSet::new();
     for token in stripped.split(|c: char| c.is_whitespace() || "{}()[],;.".contains(c)) {
         let Some((prefix, local)) = token.split_once(':') else {
             continue;
         };
-        if local.is_empty() || prefix.starts_with('?') || prefix.starts_with('$') {
+        if local.is_empty() || prefix.is_empty() || prefix.starts_with('?') || prefix.starts_with('$')
+        {
             continue;
         }
-        if let Some(base) = prefixes.get(prefix) {
-            iris.push(format!("{base}{local}"));
+        match prefixes.get(prefix) {
+            Some(base) => iris.push(format!("{base}{local}")),
+            // `rdfs:label` with no PREFIX line is the single most common way a query
+            // fails to parse here, and the parser reports it as a wall of character
+            // classes with "Prefix not found" buried inside.
+            None => {
+                undeclared.insert(prefix.to_string());
+            }
         }
     }
     iris.sort();
     iris.dedup();
-    iris
+    (iris, undeclared)
 }
 
 /// The prefix name when `text` ends with a `PREFIX name:` (or `@prefix name:`) declaration.
@@ -316,6 +356,39 @@ mod tests {
             "# find the lessons\nSELECT ?s WHERE {{ ?s a <{ARCH}Lesson> }} # trailing"
         ));
         assert_eq!(terms, vec![format!("{ARCH}Lesson")]);
+    }
+
+    /// The exact query Qwen3.5-9B sent six times, whose only fault is the missing
+    /// `rdfs:` declaration — the parser reported it as a character-class wall.
+    #[test]
+    fn names_the_prefix_a_query_forgot_to_declare() {
+        let note = explain_parse_error(
+            "PREFIX arch: <https://example.org/a#>\nSELECT ?label WHERE { ?r a arch:Requirement . \
+             ?r rdfs:label ?label }",
+        )
+        .expect("an undeclared prefix must be named");
+        assert!(note.contains("rdfs:"), "{note}");
+        assert!(!note.contains("arch:"), "a DECLARED prefix is not a fault: {note}");
+    }
+
+    /// A syntactically broken query with every prefix declared gets no prefix advice —
+    /// inventing a cause would be worse than the parser's own message.
+    #[test]
+    fn stays_quiet_when_every_prefix_is_declared() {
+        assert!(explain_parse_error("SELECT ?s WHERE { ?s ?p ?o } WHERE {").is_none());
+        assert!(explain_parse_error("SELECT ?id WHERE { ?r <https://example.org/a#x> ?id }").is_none());
+    }
+
+    /// The empty-result note must steer back to the original query, not to breadth:
+    /// the 27B learned the vocabulary from it, then queried broadly and over-retrieved
+    /// (set_superseded_ads precision 0.982 -> 0.443 at unchanged recall).
+    #[test]
+    fn the_empty_result_note_steers_back_to_the_original_query() {
+        let query = format!("SELECT ?t WHERE {{ ?c a <{SHAPES_GRAPH}Constraint> }}");
+        let note = explain_empty_result(&store(), &query, r#"{"results":{"bindings":[]}}"#)
+            .expect("unknown terms are explained");
+        assert!(note.contains("re-run YOUR ORIGINAL query"), "{note}");
+        assert!(note.contains("not a scope problem"), "{note}");
     }
 
     /// An ASK that comes back false is the same trap wearing a different shape.

@@ -1850,7 +1850,12 @@ impl MooseDevServer {
                     None => tool_ok(output),
                 },
             ),
-            Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),
+            // A query that never PARSED never reaches explain_empty_result, and the raw
+            // parser expectation set buries the cause. Name it when we can.
+            Err(e) => Ok(match sparql::explain_parse_error(query) {
+                Some(note) => tool_error(format!("SPARQL failed: {e}\n\n{note}")),
+                None => tool_error(format!("SPARQL failed: {e}")),
+            }),
         }
     }
 
