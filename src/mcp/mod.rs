@@ -30,6 +30,15 @@ const SERVER_INSTRUCTIONS: &str = "MOOSEDev is durable, authoritative structured
 fn tool_ok(message: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![Content::text(message.into())])
 }
+/// A result plus a diagnostic, as two blocks: the payload keeps its own format (a caller
+/// parsing SPARQL JSON still can) while the note reaches the model that needs it.
+fn tool_ok_note(message: impl Into<String>, note: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![
+        Content::text(message.into()),
+        Content::text(note.into()),
+    ])
+}
+
 fn tool_error(message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![Content::text(message.into())])
 }
@@ -1831,7 +1840,16 @@ impl MooseDevServer {
         // Inferred edges are queryable too — refresh them if a write invalidated them.
         self.state.ensure_enriched();
         match sparql::run_query(&self.state.store, query) {
-            Ok(output) => Ok(tool_ok(output)),
+            // A query over terms this graph never uses matches nothing, and an empty result
+            // reads as "no such knowledge" — which is how two models concluded the graph held
+            // no Constraints and no Lessons when it held 54 and 74 (Lesson ea5e5f24). The note
+            // rides as its own content block so the result stays parseable JSON.
+            Ok(output) => Ok(
+                match sparql::explain_empty_result(&self.state.store, query, &output) {
+                    Some(note) => tool_ok_note(output, note),
+                    None => tool_ok(output),
+                },
+            ),
             Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),
         }
     }
