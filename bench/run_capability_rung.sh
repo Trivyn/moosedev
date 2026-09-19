@@ -115,7 +115,7 @@ for t in $(ls "$TDIR"/*.json | xargs -n1 basename | sed 's/\.json$//' | grep -E 
          $(ls "$TDIR"/*.json | xargs -n1 basename | sed 's/\.json$//' | grep -E '^(neg_|sup_)'); do
   line=$(.venv/bin/python run.py --corpus "$CORPUS" --task "$t" --arm B2 --mode tooluse \
            --backend opencode --model "$MODEL_ARG" 2>&1 \
-         | grep -oE "score=[0-9.]+ passed=[A-Za-z]+|ABORTED\\[[^]]*\\]|wall=[0-9]+ms" | tr '\n' ' ')
+         | grep -oE "score=[0-9.]+ passed=[A-Za-z]+|ABORTED\\[[^]]*\\]|EMPTY-ANSWER|wall=[0-9]+ms" | tr '\n' ' ')
   say "  $(printf '%-30s' "$t") ${line:-(no row)}"
 done
 say ""; say "=== rung complete $(date) ==="

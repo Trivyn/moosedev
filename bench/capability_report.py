@@ -99,6 +99,27 @@ def load(model: str = None, mode: str = None) -> list[dict]:
         print(f"[TIMED OUT at the cell budget, counted in the means below: {note} — "
               f"a timeout is 'did not finish', not 'could not answer'; read any gap "
               f"that tracks these counts as throughput, not capability]")
+    # A cell that ended its turn WITHOUT answering is a different outcome from one that
+    # answered wrongly, and both score F1 0.000. The distinction separates two failure modes
+    # the means otherwise merge: Qwen3.5-9B answers every time and is often wrong (0/78 empty),
+    # while Qwen3.5-122B mostly does not answer at all (3/4). Those call for opposite responses.
+    def answered_nothing(row):
+        # The flag is authoritative on rows written after it existed; older rows are judged
+        # from final_text directly, so the disclosure covers the campaigns already on disk.
+        if "empty_answer" in row:
+            return row["empty_answer"]
+        return "final_text" in row and not (row.get("final_text") or "").strip()
+
+    silent = [r for r in rows if answered_nothing(r)]
+    if silent:
+        per_model = collections.Counter((r.get("agent_model") or "?").split("/")[-1]
+                                        for r in silent)
+        total = collections.Counter((r.get("agent_model") or "?").split("/")[-1]
+                                    for r in rows)
+        note = ", ".join(f"{m} {per_model[m]}/{total[m]}" for m in sorted(per_model))
+        print(f"[EMPTY ANSWER — the cell ended its turn with no final text, counted in the "
+              f"means below: {note} — scored 0.0 for producing NOTHING, not for producing "
+              f"something wrong; do not read these as a wrong-answer rate]")
     if model:  # never pool two agent models: model size is a variable under test, not noise
         rows = [r for r in rows if model in (r.get("agent_model") or "")]
     if mode:   # nor two delivery modes: tooluse vs oracle IS the question
