@@ -9,6 +9,7 @@ needs no agent re-run.
 import collections
 import functools
 import json
+import re
 import statistics
 
 import config
@@ -143,7 +144,7 @@ def load(model: str = None, mode: str = None) -> list[dict]:
     return rows
 
 
-# --- stability gate (AD ab564b4a, pre-registered 2026-09-18) ------------------
+# --- stability gate (AD 7252e753, pre-registered 2026-09-18) ------------------
 # A tier qualifies for the floor only if it answers RELIABLY, so the gate is on the WORST
 # repetition of each cell, never the mean. A cell scoring 0.50 three times has sd 0.00 and
 # would pass any variance gate while being useless every time — the same defect AD 33b3dbac
@@ -194,8 +195,17 @@ def stability(rows: list[dict], n: int = STABILITY_N, tau: float = STABILITY_TAU
     for r in rows:
         key = ((r.get("agent_model") or "?").split("/")[-1], r.get("arm"), r.get("mode"))
         groups[key][r.get("task_id")].append(r)
+    # The denominator is the cells the rung SHOULD cover, not the cells that happen to have
+    # rows. Counting only tasks with rows lets a campaign that died at cell 4 of 13 report
+    # "4/4 QUALIFIES" -- a truncated run reading as a perfect one. Seen live: stopping Hermes
+    # at 7 of 13 printed 1/7 rather than 1/13.
+    try:
+        expected_tasks = {p.stem for p in config.corpus_tasks_path(CORPUS).glob("*.json")
+                          if re.match(r"^(set_|neg_|sup_)", p.stem)}
+    except Exception:
+        expected_tasks = set()
 
-    print(f"\n=== STABILITY GATE (AD ab564b4a): cell reliable if min(F1) over {n} valid "
+    print(f"\n=== STABILITY GATE (AD 7252e753): cell reliable if min(F1) over {n} valid "
           f"reps >= {tau:.2f}; tier qualifies at >= {phi:.0%} of cells ===")
     for (model, arm, mode), cells in sorted(groups.items()):
         reliable, underpowered, excluded, worst = 0, [], 0, []
@@ -205,22 +215,27 @@ def stability(rows: list[dict], n: int = STABILITY_N, tau: float = STABILITY_TAU
             valid.sort(key=lambda r: r.get("ts") or "")
             used = valid[-n:]
             if len(used) < n:
+                # NOT counted toward `reliable`: a cell with 2 good reps out of 3 is missing
+                # evidence, and AD 7252e753 says missing data never qualifies a tier.
                 underpowered.append(f"{task} ({len(used)}/{n})")
-            if not used:
+                if used:
+                    worst.append((min((r.get("metrics") or {}).get("f1", 0.0) for r in used), task))
                 continue
             mn = min((r.get("metrics") or {}).get("f1", 0.0) for r in used)
             worst.append((mn, task))
             if mn >= tau:
                 reliable += 1
-        if not worst:
+        missing = sorted(expected_tasks - set(cells)) if expected_tasks else []
+        if not worst and not missing:
             continue
-        total = len(cells)
-        frac = reliable / total
+        total = max(len(cells), len(expected_tasks)) if expected_tasks else len(cells)
+        frac = reliable / total if total else 0.0
         span_rows = [r for rs in cells.values() for r in rs if r.get("ts")]
         span = (f"{min(r['ts'] for r in span_rows)[:16]}..{max(r['ts'] for r in span_rows)[11:16]}"
                 if span_rows else "?")
-        verdict = ("QUALIFIES" if frac >= phi and not underpowered
-                   else "UNDER-POWERED" if underpowered and frac >= phi else "fails")
+        incomplete = bool(underpowered or missing)
+        verdict = ("QUALIFIES" if frac >= phi and not incomplete
+                   else "INCOMPLETE - cannot qualify" if incomplete and frac >= phi else "fails")
         print(f"\n  {model}  {arm}/{mode}  [{span}]")
         print(f"    reliable cells {reliable}/{total} = {frac:.2f}  ->  {verdict}")
         if not since and span_rows:
@@ -231,8 +246,11 @@ def stability(rows: list[dict], n: int = STABILITY_N, tau: float = STABILITY_TAU
         if excluded:
             print(f"    {excluded} rep(s) excluded as infrastructure faults (killed by an "
                   f"unsent signal)")
+        if missing:
+            print(f"    NO ROWS AT ALL for {len(missing)} expected cell(s), counted against the "
+                  f"denominator: {', '.join(missing)}")
         if underpowered:
-            print(f"    UNDER-POWERED, re-run before the verdict counts: "
+            print(f"    UNDER-POWERED (not counted reliable), re-run before the verdict counts: "
                   f"{', '.join(underpowered)}")
         for mn, task in sorted(worst)[:4]:
             if mn < tau:
@@ -314,7 +332,7 @@ def main() -> None:
                     help="only count reps at or after this timestamp — names the campaign "
                          "window so the verdict cannot pool two builds")
     ap.add_argument("--stability", action="store_true",
-                    help="pre-registered stability verdict per tier (AD ab564b4a)")
+                    help="pre-registered stability verdict per tier (AD 7252e753)")
     ap.add_argument("--premise", action="store_true",
                     help="tooluse-vs-oracle summary per model: did it fail to fetch, or to use?")
     args = ap.parse_args()

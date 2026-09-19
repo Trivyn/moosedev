@@ -127,17 +127,26 @@ hold_only() {
   done
   lms load "$1" -y --context-length "${BENCH_LOCAL_CONTEXT:-65536}" >/dev/null 2>&1 \
     || { echo "!!! could not load $1 — its cells will fail"; return 1; }
-  n=$(instances_of "$1" | wc -l | tr -d ' ')
-  if [ "$n" != "1" ]; then
-    # Something outside this script is loading models. Continuing is how the OOM happens.
-    echo "!!! $1 has $n loaded instances after a full eviction, expected 1 — stopping"
+  # Verify the WHOLE resident set, not just the target's own count: an unrelated model whose
+  # unload silently failed leaves the target at exactly 1 and the box still over-committed,
+  # which is the state that OOM-killed the 2026-09-18 run.
+  allowed="$1"; [ -n "$keep" ] && allowed="$allowed $keep"
+  actual=$(instances_of "" | awk '{print $2}' | sort | tr '\n' ' ')
+  want=$(printf '%s\n' $allowed | sort | tr '\n' ' ')
+  if [ "$actual" != "$want" ]; then
+    echo "!!! resident set is [$actual], expected [$want] — an unload failed or something else"
+    echo "!!! is loading models; continuing is how the box OOMs. Stopping."
     exit 1
   fi
   resident="$1"
 }
 
 for i in $(seq 1 "$N"); do for model in "${MODELS[@]}"; do
-  hold_only "${model#lmstudio/}"
+  hold_only "${model#lmstudio/}" || {
+    echo "!!! could not hold ${model#lmstudio/} — refusing to run its cells against an unloaded"
+    echo "!!! model: LM Studio has JIT off, so every cell would 400 and score a plausible 0.0"
+    exit 1
+  }
   for cell in "${CELLS[@]}"; do
   arm="${cell%%:*}"; mode="${cell##*:}"
   for task in "${TASKS[@]}"; do
