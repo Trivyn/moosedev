@@ -12,7 +12,12 @@ spurious. Stdlib only (difflib) — no new dependency.
 import difflib
 import re
 
-KG_IRI = re.compile(r"https?://[^\s)\]]*moosedev\.dev/kg/[^\s)\],]+")
+KG_IRI = re.compile(r"https?://[^\s)\]`]*moosedev\.dev/kg/[^\s)\],`]+")
+# The backticks are load-bearing: a markdown code span is the normal way to write an IRI,
+# and without them the pattern swallowed the closing ` so every id matched nothing, while
+# _norm stripped the IRIs out of the title path at the same time. Both match routes failed
+# together and a recall-1.000 answer scored 0.000 (a4b, neg_constraints_no_rationale,
+# 2026-09-19: 74 predicted, 0 matched). See test_grade_set.py.
 _RATIO = 0.88
 
 
@@ -30,7 +35,7 @@ def _is_table_sep(line: str) -> bool:
 def _predicted(text: str):
     """Pull candidate answer items out of a free-text / markdown answer.
     Returns (iris:set, titles:list[str]) — `titles` is one normalized title per list/table line."""
-    iris = {m.group(0).rstrip(".,);") for m in KG_IRI.finditer(text)}
+    iris = {m.group(0).rstrip(".,);`") for m in KG_IRI.finditer(text)}
     titles = []
     lines = text.splitlines()
     for i, raw in enumerate(lines):

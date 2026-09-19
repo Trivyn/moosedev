@@ -70,10 +70,16 @@ def invalid_ids(path: Path) -> set[str]:
     return {json.loads(l)["run_id"] for l in manifest.read_text().splitlines() if l.strip()}
 
 
-def regrade_all() -> list[dict]:
+def regrade_all(only_corpus: str = None) -> list[dict]:
     """Regrade every runs file in place (writing a sibling *_regraded.jsonl) and return all
-    regraded rows. Rows listed in a runs_invalid.jsonl sibling are excluded."""
-    all_rows, changed, skipped = [], 0, 0
+    regraded rows. Rows listed in a runs_invalid.jsonl sibling are excluded.
+
+    Rows whose corpus is no longer registered in config.CORPORA are kept AS STORED and counted
+    aloud rather than regraded: their tasks are gone, so there is no ground truth to score
+    against. Before this they raised KeyError and stopped the whole regrade at the first
+    retired corpus, which made the tool unusable exactly when a grader fix needed applying.
+    """
+    all_rows, changed, skipped, unregistered = [], 0, 0, collections.Counter()
     for path in runs_files():
         rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
         bad = invalid_ids(path)
@@ -83,6 +89,13 @@ def regrade_all() -> list[dict]:
             print(f"  {path.name}: excluded {n0 - len(rows)} manifest-invalid rows (runs_invalid.jsonl)")
         out = []
         for row in rows:
+            if row.get("corpus") not in config.CORPORA:
+                unregistered[row.get("corpus")] += 1
+                out.append(row)
+                continue
+            if only_corpus and row.get("corpus") != only_corpus:
+                out.append(row)
+                continue
             new = regrade_row(row, path.parent)
             if new is None:
                 skipped += 1
@@ -93,10 +106,21 @@ def regrade_all() -> list[dict]:
                 changed += 1
             out.append(new)
         dest = path.with_name("runs_regraded.jsonl")
+        # A scoped run must not write a file it did not regrade. Writing a pass-through copy
+        # would plant an un-regraded sibling that `capability_report.load()` PREFERS over
+        # runs.jsonl, so a later grader fix would be silently invisible for that corpus -- and
+        # for the live trial corpora it drops a new evidence file for no reason.
+        if only_corpus and not any(r.get("corpus") == only_corpus for r in rows):
+            print(f"  {path.name}: skipped (no {only_corpus} rows)")
+            all_rows.extend(out)
+            continue
         dest.write_text("".join(json.dumps(r) + "\n" for r in out))
         print(f"  {path}  ->  {dest.name}  ({len(out)} rows)")
         all_rows.extend(out)
     print(f"regraded {len(all_rows)} rows | {changed} changed vs stored | {skipped} skipped (no patch artifact)")
+    if unregistered:
+        detail = ", ".join(f"{c}={n}" for c, n in sorted(unregistered.items()))
+        print(f"  kept as stored, corpus no longer registered: {detail}")
     return all_rows
 
 
@@ -138,8 +162,9 @@ def currency_summary(rows: list[dict], as_md: bool = False) -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--md", action="store_true", help="emit the currency table as Markdown")
+    ap.add_argument("--corpus", help="regrade only this corpus; other rows are kept as stored")
     args = ap.parse_args()
-    rows = regrade_all()
+    rows = regrade_all(args.corpus)
     currency_summary(rows, as_md=args.md)
 
 
