@@ -320,7 +320,55 @@ fn unflipped_supersession_breaks_conformance() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A PROPOSED replacement carrying a `supersedes` edge is the deferred
+/// supersession path, not drift: `accept_proposed_supersession` flips the
+/// predecessor when a human ratifies it, and until then the predecessor is
+/// correctly still current. `guard_supersession_edge` admits exactly this edge,
+/// so a detector that flagged it would fire on the one workflow the guard exists
+/// to preserve — which it did, on the first real proposal drafted after #49.
+#[test]
+fn pending_proposed_supersession_still_conforms() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-validation-pending-supersession-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let predecessor = record_accepted(&state, "The ratified decision");
+    let replacement = record_with_status(&state, "The proposed correction", "proposed");
+
+    // The write path ALLOWS this one — a proposed subject is the deferred path's input.
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+    insert_iri(&state, &replacement, &supersedes, &predecessor);
+
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        report.conforms(),
+        "a pending proposed supersession is not drift:\n{}",
+        validation::format_report(&report)
+    );
+
+    // Ratification is what puts the edge in force; only THEN must the predecessor
+    // have been flipped, and the check goes back to noticing when it was not.
+    insert_literal(&state, &replacement, &state.capture.status, "accepted");
+    remove_literal(&state, &replacement, &state.capture.status, "proposed");
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        !report.conforms(),
+        "once the replacement is accepted the unflipped predecessor is drift again:\n{}",
+        validation::format_report(&report)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn record_accepted(state: &AppState, title: &str) -> String {
+    record_with_status(state, title, "accepted")
+}
+
+fn record_with_status(state: &AppState, title: &str, status: &str) -> String {
     let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
     graph::record_instance(
         state,
@@ -330,7 +378,7 @@ fn record_accepted(state: &AppState, title: &str) -> String {
             properties: vec![
                 (moose::RDFS_LABEL.to_string(), title.to_string()),
                 (state.capture.title.clone(), title.to_string()),
-                (state.capture.status.clone(), "accepted".to_string()),
+                (state.capture.status.clone(), status.to_string()),
             ],
         },
         "test-agent",
