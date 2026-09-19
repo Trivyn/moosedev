@@ -186,6 +186,36 @@ FREE=$(vm_stat | awk '/page size/{ps=$8} /Pages free/{f=$3} /Pages inactive/{i=$
         END{gsub(/\./,"",f); gsub(/\./,"",i); printf "%.0f",(f+i)*ps/1073741824}')
 if [ "$FREE" -ge 8 ]; then ok "${FREE} GB free+inactive"
 else bad "${FREE} GB free+inactive — the OS killed MCP children at 2.9 GB once"; fi
+# Free memory NOW says nothing about the campaign: on 2026-09-18 this passed at 38 GB before a
+# single campaign model was loaded, and the run was OOM-killed an hour later at 56.9 GB
+# resident. So check the PLAN. The matrix holds one agent model at a time and evicts
+# everything else, so the requirement is the LARGEST planned model plus a local NLQ model,
+# against what will be free once the currently loaded instances are evicted.
+if [ -n "${SMOKE_PLAN_MODELS:-}" ]; then
+  PLAN_NLQ=""; case "$NLQ_URL" in *localhost*|*127.0.0.1*) PLAN_NLQ="$NLQ_MODEL" ;; esac
+  if PLAN=$(.venv/bin/python - "$FREE" "$PLAN_NLQ" $SMOKE_PLAN_MODELS <<'PYM'
+import json, sys, urllib.request
+free, nlq, plan = float(sys.argv[1]), sys.argv[2], sys.argv[3:]
+models = {m["key"]: m for m in json.loads(urllib.request.urlopen(
+    "http://localhost:1234/api/v1/models", timeout=10).read())["models"]}
+gb = lambda k: models[k]["size_bytes"] / 2**30
+missing = [k for k in plan + ([nlq] if nlq else []) if k not in models]
+if missing:
+    print(f"not in LM Studio: {missing}"); sys.exit(1)
+evictable = sum(gb(k) * len(m.get("loaded_instances") or [])
+                for k, m in models.items() if k != nlq)
+biggest = max(plan, key=gb)
+need = gb(biggest) + (gb(nlq) if nlq and not models[nlq].get("loaded_instances") else 0) + 8
+have = free + evictable
+print(f"{biggest} {gb(biggest):.1f} GB is the largest planned model; need {need:.0f} GB "
+      f"(incl. 8 GB margin), have {have:.0f} GB once {evictable:.0f} GB is evicted")
+sys.exit(0 if have >= need else 1)
+PYM
+  ); then ok "planned set fits: $PLAN"
+  else bad "planned set does NOT fit: $PLAN"; fi
+else
+  warn "SMOKE_PLAN_MODELS unset — headroom checked against current load only, which cannot see a campaign's models"
+fi
 
 # --- 7. the canary: one real scored cell, end to end -------------------------
 # The single check that exercises everything at once — daemon, MCP child launch, prompt

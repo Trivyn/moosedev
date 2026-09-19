@@ -96,17 +96,43 @@ START=$(date +%s)
 
 # Hold exactly one agent model in memory at a time. Keeping every model resident is what
 # starved the machine and killed the per-cell `moosedev --connect` children mid-campaign,
-# silently voiding 14 cells; a cell only ever needs its own model, and the daemon's NLQ now
-# lives on another host entirely.
+# silently voiding 14 cells; a cell only ever needs its own model.
+#
+# Eviction covers EVERY loaded instance, not only the models this invocation names. On
+# 2026-09-18 two back-to-back invocations stacked a4b, a duplicate a4b instance and the 27B to
+# 56.9 GB and the OS killed the run: each invocation could see only its own MODELS array. And a
+# second `lms load` of a model that is already loaded does not reuse it — it adds a `:2`
+# instance — so the target is evicted too and then loaded exactly once. The daemon's NLQ model
+# is spared only when it is served from this machine.
+nlq_local_key() {
+  case "${MOOSEDEV_LLM_BASE_URL:-http://yavin:1234/v1}" in
+    *localhost*|*127.0.0.1*) echo "${MOOSEDEV_LLM_MODEL:-google/gemma-4-26b-a4b-qat}" ;;
+  esac
+}
+instances_of() {  # $1: model key, or empty for every loaded instance; prints identifiers
+  lms ps --json 2>/dev/null | .venv/bin/python -c '
+import json, sys
+want = sys.argv[1]
+for inst in json.load(sys.stdin):
+    if not want or inst.get("modelKey") == want:
+        print(inst["identifier"], inst.get("modelKey"))' "$1"
+}
 resident=""
 hold_only() {
   [ "$resident" = "$1" ] && return 0
-  for other in "${MODELS[@]}"; do
-    key="${other#lmstudio/}"; [ "$key" = "$1" ] && continue
-    lms unload "$key" >/dev/null 2>&1
+  keep=$(nlq_local_key)
+  instances_of "" | while read -r id key; do
+    [ -n "$keep" ] && [ "$key" = "$keep" ] && continue
+    lms unload "$id" >/dev/null 2>&1
   done
   lms load "$1" -y --context-length "${BENCH_LOCAL_CONTEXT:-65536}" >/dev/null 2>&1 \
     || { echo "!!! could not load $1 — its cells will fail"; return 1; }
+  n=$(instances_of "$1" | wc -l | tr -d ' ')
+  if [ "$n" != "1" ]; then
+    # Something outside this script is loading models. Continuing is how the OOM happens.
+    echo "!!! $1 has $n loaded instances after a full eviction, expected 1 — stopping"
+    exit 1
+  fi
   resident="$1"
 }
 
