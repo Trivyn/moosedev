@@ -106,6 +106,11 @@ def load(model: str = None, mode: str = None) -> list[dict]:
     def answered_nothing(row):
         # The flag is authoritative on rows written after it existed; older rows are judged
         # from final_text directly, so the disclosure covers the campaigns already on disk.
+        # Either way a TRUNCATED cell does not count: a timeout or a non-zero exit has no
+        # final text because the cell was killed, not because the model declined, and
+        # conflating the two is the mistake this disclosure exists to prevent.
+        if row.get("timed_out") or row.get("opencode_exit") not in (0, None):
+            return False
         if "empty_answer" in row:
             return row["empty_answer"]
         return "final_text" in row and not (row.get("final_text") or "").strip()

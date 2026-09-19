@@ -755,13 +755,20 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         # failed; this says the rig stopped it, and why.
         "aborted": bool(aborted), "abort_reason": aborted,
         "abort_detail": watch.detail if (watch and aborted) else None,
-        # A cell that ends its turn WITHOUT answering is a distinct outcome from one that
-        # answers wrongly, and both score F1 0.000 — so the table cannot tell them apart.
-        # Qwen3.5-122B did this in 3 of 3 cells (Lesson 4a26f1ce) and Qwen3.8-27B did it on
-        # the one cell that broke its stability, AFTER the diagnostics had already told it
-        # the vocabulary and its own discovery queries had succeeded. It is invisible to the
-        # no-progress abort too: 4 calls, 3 steps, no repetition, nothing to cut.
-        "empty_answer": not (ev["final_text"] or "").strip(),
+        # A cell that RAN TO COMPLETION and still produced no final text is a distinct
+        # outcome from one that answered wrongly, and both score F1 0.000 — so the table
+        # cannot tell them apart. Qwen3.5-122B does this (Lesson 4a26f1ce): it abstains
+        # rather than confabulate.
+        #
+        # The completion condition is load-bearing, and the first version of this flag
+        # omitted it and was wrong. A timed-out cell has no final text either, but because
+        # it was KILLED mid-generation, not because the model declined — 10 of 17 flagged
+        # rows turned out to be timeouts and one a signal kill (exit -5), which briefly made
+        # a 27B infrastructure fault look like the model going quiet on pushed context.
+        # Silence only means something when the model had the chance to speak.
+        "empty_answer": (
+            not (ev["final_text"] or "").strip() and not timed_out and returncode == 0
+        ),
         "cell_errors": cell_errors or None,
         "stderr_tail": (stderr or "").strip()[-2000:] if returncode != 0 else None,
     }
