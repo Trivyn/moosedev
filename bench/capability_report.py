@@ -59,6 +59,17 @@ def load(model: str = None, mode: str = None) -> list[dict]:
     if not p.exists():
         p = d / "runs.jsonl"
     rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+    # runs_regraded.jsonl is a point-in-time snapshot and this reader PREFERS it, so every row
+    # appended to runs.jsonl after the last regrade is invisible here -- a verdict computed over
+    # a campaign that silently is not in the data (the stale-snapshot failure of Lesson 08540ceb).
+    raw = d / "runs.jsonl"
+    if p.name == "runs_regraded.jsonl" and raw.exists():
+        have = {r.get("run_id") for r in rows}
+        missing = sum(1 for l in raw.read_text().splitlines()
+                      if l.strip() and json.loads(l).get("run_id") not in have)
+        if missing:
+            print(f"[!! STALE REGRADE: {missing} row(s) in runs.jsonl are NOT in runs_regraded.jsonl "
+                  f"and are invisible to this report. Run: python regrade.py --corpus {CORPUS}]")
     rows = [r for r in rows if r.get("task_type") == "capability_qa"]
     # A cell whose agent never received the prompt (provider not found, model not loaded, backend
     # down) is an INFRASTRUCTURE failure. run.py still writes a row, and its score is 0.0 — which

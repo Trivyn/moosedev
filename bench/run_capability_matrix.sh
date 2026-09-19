@@ -147,6 +147,16 @@ for i in $(seq 1 "$N"); do for model in "${MODELS[@]}"; do
     .venv/bin/python run.py --corpus "$CORPUS" --task "$task" --arm "$arm" \
       --mode "$mode" --backend opencode --model "$model" 2>&1 \
       | grep -Ev "moosedev::runtime" | grep -E "score=|Traceback|Error" || echo "  (cell produced no row)"
+    # Per cell, not per campaign. On 2026-09-17 two Qwen3.5-9B cells wrote into this corpus
+    # (a "Test query" Consequence; an AD superseding ITSELF) and the end-of-campaign check never
+    # ran because the campaign was interrupted. The mutated export then became the "verified"
+    # baseline for every later campaign. A cell that writes stops the run here, so the damage is
+    # one cell and the culprit is named, rather than discovered two days later in a transcript.
+    KG_NOW=$(shasum -a 256 "$KG" | cut -d' ' -f1)
+    if [ "$KG_NOW" != "$KG_BEFORE" ]; then
+      echo "!!! SNAPSHOT MUTATED by ${model##*/} $arm/$mode $task #$i: ${KG_BEFORE:0:16} -> ${KG_NOW:0:16} — stopping"
+      exit 1
+    fi
   done
 done; done; done
 
