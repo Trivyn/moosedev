@@ -132,6 +132,102 @@ def load(model: str = None, mode: str = None) -> list[dict]:
     return rows
 
 
+# --- stability gate (AD ab564b4a, pre-registered 2026-09-18) ------------------
+# A tier qualifies for the floor only if it answers RELIABLY, so the gate is on the WORST
+# repetition of each cell, never the mean. A cell scoring 0.50 three times has sd 0.00 and
+# would pass any variance gate while being useless every time — the same defect AD 33b3dbac
+# rejected in mean F1, rotated onto the variance axis.
+#
+# TAU is inherited from the floor study's sealed rule (AD c944806b, T = 0.8), fixed before
+# this data existed, which is the evidence it was not fitted. On the measured tiers every
+# PHI in [0.2, 0.9] gives the same verdict, so PHI is not what decides them.
+STABILITY_TAU = 0.80   # a cell is reliable if its WORST valid rep scores at least this
+STABILITY_PHI = 0.80   # a tier qualifies if at least this fraction of cells are reliable
+STABILITY_N = 3        # valid repetitions required per cell
+
+
+def infrastructure_fault(row: dict) -> bool:
+    """True only when the agent was killed by a signal the RUNNER did not send.
+
+    run.py's `_terminate` sends SIGTERM and SIGKILL, and only from the deadline timer or the
+    no-progress watcher, so a negative exit with neither flag set means something outside the
+    rig killed the process. Deliberately narrow, because everything else is a model outcome:
+    a timeout means the model had its whole budget and did not finish, an abort means it
+    looped, and a positive non-zero exit still carries the model's answer.
+
+    On the 2026-09-18 campaign this excludes exactly one row of 79 (an opencode/Bun SIGTRAP
+    at 318 s of a 2400 s budget). Excluding every non-zero exit instead would have thrown
+    away three genuine 9B failures at 0.00 after 48-57 tool calls — flattering precisely the
+    model the gate exists to reject.
+    """
+    code = row.get("opencode_exit")
+    return (isinstance(code, int) and code < 0
+            and not row.get("timed_out") and not row.get("aborted"))
+
+
+def stability(rows: list[dict], n: int = STABILITY_N, tau: float = STABILITY_TAU,
+              phi: float = STABILITY_PHI, since: str = None) -> None:
+    """Report the pre-registered stability verdict per (model, arm, mode).
+
+    `since` (an ISO timestamp prefix) names the campaign window. Pass it. Without it the
+    last n valid reps of each cell are used, and where a campaign lost a rep to an
+    infrastructure fault the n-th comes from an EARLIER campaign on a different build —
+    silently pooling a pre-fix run into a post-fix verdict. That is not a hypothetical: it
+    moved Qwen3.8-27B from 12/13 to 11/13 the first time this was run. The rows carry
+    `moosedev_binary_sha256` but it is unpopulated, so the window is the operator's to state
+    until it is filled in.
+    """
+    if since:
+        rows = [r for r in rows if (r.get("ts") or "") >= since]
+    groups = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in rows:
+        key = ((r.get("agent_model") or "?").split("/")[-1], r.get("arm"), r.get("mode"))
+        groups[key][r.get("task_id")].append(r)
+
+    print(f"\n=== STABILITY GATE (AD ab564b4a): cell reliable if min(F1) over {n} valid "
+          f"reps >= {tau:.2f}; tier qualifies at >= {phi:.0%} of cells ===")
+    for (model, arm, mode), cells in sorted(groups.items()):
+        reliable, underpowered, excluded, worst = 0, [], 0, []
+        for task, rs in sorted(cells.items()):
+            valid = [r for r in rs if not infrastructure_fault(r)]
+            excluded += len(rs) - len(valid)
+            valid.sort(key=lambda r: r.get("ts") or "")
+            used = valid[-n:]
+            if len(used) < n:
+                underpowered.append(f"{task} ({len(used)}/{n})")
+            if not used:
+                continue
+            mn = min((r.get("metrics") or {}).get("f1", 0.0) for r in used)
+            worst.append((mn, task))
+            if mn >= tau:
+                reliable += 1
+        if not worst:
+            continue
+        total = len(cells)
+        frac = reliable / total
+        span_rows = [r for rs in cells.values() for r in rs if r.get("ts")]
+        span = (f"{min(r['ts'] for r in span_rows)[:16]}..{max(r['ts'] for r in span_rows)[11:16]}"
+                if span_rows else "?")
+        verdict = ("QUALIFIES" if frac >= phi and not underpowered
+                   else "UNDER-POWERED" if underpowered and frac >= phi else "fails")
+        print(f"\n  {model}  {arm}/{mode}  [{span}]")
+        print(f"    reliable cells {reliable}/{total} = {frac:.2f}  ->  {verdict}")
+        if not since and span_rows:
+            lo, hi = min(r["ts"] for r in span_rows), max(r["ts"] for r in span_rows)
+            if lo[:10] != hi[:10]:
+                print(f"    !! reps span {lo[:10]}..{hi[:10]} and may mix BUILDS — pass "
+                      f"--since to name one campaign; this verdict is not trustworthy")
+        if excluded:
+            print(f"    {excluded} rep(s) excluded as infrastructure faults (killed by an "
+                  f"unsent signal)")
+        if underpowered:
+            print(f"    UNDER-POWERED, re-run before the verdict counts: "
+                  f"{', '.join(underpowered)}")
+        for mn, task in sorted(worst)[:4]:
+            if mn < tau:
+                print(f"    worst cell  min={mn:.2f}  {task}")
+
+
 def _agent_tok(r):
     t = r["tokens"]
     return t["agent_prompt"] + t["agent_completion"]
@@ -203,12 +299,20 @@ def main() -> None:
     ap.add_argument("--corpus", default=CORPUS)
     ap.add_argument("--model", help="restrict to one agent model (substring)")
     ap.add_argument("--mode", choices=["tooluse", "oracle"], help="restrict to one delivery mode")
+    ap.add_argument("--since", metavar="ISO_TS",
+                    help="only count reps at or after this timestamp — names the campaign "
+                         "window so the verdict cannot pool two builds")
+    ap.add_argument("--stability", action="store_true",
+                    help="pre-registered stability verdict per tier (AD ab564b4a)")
     ap.add_argument("--premise", action="store_true",
                     help="tooluse-vs-oracle summary per model: did it fail to fetch, or to use?")
     args = ap.parse_args()
     CORPUS = args.corpus
     if args.premise:
         premise(load())
+        return
+    if args.stability:
+        stability(load(args.model, args.mode), since=args.since)
         return
     rows = load(args.model, args.mode)
     if args.model or args.mode:

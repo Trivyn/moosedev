@@ -115,16 +115,26 @@ step "4. daemon + store"
 # A running daemon is only reusable if it is running CURRENT code. One started before the
 # last build serves yesterday's server to today's conclusions, and nothing in the scores
 # would ever show it — the same stale-artifact trap as check 2, one layer out.
+# Liveness BEFORE currency: a daemon that died leaves its socket and pidfile behind, and a
+# leftover socket satisfied the old `[ -S ... ]` reuse test, so a dead daemon was reported as
+# "up and current" and every MCP call in the campaign would have failed. Found 2026-09-18 when
+# the canary caught it two checks later, with zero moosedev_* calls. Prove a live owner first.
 STALE_PID=""
-if [ -S "$DD/moosedev.sock" ] && [ -f "$DD/moosedev-serve.pid" ]; then
+LIVE_PID=""
+if [ -f "$DD/moosedev-serve.pid" ]; then
   DPID=$(cat "$DD/moosedev-serve.pid" 2>/dev/null)
-  if [ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null; then
-    # No /proc on macOS: compare the binary's mtime against the process start time.
-    STARTED=$(ps -o lstart= -p "$DPID" 2>/dev/null)
-    BIN_EPOCH=$(stat -f %m "$BIN" 2>/dev/null || echo 0)
-    PROC_EPOCH=$(date -j -f "%a %b %d %T %Y" "$STARTED" +%s 2>/dev/null || echo 0)
-    if [ "$PROC_EPOCH" -gt 0 ] && [ "$BIN_EPOCH" -gt "$PROC_EPOCH" ]; then STALE_PID="$DPID"; fi
-  fi
+  if [ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null; then LIVE_PID="$DPID"; fi
+fi
+if [ -z "$LIVE_PID" ] && [ -S "$DD/moosedev.sock" ]; then
+  note "socket present but no live daemon owns it — clearing the leftover"
+  rm -f "$DD/moosedev.sock" "$DD/moosedev-serve.pid"
+fi
+if [ -n "$LIVE_PID" ]; then
+  # No /proc on macOS: compare the binary's mtime against the process start time.
+  STARTED=$(ps -o lstart= -p "$LIVE_PID" 2>/dev/null)
+  BIN_EPOCH=$(stat -f %m "$BIN" 2>/dev/null || echo 0)
+  PROC_EPOCH=$(date -j -f "%a %b %d %T %Y" "$STARTED" +%s 2>/dev/null || echo 0)
+  if [ "$PROC_EPOCH" -gt 0 ] && [ "$BIN_EPOCH" -gt "$PROC_EPOCH" ]; then STALE_PID="$LIVE_PID"; fi
 fi
 if [ -n "$STALE_PID" ]; then
   note "daemon $STALE_PID predates the current binary — restarting it"
@@ -133,8 +143,8 @@ if [ -n "$STALE_PID" ]; then
   kill -0 "$STALE_PID" 2>/dev/null && kill -9 "$STALE_PID" 2>/dev/null
   rm -f "$DD/moosedev.sock" "$DD/moosedev-serve.pid"
 fi
-if [ -S "$DD/moosedev.sock" ]; then
-  ok "daemon socket up and current (reusing)"
+if [ -n "$LIVE_PID" ] && [ -z "$STALE_PID" ] && [ -S "$DD/moosedev.sock" ]; then
+  ok "daemon $LIVE_PID up and current (reusing)"
 else
   note "starting daemon (a cold store can take several minutes to hydrate)…"
   MOOSEDEV_DATA_DIR="$DD" MOOSEDEV_ONTOLOGY_DIR="$ONTO" \
