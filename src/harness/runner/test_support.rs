@@ -30,6 +30,7 @@ async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
         revision: "fixture".into(),
         context: String::new(),
         files: vec![],
+        records: vec![],
         evidence_iris: vec![],
         governing_constraints: vec![],
     })

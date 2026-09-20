@@ -54,6 +54,7 @@ async fn context(
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),
         evidence_iris: vec![],
+        records: vec![],
         governing_constraints: vec![],
         context: "Constraint: reading must precede work.".into(),
         files: request

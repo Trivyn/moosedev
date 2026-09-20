@@ -34,6 +34,30 @@ pub(super) fn error_kind(error: &anyhow::Error) -> &'static str {
 }
 
 impl Runner {
+    fn human_query(&self) -> String {
+        if self.task.guidance.trim().is_empty() {
+            self.task.objective.clone()
+        } else {
+            self.task.guidance.clone()
+        }
+    }
+
+    fn ensure_knowledge_turn(&mut self, topic: &str, revision: &str) -> &mut KnowledgeTurn {
+        let sequence = self.task.knowledge_turn_sequence;
+        if self.task.knowledge_turns.last().map(|turn| turn.sequence) != Some(sequence) {
+            self.task.knowledge_turns.push(KnowledgeTurn {
+                sequence,
+                query: self.human_query(),
+                retrieval_topic: topic.to_owned(),
+                revision: revision.to_owned(),
+                records: Vec::new(),
+                files: Vec::new(),
+                searches: Vec::new(),
+            });
+        }
+        self.task.knowledge_turns.last_mut().unwrap()
+    }
+
     pub(super) fn client(daemon: &str) -> Result<reqwest::Client> {
         let url = reqwest::Url::parse(daemon)?;
         anyhow::ensure!(
@@ -95,13 +119,14 @@ impl Runner {
     }
 
     pub(super) async fn refresh(&mut self, files: &[String]) -> Result<ContextResponse> {
+        let topic = format!("{} {}", self.task.objective, self.task.guidance)
+            .trim()
+            .to_owned();
         let response: ContextResponse = self
             .post(
                 "context",
                 &ContextRequest {
-                    topic: format!("{} {}", self.task.objective, self.task.guidance)
-                        .trim()
-                        .to_owned(),
+                    topic: topic.clone(),
                     files: files.to_vec(),
                     evidence_only: false,
                 },
@@ -118,6 +143,30 @@ impl Runner {
             "daemon omitted requested file context"
         );
         self.update_knowledge_revision(response.revision.clone());
+        self.task.knowledge_context = Some(KnowledgeContextSnapshot {
+            topic: topic.clone(),
+            revision: response.revision.clone(),
+            context: response.context.clone(),
+            files: response
+                .files
+                .iter()
+                .map(|file| KnowledgeFileDossier {
+                    file: file.file.clone(),
+                    dossier: file.dossier.clone(),
+                })
+                .collect(),
+            governing_constraints: response.governing_constraints.clone(),
+            records: response.records.clone(),
+        });
+        let turn = self.ensure_knowledge_turn(&topic, &response.revision);
+        turn.retrieval_topic = topic;
+        turn.revision = response.revision.clone();
+        turn.records = response.records.clone();
+        turn.files = response
+            .files
+            .iter()
+            .map(|file| file.file.clone())
+            .collect();
         self.context = Some(response.clone());
         Ok(response)
     }
@@ -156,6 +205,20 @@ impl Runner {
             "daemon belongs to a different project"
         );
         self.update_knowledge_revision(response.revision.clone());
+        let search = KnowledgeSearchResult {
+            query: query.to_owned(),
+            revision: response.revision.clone(),
+            context: response.context.clone(),
+            evidence_iris: response.evidence_iris.clone(),
+            records: response.records.clone(),
+        };
+        self.task.knowledge_searches.push(search.clone());
+        let topic = format!("{} {}", self.task.objective, self.task.guidance)
+            .trim()
+            .to_owned();
+        self.ensure_knowledge_turn(&topic, &response.revision)
+            .searches
+            .push(search);
         Ok(response)
     }
 
@@ -164,5 +227,63 @@ impl Runner {
             .iter()
             .map(|file| Ok((file.clone(), fingerprint(&self.workspace.read(file)?))))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{context_router, serve, Project};
+    use super::*;
+
+    #[tokio::test]
+    async fn refresh_replaces_current_context_while_searches_accumulate() {
+        let project = Project::new("knowledge-view");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Explain graph context".into())
+            .await
+            .unwrap();
+
+        let current = runner.task.knowledge_context.as_ref().unwrap();
+        assert_eq!(current.topic, "Explain graph context");
+        assert!(runner.task.knowledge_searches.is_empty());
+        assert_eq!(runner.task.knowledge_turns.len(), 1);
+        assert_eq!(
+            runner.task.knowledge_turns[0].query,
+            "Explain graph context"
+        );
+
+        runner.search_knowledge("constraints").await.unwrap();
+        runner.search_knowledge("lessons").await.unwrap();
+        assert_eq!(runner.task.knowledge_searches.len(), 2);
+        assert_eq!(runner.task.knowledge_searches[0].query, "constraints");
+        assert_eq!(runner.task.knowledge_searches[1].query, "lessons");
+        assert_eq!(runner.task.knowledge_turns[0].searches.len(), 2);
+        assert_eq!(
+            runner.task.knowledge_context.as_ref().unwrap().topic,
+            "Explain graph context"
+        );
+
+        runner.task.guidance = "Focus on the harness".into();
+        runner.refresh(&[]).await.unwrap();
+        assert_eq!(
+            runner.task.knowledge_context.as_ref().unwrap().topic,
+            "Explain graph context Focus on the harness"
+        );
+        assert_eq!(runner.task.knowledge_searches.len(), 2);
+        assert_eq!(runner.task.knowledge_turns.len(), 1);
+        assert_eq!(
+            runner.task.knowledge_turns[0].query,
+            "Explain graph context"
+        );
+        assert_eq!(runner.task.knowledge_turns[0].searches.len(), 2);
+
+        runner.task.knowledge_turn_sequence += 1;
+        runner.task.guidance = "Focus on the harness".into();
+        runner.refresh(&[]).await.unwrap();
+        assert_eq!(runner.task.knowledge_turns.len(), 2);
+        assert_eq!(runner.task.knowledge_turns[1].sequence, 1);
+        assert_eq!(runner.task.knowledge_turns[1].query, "Focus on the harness");
+        assert!(runner.task.knowledge_turns[1].searches.is_empty());
+        server.abort();
     }
 }

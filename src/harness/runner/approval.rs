@@ -159,6 +159,7 @@ impl Runner {
         if let Some(id) = id {
             self.task.delivered_messages.push(id.to_owned());
         }
+        self.task.knowledge_turn_sequence = self.task.knowledge_turn_sequence.saturating_add(1);
         self.task.guidance = text.clone();
         self.task.recovery = None;
         self.task.last_response = text;
@@ -235,6 +236,7 @@ impl Runner {
         );
         self.event(format!("Human response: {text}"));
         self.end_unchanged_window();
+        self.task.knowledge_turn_sequence = self.task.knowledge_turn_sequence.saturating_add(1);
         self.task.guidance = text.clone();
         self.task.recovery = None;
         self.task.last_response = text;

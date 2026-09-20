@@ -12,7 +12,8 @@ use crossterm::event::{
 };
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -29,7 +30,7 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     io::{self, IsTerminal},
     path::PathBuf,
     sync::{
@@ -245,6 +246,13 @@ impl Composer {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct KnowledgeHeader {
+    sequence: u64,
+    start: usize,
+    end: usize,
+}
+
 #[derive(Default)]
 struct View {
     tab: usize,
@@ -256,6 +264,12 @@ struct View {
     activity_expanded: bool,
     notice: String,
     retained_inputs: VecDeque<String>,
+    knowledge_collapsed: BTreeSet<u64>,
+    knowledge_headers: Vec<KnowledgeHeader>,
+    knowledge_selected: Option<u64>,
+    knowledge_latest: Option<u64>,
+    knowledge_reveal_selection: bool,
+    knowledge_area: Rect,
 }
 
 fn visible(value: &str) -> String {
@@ -272,8 +286,8 @@ fn gate(task: &Task) -> String {
             text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
             text
         }).unwrap_or_default(),
-        Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Knowledge (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
-        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Knowledge (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
+        Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Review (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
+        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
         Phase::AwaitingInput => if task.turn_finished { "Your turn. Ask a follow-up or describe the next change.".into() } else { "Your input is needed. Reply below.".into() },
         Phase::Cancelled => "Interrupted; obligations are saved. /continue resumes, or send follow-up guidance.".into(),
         Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
@@ -382,7 +396,7 @@ fn conversation_body(snapshot: &Snapshot, view: &View) -> Text<'static> {
         control.push_str(&gate(task));
         if !task.reviews.is_empty() && task.phase != Phase::AwaitingReview {
             control.push_str(&format!(
-                "\n\n{} knowledge review(s) pending · /review or view Knowledge",
+                "\n\n{} knowledge review(s) pending · /review or view Review",
                 task.reviews.len()
             ));
         }
@@ -424,6 +438,13 @@ fn body(snapshot: &Snapshot, view: &View) -> Text<'static> {
             }
         }
         3 => {
+            if let Some(task) = &snapshot.task {
+                text.push_str(&legacy_knowledge_text(task));
+            } else {
+                text.push_str("No active task. Graph context appears here after work begins.");
+            }
+        }
+        4 => {
             if let Some(task) = &snapshot.task {
                 for (index, review) in task.reviews.iter().enumerate() {
                     text.push_str(&format!("REVIEW {}\n{}\n", index + 1, review.reason));
@@ -525,6 +546,307 @@ fn body(snapshot: &Snapshot, view: &View) -> Text<'static> {
         }
     }
     Text::raw(visible(&text))
+}
+
+fn sync_knowledge_state(view: &mut View, task: &Task) {
+    let sequences: BTreeSet<_> = task
+        .knowledge_turns
+        .iter()
+        .map(|turn| turn.sequence)
+        .collect();
+    view.knowledge_collapsed
+        .retain(|sequence| sequences.contains(sequence));
+    let latest = task.knowledge_turns.last().map(|turn| turn.sequence);
+    if latest != view.knowledge_latest {
+        if let Some(latest) = latest {
+            view.knowledge_collapsed.extend(
+                sequences
+                    .iter()
+                    .copied()
+                    .filter(|sequence| *sequence != latest),
+            );
+            view.knowledge_collapsed.remove(&latest);
+            view.knowledge_selected = Some(latest);
+            view.knowledge_reveal_selection = true;
+        }
+        view.knowledge_latest = latest;
+    }
+    if view
+        .knowledge_selected
+        .is_some_and(|sequence| !sequences.contains(&sequence))
+    {
+        view.knowledge_selected = latest;
+    }
+}
+
+fn push_wrapped_text(
+    lines: &mut Vec<Line<'static>>,
+    text: Text<'static>,
+    width: usize,
+) -> (usize, usize) {
+    let start = lines.len();
+    lines.extend(markdown::wrap(text, width.max(1)).lines);
+    (start, lines.len())
+}
+
+fn record_color(kind: &str) -> Color {
+    match kind {
+        "Constraint" => Color::Red,
+        "Requirement" => Color::Yellow,
+        "ArchitecturalDecision" => Color::Magenta,
+        "Lesson" => Color::Green,
+        "Pattern" => Color::Blue,
+        "AntiPattern" => Color::LightRed,
+        _ => Color::Cyan,
+    }
+}
+
+fn push_record_cards(
+    lines: &mut Vec<Line<'static>>,
+    records: &[super::protocol::ContextRecord],
+    width: usize,
+) {
+    for record in records {
+        push_wrapped_text(
+            lines,
+            Text::from(Line::from(vec![
+                Span::styled(
+                    format!("[{}]", visible(&record.kind)),
+                    Style::default()
+                        .fg(record_color(&record.kind))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}", visible(&record.title)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            width,
+        );
+        if record.claim.trim().is_empty() {
+            push_wrapped_text(
+                lines,
+                Text::from(Line::from(Span::styled(
+                    "Claim not supplied by this retrieval.",
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                width,
+            );
+        } else {
+            let claim = markdown::render(
+                &visible(record.claim.trim()),
+                Style::default().fg(Color::White),
+            );
+            lines.extend(markdown::wrap(claim, width.max(1)).lines);
+        }
+        for source in &record.provenance {
+            push_wrapped_text(
+                lines,
+                Text::from(Line::from(Span::styled(
+                    format!("via · {}", visible(source)),
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                width,
+            );
+        }
+        push_wrapped_text(
+            lines,
+            Text::from(Line::from(Span::styled(
+                visible(&record.iri),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            width,
+        );
+        lines.push(Line::default());
+    }
+}
+
+fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
+    sync_knowledge_state(view, task);
+    view.knowledge_headers.clear();
+    if task.knowledge_turns.is_empty() {
+        return markdown::wrap(
+            Text::raw(visible(&legacy_knowledge_text(task))),
+            width.max(1),
+        );
+    }
+
+    let mut lines = Vec::new();
+    for (index, turn) in task.knowledge_turns.iter().enumerate() {
+        let collapsed = view.knowledge_collapsed.contains(&turn.sequence);
+        let record_count = turn.records.len()
+            + turn
+                .searches
+                .iter()
+                .map(|search| search.records.len())
+                .sum::<usize>();
+        let selected = view.knowledge_selected == Some(turn.sequence);
+        let header_style = if selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        };
+        let (start, end) = push_wrapped_text(
+            &mut lines,
+            Text::from(Line::from(vec![
+                Span::styled(if collapsed { "▶ " } else { "▼ " }, header_style),
+                Span::styled(
+                    format!(
+                        "Query {} · {} record{} — ",
+                        index + 1,
+                        record_count,
+                        if record_count == 1 { "" } else { "s" }
+                    ),
+                    header_style,
+                ),
+                Span::styled(visible(&turn.query), header_style),
+            ])),
+            width,
+        );
+        view.knowledge_headers.push(KnowledgeHeader {
+            sequence: turn.sequence,
+            start,
+            end,
+        });
+        if collapsed {
+            lines.push(Line::default());
+            continue;
+        }
+
+        let revision = &turn.revision[..turn.revision.len().min(12)];
+        let mut detail = format!("revision {revision}");
+        if !turn.files.is_empty() {
+            detail.push_str(&format!(" · files {}", turn.files.join(", ")));
+        }
+        push_wrapped_text(
+            &mut lines,
+            Text::from(Line::from(Span::styled(
+                visible(&detail),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            width,
+        );
+        lines.push(Line::default());
+        if turn.records.is_empty() {
+            push_wrapped_text(
+                &mut lines,
+                Text::from(Line::from(Span::styled(
+                    "No accepted project knowledge matched this turn.",
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                width,
+            );
+            lines.push(Line::default());
+        } else {
+            push_record_cards(&mut lines, &turn.records, width);
+        }
+
+        for (search_index, search) in turn.searches.iter().enumerate() {
+            push_wrapped_text(
+                &mut lines,
+                Text::from(Line::from(Span::styled(
+                    format!(
+                        "Model search {} · {} — {}",
+                        search_index + 1,
+                        search.records.len(),
+                        visible(&search.query)
+                    ),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                width,
+            );
+            lines.push(Line::default());
+            if search.records.is_empty() {
+                push_wrapped_text(
+                    &mut lines,
+                    Text::from(Line::from(Span::styled(
+                        "No accepted project knowledge matched this search.",
+                        Style::default().fg(Color::DarkGray),
+                    ))),
+                    width,
+                );
+                lines.push(Line::default());
+            } else {
+                push_record_cards(&mut lines, &search.records, width);
+            }
+        }
+    }
+    Text::from(lines)
+}
+
+fn legacy_knowledge_text(task: &Task) -> String {
+    let mut text = String::new();
+    text.push_str("CURRENT WORKING CONTEXT\n");
+    if let Some(context) = &task.knowledge_context {
+        text.push_str(&format!(
+            "Topic: {}\nRevision: {}\n\nACCEPTED PROJECT KNOWLEDGE\n",
+            context.topic, context.revision
+        ));
+        if context.context.trim().is_empty() {
+            text.push_str("No accepted project knowledge matched.\n");
+        } else {
+            text.push_str(context.context.trim());
+            text.push('\n');
+        }
+        text.push_str("\nPROJECT RULES\n");
+        if context.governing_constraints.is_empty() {
+            text.push_str("No governing constraints for the current working set.\n");
+        }
+        for rule in &context.governing_constraints {
+            text.push_str(&format!(
+                "{}\n{}\nvia: {}\n",
+                rule.label, rule.iri, rule.via
+            ));
+            if !rule.claim.is_empty() {
+                text.push_str(&rule.claim);
+                text.push('\n');
+            }
+            text.push('\n');
+        }
+        text.push_str("FILE DOSSIERS\n");
+        if context.files.is_empty() {
+            text.push_str("No files are in the current working set.\n");
+        }
+        for file in &context.files {
+            text.push_str(&format!("\n{}\n", file.file));
+            if file.dossier.trim().is_empty() {
+                text.push_str("No recorded knowledge is linked to this file.\n");
+            } else {
+                text.push_str(file.dossier.trim());
+                text.push('\n');
+            }
+        }
+    } else {
+        text.push_str("No graph context has been retrieved for this task yet.\n");
+    }
+
+    text.push_str("\nEXPLICIT SEARCH HISTORY\n");
+    if task.knowledge_searches.is_empty() {
+        text.push_str("No explicit graph searches yet.\n");
+    }
+    for (index, search) in task.knowledge_searches.iter().enumerate() {
+        text.push_str(&format!(
+            "\nSEARCH {} · {} accepted record(s)\nQuery: {}\nRevision: {}\n",
+            index + 1,
+            search.evidence_iris.len(),
+            search.query,
+            search.revision
+        ));
+        if search.context.trim().is_empty() {
+            text.push_str("No accepted project knowledge matched.\n");
+        } else {
+            text.push_str(search.context.trim());
+            text.push('\n');
+        }
+    }
+    text
 }
 
 const SYMBOLIC_APPROVAL: &str = "On /approve the harness derives obligations from the plan files' governing records; no model call";
@@ -828,13 +1150,23 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
                 snapshot.endpoint
             ))),
             Line::raw(format!(
-                " {}  Conversation   Activity   Diff   Knowledge   Journal · Tab switches",
-                ["●", "◉", "◇", "◆", "≡"][view.tab]
+                " {}  Conversation   Activity   Diff   Knowledge   Review   Journal · Tab switches",
+                ["●", "◉", "◇", "◆", "□", "≡"][view.tab]
             )),
         ]),
         header,
     );
-    let body = markdown::wrap(body(snapshot, view), main.width.saturating_sub(2) as usize);
+    let inner = Block::default().borders(Borders::ALL).inner(main);
+    view.knowledge_area = inner;
+    let body = if view.tab == 3 {
+        match &snapshot.task {
+            Some(task) => knowledge_body(task, view, inner.width as usize),
+            None => Text::raw("No active task. Graph context appears here after work begins."),
+        }
+    } else {
+        view.knowledge_headers.clear();
+        markdown::wrap(body(snapshot, view), inner.width as usize)
+    };
     let line_count = body.height();
     let paragraph = Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(
         [
@@ -842,10 +1174,28 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
             " Activity ",
             " Diff ",
             " Knowledge ",
+            " Review ",
             " Journal ",
         ][view.tab],
     ));
     sync_scroll_bounds(view, line_count, main.height.saturating_sub(2));
+    if view.tab == 3 && view.knowledge_reveal_selection {
+        if let Some(header) = view
+            .knowledge_headers
+            .iter()
+            .find(|header| Some(header.sequence) == view.knowledge_selected)
+        {
+            let viewport = inner.height as usize;
+            let scroll = view.scroll as usize;
+            if header.start < scroll {
+                view.scroll = header.start.min(u16::MAX as usize) as u16;
+            } else if header.end > scroll.saturating_add(viewport) {
+                view.scroll = header.end.saturating_sub(viewport).min(u16::MAX as usize) as u16;
+            }
+            view.scroll = view.scroll.min(view.scroll_max);
+        }
+        view.knowledge_reveal_selection = false;
+    }
     frame.render_widget(paragraph.scroll((view.scroll, 0)), main);
     let spinner = if snapshot.busy {
         ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][view.tick % 10]
@@ -857,7 +1207,21 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
     } else {
         view.notice.as_str()
     };
-    frame.render_widget(Paragraph::new(format!("{spinner} {}\nEnter send · Alt-Enter newline · Esc interrupt · /help · Mouse wheel/PageUp/PageDown scroll",visible(notice))).style(Style::default().fg(if snapshot.busy {Color::Yellow} else {Color::Cyan})),status);
+    let help = if view.tab == 3 {
+        "Click query headers · Alt-↑/↓ select · Alt-←/→ collapse/expand · wheel/PageUp/PageDown scroll"
+    } else {
+        "Enter send · Alt-Enter newline · Esc interrupt · /help · Mouse wheel/PageUp/PageDown scroll"
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{spinner} {}\n{help}", visible(notice))).style(
+            Style::default().fg(if snapshot.busy {
+                Color::Yellow
+            } else {
+                Color::Cyan
+            }),
+        ),
+        status,
+    );
     render_composer(frame, composer, &view.composer);
 }
 
@@ -877,6 +1241,34 @@ fn render_composer(frame: &mut ratatui::Frame, area: Rect, composer: &Composer) 
             inner.y + (row - scroll).min(inner.height.saturating_sub(1) as usize) as u16,
         ));
     }
+}
+
+fn move_knowledge_selection(view: &mut View, down: bool) {
+    if view.knowledge_headers.is_empty() {
+        return;
+    }
+    let current = view
+        .knowledge_selected
+        .and_then(|sequence| {
+            view.knowledge_headers
+                .iter()
+                .position(|header| header.sequence == sequence)
+        })
+        .unwrap_or_else(|| {
+            if down {
+                0
+            } else {
+                view.knowledge_headers.len() - 1
+            }
+        });
+    let next = if down {
+        (current + 1).min(view.knowledge_headers.len() - 1)
+    } else {
+        current.saturating_sub(1)
+    };
+    view.knowledge_selected = Some(view.knowledge_headers[next].sequence);
+    view.knowledge_reveal_selection = true;
+    view.follow = false;
 }
 
 fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
@@ -929,6 +1321,18 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
         KeyCode::Char(c) => view.composer.insert(&c.to_string()),
         KeyCode::Backspace => view.composer.backspace(),
         KeyCode::Delete => view.composer.delete(),
+        KeyCode::Left if view.tab == 3 && key.modifiers.contains(KeyModifiers::ALT) => {
+            if let Some(sequence) = view.knowledge_selected {
+                view.knowledge_collapsed.insert(sequence);
+                view.knowledge_reveal_selection = true;
+            }
+        }
+        KeyCode::Right if view.tab == 3 && key.modifiers.contains(KeyModifiers::ALT) => {
+            if let Some(sequence) = view.knowledge_selected {
+                view.knowledge_collapsed.remove(&sequence);
+                view.knowledge_reveal_selection = true;
+            }
+        }
         KeyCode::Left => view.composer.left(),
         KeyCode::Right => view.composer.right(),
         KeyCode::Home => view.composer.home(),
@@ -941,17 +1345,25 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
             view.scroll = view.scroll.saturating_add(12).min(view.scroll_max);
         }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
-            view.follow = false;
-            view.scroll = view.scroll.saturating_sub(1);
+            if view.tab == 3 {
+                move_knowledge_selection(view, false);
+            } else {
+                view.follow = false;
+                view.scroll = view.scroll.saturating_sub(1);
+            }
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
-            view.scroll = view.scroll.saturating_add(1).min(view.scroll_max)
+            if view.tab == 3 {
+                move_knowledge_selection(view, true);
+            } else {
+                view.scroll = view.scroll.saturating_add(1).min(view.scroll_max)
+            }
         }
         KeyCode::Up => view.composer.vertical(false),
         KeyCode::Down => view.composer.vertical(true),
         KeyCode::Tab | KeyCode::BackTab => {
-            let offset = if key.code == KeyCode::Tab { 1 } else { 4 };
-            view.tab = (view.tab + offset) % 5;
+            let offset = if key.code == KeyCode::Tab { 1 } else { 5 };
+            view.tab = (view.tab + offset) % 6;
             view.scroll = 0;
             view.follow = view.tab < 2;
         }
@@ -962,6 +1374,30 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
 
 fn mouse(view: &mut View, event: MouseEvent) -> bool {
     match event.kind {
+        MouseEventKind::Down(MouseButton::Left)
+            if view.tab == 3
+                && event.column >= view.knowledge_area.x
+                && event.column < view.knowledge_area.right()
+                && event.row >= view.knowledge_area.y
+                && event.row < view.knowledge_area.bottom() =>
+        {
+            let line = view.scroll as usize + (event.row - view.knowledge_area.y) as usize;
+            if let Some(header) = view
+                .knowledge_headers
+                .iter()
+                .find(|header| line >= header.start && line < header.end)
+                .copied()
+            {
+                view.knowledge_selected = Some(header.sequence);
+                if !view.knowledge_collapsed.remove(&header.sequence) {
+                    view.knowledge_collapsed.insert(header.sequence);
+                }
+                view.knowledge_reveal_selection = true;
+                view.follow = false;
+                return true;
+            }
+            false
+        }
         MouseEventKind::ScrollUp => {
             view.follow = false;
             view.scroll = view.scroll.saturating_sub(MOUSE_SCROLL_LINES);
@@ -1207,9 +1643,9 @@ mod tests {
             live: Default::default(),
         }
     }
-    fn knowledge_view() -> View {
+    fn review_view() -> View {
         View {
-            tab: 3,
+            tab: 4,
             ..Default::default()
         }
     }
@@ -1264,8 +1700,8 @@ mod tests {
         assert!(text.ends_with("/approve to execute · send feedback to revise"));
     }
     #[test]
-    fn knowledge_tab_renders_derived_obligations_for_the_approved_plan() {
-        let text = text_content(&body(&snapshot_for(symbolic_task()), &knowledge_view()));
+    fn review_tab_renders_derived_obligations_for_the_approved_plan() {
+        let text = text_content(&body(&snapshot_for(symbolic_task()), &review_view()));
         assert!(text.contains("Derived scope\nlabels.py\n  Constraint · https://moosedev.dev/kg/Constraint/preserve-names\n  Requirement · https://moosedev.dev/kg/Requirement/label-intent\nutil.py · ungoverned\n"));
         assert!(text.contains("  def labels.py · labels/render_name().\n"));
         assert!(text.contains("Revision accepted-v3 · obligations 0123456789ab\n"));
@@ -1273,8 +1709,188 @@ mod tests {
         assert!(text.contains("  FAIL · pytest -q · after edit\n  PASS · pytest -q · after edit\n"));
         let mut bare = task_fixture(PathBuf::from("/project"));
         bare.symbolic = Some(Default::default());
-        let text = text_content(&body(&snapshot_for(bare), &knowledge_view()));
+        let text = text_content(&body(&snapshot_for(bare), &review_view()));
         assert!(text.contains("No approved plan scope derived yet."));
+    }
+    #[test]
+    fn knowledge_tab_renders_current_context_and_search_history() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.knowledge_context = Some(super::super::runner::KnowledgeContextSnapshot {
+            topic: "Explain the parser".into(),
+            revision: "accepted-v4".into(),
+            context: "Requirement · Parser output stays deterministic".into(),
+            files: vec![super::super::runner::KnowledgeFileDossier {
+                file: "src/parser.rs".into(),
+                dossier: "Parser dossier".into(),
+            }],
+            governing_constraints: vec![super::super::protocol::GoverningConstraint {
+                iri: "https://moosedev.dev/kg/Constraint/deterministic".into(),
+                label: "Deterministic parser".into(),
+                claim: "Parsing must not depend on iteration order.".into(),
+                via: "src/parser.rs".into(),
+            }],
+            records: vec![],
+        });
+        task.knowledge_searches = vec![
+            super::super::runner::KnowledgeSearchResult {
+                query: "parser".into(),
+                revision: "accepted-v4".into(),
+                context: "Requirement · Parser output stays deterministic".into(),
+                evidence_iris: vec!["https://moosedev.dev/kg/Requirement/parser".into()],
+                records: vec![],
+            },
+            super::super::runner::KnowledgeSearchResult {
+                query: "missing".into(),
+                revision: "accepted-v4".into(),
+                context: String::new(),
+                evidence_iris: vec![],
+                records: vec![],
+            },
+        ];
+
+        let view = View {
+            tab: 3,
+            ..Default::default()
+        };
+        let text = text_content(&body(&snapshot_for(task), &view));
+        assert!(text.contains("CURRENT WORKING CONTEXT\nTopic: Explain the parser"));
+        assert!(text.contains("PROJECT RULES\nDeterministic parser"));
+        assert!(text.contains("FILE DOSSIERS\n\nsrc/parser.rs\nParser dossier"));
+        assert!(text.contains("SEARCH 1 · 1 accepted record(s)\nQuery: parser"));
+        assert!(text.contains("SEARCH 2 · 0 accepted record(s)\nQuery: missing"));
+        assert!(text.contains("No accepted project knowledge matched."));
+    }
+    #[test]
+    fn structured_knowledge_history_groups_records_and_defaults_to_latest_open() {
+        let record = |iri: &str, kind: &str, title: &str, claim: &str, via: &str| {
+            super::super::protocol::ContextRecord {
+                iri: iri.into(),
+                kind: kind.into(),
+                title: title.into(),
+                claim: claim.into(),
+                provenance: vec![via.into()],
+            }
+        };
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.knowledge_turns = vec![
+            super::super::runner::KnowledgeTurn {
+                sequence: 0,
+                query: "Explain the old parser behavior".into(),
+                retrieval_topic: "Explain the parser".into(),
+                revision: "accepted-old".into(),
+                records: vec![record(
+                    "https://moosedev.dev/kg/Constraint/old",
+                    "Constraint",
+                    "Old parser constraint",
+                    "The old parser is stable.",
+                    "topic match",
+                )],
+                files: vec![],
+                searches: vec![],
+            },
+            super::super::runner::KnowledgeTurn {
+                sequence: 1,
+                query: "Show the new parser requirement".into(),
+                retrieval_topic: "Explain the parser Show the new parser requirement".into(),
+                revision: "accepted-new".into(),
+                records: vec![record(
+                    "https://moosedev.dev/kg/Requirement/new",
+                    "Requirement",
+                    "New parser requirement",
+                    "Output must stay deterministic.",
+                    "current inventory",
+                )],
+                files: vec!["src/parser.rs".into()],
+                searches: vec![super::super::runner::KnowledgeSearchResult {
+                    query: "parser lessons".into(),
+                    revision: "accepted-new".into(),
+                    context: "legacy model text".into(),
+                    evidence_iris: vec!["https://moosedev.dev/kg/Lesson/parser".into()],
+                    records: vec![record(
+                        "https://moosedev.dev/kg/Lesson/parser",
+                        "Lesson",
+                        "Parser ordering lesson",
+                        "Sort before rendering.",
+                        "topic match",
+                    )],
+                }],
+            },
+        ];
+        let mut view = View {
+            tab: 3,
+            ..Default::default()
+        };
+        let rendered = knowledge_body(&task, &mut view, 80);
+        let text = text_content(&rendered);
+        assert!(text.contains("▶ Query 1 · 1 record — Explain the old parser behavior"));
+        assert!(!text.contains("Old parser constraint"));
+        assert!(text.contains("▼ Query 2 · 2 records — Show the new parser requirement"));
+        assert!(text.contains("[Requirement] New parser requirement"));
+        assert!(text.contains("Output must stay deterministic."));
+        assert!(text.contains("via · current inventory"));
+        assert!(text.contains("https://moosedev.dev/kg/Requirement/new"));
+        assert!(text.contains("Model search 1 · 1 — parser lessons"));
+        assert!(text.contains("[Lesson] Parser ordering lesson"));
+        assert_eq!(view.knowledge_selected, Some(1));
+        assert!(view.knowledge_collapsed.contains(&0));
+        assert!(!view.knowledge_collapsed.contains(&1));
+        assert!(rendered
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| {
+                span.content.contains("Show the new parser requirement")
+                    && span.style.fg == Some(Color::Yellow)
+                    && span.style.add_modifier.contains(Modifier::BOLD)
+            }));
+    }
+
+    #[test]
+    fn knowledge_headers_toggle_by_wrapped_mouse_hit_and_alt_navigation() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.knowledge_turns = [
+            (0, "A deliberately long first human query that wraps"),
+            (1, "A deliberately long newest human query that wraps"),
+        ]
+        .into_iter()
+        .map(|(sequence, query)| super::super::runner::KnowledgeTurn {
+            sequence,
+            query: query.into(),
+            retrieval_topic: query.into(),
+            revision: "accepted-v1".into(),
+            records: vec![],
+            files: vec![],
+            searches: vec![],
+        })
+        .collect();
+        let mut view = View {
+            tab: 3,
+            ..Default::default()
+        };
+        let _ = knowledge_body(&task, &mut view, 18);
+        let first = view.knowledge_headers[0];
+        assert!(first.end - first.start > 1, "header should wrap");
+        view.knowledge_area = Rect::new(1, 2, 18, 12);
+        let click_row = view.knowledge_area.y + first.start as u16 + 1;
+        let clicked = mouse(
+            &mut view,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: click_row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(clicked);
+        assert!(!view.knowledge_collapsed.contains(&0));
+        assert!(!view.knowledge_collapsed.contains(&1));
+
+        key(&mut view, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(view.knowledge_selected, Some(0));
+        key(&mut view, KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert!(view.knowledge_collapsed.contains(&0));
+        key(&mut view, KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert!(!view.knowledge_collapsed.contains(&0));
     }
     #[test]
     fn link_review_renders_derived_bindings_with_predicate_and_basis() {
@@ -1303,7 +1919,7 @@ mod tests {
             }
         }))
         .unwrap());
-        let text = text_content(&body(&snapshot_for(task.clone()), &knowledge_view()));
+        let text = text_content(&body(&snapshot_for(task.clone()), &review_view()));
         assert!(text.contains("Code associations · link-1\n"));
         assert!(text.contains("Constraint · https://moosedev.dev/kg/Constraint/preserve-names\nlabels.py · render_name (function) · line 5\n-constrains-> plan obligation\n"));
         assert!(text.contains("Skipped: Local 2 · Parameter 1\n"));
@@ -1312,7 +1928,7 @@ mod tests {
         assert!(!text.contains("Derivation detail unavailable"));
         // A journal whose batch moved on keeps the plain binding list.
         task.symbolic.as_mut().unwrap().association = None;
-        let text = text_content(&body(&snapshot_for(task), &knowledge_view()));
+        let text = text_content(&body(&snapshot_for(task), &review_view()));
         assert!(text.contains("labels.py · labels/render_name().\n"));
         assert!(text.contains("Derivation detail unavailable\n"));
     }
@@ -1341,7 +1957,7 @@ mod tests {
             }
         }))
         .unwrap());
-        let text = text_content(&body(&snapshot_for(task), &knowledge_view()));
+        let text = text_content(&body(&snapshot_for(task), &review_view()));
         assert!(text.contains("REVIEW 1\nFinal checkpoint\n\nCapture note\nNames are stripped before comparison.\nTyping: symbolic with sensor · sensor added one proposal\n"));
         assert!(text.contains("SymbolicDecision · ArchitecturalDecision · Trim label whitespace — restates https://moosedev.dev/kg/Requirement/label-intent; no record proposed\n"));
         assert!(text.contains("SymbolicLesson · Lesson · Strip before comparing — refines https://moosedev.dev/kg/Constraint/preserve-names (0.63)\n"));
@@ -1392,6 +2008,21 @@ mod tests {
             key(&mut view, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(Command::Interrupt)
         ));
+    }
+    #[test]
+    fn tab_navigation_includes_knowledge_and_review() {
+        let mut view = View::default();
+        for expected in 1..=5 {
+            key(&mut view, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(view.tab, expected);
+        }
+        key(&mut view, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(view.tab, 0);
+        key(
+            &mut view,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        );
+        assert_eq!(view.tab, 5);
     }
     #[test]
     fn oversized_input_stays_in_composer_for_correction() {

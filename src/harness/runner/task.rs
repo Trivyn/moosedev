@@ -31,6 +31,50 @@ pub struct Plan {
 pub struct Event {
     pub message: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeFileDossier {
+    pub file: String,
+    pub dossier: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeContextSnapshot {
+    pub topic: String,
+    pub revision: String,
+    pub context: String,
+    pub files: Vec<KnowledgeFileDossier>,
+    pub governing_constraints: Vec<GoverningConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ContextRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeSearchResult {
+    pub query: String,
+    pub revision: String,
+    pub context: String,
+    pub evidence_iris: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ContextRecord>,
+}
+
+/// The graph evidence retrieved while one exact human query was active.
+/// Sequence, rather than query text, is the stable identity: a repeated human
+/// message starts a distinct turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeTurn {
+    pub sequence: u64,
+    pub query: String,
+    pub retrieval_topic: String,
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ContextRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub searches: Vec<KnowledgeSearchResult>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
     pub command: String,
@@ -83,6 +127,8 @@ pub struct Task {
     #[serde(default)]
     pub(super) intent_refresh_pending: Vec<String>,
     pub events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_events: Vec<usize>,
     pub pending_capture: Option<CaptureResponse>,
     pub capture_request: Option<CaptureRequest>,
     pub capture_reason: Option<String>,
@@ -103,6 +149,17 @@ pub struct Task {
     pub token_usage: UsageLedger,
     pub last_response: String,
     pub knowledge_revision: String,
+    #[serde(default)]
+    pub knowledge_turn_sequence: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_turns: Vec<KnowledgeTurn>,
+    /// Legacy raw snapshot retained for schema-2 journal compatibility. New
+    /// Knowledge rendering prefers `knowledge_turns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_context: Option<KnowledgeContextSnapshot>,
+    /// Legacy flat search history retained for schema-2 journal compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_searches: Vec<KnowledgeSearchResult>,
     pub read_files: Vec<String>,
     pub check_results: Vec<CheckResult>,
     pub root: PathBuf,
@@ -214,6 +271,13 @@ impl Runner {
             let _ = progress.send(Progress::Status(bounded(&message, 2000)));
         }
         self.task.events.push(Event { message });
+    }
+
+    pub(super) fn knowledge_event(&mut self, message: impl Into<String>) {
+        self.task.knowledge_events.push(self.task.events.len());
+        self.task.events.push(Event {
+            message: message.into(),
+        });
     }
 
     pub(super) fn persist(&self) -> Result<()> {

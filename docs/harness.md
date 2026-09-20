@@ -166,12 +166,21 @@ turns use a green `YOU` label, while assistant turns use a cyan `🫎 MOOSEDev`
 label and render common Markdown structures with terminal-native styling. System,
 activity, and human text remain literal.
 
-Use `/approve` to approve the displayed plan or exact policy-gated edit. `/review`
-opens outstanding knowledge; `/accept NUMBER` or `/reject NUMBER` reviews an
+Use `/approve` to approve the displayed plan or exact policy-gated edit. The
+Knowledge tab shows chronological graph context grouped by the exact human query
+that caused it, without adding retrieval payloads to Conversation. Each query
+contains typed record cards (kind, title, full supplied claim, provenance, and
+IRI), with model-requested graph searches nested beneath it. The newest query
+opens by default and older queries collapse. Click a wrapped query header to
+toggle it, or use Alt-Up/Down to select a query and Alt-Left/Right to collapse or
+expand it; expanded sections are independent. The Review tab holds derived
+obligations, verification, and pending knowledge operations.
+`/review` opens outstanding knowledge; `/accept NUMBER` or `/reject NUMBER` reviews an
 operation, and omitting the number reviews all displayed operations.
 `/no-knowledge` confirms a consolidated no-change assessment. Tab switches views;
 the mouse wheel scrolls one line at a time within the current pane, while Page
-Up/Down and Alt-Up/Down provide keyboard scrolling. `/help` lists the controls.
+Up/Down provides keyboard scrolling (Alt-Up/Down selects queries in Knowledge).
+`/help` lists the controls.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`
 begins a conversation. `/resume` lists saved conversations; `/resume ID` opens one.

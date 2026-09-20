@@ -493,6 +493,19 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
     // Nothing is linked, so the full context falls back to topic evidence.
     assert!(full.context.contains("\nTopic evidence (fallback;"));
     assert!(!full.context.contains("Linked evidence"));
+    let full_record = full
+        .records
+        .iter()
+        .find(|record| record.iri == existing)
+        .unwrap();
+    assert_eq!(full_record.kind, "Constraint");
+    assert!(full_record
+        .claim
+        .contains("Established Established coding constraint"));
+    assert_eq!(
+        full_record.provenance,
+        vec!["current inventory", "topic fallback"]
+    );
 
     let evidence =
         daemon::context_snapshot(&state, &request("coding constraint", true, vec![])).unwrap();
@@ -513,6 +526,13 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
     assert!(!evidence.context.contains("Recall:"));
     assert!(evidence.files.is_empty());
     assert_eq!(evidence.revision, full.revision);
+    assert_eq!(evidence.records.len(), 1);
+    assert_eq!(evidence.records[0].iri, existing);
+    assert_eq!(evidence.records[0].kind, "Constraint");
+    assert_eq!(evidence.records[0].provenance, vec!["topic match"]);
+    assert!(evidence.records[0]
+        .claim
+        .contains("Established Established coding constraint"));
 
     let unmatched = daemon::context_snapshot(
         &state,
@@ -520,6 +540,7 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
     )
     .unwrap();
     assert!(unmatched.evidence_iris.is_empty());
+    assert!(unmatched.records.is_empty());
     assert!(unmatched.context.is_empty(), "{}", unmatched.context);
     assert!(daemon::context_snapshot(
         &state,

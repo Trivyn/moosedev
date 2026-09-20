@@ -221,7 +221,7 @@ impl Runner {
                         knowledge.context.trim()
                     ),
                 };
-                self.event(self.task.last_response.clone());
+                self.knowledge_event(self.task.last_response.clone());
             }
             Step::Plan {
                 summary,

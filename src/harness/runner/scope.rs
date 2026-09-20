@@ -343,6 +343,7 @@ mod tests {
             revision: String::new(),
             context: String::new(),
             files: vec![],
+            records: vec![],
             evidence_iris: vec![],
             capture_contracts,
             intent_contracts: vec![2],

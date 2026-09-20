@@ -39,17 +39,28 @@ pub fn context_snapshot(
     state.try_ensure_enriched()?;
     let mut context = String::new();
     let mut governing_constraints = Vec::new();
+    let mut context_records = Vec::new();
+    let mut record_indexes = std::collections::BTreeMap::new();
+    let mut file_record_iris = Vec::new();
     let evidence_iris = if request.evidence_only {
         // An evidence-only request (the model's search) returns just the
         // topic's records with their complete claims.
         let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
         render_topic_records(state, &mut context, &records);
+        for record in &records {
+            merge_context_record(
+                &mut context_records,
+                &mut record_indexes,
+                context_record(state, record, true, "topic match"),
+            );
+        }
         records.into_iter().map(|record| record.iri).collect()
     } else {
         // Linked evidence leads (AD 85da8700): the walk from the files' code
         // replaces similarity-ranked topic recall, which remains only as a
         // fallback when nothing is linked beyond what the dossiers print.
         let linked = graph::linked_evidence(state, &request.files)?;
+        file_record_iris.extend(linked.excluded.iter().cloned());
         governing_constraints = graph::governing_constraints(&linked)
             .into_iter()
             .map(|rule| GoverningConstraint {
@@ -59,6 +70,32 @@ pub fn context_snapshot(
                 claim: rule.claim,
             })
             .collect();
+        for record in &linked.records {
+            merge_context_record(
+                &mut context_records,
+                &mut record_indexes,
+                ContextRecord {
+                    iri: record.iri.clone(),
+                    kind: record.kind.clone(),
+                    title: record.label.clone(),
+                    claim: record.claim.clone(),
+                    provenance: vec![record.hop.via(&record.source)],
+                },
+            );
+        }
+        for rule in &governing_constraints {
+            merge_context_record(
+                &mut context_records,
+                &mut record_indexes,
+                ContextRecord {
+                    iri: rule.iri.clone(),
+                    kind: "Constraint".into(),
+                    title: rule.label.clone(),
+                    claim: rule.claim.clone(),
+                    provenance: vec![rule.via.clone()],
+                },
+            );
+        }
         // The record-name inventory stays only while the walk supplies no
         // rules and no linked evidence, as on the first request with no files.
         if linked.records.is_empty() && governing_constraints.is_empty() {
@@ -68,6 +105,11 @@ pub fn context_snapshot(
                     "[{}] {} ({})\n",
                     record.kind, record.label, record.iri
                 ));
+                merge_context_record(
+                    &mut context_records,
+                    &mut record_indexes,
+                    context_record(state, &record, false, "current inventory"),
+                );
             }
         } else {
             context.push_str(&format!("Recall: {RECALL}\n"));
@@ -80,6 +122,13 @@ pub fn context_snapshot(
                     .collect();
             context.push_str("\nTopic evidence (fallback; nothing is linked beyond the file dossiers; complete claims; up to six relationships per record):\n");
             render_topic_records(state, &mut context, &fallback);
+            for record in &fallback {
+                merge_context_record(
+                    &mut context_records,
+                    &mut record_indexes,
+                    context_record(state, record, true, "topic fallback"),
+                );
+            }
         } else {
             context.push_str("\nLinked evidence (records linked to the files' code and components; complete claims):\n");
             context.push_str(&graph::render_linked_evidence(&graph::with_rule_pointers(
@@ -132,6 +181,17 @@ pub fn context_snapshot(
             policy,
         });
     }
+    if !request.evidence_only {
+        for iri in &file_record_iris {
+            if let Some(record) = graph::context_item_for_iri(state, iri, false) {
+                merge_context_record(
+                    &mut context_records,
+                    &mut record_indexes,
+                    context_record(state, &record, true, "file dossier"),
+                );
+            }
+        }
+    }
     // The explicit notice AD 21855a2a requires. Without it a shorter dossier reads as a
     // smaller graph — the same misreading that had two models report an empty graph.
     if shown.claims_withheld() > 0 {
@@ -144,6 +204,27 @@ pub fn context_snapshot(
             shown.claims_withheld_by_kind()
         ));
     }
+    // The model-facing push keeps its established claim bounds. The Knowledge
+    // view is an audit surface, so every selected non-inventory record gets its
+    // complete claim even when the prompt rendered only a pointer.
+    for record in &mut context_records {
+        if record
+            .provenance
+            .iter()
+            .any(|source| source != "current inventory")
+        {
+            if let Some(item) = graph::context_item_for_iri(state, &record.iri, false) {
+                record.claim.clear();
+                graph::render_styled_claim_body(
+                    state,
+                    &item,
+                    graph::ClaimStyle::Full,
+                    &mut record.claim,
+                );
+                record.claim = record.claim.trim().to_owned();
+            }
+        }
+    }
     let revision = accepted_revision(state)?;
     anyhow::ensure!(
         generation == state.project_write_generation(),
@@ -154,11 +235,52 @@ pub fn context_snapshot(
         revision,
         context,
         files,
+        records: context_records,
         evidence_iris,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
         governing_constraints,
     })
+}
+
+fn context_record(
+    state: &AppState,
+    record: &graph::ContextItem,
+    include_claim: bool,
+    provenance: &str,
+) -> ContextRecord {
+    let mut claim = String::new();
+    if include_claim {
+        graph::render_styled_claim_body(state, record, graph::ClaimStyle::Full, &mut claim);
+    }
+    ContextRecord {
+        iri: record.iri.clone(),
+        kind: record.kind.clone(),
+        title: record.label.clone(),
+        claim: claim.trim().to_owned(),
+        provenance: vec![provenance.to_owned()],
+    }
+}
+
+fn merge_context_record(
+    records: &mut Vec<ContextRecord>,
+    indexes: &mut std::collections::BTreeMap<String, usize>,
+    incoming: ContextRecord,
+) {
+    if let Some(index) = indexes.get(&incoming.iri).copied() {
+        let current = &mut records[index];
+        if current.claim.is_empty() && !incoming.claim.is_empty() {
+            current.claim = incoming.claim;
+        }
+        for source in incoming.provenance {
+            if !current.provenance.contains(&source) {
+                current.provenance.push(source);
+            }
+        }
+        return;
+    }
+    indexes.insert(incoming.iri.clone(), records.len());
+    records.push(incoming);
 }
 
 /// How recall reaches claims, after the inventory sentence when it is listed.

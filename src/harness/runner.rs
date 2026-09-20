@@ -45,7 +45,8 @@ pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
 pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
 pub use task::{
-    CheckResult, Event, Mode, PendingEdit, Phase, Plan, ReviewItem, StandingGuidance, Task,
+    CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier, KnowledgeSearchResult,
+    KnowledgeTurn, Mode, PendingEdit, Phase, Plan, ReviewItem, StandingGuidance, Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;
@@ -157,6 +158,7 @@ impl Runner {
             pending_intent_links: None,
             intent_refresh_pending: vec![],
             events: vec![],
+            knowledge_events: vec![],
             pending_capture: None,
             capture_request: None,
             capture_reason: None,
@@ -169,6 +171,10 @@ impl Runner {
             token_usage: UsageLedger::new(&journal),
             last_response: String::new(),
             knowledge_revision: String::new(),
+            knowledge_turn_sequence: 0,
+            knowledge_turns: Vec::new(),
+            knowledge_context: None,
+            knowledge_searches: Vec::new(),
             read_files: vec![],
             check_results: vec![],
             root,

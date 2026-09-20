@@ -196,11 +196,32 @@ impl Conversation {
     }
     fn sync_task(&mut self, task: &Task) {
         let seen = *self.seen_events.get(&task.id).unwrap_or(&0);
-        for event in task.events.iter().skip(seen) {
-            self.push("activity", event.message.clone());
+        for (index, event) in task.events.iter().enumerate().skip(seen) {
+            if transcript_role(index, &task.knowledge_events).is_some() {
+                self.push("activity", event.message.clone());
+            }
         }
         self.seen_events.insert(task.id.clone(), task.events.len());
     }
+}
+
+fn transcript_role(index: usize, knowledge_events: &[usize]) -> Option<&'static str> {
+    (!knowledge_events.contains(&index)).then_some("activity")
+}
+
+fn should_append_last_response(
+    last_response: &str,
+    prior_response: &str,
+    phase: Phase,
+    outcome_ok: bool,
+    interrupted: bool,
+    searched_knowledge: bool,
+) -> bool {
+    outcome_ok
+        && !interrupted
+        && !searched_knowledge
+        && !last_response.is_empty()
+        && (last_response != prior_response || phase == Phase::AwaitingInput)
 }
 
 #[derive(Debug)]
@@ -623,6 +644,7 @@ impl Controller {
         // interrupts generation/commands before cancel reconciles its durable intent.
         let mut runner = self.runner.take().unwrap();
         let prior_response = runner.task.last_response.clone();
+        let prior_knowledge_events = runner.task.knowledge_events.len();
         self.active_snapshot = Some(runner.task.clone());
         let mut quit = false;
         let result = {
@@ -676,6 +698,7 @@ impl Controller {
             None => runner.cancel().await,
         };
         self.conversation.sync_task(&runner.task);
+        let searched_knowledge = runner.task.knowledge_events.len() > prior_knowledge_events;
         let live_assistant = self.live.lock().unwrap().assistant.clone();
         if !live_assistant.is_empty() {
             let suffix = assistant_suffix(
@@ -685,12 +708,14 @@ impl Controller {
             );
             self.conversation
                 .push("assistant", format!("{live_assistant}{suffix}"));
-        } else if outcome.is_ok()
-            && !interrupted
-            && !runner.task.last_response.is_empty()
-            && (runner.task.last_response != prior_response
-                || runner.task.phase == Phase::AwaitingInput)
-        {
+        } else if should_append_last_response(
+            &runner.task.last_response,
+            &prior_response,
+            runner.task.phase,
+            outcome.is_ok(),
+            interrupted,
+            searched_knowledge,
+        ) {
             self.conversation
                 .push("assistant", runner.task.last_response.clone());
         }
@@ -699,6 +724,7 @@ impl Controller {
         // the same answer to a later user question still deserves a visible turn.
         if outcome.is_ok()
             && !interrupted
+            && !searched_knowledge
             && runner.task.phase == Phase::AwaitingInput
             && !live_assistant.is_empty()
             && !runner.task.last_response.is_empty()
@@ -992,6 +1018,31 @@ mod tests {
         assert!(conversation.context().len() <= 12_000);
         assert_eq!(conversation.messages.len(), 100);
         assert!(conversation.context().contains("99 "));
+    }
+    #[test]
+    fn knowledge_events_stay_out_of_the_conversation_transcript() {
+        assert_eq!(transcript_role(3, &[4]), Some("activity"));
+        assert_eq!(transcript_role(4, &[4]), None);
+        assert_eq!(transcript_role(0, &[]), Some("activity"));
+    }
+    #[test]
+    fn knowledge_search_results_are_not_promoted_to_assistant_turns() {
+        assert!(!should_append_last_response(
+            "Full accepted graph context",
+            "",
+            Phase::Planning,
+            true,
+            false,
+            true,
+        ));
+        assert!(should_append_last_response(
+            "A user-facing answer",
+            "",
+            Phase::AwaitingInput,
+            true,
+            false,
+            false,
+        ));
     }
     #[test]
     fn pending_and_current_guidance_are_not_repeated_in_history() {

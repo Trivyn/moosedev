@@ -1592,6 +1592,7 @@ async fn interactive_message_delivery_is_idempotent_after_restart() {
         .submit_message_once(&message_id, message.into())
         .await
         .unwrap();
+    assert_eq!(runner.task.knowledge_turn_sequence, 1);
     let task_id = runner.task.id.clone();
     let events = runner.task.events.len();
     drop(runner);
@@ -1600,6 +1601,7 @@ async fn interactive_message_delivery_is_idempotent_after_restart() {
         .submit_message_once(&message_id, message.into())
         .await
         .unwrap();
+    assert_eq!(runner.task.knowledge_turn_sequence, 1);
     assert_eq!(runner.task.events.len(), events);
     assert_eq!(
         runner
@@ -2414,6 +2416,16 @@ async fn search_returns_accepted_knowledge_before_repository_matches() {
         intent_details(&runner, "knowledge_search"),
         vec!["1 records, 1 repository matches: original"]
     );
+    assert_eq!(runner.task.knowledge_searches.len(), 1);
+    assert_eq!(runner.task.knowledge_searches[0].query, "original");
+    assert_eq!(runner.task.knowledge_searches[0].evidence_iris.len(), 1);
+    assert!(runner.task.knowledge_searches[0]
+        .context
+        .contains("Never rename the original marker."));
+    assert_eq!(
+        runner.task.knowledge_events,
+        vec![runner.task.events.len() - 1]
+    );
 }
 
 #[tokio::test]
@@ -2438,4 +2450,19 @@ async fn search_with_no_knowledge_match_returns_repository_matches_only() {
             "0 records, 0 repository matches: zz-absent"
         ]
     );
+    assert_eq!(
+        runner
+            .task
+            .knowledge_searches
+            .iter()
+            .map(|search| search.query.as_str())
+            .collect::<Vec<_>>(),
+        ["original", "zz-absent"]
+    );
+    assert!(runner
+        .task
+        .knowledge_searches
+        .iter()
+        .all(|search| search.context.is_empty() && search.evidence_iris.is_empty()));
+    assert_eq!(runner.task.knowledge_events.len(), 2);
 }

@@ -35,6 +35,22 @@ pub struct GoverningConstraint {
     pub via: String,
 }
 
+/// A typed graph record selected for one harness context response. This is the
+/// human-facing representation; `ContextResponse::context` remains the exact
+/// model-facing prompt text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRecord {
+    pub iri: String,
+    pub kind: String,
+    pub title: String,
+    /// Complete claim text when this retrieval supplied it. Inventory-only
+    /// entries deliberately leave this empty rather than implying a claim.
+    pub claim: String,
+    /// Deterministic descriptions of how this retrieval selected the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextResponse {
     pub project_root: String,
@@ -42,6 +58,10 @@ pub struct ContextResponse {
     pub revision: String,
     pub context: String,
     pub files: Vec<FileContext>,
+    /// Typed records for the Knowledge view. This is additive metadata and is
+    /// never substituted for the model-facing `context` string.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ContextRecord>,
     /// IRIs of the records an evidence-only request returned, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_iris: Vec<String>,
