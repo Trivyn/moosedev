@@ -227,8 +227,17 @@ fn trailing_prefix_decl(text: &str) -> Option<String> {
 fn store_vocabulary(store: &Store) -> anyhow::Result<std::collections::HashSet<String>> {
     let mut terms = std::collections::HashSet::new();
     for q in [
-        "SELECT DISTINCT ?t WHERE { ?s ?t ?o }",
-        "SELECT DISTINCT ?t WHERE { ?s a ?t }",
+        "SELECT DISTINCT ?t WHERE { ?s ?t ?o }", // predicates
+        "SELECT DISTINCT ?t WHERE { ?s a ?t }",  // classes
+        // Subjects and IRI objects, or every RECORD iri a query names is reported as absent.
+        // Record IRIs are subjects, so scanning only predicates and classes made the claim
+        // "does not occur anywhere in this graph" structurally guaranteed to be wrong about
+        // them: a query for a record that exists, returning empty for any other reason, was
+        // told the record does not exist. That is this diagnostic causing the failure it was
+        // written to prevent (Lesson ea5e5f24 — models concluding a graph of 74 Lessons held
+        // none). Four scans instead of two, and only on an already-empty result.
+        "SELECT DISTINCT ?t WHERE { ?t ?p ?o }",
+        "SELECT DISTINCT ?t WHERE { ?s ?p ?t }",
     ] {
         let mut prepared = SparqlEvaluator::new().parse_query(q)?;
         if prepared.dataset().is_default_dataset() {
@@ -301,6 +310,29 @@ mod tests {
                 .unwrap();
         }
         store
+    }
+
+    /// A record IRI that EXISTS must never be reported as absent. `store_vocabulary` once
+    /// scanned only predicates and classes; records are SUBJECTS, so every record a query
+    /// named was declared "not in this graph", and a query returning empty for any other
+    /// reason blamed the record instead of the real cause. That is this diagnostic causing
+    /// the misreading it was written to prevent (Lesson ea5e5f24).
+    #[test]
+    fn an_existing_record_is_not_reported_as_unknown() {
+        let empty = r#"{"results":{"bindings":[]}}"#;
+        let rec = "https://moosedev.dev/kg/Constraint/c1"; // the subject store() inserts
+
+        // Empty because the PREDICATE is absent, not the record.
+        let q = format!("SELECT ?d WHERE {{ <{rec}> <{ARCH}hasDescription> ?d }}");
+        let note = explain_empty_result(&store(), &q, empty).expect("a note");
+        assert!(!note.contains(rec), "the record EXISTS and must not be named:\n{note}");
+        assert!(note.contains("hasDescription"), "name the absent predicate:\n{note}");
+
+        // A record that genuinely is absent must still be named.
+        let gone = "https://moosedev.dev/kg/Constraint/nope";
+        let q2 = format!("SELECT ?t WHERE {{ <{gone}> <{ARCH}hasLifecycleStatus> ?t }}");
+        let note2 = explain_empty_result(&store(), &q2, empty).expect("a note");
+        assert!(note2.contains(gone), "an absent record must be named:\n{note2}");
     }
 
     /// The exact failure from the floor study: the tool's own shapes-GRAPH IRI used as a
