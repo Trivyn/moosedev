@@ -540,7 +540,7 @@ def run_agent(cmd, cwd, timeout, watch=None):
 
 def parse_events(stdout: str) -> dict:
     events = [json.loads(l) for l in stdout.splitlines() if l.strip().startswith("{")]
-    agent_in = agent_out = steps = 0
+    agent_in = agent_out = agent_reasoning = steps = 0
     tools, texts = [], []
     nlq_p = nlq_c = 0
     for e in events:
@@ -550,6 +550,12 @@ def parse_events(stdout: str) -> dict:
             steps += 1
             agent_in += p["tokens"].get("input", 0)
             agent_out += p["tokens"].get("output", 0)
+            # opencode reports reasoning SEPARATELY from output, and dropping it made the one
+            # lever we cared about invisible: Qwen3.8-27B at 5-bit/xhigh vs 8-bit/thinking-off
+            # showed 2094 vs 2120 median completion tokens, which looked like proof reasoning
+            # had not changed. It could not have shown a change -- neither run counted a single
+            # reasoning token. Kept separate from agent_out so the two eras stay comparable.
+            agent_reasoning += p["tokens"].get("reasoning", 0)
         elif t == "tool_use":
             tools.append(p.get("tool"))
             out = (p.get("state") or {}).get("output", "") or ""
@@ -561,7 +567,8 @@ def parse_events(stdout: str) -> dict:
             if tx.strip():
                 texts.append(tx)
     return {
-        "agent_in": agent_in, "agent_out": agent_out, "steps": steps, "tools": tools,
+        "agent_in": agent_in, "agent_out": agent_out, "agent_reasoning": agent_reasoning,
+        "steps": steps, "tools": tools,
         "nlq_prompt": nlq_p, "nlq_completion": nlq_c, "final_text": "\n".join(texts),
     }
 
@@ -778,6 +785,7 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         "score": g["score"], "passed": g["passed"], "metrics": metrics,
         "tokens": {
             "agent_prompt": ev["agent_in"], "agent_completion": ev["agent_out"],
+            "agent_reasoning": ev.get("agent_reasoning", 0),
             "internal_prompt": ev["nlq_prompt"], "internal_completion": ev["nlq_completion"],
         },
         # thrashing signals (collected for BOTH Q&A and code tasks): step count, the raw tool-call
