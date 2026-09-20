@@ -167,7 +167,7 @@ Use `/approve` to approve the displayed plan or exact policy-gated edit. `/revie
 opens outstanding knowledge; `/accept NUMBER` or `/reject NUMBER` reviews an
 operation, and omitting the number reviews all displayed operations.
 `/no-knowledge` confirms a consolidated no-change assessment. Tab switches views;
-Page Up/Down scroll. `/help` lists the controls.
+the mouse wheel, Page Up/Down, and Alt-Up/Down scroll. `/help` lists the controls.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`
 begins a conversation. `/resume` lists saved conversations; `/resume ID` opens one.

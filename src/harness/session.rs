@@ -945,7 +945,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan or exact edit\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Alt-Enter inserts a newline · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · PageUp/PageDown and Alt-Up/Down scroll.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan or exact edit\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Alt-Enter inserts a newline · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll.";
 
 #[cfg(test)]
 mod tests {

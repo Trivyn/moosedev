@@ -118,7 +118,11 @@ pub fn explain_parse_error(query: &str) -> Option<String> {
         "The query uses {} that it never declares: {}. Add a PREFIX line for each, or write \
          the term as a full IRI in angle brackets. This graph's real vocabulary is:\n  \
          SELECT DISTINCT ?p WHERE {{ ?s ?p ?o }}\n  SELECT DISTINCT ?c WHERE {{ ?s a ?c }}",
-        if undeclared.len() == 1 { "a prefix" } else { "prefixes" },
+        if undeclared.len() == 1 {
+            "a prefix"
+        } else {
+            "prefixes"
+        },
         names.join(", ")
     ))
 }
@@ -194,7 +198,10 @@ fn scan_query(query: &str) -> (Vec<String>, std::collections::BTreeSet<String>) 
         let Some((prefix, local)) = token.split_once(':') else {
             continue;
         };
-        if local.is_empty() || prefix.is_empty() || prefix.starts_with('?') || prefix.starts_with('$')
+        if local.is_empty()
+            || prefix.is_empty()
+            || prefix.starts_with('?')
+            || prefix.starts_with('$')
         {
             continue;
         }
@@ -257,9 +264,8 @@ fn store_vocabulary(store: &Store) -> anyhow::Result<std::collections::HashSet<S
 /// Terms whose local name matches the unknown term's, exactly or by containment —
 /// `status` finds `hasLifecycleStatus`, which is the miss that actually happens.
 fn suggest_by_local_name(unknown: &str, used: &std::collections::HashSet<String>) -> Vec<String> {
-    let local = |iri: &str| -> String {
-        iri.rsplit(['#', '/']).next().unwrap_or(iri).to_lowercase()
-    };
+    let local =
+        |iri: &str| -> String { iri.rsplit(['#', '/']).next().unwrap_or(iri).to_lowercase() };
     let needle = local(unknown);
     if needle.is_empty() {
         return Vec::new();
@@ -325,14 +331,23 @@ mod tests {
         // Empty because the PREDICATE is absent, not the record.
         let q = format!("SELECT ?d WHERE {{ <{rec}> <{ARCH}hasDescription> ?d }}");
         let note = explain_empty_result(&store(), &q, empty).expect("a note");
-        assert!(!note.contains(rec), "the record EXISTS and must not be named:\n{note}");
-        assert!(note.contains("hasDescription"), "name the absent predicate:\n{note}");
+        assert!(
+            !note.contains(rec),
+            "the record EXISTS and must not be named:\n{note}"
+        );
+        assert!(
+            note.contains("hasDescription"),
+            "name the absent predicate:\n{note}"
+        );
 
         // A record that genuinely is absent must still be named.
         let gone = "https://moosedev.dev/kg/Constraint/nope";
         let q2 = format!("SELECT ?t WHERE {{ <{gone}> <{ARCH}hasLifecycleStatus> ?t }}");
         let note2 = explain_empty_result(&store(), &q2, empty).expect("a note");
-        assert!(note2.contains(gone), "an absent record must be named:\n{note2}");
+        assert!(
+            note2.contains(gone),
+            "an absent record must be named:\n{note2}"
+        );
     }
 
     /// The exact failure from the floor study: the tool's own shapes-GRAPH IRI used as a
@@ -346,12 +361,18 @@ mod tests {
         );
         let note = explain_empty_result(&store(), &query, r#"{"results":{"bindings":[]}}"#)
             .expect("an empty result over unknown terms must be explained");
-        assert!(note.contains(&format!("{SHAPES_GRAPH}Constraint")), "{note}");
+        assert!(
+            note.contains(&format!("{SHAPES_GRAPH}Constraint")),
+            "{note}"
+        );
         assert!(note.contains(&format!("{SHAPES_GRAPH}status")), "{note}");
         // Local-name matching carries the agent to the real namespace without this code
         // ever naming it (Constraint 19bb4d8a).
         assert!(note.contains(&format!("{ARCH}Constraint")), "{note}");
-        assert!(note.contains(&format!("{ARCH}hasLifecycleStatus")), "{note}");
+        assert!(
+            note.contains(&format!("{ARCH}hasLifecycleStatus")),
+            "{note}"
+        );
     }
 
     /// A correct query that simply matches nothing is a real answer; adding a lecture to it
@@ -376,7 +397,9 @@ mod tests {
     /// A PREFIX declaration binds a namespace; it does not name a term to be flagged.
     #[test]
     fn prefix_declarations_are_not_terms() {
-        let terms = query_terms(&format!("PREFIX a: <{ARCH}>\nSELECT ?s WHERE {{ ?s a a:Lesson }}"));
+        let terms = query_terms(&format!(
+            "PREFIX a: <{ARCH}>\nSELECT ?s WHERE {{ ?s a a:Lesson }}"
+        ));
         assert_eq!(terms, vec![format!("{ARCH}Lesson")]);
     }
 
@@ -400,7 +423,10 @@ mod tests {
         )
         .expect("an undeclared prefix must be named");
         assert!(note.contains("rdfs:"), "{note}");
-        assert!(!note.contains("arch:"), "a DECLARED prefix is not a fault: {note}");
+        assert!(
+            !note.contains("arch:"),
+            "a DECLARED prefix is not a fault: {note}"
+        );
     }
 
     /// A syntactically broken query with every prefix declared gets no prefix advice —
@@ -408,7 +434,9 @@ mod tests {
     #[test]
     fn stays_quiet_when_every_prefix_is_declared() {
         assert!(explain_parse_error("SELECT ?s WHERE { ?s ?p ?o } WHERE {").is_none());
-        assert!(explain_parse_error("SELECT ?id WHERE { ?r <https://example.org/a#x> ?id }").is_none());
+        assert!(
+            explain_parse_error("SELECT ?id WHERE { ?r <https://example.org/a#x> ?id }").is_none()
+        );
     }
 
     /// The empty-result note must steer back to the original query, not to breadth:

@@ -300,7 +300,10 @@ fn unflipped_supersession_breaks_conformance() {
         .iter()
         .find(|v| v.kind == ViolationKind::Other("UnflippedSupersession".to_string()))
         .expect("the unflipped supersession is reported");
-    assert_eq!(drift.node, predecessor, "the PREDECESSOR is the drifted node");
+    assert_eq!(
+        drift.node, predecessor,
+        "the PREDECESSOR is the drifted node"
+    );
     assert!(
         drift.detail.contains("repair_unflipped_supersessions"),
         "the violation names its repair: {}",

@@ -6,9 +6,13 @@ use super::{
     startup::{ProviderSettings, StartupOptions},
 };
 use anyhow::Result;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -37,6 +41,7 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
 
 const MAX_RUN_STEPS: usize = 32;
+const MOUSE_SCROLL_LINES: u16 = 3;
 
 #[derive(Debug)]
 pub enum Action {
@@ -93,6 +98,7 @@ fn restore_terminal() {
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen,
             crossterm::cursor::Show
@@ -115,7 +121,12 @@ impl Screen {
         enable_raw_mode()?;
         SCREEN_ACTIVE.store(true, Ordering::SeqCst);
         let result = (|| {
-            execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+            execute!(
+                io::stdout(),
+                EnterAlternateScreen,
+                EnableBracketedPaste,
+                EnableMouseCapture
+            )?;
             Ok(Self {
                 terminal: Terminal::new(CrosstermBackend::new(io::stdout()))?,
             })
@@ -751,7 +762,7 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
     } else {
         view.notice.as_str()
     };
-    frame.render_widget(Paragraph::new(format!("{spinner} {}\nEnter send · Alt-Enter newline · Esc interrupt · /help · PageUp/PageDown scroll",visible(notice))).style(Style::default().fg(if snapshot.busy {Color::Yellow} else {Color::Cyan})),status);
+    frame.render_widget(Paragraph::new(format!("{spinner} {}\nEnter send · Alt-Enter newline · Esc interrupt · /help · Mouse wheel/PageUp/PageDown scroll",visible(notice))).style(Style::default().fg(if snapshot.busy {Color::Yellow} else {Color::Cyan})),status);
     render_composer(frame, composer, &view.composer);
 }
 
@@ -854,6 +865,21 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
     None
 }
 
+fn mouse(view: &mut View, event: MouseEvent) -> bool {
+    match event.kind {
+        MouseEventKind::ScrollUp => {
+            view.follow = false;
+            view.scroll = view.scroll.saturating_sub(MOUSE_SCROLL_LINES);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            view.scroll = view.scroll.saturating_add(MOUSE_SCROLL_LINES);
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn show(
     conversation: Conversation,
     runner: Option<Runner>,
@@ -906,15 +932,17 @@ async fn show(
                 _ = interval.tick() => {
                     view.tick += 1;
                     while event::poll(Duration::ZERO)? {
-                        dirty = true;
-                        let command = match event::read()? {
-                            Event::Key(event) => key(&mut view, event),
+                        let (command, event_dirty) = match event::read()? {
+                            Event::Key(event) => (key(&mut view, event), true),
                             Event::Paste(text) => {
                                 view.composer.insert(&text);
-                                None
+                                (None, true)
                             }
-                            _ => None,
+                            Event::Mouse(event) => (None, mouse(&mut view, event)),
+                            Event::Resize(_, _) => (None, true),
+                            _ => (None, false),
                         };
+                        dirty |= event_dirty;
                         if let Some(command) = command {
                             let quit = matches!(command, Command::Quit);
                             input.send(command).map_err(|_| anyhow::anyhow!("session controller stopped"))?;
@@ -1265,6 +1293,48 @@ mod tests {
         assert!(key(&mut view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none());
         assert_eq!(view.composer.text.len(), 16_001);
         assert!(view.notice.contains("shorten"));
+    }
+    #[test]
+    fn mouse_wheel_scrolls_content_and_pauses_following() {
+        let mut view = View {
+            scroll: 5,
+            follow: true,
+            ..View::default()
+        };
+        let event = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(mouse(&mut view, event(MouseEventKind::ScrollUp)));
+        assert_eq!(view.scroll, 2);
+        assert!(!view.follow);
+
+        assert!(mouse(&mut view, event(MouseEventKind::ScrollDown)));
+        assert_eq!(view.scroll, 5);
+        assert!(!view.follow);
+    }
+    #[test]
+    fn mouse_wheel_saturates_and_ignores_unrelated_events() {
+        let mut view = View {
+            scroll: 1,
+            follow: true,
+            ..View::default()
+        };
+        let event = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(mouse(&mut view, event(MouseEventKind::ScrollUp)));
+        assert_eq!(view.scroll, 0);
+        let state = (view.scroll, view.follow);
+        assert!(!mouse(&mut view, event(MouseEventKind::Moved)));
+        assert_eq!((view.scroll, view.follow), state);
     }
     #[test]
     fn multiline_cursor_matches_visual_wrapping_and_unicode_lines() {

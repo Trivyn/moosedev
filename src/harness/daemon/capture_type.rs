@@ -376,8 +376,13 @@ async fn type_note(
             // that is not current ratified knowledge is simply not a candidate.
             let node = oxigraph::model::NamedNode::new(iri).ok()?;
             let class = graph::require_information_record(state, &node).ok()?;
-            graph::in_working_set(&current_status(state, iri).unwrap_or_default())
-                .then(|| class.rsplit(['#', '/']).next().unwrap_or_default().to_string())
+            graph::in_working_set(&current_status(state, iri).unwrap_or_default()).then(|| {
+                class
+                    .rsplit(['#', '/'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
         });
         let scored = score_proposal(state, &request.owner_id, &proposal, thresholds)?;
         let receipt_id = format!("{}-r{index}", request.operation_id);
@@ -705,7 +710,10 @@ mod tests {
         );
         assert_eq!(derived.chosen.as_deref(), Some(REQ));
         assert_eq!(derived.reason, "asserted");
-        assert_eq!(derived.candidates_considered, 1, "the AD is not a legal target");
+        assert_eq!(
+            derived.candidates_considered, 1,
+            "the AD is not a legal target"
+        );
     }
 
     /// Two is a judgement call, so nothing is drawn — the record keeps its SHACL
@@ -743,7 +751,10 @@ mod tests {
         let derived = derive_relation(
             "isMotivatedBy",
             &["Requirement", "Constraint"],
-            &[REQ.into(), "https://moosedev.dev/kg/Requirement/gone".into()],
+            &[
+                REQ.into(),
+                "https://moosedev.dev/kg/Requirement/gone".into(),
+            ],
             kinds(&[(REQ, "Requirement")]),
         );
         assert_eq!(derived.chosen.as_deref(), Some(REQ), "{derived:?}");
@@ -759,7 +770,10 @@ mod tests {
         });
         assert_eq!(lesson.learned_from.as_deref(), Some(AD));
         assert_eq!(derived[0].predicate, "learnedFrom");
-        assert!(lesson.requirement.is_none(), "a Lesson takes no isMotivatedBy");
+        assert!(
+            lesson.requirement.is_none(),
+            "a Lesson takes no isMotivatedBy"
+        );
     }
 
     /// A plan over ungoverned files, or a runner older than the obligations
@@ -802,6 +816,9 @@ mod tests {
         // sets one.
         let mut superseding = proposal("ArchitecturalDecision");
         superseding.supersedes = Some(LESSON.into());
-        assert!(superseding.is_governing(), "guard still works for real lifecycle change");
+        assert!(
+            superseding.is_governing(),
+            "guard still works for real lifecycle change"
+        );
     }
 }
