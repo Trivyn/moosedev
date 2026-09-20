@@ -58,7 +58,11 @@ PY
 # loaded BEFORE the first cell rather than discovered at the end.
 .venv/bin/python - "${MODELS[@]}" <<'PREFLIGHT' || exit 1
 import json, sys, urllib.request
-wanted = {m.split("/", 1)[1] for m in sys.argv[1:] if "/" in m}
+# Only lmstudio/* models are served from this box. A hosted model (openrouter/*) has no
+# local presence to verify and no weights to hold, so it is exempt from this check and
+# from hold_only -- which, since the load-failure fix, would otherwise abort the campaign
+# trying to `lms load` a model that lives on someone else's GPU.
+wanted = {m.split("/", 1)[1] for m in sys.argv[1:] if m.startswith("lmstudio/")}
 # The daemon's internal NLQ model too: when it is absent every moosedev_query
 # call 400s and B2 runs with its symbolic-answer path dead, which is invisible
 # in the scores and cost a whole campaign once.
@@ -138,15 +142,43 @@ hold_only() {
     echo "!!! is loading models; continuing is how the box OOMs. Stopping."
     exit 1
   fi
+  # The quantisation cannot be pinned from the CLI -- `lms load` has no variant flag, and with
+  # two variants present `-y` documents itself as loading "the first matching model". The GUI's
+  # selected_variant governs, which is ambient state no run row used to record. So the campaign
+  # DECLARES what it expects and we verify after loading: a 5-bit and an 8-bit run of
+  # qwen/qwen3.8-27b are otherwise indistinguishable, since both answer to the same model key.
+  if [ -n "${EXPECT_QUANT:-}" ]; then
+    got=$(.venv/bin/python - "$1" <<'PYQ'
+import json, sys, urllib.request
+key = sys.argv[1]
+try:
+    d = json.loads(urllib.request.urlopen("http://localhost:1234/api/v1/models", timeout=10).read())
+    for m in d["models"]:
+        if m.get("key") == key:
+            print((m.get("quantization") or {}).get("name") or "?"); break
+    else:
+        print("?")
+except Exception:
+    print("?")
+PYQ
+)
+    if [ "$got" != "$EXPECT_QUANT" ]; then
+      echo "!!! $1 is served at '$got' but this campaign expects '$EXPECT_QUANT'."
+      echo "!!! Select the right variant in LM Studio (the CLI cannot pin it) and re-run. Stopping"
+      echo "!!! rather than recording a campaign whose rows would be indistinguishable from the other."
+      exit 1
+    fi
+    note_quant="$got"
+  fi
   resident="$1"
 }
 
 for i in $(seq 1 "$N"); do for model in "${MODELS[@]}"; do
-  hold_only "${model#lmstudio/}" || {
+  case "$model" in lmstudio/*) hold_only "${model#lmstudio/}" || {
     echo "!!! could not hold ${model#lmstudio/} — refusing to run its cells against an unloaded"
     echo "!!! model: LM Studio has JIT off, so every cell would 400 and score a plausible 0.0"
     exit 1
-  }
+  } ;; *) echo "  (hosted model — no local weights to hold)" ;; esac
   for cell in "${CELLS[@]}"; do
   arm="${cell%%:*}"; mode="${cell##*:}"
   for task in "${TASKS[@]}"; do

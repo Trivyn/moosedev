@@ -78,6 +78,39 @@ def load_task(corpus: str, task_id: str) -> dict:
     return json.loads((config.corpus_tasks_path(corpus) / f"{task_id}.json").read_text())
 
 
+def serving_regime(model: str) -> dict:
+    """What actually served this cell: quantisation, format, and the reasoning the build defaults to.
+
+    None of this was recorded until 2026-09-20, and its absence cost real work. The ladder turned
+    out to mix 4-bit, 5-bit and Q4_K_M and four different reasoning defaults, and recovering that
+    required querying a live LM Studio -- an avenue that closes the moment a model is deleted. It
+    got worse when a second quantisation of qwen/qwen3.8-27b was downloaded: both variants answer
+    to the SAME model key, so without this field a 5-bit and an 8-bit campaign are indistinguishable
+    in runs.jsonl. Best effort: a probe failure must never fail a cell.
+    """
+    provider = model.split("/", 1)[0]
+    out = {"provider": provider, "quantization": None, "format": None,
+           "reasoning_default": None, "selected_variant": None}
+    if provider != "lmstudio":
+        return out                      # hosted: the serving stack is the provider's, not ours
+    key = model.split("/", 1)[1]
+    try:
+        import urllib.request
+        base = config.LLM_BASE_URL.rsplit("/v1", 1)[0]
+        served = urllib.request.urlopen(f"{base}/api/v1/models", timeout=10).read()
+        for m in json.loads(served)["models"]:
+            if m.get("key") != key:
+                continue
+            out["quantization"] = (m.get("quantization") or {}).get("name")
+            out["format"] = m.get("format")
+            out["selected_variant"] = m.get("selected_variant")
+            out["reasoning_default"] = ((m.get("capabilities") or {}).get("reasoning") or {}).get("default")
+            break
+    except Exception as e:
+        out["probe_error"] = str(e)[:120]
+    return out
+
+
 def local_provider(model: str) -> dict:
     """Run-local provider definition for a model served by the local LM Studio.
 
@@ -740,6 +773,8 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         "hop_count": task.get("hop_count"), "arm": arm, "mode": mode, "agent_model": model,
         "backend": backend,
         "internal_nlq_model": config.NLQ_MODEL if arm == "B2" else None,
+        # The configuration that produced this number, so it never has to be reconstructed.
+        "serving": serving_regime(model),
         "score": g["score"], "passed": g["passed"], "metrics": metrics,
         "tokens": {
             "agent_prompt": ev["agent_in"], "agent_completion": ev["agent_out"],
