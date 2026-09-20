@@ -303,7 +303,7 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
             outcome["observed_error"] = observation.get("error") or event_type
         if backend in {"codex", "codex_mcp"} and event_type == "turn.completed":
             completion_seen = True
-        if backend == "opencode" and event_type == "step_finish":
+        if backend in {"opencode", "opencode_mcp"} and event_type == "step_finish":
             part = event.get("part") if isinstance(event.get("part"), dict) else {}
             completion_seen = part.get("reason") in {"stop", "end_turn"}
         if backend == "harness" and event_type == "closed":

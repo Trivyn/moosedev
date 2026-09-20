@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from bench.harness_study import config, evolution, field_check, intent, long_horizon, model_table
+from bench.harness_study import (capture_study, config, evolution, field_check, floor_study, intent,
+                                 long_horizon, model_table)
 from bench.harness_study.artifacts import canonical_json
 from bench.harness_study.scenario import MAINTENANCE
 
@@ -65,7 +66,14 @@ class SealedIdentityTests(unittest.TestCase):
         self.assertIs(field_check.ARMS, evolution.ARMS[evolution.SYMBOLIC_BASELINE_MODE])
         self.assertEqual(set(evolution.ARMS), {evolution.STAGE2_BASELINE_MODE, evolution.SYMBOLIC_BASELINE_MODE})
         self.assertIn(field_check.MODE, config.HARNESS_MODES)
-        self.assertEqual(config.HARNESS_MODES[:-2], (intent.MODE, *evolution.MODES))
+        # The sealed prefix is what must not move: the intent pilot and the
+        # evolution stages keep their order and their identities. Later study
+        # modes are appended, so this is a prefix assertion rather than a count
+        # from the end -- which silently broke when a third mode was added.
+        prefix = (intent.MODE, *evolution.MODES)
+        self.assertEqual(config.HARNESS_MODES[:len(prefix)], prefix)
+        self.assertEqual(sorted(set(config.HARNESS_MODES[len(prefix):])),
+                         sorted({field_check.MODE, floor_study.MODE, capture_study.MODE}))
 
 
 class ModelTableTests(unittest.TestCase):

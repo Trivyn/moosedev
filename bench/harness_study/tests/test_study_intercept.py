@@ -59,6 +59,34 @@ class CensusTests(unittest.TestCase):
                          "graph_tool")
         self.assertEqual(intercept.classify_harness("command", {"command": "python3 -m unittest"})[0], "command")
 
+    def test_an_mcp_call_is_knowledge_seeking_in_both_mcp_arms(self):
+        # Both MCP arms must land in one census category, or "did it consult
+        # memory before editing" would mean different things per arm.
+        category, text = intercept.classify_native("moosedev_get_relevant_context", {"topic": "fees"})
+        self.assertEqual(category, "graph_tool")
+        self.assertIn("moosedev_get_relevant_context", text)
+        self.assertIn("graph_tool", intercept.SEARCH_LIKE)
+        self.assertEqual(intercept.classify_native("read", {"filePath": "fees.py"})[0], "read")
+
+    def test_opencode_mcp_events_are_read_as_native_not_codex(self):
+        # native_actions dispatches on the backend name. Before this, the MCP arm
+        # fell through to the Codex branch and every action was dropped.
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "events.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in [
+                {"channel": "stdout", "sequence": 1, "payload": {"text": json.dumps(
+                    {"type": "tool_use", "part": {"tool": "moosedev_sparql",
+                                                  "state": {"input": {"query": "SELECT"}}}})}},
+                {"channel": "stdout", "sequence": 2, "payload": {"text": json.dumps(
+                    {"type": "tool_use", "part": {"tool": "edit",
+                                                  "state": {"input": {"filePath": "fees.py"}}}})}},
+            ]))
+            actions = intercept.native_actions(run, "opencode_mcp")
+        summary = intercept.summarize_actions([(order, category, text)
+                                               for order, category, text in actions])
+        self.assertEqual(summary["counts"], {"graph_tool": 1, "edit": 1})
+        self.assertTrue(summary["search_before_first_edit"])
+
     def test_run_census_reads_task_journals_native_events_and_skips_unsealed_runs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "evidence"

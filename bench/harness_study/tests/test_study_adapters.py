@@ -114,6 +114,47 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(server["env"]["MOOSEDEV_DATA_DIR"], str(self.workspace / ".moosedev"))
         self.assertEqual(set(parsed["mcp_servers"]), {"moosedev"})
 
+    def test_opencode_mcp_serves_the_frozen_daemon_and_never_denies_its_tools(self):
+        socket = self.runtime / "daemon.sock"
+        _, env = self.build("opencode_mcp", endpoint="http://127.0.0.1:1234/v1",
+                            daemon_exe=self.daemon, daemon_socket=socket)
+        config = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())
+        server = config["mcp"]["moosedev"]
+        self.assertEqual(set(config["mcp"]), {"moosedev"})
+        self.assertEqual(server["command"], [str(self.daemon), "--connect", str(socket)])
+        self.assertIs(server["enabled"], True)
+        self.assertEqual(server["environment"]["MOOSEDEV_NO_AUTOSPAWN"], "1")
+        self.assertEqual(server["environment"]["MOOSEDEV_SOCKET"], str(socket))
+        self.assertEqual(server["environment"]["MOOSEDEV_DATA_DIR"], str(self.workspace / ".moosedev"))
+        # The wildcard deny would otherwise cover the server's own tools, making
+        # the arm record zero memory calls -- the finding it exists to establish.
+        permission = config["permission"]
+        self.assertEqual(permission["*"], "deny")
+        for tool in adapters.MOOSEDEV_TOOLS:
+            self.assertEqual(permission[f"moosedev_{tool}"], "allow", tool)
+        self.assertIn("record_important_decision", adapters.MOOSEDEV_TOOLS)
+        # Native tool policy stays identical to the notes arm, so memory is the
+        # only difference between the two OpenCode arms.
+        # A separate runtime: _config refuses to overwrite a differing config.
+        other = self.build("opencode", endpoint="http://127.0.0.1:1234/v1",
+                           runtime=self.runtime.parent / "plain")
+        plain = json.loads(Path(other[1]["OPENCODE_CONFIG"]).read_text())
+        for key, value in plain["permission"].items():
+            self.assertEqual(permission[key], value, key)
+
+    def test_opencode_mcp_requires_an_explicit_frozen_daemon_and_socket(self):
+        base = dict(endpoint="http://127.0.0.1:1234/v1")
+        with self.assertRaises(ValueError):
+            self.build("opencode_mcp", **base)
+        with self.assertRaises(ValueError):
+            self.build("opencode_mcp", daemon_exe=self.daemon, **base)
+        with self.assertRaises(ValueError):
+            self.build("opencode_mcp", daemon_exe=self.binary,
+                       daemon_socket=self.runtime / "s", **base)
+        with self.assertRaises(ValueError):
+            self.build("opencode_mcp", daemon_exe=self.daemon,
+                       daemon_socket=Path("relative.sock"), **base)
+
     def test_no_path_or_homebrew_fallback(self):
         with self.assertRaises(ValueError):
             self.build("codex", executable=Path("codex"))
@@ -218,6 +259,24 @@ class EventTests(unittest.TestCase):
         self.assertIsNotNone(adapters.normalize_event("codex_mcp", event)["retrieval"])
         event["item"]["tool"] = "record_important_decision"
         self.assertIsNotNone(adapters.normalize_event("codex_mcp", event)["capture"])
+
+    def test_an_opencode_mcp_call_is_classified_under_every_real_spelling(self):
+        # Three spellings occur in retained traces; matching one only would report
+        # a whole backend as never touching its memory.
+        for tool in ("moosedev_record_important_decision", "mcp__moosedev__record_important_decision"):
+            event = {"type": "tool_use", "part": {"tool": tool}}
+            self.assertIsNotNone(adapters.normalize_event("opencode_mcp", event)["capture"], tool)
+        retrieval = {"type": "tool_use", "part": {"tool": "moosedev_get_relevant_context"}}
+        self.assertIsNotNone(adapters.normalize_event("opencode_mcp", retrieval)["retrieval"])
+        # A native tool of the same shape is not memory.
+        plain = adapters.normalize_event("opencode_mcp", {"type": "tool_use", "part": {"tool": "read"}})
+        self.assertIsNone(plain["capture"])
+        self.assertIsNone(plain["retrieval"])
+        self.assertIsNotNone(plain["read"])
+        # A failed capture is still an attempt, and its error is surfaced.
+        failed = adapters.normalize_event("opencode_mcp", {"type": "tool_use", "part": {
+            "tool": "moosedev_relate", "state": {"status": "error", "error": "range check refused"}}})
+        self.assertEqual(failed["error"], "range check refused")
 
     def test_opencode_observations(self):
         read = adapters.normalize_event("opencode", {"type": "tool_use", "part": {"tool": "read"}})

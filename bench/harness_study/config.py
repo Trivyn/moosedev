@@ -17,9 +17,10 @@ from .binaries import REPO, verify_binaries
 from .scenario import MAINTENANCE, list_scenarios, load_scenario, tree_manifest
 from . import intent
 from . import evolution
-from . import field_check, floor_study, model_table
+from . import capture_study, field_check, floor_study, model_table
 
-HARNESS_MODES = (intent.MODE, *evolution.MODES, field_check.MODE, floor_study.MODE)
+HARNESS_MODES = (intent.MODE, *evolution.MODES, field_check.MODE, floor_study.MODE,
+                 capture_study.MODE)
 
 
 def frozen_arms(mode):
@@ -28,6 +29,8 @@ def frozen_arms(mode):
         return field_check.ARMS
     if mode == floor_study.MODE:
         return floor_study.ARMS
+    if mode == capture_study.MODE:
+        return capture_study.ARMS
     return evolution.ARMS.get(mode)
 
 
@@ -80,6 +83,8 @@ def schedule(config):
         return field_check.schedule(config)
     if config.get("evaluation_mode") == floor_study.MODE:
         return floor_study.schedule(config)
+    if config.get("evaluation_mode") == capture_study.MODE:
+        return capture_study.schedule(config)
     if config.get("evaluation_mode") in evolution.MODES:
         stage = config["evaluation_mode"]
         scenarios = config.get("scenario_ids")
@@ -130,7 +135,7 @@ def schedule(config):
 
 def required_clients(config):
     mode = config.get("evaluation_mode")
-    if any(backend == "opencode" for backend, _, _ in frozen_arms(mode) or ()):
+    if any(backend.startswith("opencode") for backend, _, _ in frozen_arms(mode) or ()):
         return ("opencode", "lms")
     return ("lms",) if mode in ("local-harness-development", *HARNESS_MODES) else ("codex", "opencode", "lms")
 
@@ -276,6 +281,60 @@ def floor_study_config(parent, binary_manifest, study_id, tiers, scenarios, appr
                                 "evolution_design_sha256": original["evolution_design"]["sha256"]})
     if not result.get("opencode"):
         raise ValueError("floor study requires the parent configuration's opencode client path")
+    schedule(result)
+    return result
+
+
+def capture_study_config(parent, binary_manifest, study_id, tiers, scenarios, approval_path,
+                         response_policy=capture_study.RESPONSE_POLICY, repetitions=None,
+                         response_policies=None, rule=None):
+    """Derive the confirmatory capture study from a symbolic-baseline preflight.
+
+    Same descent as the floor study: it selects models and packages rather than a
+    new harness, so it reuses the parent's frozen build, and its runs are scored,
+    so that build is the sealed one for the whole campaign. It differs in adding
+    the third arm, and in admitting accumulation packages only.
+    """
+    original = parent.get("config")
+    if not parent.get("ready") or not isinstance(original, dict) or parent.get("config_sha256") != configuration_hash(original):
+        raise ValueError("capture-study configuration requires an intact successful parent preflight")
+    if original.get("evaluation_mode") != evolution.SYMBOLIC_BASELINE_MODE:
+        raise ValueError("capture-study configuration must descend from a symbolic-baseline preflight")
+    verify_approval(Path(original["gold_approval"]), config=original)
+    if not study_id.strip() or study_id == original.get("study_id"):
+        raise ValueError("capture study requires a distinct nonempty study_id")
+    build = verify_binaries(Path(binary_manifest))
+    if build["build_id"] in evolution.SEALED_SYMBOLIC_PREDECESSORS:
+        raise ValueError("capture study refuses a sealed symbolic predecessor build")
+    tiers, scenarios = list(tiers), list(scenarios)
+    design = capture_study.design_identity(tiers, scenarios, response_policy, repetitions,
+                                           response_policies, rule)
+    plan = design["payload"]["tiers"]
+    result = deepcopy(original)
+    result.pop("evolution_design", None)
+    result.update(study_id=study_id, evaluation_mode=capture_study.MODE,
+                  binary_manifest=str(Path(binary_manifest).resolve()),
+                  gold_approval=str(Path(approval_path).resolve()),
+                  tier_models=tiers, coding_models=tiers, helper_model=model_table.HELPER,
+                  local_models=model_table.config_entries([*tiers, model_table.HELPER],
+                                                          model_table.models_root(original)),
+                  scenario_ids=scenarios, intent_policies=list(capture_study.POLICIES),
+                  episode_limit=capture_study.EPISODE_LIMIT, episode_seconds=capture_study.EPISODE_SECONDS,
+                  context_tokens=capture_study.CLIENT_CONTEXT_TOKENS,
+                  generation_policy={**original.get("generation_policy", {}), "local_temperature": 0.0},
+                  harness_response_policy=response_policy,
+                  tier_repetitions={tier["tier"]: tier["repetitions"] for tier in plan},
+                  tier_response_policies={tier["tier"]: tier["harness_response_policy"] for tier in plan},
+                  capture_rule={key: design["payload"]["capture_rule"][key]
+                                for key in ("adequate_capture", "retention_margin")},
+                  evidence_byte_limit=evolution.BASELINE_EVIDENCE_BYTE_LIMIT,
+                  reject_loop_limit=evolution.BASELINE_REJECT_LOOP_LIMIT,
+                  capture_study_design=design,
+                  parent_pilot={"study_id": original["study_id"], "config_sha256": parent["config_sha256"],
+                                "build_id": parent["binaries"]["build_id"],
+                                "evolution_design_sha256": original["evolution_design"]["sha256"]})
+    if not result.get("opencode"):
+        raise ValueError("capture study requires the parent configuration's opencode client path")
     schedule(result)
     return result
 
@@ -435,7 +494,7 @@ def preflight(config, *, fingerprint=True):
             check(f"local_model_{index}", lambda model=model: fingerprint_model(model, result["lmstudio"]))
     else:
         checks.append({"check": "weight_fingerprints", "passed": False, "error": "not fingerprinted"})
-    if config.get("evaluation_mode") in (field_check.MODE, floor_study.MODE):
+    if config.get("evaluation_mode") in (field_check.MODE, floor_study.MODE, capture_study.MODE):
         check("model_table_weights", lambda: model_table.verify_fingerprints(config, result))
     check("gold_approval", lambda: verify_approval(Path(config["gold_approval"]), config=config))
     if config.get("evaluation_mode") in HARNESS_MODES:
@@ -455,8 +514,11 @@ def preflight(config, *, fingerprint=True):
             check("field_check_design", lambda: field_check.verify_config(config))
         elif config.get("evaluation_mode") == floor_study.MODE:
             check("floor_study_design", lambda: floor_study.verify_config(config))
+        elif config.get("evaluation_mode") == capture_study.MODE:
+            check("capture_study_design", lambda: capture_study.verify_config(config))
         probed = ({"scenarios": tuple(dict.fromkeys([*intent.SCENARIOS, *config["scenario_ids"]]))}
-                  if config.get("evaluation_mode") in (field_check.MODE, floor_study.MODE) else {})
+                  if config.get("evaluation_mode") in (field_check.MODE, floor_study.MODE,
+                                                       capture_study.MODE) else {})
         check("indexer_probe", lambda: probe_indexer(result["indexer"], result["binaries"], result["assets"],
               evolution_contract=evolution.postedit_association_contract(config.get("evaluation_mode")),
               **probed))
@@ -481,6 +543,18 @@ def approval_payload(reviewer, *, config=None):
                               for name in config["scenario_ids"]},
                 "intent_design": intent.design_identity(),
                 "floor_study_design": floor_study.verify_config(config)}
+    if config is not None and config.get("evaluation_mode") == capture_study.MODE:
+        schedule(config)
+        return {"schema_version": 5, "reviewer": reviewer, "approved_at": datetime.now(timezone.utc).isoformat(),
+                "scope": ("confirmatory capture-study design (ordered tiers with pinned weights and runtime "
+                          "contexts, helper, the three capture arms, accumulation scenarios, per-tier "
+                          "repetitions and response policy, episode policy and the pre-registered capture "
+                          "rule with both falsifiers) and the approved fixture hashes; results ARE scored "
+                          "and pooled within this identity; not outcomes"),
+                "scenarios": {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
+                              for name in config["scenario_ids"]},
+                "intent_design": intent.design_identity(),
+                "capture_study_design": capture_study.verify_config(config)}
     if config is not None and config.get("evaluation_mode") == field_check.MODE:
         schedule(config)
         return {"schema_version": 3, "reviewer": reviewer, "approved_at": datetime.now(timezone.utc).isoformat(),
@@ -509,7 +583,7 @@ def approval_payload(reviewer, *, config=None):
 
 def verify_approval(path, *, config=None):
     value = json.loads(path.read_text())
-    if value.get("schema_version") not in (1, 2, 3, 4) or not value.get("reviewer") or not value.get("approved_at"):
+    if value.get("schema_version") not in (1, 2, 3, 4, 5) or not value.get("reviewer") or not value.get("approved_at"):
         raise ValueError("invalid human gold approval")
     field_run = config is not None and config.get("evaluation_mode") == field_check.MODE
     if (value["schema_version"] == 3) != field_run:
@@ -517,8 +591,21 @@ def verify_approval(path, *, config=None):
     floor_run = config is not None and config.get("evaluation_mode") == floor_study.MODE
     if (value["schema_version"] == 4) != floor_run:
         raise ValueError("floor-study runs require, and only accept, a floor-study approval")
+    capture_run = config is not None and config.get("evaluation_mode") == capture_study.MODE
+    if (value["schema_version"] == 5) != capture_run:
+        raise ValueError("capture-study runs require, and only accept, a capture-study approval")
     evolution_run = config is not None and config.get("evaluation_mode") in evolution.MODES
-    if value["schema_version"] == 4:
+    if value["schema_version"] == 5:
+        if value.get("intent_design") != intent.design_identity():
+            raise ValueError("capture-study approval does not match the current intent design")
+        if value.get("capture_study_design") != capture_study.verify_config(config):
+            raise ValueError("capture-study approval does not match the current capture-study design")
+        selected = list(value.get("scenarios") or {})
+        if set(selected) != set(config["scenario_ids"]):
+            raise ValueError("capture-study approval must bind the configured scenario set")
+        current = {name: {key: load_scenario(name)[key] for key in ("package_sha256", "gold_sha256")}
+                   for name in selected}
+    elif value["schema_version"] == 4:
         if value.get("intent_design") != intent.design_identity():
             raise ValueError("floor-study approval does not match the current intent design")
         if value.get("floor_study_design") != floor_study.verify_config(config):

@@ -134,7 +134,7 @@ def observe(events, manifest, config):
         if native.get("type") in {"error", "turn.failed"}:
             kind, detail = "native_error", native.get("error", native.get("message"))
         part, item = native.get("part") or {}, native.get("item") or {}
-        if manifest.get("backend") == "opencode" and native.get("type") == "tool_use":
+        if str(manifest.get("backend") or "").startswith("opencode") and native.get("type") == "tool_use":
             state = part.get("state") or {}
             if state.get("status") == "error":
                 kind, detail = "native_tool_error", {"tool": part.get("tool"), "error": state.get("error")}

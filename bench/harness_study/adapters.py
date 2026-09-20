@@ -16,7 +16,15 @@ import ssl
 from urllib.parse import urlsplit
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-BACKENDS = {"codex", "codex_mcp", "opencode", "harness"}
+BACKENDS = {"codex", "codex_mcp", "opencode", "opencode_mcp", "harness"}
+# Every tool the MOOSEDev MCP server exposes, allowed by exact name in the MCP
+# arms. See the permission comment in build_command for why not a glob.
+MOOSEDEV_TOOLS = ("align_concepts", "capture_decision_point", "declare_component_paths",
+                  "evaluate_policy", "export_graph", "get_entity_dossier", "get_provenance",
+                  "get_relevant_context", "link_code", "pending_ratifications", "ping", "query",
+                  "record_important_decision", "relate", "retract_decision", "sparql",
+                  "suggest_links", "suggest_mappings", "supersede_decision",
+                  "validate_against_architecture")
 
 
 def _path(value: Path, *, executable: bool = False, repository_build: bool = False) -> Path:
@@ -98,7 +106,8 @@ def build_command(
 ) -> tuple[list[str], dict[str, str]]:
     """Build argv and controlled env additions; write only runtime configuration.
 
-    ``codex_mcp`` requires an explicit daemon executable and Unix socket. Harness
+    ``codex_mcp`` and ``opencode_mcp`` require an explicit daemon executable and
+    Unix socket. Harness
     stdin is owned by the caller: send {"type":"input","text":prompt} and keep
     it open for ordinary reviewer slash commands. A caller-supplied Codex auth
     file at runtime/codex/auth.json is retained without being read here.
@@ -173,8 +182,35 @@ def build_command(
         return command, env
 
     endpoint = _endpoint(endpoint, "endpoint")
-    if backend == "opencode":
+    if backend in {"opencode", "opencode_mcp"}:
         provider_model = f"study/{model}"
+        # Identical native-tool policy in both OpenCode arms, so the only difference
+        # between them is the memory representation.
+        permission = {"*": "deny", "read": "allow", "edit": "allow", "glob": "allow",
+                      "grep": "allow", "list": "allow", "bash": "allow",
+                      "external_directory": "deny", "webfetch": "deny", "websearch": "deny"}
+        servers = {}
+        if backend == "opencode_mcp":
+            if daemon_exe is None or daemon_socket is None:
+                raise ValueError("opencode_mcp requires daemon_exe and daemon_socket")
+            daemon = _path(daemon_exe, executable=True, repository_build=True)
+            socket = Path(daemon_socket)
+            if not socket.is_absolute() or ".." in socket.parts:
+                raise ValueError("daemon_socket must be an explicit absolute path")
+            servers["moosedev"] = {
+                "type": "local", "command": [str(daemon), "--connect", str(socket)],
+                "environment": {"MOOSEDEV_NO_AUTOSPAWN": "1", "MOOSEDEV_SOCKET": str(socket),
+                                "MOOSEDEV_DATA_DIR": str(workspace / ".moosedev")},
+                "enabled": True,
+            }
+            # A bare `"*": "deny"` also covers this server's tools. That would make
+            # the arm record zero memory calls and read in the table as "the model
+            # would not call its memory tool" when the configuration forbade it --
+            # which is the finding this arm exists to establish, so the rig must not
+            # be able to manufacture it. Allowed by EXACT OpenCode name (server
+            # prefix + tool) rather than a glob, so the arm never depends on the
+            # client's pattern semantics. Later keys win, so these follow the deny.
+            permission.update({f"moosedev_{tool}": "allow" for tool in MOOSEDEV_TOOLS})
         settings = {
             "$schema": "https://opencode.ai/config.json", "model": provider_model,
             "small_model": provider_model, "enabled_providers": ["study"],
@@ -184,11 +220,9 @@ def build_command(
                 "options": {"baseURL": endpoint, "apiKey": "local-study"},
                 "models": {model: {"id": model, "name": model, "temperature": True,
                     "limit": {"context": context_tokens, "output": min(8192, context_tokens // 4)}}}}},
-            "plugin": [], "mcp": {}, "instructions": [], "autoupdate": False,
+            "plugin": [], "mcp": servers, "instructions": [], "autoupdate": False,
             "share": "disabled", "formatter": False, "lsp": False,
-            "permission": {"*": "deny", "read": "allow", "edit": "allow", "glob": "allow",
-                           "grep": "allow", "list": "allow", "bash": "allow",
-                           "external_directory": "deny", "webfetch": "deny", "websearch": "deny"},
+            "permission": permission,
             "compaction": {"auto": True, "prune": True, "reserved": context_tokens // 4},
         }
         opencode_dir = _directory(runtime / "opencode")
@@ -264,7 +298,7 @@ def normalize_event(backend: str, event: dict) -> dict:
                 _classify_tool(result, item.get("tool"), item, item.get("server") == "moosedev")
             elif item.get("type") == "error":
                 result["error"] = item.get("message")
-    elif backend == "opencode":
+    elif backend in {"opencode", "opencode_mcp"}:
         part = event.get("part") if isinstance(event.get("part"), dict) else {}
         if event_type == "step_finish" and isinstance(part.get("tokens"), dict):
             result["tokens"] = _tokens(part["tokens"], codex=False)
@@ -278,6 +312,9 @@ def normalize_event(backend: str, event: dict) -> dict:
                 result["command"] = part
             elif tool in {"edit", "write", "patch", "multiedit"}:
                 result["edit"] = part
+            # An MCP call arrives on this same channel; without this the arm's
+            # memory calls are dropped and every cell reports none.
+            _classify_tool(result, tool, part, False)
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             if state.get("status") == "error":
                 result["error"] = state.get("error")
@@ -292,8 +329,14 @@ def normalize_event(backend: str, event: dict) -> dict:
 def _classify_tool(result: dict, name: object, item: dict, moosedev: bool) -> None:
     if not isinstance(name, str):
         return
-    if name.startswith("mcp__moosedev__"):
-        moosedev, name = True, name.removeprefix("mcp__moosedev__")
+    # Three spellings occur in retained traces: Codex exposes the bare name beside a
+    # `server` field, Claude-style clients prefix `mcp__moosedev__`, and OpenCode
+    # prefixes the server name. Matching one spelling only would report a whole
+    # backend as never touching its memory.
+    for prefix in ("mcp__moosedev__", "moosedev_"):
+        if name.startswith(prefix):
+            moosedev, name = True, name.removeprefix(prefix)
+            break
     if moosedev and name in {"get_relevant_context", "get_entity_dossier", "query", "sparql"}:
         result["retrieval"] = item
     elif moosedev and name in {"record_important_decision", "supersede_decision", "retract_decision", "link_code"}:

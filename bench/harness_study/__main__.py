@@ -8,8 +8,8 @@ import sys
 from .artifacts import ArtifactStore, canonical_json
 from .binaries import REPO, build_and_freeze
 from .config import (approval_payload, development_config, evolution_config, field_check_config,
-                     floor_study_config, preflight, template)
-from . import evolution, field_check, floor_study, intent, model_table
+                     floor_study_config, capture_study_config, preflight, template)
+from . import capture_study, evolution, field_check, floor_study, intent, model_table
 from .grading import record_review, report
 from .validation import validate_fixtures
 
@@ -81,6 +81,27 @@ def main(argv=None):
     command.add_argument("--approval", type=Path, required=True,
                          help="where the human floor-study approval will be written; it need not exist yet")
     command.add_argument("--output", type=Path, required=True)
+    command = sub.add_parser("init-capture-study", help="derive the confirmatory capture study: three arms, accumulation packages, scored and pooled")
+    command.add_argument("parent_preflight", type=Path)
+    command.add_argument("--binary-manifest", type=Path, required=True)
+    command.add_argument("--study-id", required=True)
+    command.add_argument("--tiers", nargs="+", choices=list(model_table.MODELS), required=True,
+                         help="tier models in ascending capability order; the first is T1")
+    command.add_argument("--scenarios", nargs="+", choices=list(capture_study.SCENARIOS), required=True,
+                         help="accumulation packages only; capture needs a later episode to consume it")
+    command.add_argument("--repetitions", type=int, default=capture_study.REPETITIONS_DEFAULT,
+                         help="runs per cell; the default for every tier. Three arms, so this is 3x the cells")
+    command.add_argument("--repetition-override", action="append", default=[], metavar="TIER=N")
+    command.add_argument("--response-policy", choices=list(capture_study.RESPONSE_POLICIES),
+                         default=capture_study.RESPONSE_POLICY)
+    command.add_argument("--response-policy-override", action="append", default=[], metavar="TIER=POLICY")
+    command.add_argument("--adequate-capture", type=float, default=capture_study.ADEQUATE_CAPTURE,
+                         help="falsifier 1: B-mcp valid-capture rate at or above this weakens the premise")
+    command.add_argument("--retention-margin", type=float, default=capture_study.RETENTION_MARGIN,
+                         help="falsifier 2: C-harness retention may not fall below B-mcp's by more than this")
+    command.add_argument("--approval", type=Path, required=True,
+                         help="where the human capture-study approval will be written; it need not exist yet")
+    command.add_argument("--output", type=Path, required=True)
     command = sub.add_parser("crowding-gate", help="seed a probe package with the frozen daemon and measure today's push; no model calls")
     command.add_argument("--scenario", default="late_fees_crowded")
     command.add_argument("--deciding-fact", default="fees-np7")
@@ -142,6 +163,18 @@ def main(argv=None):
     command.add_argument("run_id")
     command.add_argument("judgment", type=Path)
     command.add_argument("--store", type=Path, default=DEFAULT_STORE)
+    command = sub.add_parser("judge", help="write a blind capture-fidelity judgment for a sealed run; calls one model")
+    command.add_argument("run_id")
+    command.add_argument("--judge-model", required=True,
+                         help="exact model id, resolved against the provider before judging; never substituted")
+    command.add_argument("--base-url", default="https://openrouter.ai/api/v1",
+                         help="OpenAI-compatible endpoint serving the judge")
+    command.add_argument("--api-key-env", default="OPENROUTER_API_KEY",
+                         help="environment variable holding the judge provider key")
+    command.add_argument("--reviewer-id", help="defaults to judge:<model>, so a machine judgment is never "
+                                               "mistaken for a human one")
+    command.add_argument("--store", type=Path, default=DEFAULT_STORE)
+    command.add_argument("--output", type=Path, required=True)
     command = sub.add_parser("run", help="run one frozen schedule cell; new ID on every attempt")
     command.add_argument("preflight", type=Path)
     command.add_argument("--cell", type=int, required=True)
@@ -171,6 +204,16 @@ def main(argv=None):
                          **tier_overrides(args.repetition_override, int, "repetition")},
             response_policies=tier_overrides(args.response_policy_override, str, "response policy"),
             rule={"pass_rate_threshold": args.pass_rate_threshold, "native_margin": args.native_margin})
+        write_new(args.output, result)
+    elif args.command == "init-capture-study":
+        labels = [capture_study.tier_label(index) for index in range(len(args.tiers))]
+        result = capture_study_config(
+            json.loads(args.parent_preflight.read_text()), args.binary_manifest, args.study_id,
+            args.tiers, args.scenarios, args.approval, response_policy=args.response_policy,
+            repetitions={**dict.fromkeys(labels, args.repetitions),
+                         **tier_overrides(args.repetition_override, int, "repetition")},
+            response_policies=tier_overrides(args.response_policy_override, str, "response policy"),
+            rule={"adequate_capture": args.adequate_capture, "retention_margin": args.retention_margin})
         write_new(args.output, result)
     elif args.command == "crowding-gate":
         from .crowding import gate
@@ -234,6 +277,15 @@ def main(argv=None):
     elif args.command == "usage-report":
         from .usage import report_store
         result = report_store(args.store)
+        write_new(args.output, result)
+    elif args.command == "judge":
+        import os
+        from .judge import judge_run
+        key = os.environ.get(args.api_key_env)
+        if not key:
+            raise ValueError(f"{args.api_key_env} is not set; the judge provider key is required")
+        result = judge_run(args.store.resolve(), args.run_id, model=args.judge_model,
+                           base_url=args.base_url, api_key=key, reviewer_id=args.reviewer_id)
         write_new(args.output, result)
     elif args.command == "review":
         result = {"review": str(record_review(args.store.resolve(), args.run_id, json.loads(args.judgment.read_text())))}

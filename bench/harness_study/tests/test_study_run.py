@@ -359,6 +359,69 @@ class RunTests(unittest.TestCase):
         self.assertEqual(manifest["intent_policy"], "symbolic")
         self.assertEqual(manifest["evaluation_mode"], evolution.SYMBOLIC_BASELINE_MODE)
 
+    def test_capture_study_mcp_cell_is_indexed_and_served_but_never_overlaid(self):
+        """The deferred third arm, end to end on stubs: no model, no GPU.
+
+        The MCP arm must get the daemon and the code index -- without them
+        get_entity_dossier and link_code resolve nothing -- but never the
+        harness overlay, which is a property of that runner rather than of
+        having memory.
+        """
+        from types import SimpleNamespace
+        from bench.harness_study import capture_study, evolution, intent
+        self._symbolic_config()
+        design = capture_study.design_identity(["gemma-4-31b-it"], ["retry_ledger"], repetitions={"T1": 1})
+        self.config.update(evaluation_mode=capture_study.MODE, scenario_ids=["retry_ledger"],
+                           capture_study_design=design)
+        (self.repo / "docs").mkdir(parents=True, exist_ok=True)
+        capture_study.DOCUMENT.write_bytes(capture_study.DOCUMENT.read_bytes())
+        indexer_dir = self.root / "indexer-capture"
+        indexer_dir.mkdir()
+        (indexer_dir / "scip-python").write_text("#!/bin/sh\n")
+        indexer = {"directory": str(indexer_dir), "launcher": {"path": str(indexer_dir / "scip-python")}}
+        self.config["indexer_manifest"] = str(indexer_dir / "manifest.json")
+        self.binary_manifest["indexer"] = indexer
+        self.frozen.update(indexer=indexer, intent_design=intent.design_identity(), indexer_probe={"ok": True},
+                           indexer_system_python={"path": "/usr/bin/python3"})
+        calls = []
+        fake_indexing = SimpleNamespace(
+            verify_indexer=lambda manifest: indexer,
+            apply_overlay=lambda workspace: calls.append("overlay"),
+            index_workspace=lambda *args: calls.append("index") or {"indexed": True},
+            ready_dossiers=lambda daemon, scenario, **kwargs: calls.append("dossiers") or {"ready": True},
+            system_python_identity=lambda frozen: frozen)
+        with patch.object(capture_study, "verify_config", return_value=design):
+            self.frozen["config_sha256"] = runner.configuration_hash(self.config)
+            self.frozen["schedule"] = runner.schedule(self.config)
+            self.cell = next(cell for cell in self.frozen["schedule"]
+                             if cell["backend"] == "opencode_mcp")
+            self.assertEqual((self.cell["condition"], self.cell["intent_policy"]),
+                             ("opencode_mcp", None))
+            self.scenario["id"] = self.cell["scenario_id"]
+            (self.scenarios / self.cell["scenario_id"]).symlink_to(
+                self.scenarios / "fixture", target_is_directory=True)
+            with patch.dict("sys.modules", {"bench.harness_study.indexing": fake_indexing}):
+                result = self._run()
+        self.assertEqual(result["status"], "success", result)
+        # Indexed and given dossiers, but never overlaid.
+        self.assertIn("index", calls)
+        self.assertIn("dossiers", calls)
+        self.assertNotIn("overlay", calls)
+        backend, arguments = self.command_arguments[0]
+        self.assertEqual(backend, "opencode_mcp")
+        self.assertIsNotNone(arguments["daemon_socket"])
+        self.assertIsNotNone(arguments["daemon_exe"])
+        # No harness-only policy is sent to a client that has no such concept.
+        self.assertNotIn("harness_intent_policy", arguments)
+        saved = Path(result["path"])
+        self.assertTrue((saved / "episodes/e1/daemon.log").is_file())
+        # The pre-registration travels with the evidence it decides.
+        self.assertTrue((saved / "capture-study-design.json").is_file())
+        self.assertTrue((saved / "capture-study-protocol.md").is_file())
+        manifest = json.loads((saved / "manifest.json").read_text())
+        self.assertEqual(manifest["evaluation_mode"], capture_study.MODE)
+        self.assertEqual(manifest["backend"], "opencode_mcp")
+
     def _field_check_config(self):
         from bench.harness_study import evolution, field_check, model_table
         models, scenarios = ["gemma-4-31b-it"], ["retry_ledger"]
@@ -496,7 +559,8 @@ class RunTests(unittest.TestCase):
         self.config["codex_auth"] = str(auth)
         bundle = self._freeze_ca_bundle()
         for backend, condition in (("codex", "without"), ("codex_mcp", "codex_mcp"),
-                                   ("opencode", "without"), ("harness", "harness")):
+                                   ("opencode", "without"), ("opencode_mcp", "opencode_mcp"),
+                                   ("harness", "harness")):
             with self.subTest(backend=backend):
                 self.cell.update(backend=backend, condition=condition)
                 self.command_arguments.clear()

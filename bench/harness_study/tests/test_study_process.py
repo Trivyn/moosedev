@@ -103,6 +103,21 @@ sys.exit(2)''',
         self.assertEqual(sum(kind == "native" and "edit" in value for kind, value in records), 1)
         self.assertEqual(sum(kind == "input" for kind, _ in records), 0)
 
+    def test_opencode_mcp_completion_is_detected_like_plain_opencode(self):
+        # Missing this gate reads every run of the arm as native_no_completion,
+        # which would look like an arm that cannot finish a task.
+        result, records = self.run_client("""
+            import json
+            print(json.dumps({"type":"tool_use", "part":{"tool":"moosedev_record_important_decision",
+                "state":{"status":"completed", "input":{"title":"t"}}}}))
+            print(json.dumps({"type":"step_finish", "part":{"id":"finished", "reason":"stop",
+                "tokens":{"input":9,"output":4}}}))
+        """, backend="opencode_mcp")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["terminal_cause"], "success")
+        self.assertEqual(sum(kind == "native" and value.get("capture") is not None
+                             for kind, value in records), 1)
+
     def test_opencode_exit_without_stop_reason_is_native_no_completion(self):
         result, _ = self.run_client('''
             import json

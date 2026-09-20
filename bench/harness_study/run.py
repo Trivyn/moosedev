@@ -16,7 +16,7 @@ from .clients import verify_client
 from .client_archive import archive_clients
 from .config import (HARNESS_MODES, configuration_hash, frozen_arms, inventory, model_associations, required_clients,
                      schedule, verify_approval)
-from . import field_check, floor_study
+from . import capture_study, field_check, floor_study
 from .daemon import OwnedDaemon
 from .isolation import sandbox_command
 from .process import observe
@@ -197,6 +197,13 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
     # A mode with frozen arms runs its native arm through the same frozen
     # schedule; every other local mode admits only harness cells.
     harness_cell = experimental and cell["backend"] == "harness"
+    # Any arm holding a graph needs the code index, or get_entity_dossier and
+    # link_code resolve nothing, and its seeded records would be unreachable by
+    # position. Seeding is identical to the harness arm's: both graph arms hold
+    # the SAME graph, and only the access path differs -- that is the comparison.
+    # The harness OVERLAY stays harness-only; it is a property of that runner,
+    # not of having memory.
+    indexed_cell = experimental and cell["condition"] != "without"
     if mode in ("local-harness-development", *HARNESS_MODES):
         if Path(store_root).resolve() == (REPO / "target/harness-study/evidence").resolve():
             raise ValueError("development reruns require a separate evidence store; preserve the pilot store")
@@ -254,6 +261,9 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
             store.put_bytes(run, "floor-study-design.json", canonical_json(config["floor_study_design"]))
             # The pre-registration travels with the evidence it decides.
             store.put_bytes(run, "floor-study-protocol.md", floor_study.DOCUMENT.read_bytes())
+        elif config.get("evaluation_mode") == capture_study.MODE:
+            store.put_bytes(run, "capture-study-design.json", canonical_json(config["capture_study_design"]))
+            store.put_bytes(run, "capture-study-protocol.md", capture_study.DOCUMENT.read_bytes())
         store.put_bytes(run, "scenario.json", canonical_json(scenario))
         snapshot(store, run, SCENARIOS / scenario["id"], "scenario")
         snapshot(store, run, REPO / "bench/harness_study", "driver")
@@ -274,7 +284,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
         if binaries != frozen["binaries"]:
             raise ValueError("binary selection changed after preflight")
         indexer = None
-        if harness_cell:
+        if indexed_cell:
             from .indexing import verify_indexer, apply_overlay, index_workspace, ready_dossiers, system_python_identity
             indexer = verify_indexer(config["indexer_manifest"])
             if indexer != frozen["indexer"] or indexer != binaries.get("indexer"):
@@ -322,7 +332,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
             episode_id = episode["id"]
             runtime = execution / episode_id
             runtime.mkdir()
-            if harness_cell:
+            if indexed_cell:
                 try:
                     indexed = index_workspace(indexer, binaries["binaries"]["daemon"], workspace, runtime / "index")
                 finally:
@@ -340,7 +350,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                 if cell["backend"].startswith("codex"):
                     hosted = stack.enter_context(DomainProxy(config["hosted_endpoints"],
                         lambda event: record("hosted_transport", dict(event, episode=episode_id))))
-                if cell["backend"] in {"harness", "opencode"}:
+                if cell["backend"] in {"harness", "opencode", "opencode_mcp"}:
                     proxy = stack.enter_context(ModelProxy(config["endpoint"], cell["model"],
                         lambda event: record("model", dict(event, episode=episode_id)), "agent",
                         expected_temperature=config.get("generation_policy", {}).get("local_temperature", 0.0)))
@@ -356,9 +366,9 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                         workspace=workspace, runtime=runtime, assets=Path(frozen["assets"]["directory"]),
                         helper_model=config["helper_model"], helper_endpoint=helper.url,
                         helper_context_tokens=config["context_tokens"], log_path=run / f"episodes/{episode_id}/daemon.log",
-                        **({"indexer": indexer} if harness_cell else {})))
+                        **({"indexer": indexer} if indexed_cell else {})))
                     record("daemon", dict(daemon.identity, episode=episode_id))
-                    if harness_cell:
+                    if indexed_cell:
                         first = episode_id == scenario["episodes"][0]["id"]
                         readiness = ready_dossiers(daemon, scenario, seed=first,
                             require_empty=first and starts_empty(scenario))
@@ -416,7 +426,7 @@ def run_cell(store_root, frozen, cell, *, replacement_for=None):
                 observation_complete = True
                 if daemon:
                     record("checkpoint", dict(daemon.checkpoint(), episode=episode_id))
-                    if harness_cell:
+                    if indexed_cell:
                         try:
                             final_index = daemon._request("/api/v1/harness/intent/resolve", {
                                 "files": sorted({p.relative_to(workspace).as_posix() for p in workspace.rglob("*.py")

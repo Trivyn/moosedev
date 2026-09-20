@@ -50,6 +50,9 @@ GUIDANCE = {
     "codex_mcp": "MOOSEDev is the project's persistent memory. Recall project knowledge before work; inspect entity dossiers before edits and capture durable decisions, requirements, constraints and lessons. Correct obsolete knowledge with supersede/retract. Use the available MOOSEDev tools.",
     "harness": "Use the harness's persistent project knowledge and ordinary coding workflow. Read relevant knowledge and preserve useful understanding when it changes.",
 }
+# Both MCP arms are offered the same tools and must be asked the same thing; sharing
+# the string keeps a later edit from silently making the two conditions incomparable.
+GUIDANCE["opencode_mcp"] = GUIDANCE["codex_mcp"]
 
 
 def prepare_workspace(workspace, scenario, condition):

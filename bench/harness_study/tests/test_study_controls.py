@@ -281,7 +281,7 @@ class SeedControls(unittest.TestCase):
         scenario = load_scenario("ruleset_cache")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for condition in ("without", "codex_mcp", "harness"):
+            for condition in ("without", "codex_mcp", "opencode_mcp", "harness"):
                 workspace = root / condition
                 workspace.mkdir()
                 seed.prepare_workspace(workspace, scenario, condition)
@@ -297,13 +297,23 @@ class SeedControls(unittest.TestCase):
     def test_prompts_share_requirements_and_clarifications_but_not_gold(self):
         scenario = load_scenario("retry_ledger")
         for episode in scenario["episodes"]:
-            for condition in ("without", "codex_mcp", "harness"):
+            for condition in ("without", "codex_mcp", "opencode_mcp", "harness"):
                 prompt = seed.episode_prompt(episode, condition)
                 self.assertTrue(prompt.startswith(episode["prompt"]))
                 for clarification in episode["clarifications"].values():
                     self.assertIn(clarification, prompt)
                 self.assertNotIn(episode["hidden_test"], prompt)
                 self.assertNotIn("forbidden_claims", prompt)
+
+    def test_both_mcp_arms_are_asked_for_exactly_the_same_thing(self):
+        # The two MCP conditions are offered the same tools. If their guidance
+        # ever diverged the arms would stop being comparable, silently.
+        self.assertEqual(seed.GUIDANCE["opencode_mcp"], seed.GUIDANCE["codex_mcp"])
+        episode = load_scenario("retry_ledger")["episodes"][0]
+        self.assertEqual(seed.episode_prompt(episode, "opencode_mcp"),
+                         seed.episode_prompt(episode, "codex_mcp"))
+        self.assertNotEqual(seed.episode_prompt(episode, "opencode_mcp"),
+                            seed.episode_prompt(episode, "without"))
 
 
 class ReviewerControls(unittest.TestCase):

@@ -123,6 +123,10 @@ def classify_native(tool, arguments):
         return "read", str(arguments.get("filePath", ""))
     if tool in NATIVE_EDITS:
         return "edit", str(arguments.get("filePath", ""))
+    if isinstance(tool, str) and tool.startswith("moosedev_"):
+        # Counted as knowledge-seeking, exactly as classify_codex counts an
+        # mcp_tool_call, so the two MCP arms share one census category.
+        return "graph_tool", f"{tool} {json.dumps(arguments, sort_keys=True)}"
     return "other", str(tool)
 
 
@@ -152,7 +156,7 @@ def _stdout_value(line):
 
 def native_actions(run, backend):
     """(order, category, text) from a native run's events, streamed with a byte prefilter."""
-    marker = b"tool_use" if backend == "opencode" else b"item.started"
+    marker = b"tool_use" if backend.startswith("opencode") else b"item.started"
     actions = []
     with (Path(run) / "events.jsonl").open("rb") as stream:
         for order, line in enumerate(stream):
@@ -161,10 +165,10 @@ def native_actions(run, backend):
             value = _stdout_value(line)
             if value is None:
                 continue
-            if backend == "opencode" and value.get("type") == "tool_use":
+            if backend.startswith("opencode") and value.get("type") == "tool_use":
                 part = value.get("part") or {}
                 category, text = classify_native(part.get("tool"), (part.get("state") or {}).get("input"))
-            elif backend != "opencode" and value.get("type") == "item.started":
+            elif not backend.startswith("opencode") and value.get("type") == "item.started":
                 category, text = classify_codex(value.get("item") or {})
             else:
                 continue
