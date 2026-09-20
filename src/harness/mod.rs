@@ -5,6 +5,8 @@ pub mod digest;
 #[cfg(feature = "harness")]
 pub mod executor;
 #[cfg(feature = "harness")]
+mod markdown;
+#[cfg(feature = "harness")]
 pub mod progress;
 pub mod protocol;
 #[cfg(feature = "harness")]

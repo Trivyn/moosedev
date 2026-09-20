@@ -68,6 +68,7 @@ reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 unicode-width = { version = "0.2", optional = true }
 fs2 = { version = "0.4", optional = true }
 libc = { version = "0.2", optional = true }
@@ -102,7 +103,7 @@ axum-test = "17"
 default = ["embedded-frontend"]
 embedded-frontend = ["dep:include_dir", "dep:mime_guess"]
 headless = []
-harness = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:fs2", "dep:libc", "tokio/process"]
+harness = ["dep:ratatui", "dep:crossterm", "dep:pulldown-cmark", "dep:unicode-width", "dep:fs2", "dep:libc", "tokio/process"]
 
 # Build the engine's embedding backbone (Arctic-Embed-S) on the Apple GPU via
 # candle's Metal backend. candle-cpu (declared on the `moose` dep above) stays the

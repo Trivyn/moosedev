@@ -2,6 +2,7 @@
 use super::protocol::{AssociatePage, DerivedBasis, TypedDisposition, TypingMode};
 use super::runner::{Phase, ReviewItem, Runner, Task};
 use super::{
+    markdown,
     session::{Command, Controller, Conversation, Snapshot, Update},
     startup::{ProviderSettings, StartupOptions},
 };
@@ -19,13 +20,13 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 use ratatui::{
     layout::{Position, Rect},
-    text::{Line, Span},
+    text::{Line, Span, Text},
 };
 use std::{
     collections::VecDeque,
@@ -41,7 +42,7 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
 
 const MAX_RUN_STEPS: usize = 32;
-const MOUSE_SCROLL_LINES: u16 = 3;
+const MOUSE_SCROLL_LINES: u16 = 1;
 
 #[derive(Debug)]
 pub enum Action {
@@ -248,6 +249,7 @@ impl Composer {
 struct View {
     tab: usize,
     scroll: u16,
+    scroll_max: u16,
     follow: bool,
     composer: Composer,
     tick: usize,
@@ -279,45 +281,131 @@ fn gate(task: &Task) -> String {
     }
 }
 
-fn body(snapshot: &Snapshot, view: &View) -> String {
+fn push_plain_lines(lines: &mut Vec<Line<'static>>, value: &str, style: Style) {
+    for line in visible(value).split('\n') {
+        lines.push(Line::from(Span::styled(line.to_owned(), style)));
+    }
+}
+
+fn push_plain_section(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    label_style: Style,
+    value: &str,
+    body_style: Style,
+) {
+    lines.push(Line::from(Span::styled(label.to_owned(), label_style)));
+    push_plain_lines(lines, value, body_style);
+    lines.push(Line::default());
+}
+
+fn push_assistant(lines: &mut Vec<Line<'static>>, value: &str, streaming: bool) {
+    lines.push(Line::from(Span::styled(
+        "🫎 MOOSEDev",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let mut response = markdown::render(value, Style::default().fg(Color::LightCyan));
+    if streaming {
+        if response.lines.is_empty() {
+            response.lines.push(Line::default());
+        }
+        response.lines.last_mut().unwrap().spans.push(Span::styled(
+            "▌",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.extend(response.lines);
+    lines.push(Line::default());
+}
+
+fn conversation_body(snapshot: &Snapshot, view: &View) -> Text<'static> {
+    let mut lines = Vec::new();
+    for message in &snapshot.conversation.messages {
+        if message.role == "activity" && view.tab == 0 && !view.activity_expanded {
+            continue;
+        }
+        match message.role.as_str() {
+            "user" => push_plain_section(
+                &mut lines,
+                "YOU",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+                &message.text,
+                Style::default(),
+            ),
+            "assistant" => push_assistant(&mut lines, &message.text, false),
+            "activity" => push_plain_section(
+                &mut lines,
+                "ACTIVITY",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+                &message.text,
+                Style::default().fg(Color::DarkGray),
+            ),
+            _ => push_plain_section(
+                &mut lines,
+                "SESSION",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                &message.text,
+                Style::default().fg(Color::DarkGray),
+            ),
+        }
+    }
+    let (live_assistant, live_command) = {
+        let live = snapshot.live.lock().unwrap();
+        (live.assistant.clone(), live.command.clone())
+    };
+    if !live_assistant.is_empty() {
+        push_assistant(&mut lines, &live_assistant, true);
+    }
+    if !live_command.is_empty() {
+        push_plain_section(
+            &mut lines,
+            "COMMAND OUTPUT",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+            &live_command,
+            Style::default().fg(Color::DarkGray),
+        );
+    }
+    let mut control = String::new();
+    if let Some(task) = &snapshot.task {
+        control.push_str(&gate(task));
+        if !task.reviews.is_empty() && task.phase != Phase::AwaitingReview {
+            control.push_str(&format!(
+                "\n\n{} knowledge review(s) pending · /review or view Knowledge",
+                task.reviews.len()
+            ));
+        }
+    }
+    if !snapshot.conversation.queued.is_empty() {
+        control.push_str(&format!(
+            "\n\nQUEUED · {} message(s), delivered before the next action",
+            snapshot.conversation.queued.len()
+        ));
+    }
+    if !control.is_empty() {
+        push_plain_lines(&mut lines, &control, Style::default().fg(Color::Yellow));
+    }
+    Text::from(lines)
+}
+
+fn body(snapshot: &Snapshot, view: &View) -> Text<'static> {
+    if matches!(view.tab, 0 | 1) {
+        return conversation_body(snapshot, view);
+    }
     let mut text = String::new();
     match view.tab {
-        0 | 1 => {
-            for message in &snapshot.conversation.messages {
-                if message.role == "activity" && view.tab == 0 && !view.activity_expanded {
-                    continue;
-                }
-                let label = match message.role.as_str() {
-                    "user" => "YOU",
-                    "assistant" => "MOOSEDev",
-                    "activity" => "ACTIVITY",
-                    _ => "SESSION",
-                };
-                text.push_str(&format!("{label}\n{}\n\n", message.text));
-            }
-            let live = snapshot.live.lock().unwrap();
-            if !live.assistant.is_empty() {
-                text.push_str(&format!("MOOSEDev\n{}▌\n\n", live.assistant));
-            }
-            if !live.command.is_empty() {
-                text.push_str(&format!("COMMAND OUTPUT\n{}\n\n", live.command));
-            }
-            if let Some(task) = &snapshot.task {
-                text.push_str(&gate(task));
-                if !task.reviews.is_empty() && task.phase != Phase::AwaitingReview {
-                    text.push_str(&format!(
-                        "\n\n{} knowledge review(s) pending · /review or view Knowledge",
-                        task.reviews.len()
-                    ));
-                }
-            }
-            if !snapshot.conversation.queued.is_empty() {
-                text.push_str(&format!(
-                    "\n\nQUEUED · {} message(s), delivered before the next action",
-                    snapshot.conversation.queued.len()
-                ));
-            }
-        }
+        0 | 1 => unreachable!(),
         2 => {
             if let Some(task) = &snapshot.task {
                 if let Some(edit) = &task.pending_edit {
@@ -436,7 +524,7 @@ fn body(snapshot: &Snapshot, view: &View) -> String {
             text = journal_summary(snapshot);
         }
     }
-    visible(&text)
+    Text::raw(visible(&text))
 }
 
 const SYMBOLIC_APPROVAL: &str = "On /approve the harness derives obligations from the plan files' governing records; no model call";
@@ -691,6 +779,17 @@ fn wrapped(text: &str, width: usize) -> String {
     result
 }
 
+fn sync_scroll_bounds(view: &mut View, line_count: usize, viewport_height: u16) {
+    view.scroll_max = line_count
+        .saturating_sub(viewport_height as usize)
+        .min(u16::MAX as usize) as u16;
+    view.scroll = if view.follow {
+        view.scroll_max
+    } else {
+        view.scroll.min(view.scroll_max)
+    };
+}
+
 fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
     let area = frame.area();
     let composer_rows = wrapped(&view.composer.text, area.width.saturating_sub(2) as usize)
@@ -735,8 +834,8 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
         ]),
         header,
     );
-    let body = wrapped(&body(snapshot, view), main.width.saturating_sub(2) as usize);
-    let line_count = body.lines().count();
+    let body = markdown::wrap(body(snapshot, view), main.width.saturating_sub(2) as usize);
+    let line_count = body.height();
     let paragraph = Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(
         [
             " Conversation ",
@@ -746,11 +845,7 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
             " Journal ",
         ][view.tab],
     ));
-    if view.follow {
-        view.scroll = line_count
-            .saturating_sub(main.height.saturating_sub(2) as usize)
-            .min(u16::MAX as usize) as u16;
-    }
+    sync_scroll_bounds(view, line_count, main.height.saturating_sub(2));
     frame.render_widget(paragraph.scroll((view.scroll, 0)), main);
     let spinner = if snapshot.busy {
         ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][view.tick % 10]
@@ -843,14 +938,14 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
             view.scroll = view.scroll.saturating_sub(12);
         }
         KeyCode::PageDown => {
-            view.scroll = view.scroll.saturating_add(12);
+            view.scroll = view.scroll.saturating_add(12).min(view.scroll_max);
         }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
             view.follow = false;
             view.scroll = view.scroll.saturating_sub(1);
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
-            view.scroll = view.scroll.saturating_add(1)
+            view.scroll = view.scroll.saturating_add(1).min(view.scroll_max)
         }
         KeyCode::Up => view.composer.vertical(false),
         KeyCode::Down => view.composer.vertical(true),
@@ -873,7 +968,10 @@ fn mouse(view: &mut View, event: MouseEvent) -> bool {
             true
         }
         MouseEventKind::ScrollDown => {
-            view.scroll = view.scroll.saturating_add(MOUSE_SCROLL_LINES);
+            view.scroll = view
+                .scroll
+                .saturating_add(MOUSE_SCROLL_LINES)
+                .min(view.scroll_max);
             true
         }
         _ => false,
@@ -1058,6 +1156,15 @@ fn conversation_for_task(task: &Task) -> Result<Conversation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_content(text: &Text<'_>) -> String {
+        text.lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn task_fixture(root: PathBuf) -> Task {
         serde_json::from_value(serde_json::json!({
             "id":uuid::Uuid::new_v4().to_string(), "root":root, "objective":"Explain the parser", "mode":"Plan", "phase":"Planning",
@@ -1158,7 +1265,7 @@ mod tests {
     }
     #[test]
     fn knowledge_tab_renders_derived_obligations_for_the_approved_plan() {
-        let text = body(&snapshot_for(symbolic_task()), &knowledge_view());
+        let text = text_content(&body(&snapshot_for(symbolic_task()), &knowledge_view()));
         assert!(text.contains("Derived scope\nlabels.py\n  Constraint · https://moosedev.dev/kg/Constraint/preserve-names\n  Requirement · https://moosedev.dev/kg/Requirement/label-intent\nutil.py · ungoverned\n"));
         assert!(text.contains("  def labels.py · labels/render_name().\n"));
         assert!(text.contains("Revision accepted-v3 · obligations 0123456789ab\n"));
@@ -1166,7 +1273,7 @@ mod tests {
         assert!(text.contains("  FAIL · pytest -q · after edit\n  PASS · pytest -q · after edit\n"));
         let mut bare = task_fixture(PathBuf::from("/project"));
         bare.symbolic = Some(Default::default());
-        let text = body(&snapshot_for(bare), &knowledge_view());
+        let text = text_content(&body(&snapshot_for(bare), &knowledge_view()));
         assert!(text.contains("No approved plan scope derived yet."));
     }
     #[test]
@@ -1196,7 +1303,7 @@ mod tests {
             }
         }))
         .unwrap());
-        let text = body(&snapshot_for(task.clone()), &knowledge_view());
+        let text = text_content(&body(&snapshot_for(task.clone()), &knowledge_view()));
         assert!(text.contains("Code associations · link-1\n"));
         assert!(text.contains("Constraint · https://moosedev.dev/kg/Constraint/preserve-names\nlabels.py · render_name (function) · line 5\n-constrains-> plan obligation\n"));
         assert!(text.contains("Skipped: Local 2 · Parameter 1\n"));
@@ -1205,7 +1312,7 @@ mod tests {
         assert!(!text.contains("Derivation detail unavailable"));
         // A journal whose batch moved on keeps the plain binding list.
         task.symbolic.as_mut().unwrap().association = None;
-        let text = body(&snapshot_for(task), &knowledge_view());
+        let text = text_content(&body(&snapshot_for(task), &knowledge_view()));
         assert!(text.contains("labels.py · labels/render_name().\n"));
         assert!(text.contains("Derivation detail unavailable\n"));
     }
@@ -1234,7 +1341,7 @@ mod tests {
             }
         }))
         .unwrap());
-        let text = body(&snapshot_for(task), &knowledge_view());
+        let text = text_content(&body(&snapshot_for(task), &knowledge_view()));
         assert!(text.contains("REVIEW 1\nFinal checkpoint\n\nCapture note\nNames are stripped before comparison.\nTyping: symbolic with sensor · sensor added one proposal\n"));
         assert!(text.contains("SymbolicDecision · ArchitecturalDecision · Trim label whitespace — restates https://moosedev.dev/kg/Requirement/label-intent; no record proposed\n"));
         assert!(text.contains("SymbolicLesson · Lesson · Strip before comparing — refines https://moosedev.dev/kg/Constraint/preserve-names (0.63)\n"));
@@ -1298,6 +1405,7 @@ mod tests {
     fn mouse_wheel_scrolls_content_and_pauses_following() {
         let mut view = View {
             scroll: 5,
+            scroll_max: 10,
             follow: true,
             ..View::default()
         };
@@ -1309,7 +1417,7 @@ mod tests {
         };
 
         assert!(mouse(&mut view, event(MouseEventKind::ScrollUp)));
-        assert_eq!(view.scroll, 2);
+        assert_eq!(view.scroll, 4);
         assert!(!view.follow);
 
         assert!(mouse(&mut view, event(MouseEventKind::ScrollDown)));
@@ -1335,6 +1443,35 @@ mod tests {
         let state = (view.scroll, view.follow);
         assert!(!mouse(&mut view, event(MouseEventKind::Moved)));
         assert_eq!((view.scroll, view.follow), state);
+    }
+    #[test]
+    fn scrolling_is_clamped_to_the_rendered_viewport() {
+        let mut view = View {
+            scroll: u16::MAX,
+            ..View::default()
+        };
+        sync_scroll_bounds(&mut view, 20, 8);
+        assert_eq!((view.scroll, view.scroll_max), (12, 12));
+
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(mouse(&mut view, event));
+        assert_eq!(view.scroll, 12);
+
+        assert!(key(
+            &mut view,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)
+        )
+        .is_none());
+        assert_eq!(view.scroll, 12);
+
+        view.follow = true;
+        sync_scroll_bounds(&mut view, 6, 8);
+        assert_eq!((view.scroll, view.scroll_max), (0, 0));
     }
     #[test]
     fn multiline_cursor_matches_visual_wrapping_and_unicode_lines() {
@@ -1363,6 +1500,50 @@ mod tests {
         assert!(text.contains("+ new"));
         assert!(text.contains("  shared"));
     }
+
+    #[test]
+    fn conversation_roles_and_assistant_markdown_are_visually_distinct() {
+        let mut conversation = Conversation::new(PathBuf::from("/project"));
+        conversation.push("user", "Keep **this** literal");
+        conversation.push(
+            "assistant",
+            "## Result\n\nUse **bold** and `code` with [docs](https://example.com).",
+        );
+        let snapshot = Snapshot {
+            conversation,
+            task: None,
+            status: String::new(),
+            busy: true,
+            endpoint: String::new(),
+            model: String::new(),
+            live: std::sync::Arc::new(std::sync::Mutex::new(super::super::session::LiveOutput {
+                assistant: "*Still streaming*".into(),
+                command: String::new(),
+            })),
+        };
+
+        let text = body(&snapshot, &View::default());
+        let plain = text_content(&text);
+        assert!(plain.contains("YOU\nKeep **this** literal"));
+        assert!(plain.contains("🫎 MOOSEDev\n## Result"));
+        assert!(plain.contains("Use bold and code with docs (https://example.com)."));
+        assert!(plain.contains("🫎 MOOSEDev\nStill streaming▌"));
+
+        let user = &text.lines[0].spans[0];
+        assert_eq!(user.style.fg, Some(Color::Green));
+        assert!(user.style.add_modifier.contains(Modifier::BOLD));
+        let assistant = text
+            .lines
+            .iter()
+            .find(|line| line.to_string() == "🫎 MOOSEDev")
+            .unwrap();
+        assert_eq!(assistant.spans[0].style.fg, Some(Color::Cyan));
+        assert!(assistant.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
     #[test]
     fn conversation_composer_and_status_render_at_small_sizes() {
         let mut conversation = Conversation::new(PathBuf::from("/project"));

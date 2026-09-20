@@ -161,13 +161,17 @@ Read-only questions can receive answers without a modification plan. Coding work
 starts in Plan mode; inspect its file scope and required checks before approving
 Auto execution. The runner advances automatically until it needs human input or
 reaches a completion gate. Plans, edits, checks, and knowledge proposals appear
-in the conversation; exact requests remain available in the task journal.
+in the conversation; exact requests remain available in the task journal. Human
+turns use a green `YOU` label, while assistant turns use a cyan `🫎 MOOSEDev`
+label and render common Markdown structures with terminal-native styling. System,
+activity, and human text remain literal.
 
 Use `/approve` to approve the displayed plan or exact policy-gated edit. `/review`
 opens outstanding knowledge; `/accept NUMBER` or `/reject NUMBER` reviews an
 operation, and omitting the number reviews all displayed operations.
 `/no-knowledge` confirms a consolidated no-change assessment. Tab switches views;
-the mouse wheel, Page Up/Down, and Alt-Up/Down scroll. `/help` lists the controls.
+the mouse wheel scrolls one line at a time within the current pane, while Page
+Up/Down and Alt-Up/Down provide keyboard scrolling. `/help` lists the controls.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`
 begins a conversation. `/resume` lists saved conversations; `/resume ID` opens one.
