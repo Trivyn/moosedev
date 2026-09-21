@@ -3,6 +3,39 @@
 use super::*;
 
 impl Runner {
+    fn repository_search_hits(&self, query: &str, files: &[String]) -> Vec<String> {
+        const COLLECTION_LIMIT: usize = 12_000;
+
+        let mut hits = Vec::new();
+        let mut bytes = 0;
+        'files: for file in files {
+            if file.contains(query) {
+                let hit = format!("Path: {file}\n");
+                bytes += hit.len();
+                hits.push(hit);
+            }
+            if bytes > COLLECTION_LIMIT {
+                break;
+            }
+            if let Ok(Some(source)) = self.workspace.read(file) {
+                for (line, text) in source
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, text)| text.contains(query))
+                    .take(10)
+                {
+                    let hit = format!("{file}:{}: {}\n", line + 1, bounded(text, 300));
+                    bytes += hit.len();
+                    hits.push(hit);
+                    if bytes > COLLECTION_LIMIT {
+                        break 'files;
+                    }
+                }
+            }
+        }
+        hits
+    }
+
     pub(super) async fn fresh_approval(&mut self) -> Result<bool> {
         let files = self
             .task
@@ -171,53 +204,61 @@ impl Runner {
                 self.task.last_response = format!("Read {file} with its governing knowledge.");
             }
             Step::Search { query } => {
-                let knowledge = self.search_knowledge(&query).await?;
-                let mut hits = String::new();
-                for file in &files {
-                    if file.contains(&query) {
-                        hits.push_str(&format!("Path: {file}\n"));
-                    }
-                    if hits.len() > 12_000 {
-                        break;
-                    }
-                    if let Ok(Some(text)) = self.workspace.read(file) {
-                        for (line, text) in text
-                            .lines()
-                            .enumerate()
-                            .filter(|(_, text)| text.contains(&query))
-                            .take(10)
-                        {
-                            hits.push_str(&format!(
-                                "{file}:{}: {}\n",
-                                line + 1,
-                                bounded(text, 300)
-                            ));
-                            if hits.len() > 12_000 {
-                                break;
-                            }
-                        }
-                    }
-                    if hits.len() > 12_000 {
-                        break;
-                    }
+                // A query already asked in this task returns the same records;
+                // answer from the stored result rather than spending a daemon
+                // round trip on it again.
+                if let Some(answer) = self.repeat_search_answer(&query) {
+                    self.task.last_response = answer.clone();
+                    self.knowledge_event(answer);
+                    return self.persist();
                 }
-                let records = knowledge.evidence_iris.len();
-                let repository_matches = hits.lines().count();
+                let accepted_header =
+                    format!("Accepted project knowledge for '{query}' (authoritative):\n");
+                let repository_header = "\n\nRepository matches:\n";
+                let last_result_budget = self.next_last_result_budget(&context)?;
+                let evidence_budget = last_result_budget.saturating_sub(
+                    accepted_header.len() + repository_header.len() + "No matches.".len(),
+                );
+                let knowledge = self.search_knowledge(&query, Some(evidence_budget)).await?;
+                let hits = self.repository_search_hits(&query, &files);
+                let delivered_records = knowledge.evidence_iris.len();
+                let selected_records = knowledge.selected_record_count();
+                let omitted_records = knowledge.omitted_record_count();
+                let repository_matches = hits.len();
+                let record_detail = if omitted_records == 0 {
+                    format!("{delivered_records} records")
+                } else {
+                    format!("{delivered_records} records delivered, {omitted_records} omitted")
+                };
                 self.intent_event(
                     "knowledge_search",
-                    &format!("{records} records, {repository_matches} repository matches: {query}"),
+                    &format!("{record_detail}, {repository_matches} repository matches: {query}"),
                 );
                 let repository = if hits.is_empty() {
                     "No matches.".to_string()
                 } else {
-                    hits
+                    let fixed = match selected_records {
+                        0 => "Repository matches:\n".len(),
+                        _ => {
+                            accepted_header.len()
+                                + knowledge.context.trim().len()
+                                + repository_header.len()
+                        }
+                    };
+                    render_search_lines(&hits, last_result_budget.saturating_sub(fixed))
                 };
+                // A search that matched nothing is where models loop, so say what
+                // was actually searched and how long this has been going on.
+                let exhaustion =
+                    self.fruitless_search_note(selected_records == 0 && repository_matches == 0);
                 // Accepted knowledge answers first; repository matches follow.
-                self.task.last_response = match (records, repository_matches) {
-                    (0, 0) => repository,
+                self.task.last_response = match (selected_records, repository_matches) {
+                    (0, 0) => format!(
+                        "No accepted knowledge and no repository text matched the literal string '{query}'.{exhaustion}"
+                    ),
                     (0, _) => format!("Repository matches:\n{repository}"),
                     _ => format!(
-                        "Accepted project knowledge for '{query}' (authoritative):\n{}\n\nRepository matches:\n{repository}",
+                        "{accepted_header}{}{repository_header}{repository}",
                         knowledge.context.trim()
                     ),
                 };
@@ -470,6 +511,40 @@ impl Runner {
         self.task.capture_due = true;
         self.task.after_review = Phase::Verifying;
         self.capture().await
+    }
+}
+
+/// Repository matches share the last-result budget only after accepted graph
+/// evidence. Admit complete lines and count the rest; never make generic
+/// observation clipping responsible for fitting this search response.
+fn render_search_lines(lines: &[String], budget: usize) -> String {
+    let mut out = String::new();
+    let mut kept = 0;
+    for line in lines {
+        let omitted = lines.len().saturating_sub(kept + 1);
+        let notice = repository_omission_notice(omitted);
+        if out.len() + line.len() + notice.len() <= budget {
+            out.push_str(line);
+            kept += 1;
+        } else {
+            break;
+        }
+    }
+    let omitted = lines.len().saturating_sub(kept);
+    if omitted > 0 {
+        let notice = repository_omission_notice(omitted);
+        if out.len() + notice.len() <= budget {
+            out.push_str(&notice);
+        }
+    }
+    out
+}
+
+fn repository_omission_notice(omitted: usize) -> String {
+    if omitted == 0 {
+        String::new()
+    } else {
+        format!("{omitted} further repository match(es) omitted by the prompt byte budget.\n")
     }
 }
 

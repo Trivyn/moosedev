@@ -266,10 +266,22 @@ pub(super) async fn context(
 ) -> (StatusCode, Json<ContextResponse>) {
     let mut script = state.lock().unwrap();
     if request.evidence_only {
-        script
-            .requests
-            .push(json!({"kind":"knowledge_search","topic":request.topic}));
+        script.requests.push(json!({
+            "kind":"knowledge_search",
+            "topic": request.topic,
+            "max_bytes": request.max_bytes,
+        }));
         let knowledge = script.search_knowledge.clone();
+        let delivery_receipt = knowledge.as_ref().map(|context| ContextDeliveryReceipt {
+            max_bytes: request.max_bytes,
+            context_bytes: context.len(),
+            records: vec![ContextRecordDelivery {
+                iri: "urn:fixture:search-knowledge".into(),
+                kind: "Constraint".into(),
+                tier: ContextRecordDeliveryTier::FullClaim,
+                reason: "fixture record fit within caller byte budget".into(),
+            }],
+        });
         return (
             StatusCode::OK,
             Json(ContextResponse {
@@ -281,6 +293,7 @@ pub(super) async fn context(
                     .iter()
                     .map(|_| "urn:fixture:search-knowledge".to_string())
                     .collect(),
+                delivery_receipt,
                 context: knowledge.unwrap_or_default(),
                 files: vec![],
                 records: vec![],
@@ -304,6 +317,7 @@ pub(super) async fn context(
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             evidence_iris: vec![],
+            delivery_receipt: None,
             records: vec![],
             governing_constraints: script.governing_constraints.clone(),
             context: script.context.clone().unwrap_or_else(|| {

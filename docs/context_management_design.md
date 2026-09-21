@@ -1,8 +1,9 @@
 # Context management: design plan
 
-**Status: draft for review.** Written 2026-09-16 from floor-study evidence.
-Nothing here is implemented. Any change is a new harness build and a new study
-identity; none of it can touch the sealed campaign.
+**Status: implemented.** Written 2026-09-16 from floor-study evidence; the
+delivery contract was completed 2026-09-20. The sealed campaign was not
+modified; any comparative rerun still requires a new harness build and study
+identity.
 
 ## The measured problem
 
@@ -130,6 +131,35 @@ Responsibilities:
    report can attribute an outcome to delivery rather than guess (invariant #6).
    This also makes the lever measurable per tier, as Requirement `e9166711`
    requires.
+
+## Implemented resolution
+
+The harness now owns budget accounting at both sides of the protocol without
+creating a second retrieval policy in the runner:
+
+1. `Runner::next_last_result_budget` uses the same mandatory prompt and output
+   schema accounting as prompt assembly to compute a safe next-observation byte
+   capacity, reserving the proven worst-case JSON expansion of the journal
+   preview the pending search will add. Prompt assembly checks the invariant
+   again after context refresh and fails loudly rather than clipping graph
+   evidence if concurrent revision growth consumed the capacity.
+2. `ContextRequest.max_bytes` carries that capacity for evidence-only search.
+   The daemon remains the sole owner of record selection and degradation.
+3. Search evidence is rendered as atomic record blocks. From the
+   lowest-priority record upward, a block degrades from full claim to first
+   sentence, then title plus retrieval pointer, then counted omission. Accepted
+   Constraints stop at title; a protected core that cannot fit is an error.
+4. `ContextDeliveryReceipt` records the requested and rendered bytes and one
+   typed tier and reason per selected record. It is copied into the durable
+   `KnowledgeSearchResult`; `evidence_iris` contains only records actually shown
+   to the model.
+5. Repository results spend only what remains and are admitted as whole lines.
+   Consequently the generic head/tail observation preview no longer chooses
+   which part of a graph record survives.
+
+File dossiers retain the earlier complementary safeguards: one deduplication
+state per prompt and a daemon-owned claim budget that preserves the complete
+record inventory with a counted by-kind notice.
 
 ## Open questions, to settle with measurement not argument
 

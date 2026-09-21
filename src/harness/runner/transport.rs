@@ -129,6 +129,7 @@ impl Runner {
                     topic: topic.clone(),
                     files: files.to_vec(),
                     evidence_only: false,
+                    max_bytes: None,
                 },
             )
             .await?;
@@ -157,6 +158,7 @@ impl Runner {
                 .collect(),
             governing_constraints: response.governing_constraints.clone(),
             records: response.records.clone(),
+            delivery_receipt: response.delivery_receipt.clone(),
         });
         let turn = self.ensure_knowledge_turn(&topic, &response.revision);
         turn.retrieval_topic = topic;
@@ -186,10 +188,13 @@ impl Runner {
         self.post("ground/plan", request).await
     }
 
-    /// Accepted knowledge for a search query: the complete claims of the
-    /// matching records, without the inventory or file dossiers. The current
-    /// working context is left as it is.
-    pub(super) async fn search_knowledge(&mut self, query: &str) -> Result<ContextResponse> {
+    /// Accepted knowledge for a search query, without the inventory or file
+    /// dossiers. The current working context is left as it is.
+    pub(super) async fn search_knowledge(
+        &mut self,
+        query: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<KnowledgeSearchResult> {
         let response: ContextResponse = self
             .post(
                 "context",
@@ -197,6 +202,7 @@ impl Runner {
                     topic: query.to_owned(),
                     files: vec![],
                     evidence_only: true,
+                    max_bytes,
                 },
             )
             .await?;
@@ -211,6 +217,7 @@ impl Runner {
             context: response.context.clone(),
             evidence_iris: response.evidence_iris.clone(),
             records: response.records.clone(),
+            delivery_receipt: response.delivery_receipt.clone(),
         };
         self.task.knowledge_searches.push(search.clone());
         let topic = format!("{} {}", self.task.objective, self.task.guidance)
@@ -218,8 +225,8 @@ impl Runner {
             .to_owned();
         self.ensure_knowledge_turn(&topic, &response.revision)
             .searches
-            .push(search);
-        Ok(response)
+            .push(search.clone());
+        Ok(search)
     }
 
     pub(super) fn snapshot(&self, files: &[String]) -> Result<BTreeMap<String, Option<String>>> {
@@ -252,8 +259,8 @@ mod tests {
             "Explain graph context"
         );
 
-        runner.search_knowledge("constraints").await.unwrap();
-        runner.search_knowledge("lessons").await.unwrap();
+        runner.search_knowledge("constraints", None).await.unwrap();
+        runner.search_knowledge("lessons", None).await.unwrap();
         assert_eq!(runner.task.knowledge_searches.len(), 2);
         assert_eq!(runner.task.knowledge_searches[0].query, "constraints");
         assert_eq!(runner.task.knowledge_searches[1].query, "lessons");

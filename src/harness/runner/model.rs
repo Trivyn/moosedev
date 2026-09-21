@@ -1,4 +1,5 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
+use super::task::KnowledgeSearchResult;
 use super::tools;
 use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::progress::Progress;
@@ -8,10 +9,26 @@ use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion,
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 const MAX_CONTEXT: usize = 100_000;
 const REPAIR_RESERVE: usize = 1024;
+/// Bytes held back for conversation history and repository navigation, which
+/// are budgeted after the observations block.
+const OPTIONAL_RESERVE: usize = 20_000;
+/// The observations block renders no smaller than its previous fixed cap and no
+/// larger than the ceiling; between them it scales with what the prompt has
+/// left, so a big window is spent rather than left idle.
+const OBSERVATION_FLOOR: usize = 8_000;
+const OBSERVATION_CEILING: usize = 48_000;
+/// The last result renders no smaller than its previous fixed budget.
+const LAST_RESULT_FLOOR: usize = 3_000;
+/// Maximum growth of the observations header when dispatch journals one search.
+/// `observation_preview` contributes at most 800 bytes; JSON can expand every
+/// byte to a six-byte `\u00xx` escape. The remainder covers the event prefix,
+/// separators and the delivered-evidence counters, including `usize::MAX`.
+const PENDING_SEARCH_PREFIX_RESERVE: usize = 5_500;
 const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
 
 /// The compiled opening of the role. The project's standing guidance
@@ -25,7 +42,7 @@ const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief 
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
-const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
+const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
 /// execution and finishing wait for approval, and a replan while planning changes nothing.
@@ -97,6 +114,44 @@ pub(super) enum Generated {
     Content(String),
     Tools(ToolCompletion),
 }
+/// How many bytes the observations block may spend, given what the prompt has
+/// left after its mandatory sections. Scales with the budget between a floor
+/// (its previous fixed cap, so nothing regresses) and a ceiling, after holding
+/// back what conversation history and navigation are budgeted later.
+fn observation_budget(remaining: usize) -> usize {
+    remaining
+        .saturating_sub(OPTIONAL_RESERVE)
+        .clamp(OBSERVATION_FLOOR, OBSERVATION_CEILING)
+        .min(remaining)
+}
+
+/// What the graph has actually delivered, as a fact the model cannot compute
+/// for itself. A model with no idea how much it already holds keeps searching;
+/// the harness knows exactly, so it says so rather than asking the model to
+/// judge its own sufficiency (Constraint cd9f1a96).
+fn delivered_evidence(searches: &[KnowledgeSearchResult]) -> String {
+    if searches.is_empty() {
+        return String::new();
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut newest = 0;
+    for (index, search) in searches.iter().enumerate() {
+        let added = search
+            .evidence_iris
+            .iter()
+            .filter(|iri| seen.insert(iri.as_str()))
+            .count();
+        if index + 1 == searches.len() {
+            newest = added;
+        }
+    }
+    format!(
+        "Accepted knowledge delivered so far: {} distinct records over {} search(es); the newest added {newest}.\n",
+        seen.len(),
+        searches.len()
+    )
+}
+
 pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     const NOTICE: &str =
         "\n[observation shortened; complete evidence is retained in the task journal]\n";
@@ -487,23 +542,16 @@ impl Runner {
         }
     }
 
-    pub(super) fn prompt(&self, context: &ContextResponse, files: &[String]) -> Result<String> {
+    /// Mandatory, never-truncated prompt sections and the bytes left after the
+    /// selected action contract's output schema. Retrieval uses the same
+    /// accounting before it asks the daemon for evidence, so the daemon can
+    /// shape whole records to the real next-prompt capacity.
+    fn mandatory_prompt(&self, context: &ContextResponse) -> Result<(String, usize)> {
         let config = self
             .config
             .clone()
             .map(Ok)
             .unwrap_or_else(LlmConfig::from_env)?;
-        let mut recent: Vec<String> = self
-            .task
-            .events
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, e)| e.message != format!("Human response: {}", self.task.guidance))
-            .take(6)
-            .map(|(i, e)| format!("Event {i}: {}", observation_preview(&e.message, 800)))
-            .collect();
-        recent.reverse();
         let mut prompt = String::from(ROLE_OPENING);
         let standing = self
             .task
@@ -563,7 +611,21 @@ impl Runner {
                     JSON_SCHEMA_MARKER.len() + serde_json::to_string(&schema)?.len()
                 }
             };
-        let mut remaining = limit.saturating_sub(required);
+        Ok((prompt, limit.saturating_sub(required)))
+    }
+
+    fn observations_prefix(&self) -> Result<String> {
+        let mut recent: Vec<String> = self
+            .task
+            .events
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, e)| e.message != format!("Human response: {}", self.task.guidance))
+            .take(6)
+            .map(|(i, e)| format!("Event {i}: {}", observation_preview(&e.message, 800)))
+            .collect();
+        recent.reverse();
         let outputs: Vec<_> = self
             .task
             .check_results
@@ -571,12 +633,63 @@ impl Runner {
             .enumerate()
             .map(|(index, c)| format!("Check {index}: {}", observation_preview(&c.output, 800)))
             .collect();
-        let observations = format!("Recent observations (complete outputs remain in journal events; use inspect(event,offset) to page them):\n{}\nCheck output previews:\n{}\nLast result:\n{}\n",
-            serde_json::to_string(&recent)?, outputs.join("\n"), observation_preview(
-                if self.task.last_response == self.task.guidance || self.task.last_response == self.task.objective {
-                    "Current human input is given above."
-                } else { &self.task.last_response }, 3000));
-        let observations = observation_preview(&observations, remaining.min(8000));
+        Ok(format!("{}Recent observations (complete outputs remain in journal events; use inspect(event,offset) to page them):\n{}\nCheck output previews:\n{}\nLast result:\n",
+            delivered_evidence(&self.task.knowledge_searches),
+            serde_json::to_string(&recent)?, outputs.join("\n")))
+    }
+
+    /// Bytes the next prompt can show from `last_response` without invoking
+    /// generic head/tail clipping. The margin is a proven upper bound for the
+    /// JSON-escaped journal preview and delivery counters added by dispatch.
+    pub(super) fn next_last_result_budget(&self, context: &ContextResponse) -> Result<usize> {
+        // Dispatch journals the search response after this preflight. That
+        // adds one 800-byte recent-event preview plus the delivered-evidence
+        // sentence and JSON quoting to the next observations header.
+        let (_, remaining) = self.mandatory_prompt(context)?;
+        Ok(observation_budget(remaining)
+            .saturating_sub(self.observations_prefix()?.len())
+            .saturating_sub(PENDING_SEARCH_PREFIX_RESERVE)
+            .saturating_sub(1))
+    }
+
+    pub(super) fn prompt(&self, context: &ContextResponse, files: &[String]) -> Result<String> {
+        let (prompt, mut remaining) = self.mandatory_prompt(context)?;
+        let last = if self.task.last_response == self.task.guidance
+            || self.task.last_response == self.task.objective
+        {
+            "Current human input is given above."
+        } else {
+            &self.task.last_response
+        };
+        let header = self.observations_prefix()?;
+        // The last result is usually the evidence the model just asked for. A
+        // fixed 3 KB of a 25 KB search result costs a dozen inspect round trips
+        // to page back, 2 KB at a time, and each page overwrites the last -- so
+        // spend what is actually left instead. Observations are budgeted before
+        // conversation history and navigation, so reserve what those two take
+        // and clamp the rest: never below the previous fixed sizes, never large
+        // enough for one observation to dominate prefill (Lesson af16b95e).
+        let block = observation_budget(remaining);
+        let last_is_graph_evidence = self
+            .task
+            .knowledge_events
+            .last()
+            .and_then(|index| self.task.events.get(*index))
+            .is_some_and(|event| event.message == self.task.last_response);
+        if last_is_graph_evidence {
+            anyhow::ensure!(
+                header.len().saturating_add(last.len()).saturating_add(1) <= block,
+                "bounded graph evidence no longer fits after context refresh; repeat the search under the current context"
+            );
+        }
+        let observations = format!(
+            "{header}{}\n",
+            observation_preview(
+                last,
+                block.saturating_sub(header.len()).max(LAST_RESULT_FLOOR)
+            )
+        );
+        let observations = observation_preview(&observations, block);
         remaining = remaining.saturating_sub(observations.len());
         let mut optional = String::new();
         if self.task.batch_capture && !self.task.conversation_context.is_empty() {
@@ -840,6 +953,7 @@ pub(super) fn action_schema(mode: Mode) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::runner::test_support::{context_router, serve, Project};
 
     #[test]
     fn optional_context_respects_byte_budgets_and_unicode() {
@@ -878,8 +992,132 @@ mod tests {
         }
         assert!(DEFAULT_GUIDANCE.len() <= super::super::MAX_GUIDANCE_BYTES);
         assert!(ACTION_MEANINGS.contains(
-            "search(query) returns matching accepted knowledge first, then repository matches."
+            "search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question."
         ));
+    }
+
+    #[test]
+    fn the_observation_budget_scales_with_what_the_prompt_has_left() {
+        // A knowledge question carries no dossiers, so nearly the whole budget
+        // is free and a 25 KB search result must not be clipped to 3 KB.
+        assert_eq!(observation_budget(98_976), OBSERVATION_CEILING);
+        assert!(observation_budget(80_000) >= 24_755);
+        // Between the reserve and the ceiling it tracks the budget.
+        assert_eq!(observation_budget(40_000), 20_000);
+        // A starved prompt never renders less than the previous fixed cap...
+        assert_eq!(observation_budget(25_000), OBSERVATION_FLOOR);
+        assert_eq!(observation_budget(20_000), OBSERVATION_FLOOR);
+        // ...and never claims more than actually remains.
+        assert_eq!(observation_budget(1_000), 1_000);
+        assert_eq!(observation_budget(0), 0);
+        for remaining in [0, 1, 999, 8_000, 20_001, 47_999, 68_000, 1_000_000] {
+            assert!(observation_budget(remaining) <= remaining.max(OBSERVATION_FLOOR));
+            assert!(observation_budget(remaining) <= OBSERVATION_CEILING);
+        }
+    }
+
+    #[test]
+    fn an_observation_preview_keeps_both_ends_and_says_it_shortened() {
+        let text = "a".repeat(500) + &"b".repeat(500);
+        assert_eq!(observation_preview(&text, 1000), text);
+        assert_eq!(observation_preview(&text, 5000), text);
+        let short = observation_preview(&text, 200);
+        assert!(short.len() <= 200);
+        assert!(short.starts_with('a') && short.ends_with('b'));
+        assert!(short.contains("observation shortened"));
+        // A budget too small for the notice yields nothing rather than a lie.
+        assert_eq!(observation_preview(&text, 10), "");
+        // Multi-byte text is cut on character boundaries, never mid-codepoint.
+        let unicode = "λ😀".repeat(200);
+        let cut = observation_preview(&unicode, 300);
+        assert!(cut.len() <= 300);
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn advertised_search_capacity_reaches_the_next_prompt_without_byte_clipping() {
+        let project = Project::new("search-capacity");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Recall the decision".into())
+            .await
+            .unwrap();
+        let context = runner.context.clone().unwrap();
+        let budget = runner.next_last_result_budget(&context).unwrap();
+        assert!(
+            budget > 1_000,
+            "fixture must leave useful evidence capacity"
+        );
+        let prefix = "[Requirement] Whole record\nhasDescription: ";
+        let suffix = "\nEND_OF_WHOLE_RECORD";
+        runner.task.last_response = format!(
+            "{prefix}{}{suffix}",
+            "\u{0001}".repeat(budget - prefix.len() - suffix.len())
+        );
+        assert_eq!(runner.task.last_response.len(), budget);
+        runner.task.knowledge_searches.push(KnowledgeSearchResult {
+            query: "whole record".into(),
+            revision: "r1".into(),
+            context: runner.task.last_response.clone(),
+            evidence_iris: vec!["https://example.test/Requirement/whole-record".into()],
+            records: vec![],
+            delivery_receipt: None,
+        });
+        runner.knowledge_event(runner.task.last_response.clone());
+        let prompt = runner.prompt(&context, &[]).unwrap();
+        let last = prompt.rsplit_once("Last result:\n").unwrap().1;
+        assert!(last.contains(suffix), "{last}");
+        assert!(!last.contains("[observation shortened;"), "{last}");
+
+        // If a refreshed mandatory context consumes the preflight capacity,
+        // graph evidence fails loudly instead of falling through the generic
+        // head/tail observation preview.
+        let oversized = "x".repeat(budget + PENDING_SEARCH_PREFIX_RESERVE + 1);
+        runner.task.last_response = oversized.clone();
+        let event = *runner.task.knowledge_events.last().unwrap();
+        runner.task.events[event].message = oversized;
+        let error = runner.prompt(&context, &[]).unwrap_err().to_string();
+        assert!(
+            error.contains("bounded graph evidence no longer fits"),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn delivered_evidence_counts_distinct_records_and_what_the_newest_search_added() {
+        let search = |query: &str, iris: &[&str]| KnowledgeSearchResult {
+            query: query.into(),
+            revision: "r".into(),
+            context: String::new(),
+            evidence_iris: iris.iter().map(|iri| (*iri).into()).collect(),
+            records: vec![],
+            delivery_receipt: None,
+        };
+        assert_eq!(delivered_evidence(&[]), "");
+        let one = delivered_evidence(&[search("a", &["x", "y"])]);
+        assert!(
+            one.contains("2 distinct records over 1 search(es)"),
+            "{one}"
+        );
+        assert!(one.contains("the newest added 2"), "{one}");
+        // A second search returning what the first already delivered is the
+        // case the model cannot see for itself: distinct stays 2, newest is 0.
+        let two = delivered_evidence(&[search("a", &["x", "y"]), search("b", &["y", "x"])]);
+        assert!(
+            two.contains("2 distinct records over 2 search(es)"),
+            "{two}"
+        );
+        assert!(two.contains("the newest added 0"), "{two}");
+        let three = delivered_evidence(&[
+            search("a", &["x"]),
+            search("b", &["x"]),
+            search("c", &["x", "z"]),
+        ]);
+        assert!(
+            three.contains("2 distinct records over 3 search(es)"),
+            "{three}"
+        );
+        assert!(three.contains("the newest added 1"), "{three}");
     }
 
     #[test]

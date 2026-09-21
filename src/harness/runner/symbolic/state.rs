@@ -10,6 +10,10 @@ pub const MAX_SCOPE_ESCAPES: usize = 3;
 /// A rejected typed capture is retyped under fresh ids this many times per
 /// task; the next rejection parks for human guidance.
 pub const MAX_RETYPES: usize = 3;
+/// Consecutive searches matching nothing after which the harness states that
+/// the channel is exhausted. Two: one empty search can be a poor choice of
+/// words, a second on the same idea is evidence the knowledge is not recorded.
+pub const FRUITLESS_SEARCH_LIMIT: usize = 2;
 
 pub(super) const CAPTURE_NOTE_QUESTION: &str = "The coding work is done and its required checks passed. Answer one plain question in prose, no JSON structure beyond the single note field: what should a future engineer know about this change that the diff alone does not say? Name the decision you made and why, any rule you discovered, and anything that surprised you. Say \"nothing beyond the diff\" if there is nothing durable. Do not restate the objective.";
 
@@ -51,6 +55,10 @@ pub struct SymbolicState {
     /// Every required-check outcome in order, feeding the symbolic lesson.
     #[serde(default)]
     pub check_history: Vec<CheckOutcome>,
+    /// Consecutive `search` actions that matched no accepted knowledge and no
+    /// repository text. Reset by any search that returns something.
+    #[serde(default)]
+    pub fruitless_searches: usize,
     /// Plans returned in the current planning cycle because their summary did
     /// not address a governing rule. Reset when a plan is stored.
     #[serde(default)]

@@ -301,10 +301,18 @@ Repository navigation previews are byte-bounded (up to 8 KB), and optional
 conversation history uses only space remaining after current evidence and the
 action schema. Omitted paths are disclosed; `search` first returns the accepted
 project knowledge matching the query, then examines both paths and contents
-throughout the permitted workspace. The configured model ID is supplied
+throughout the permitted workspace, matching the query as literal text rather
+than as a query language. The configured model ID is supplied
 as session metadata so the model can answer identity questions without guessing.
-Action observations use bounded previews; `inspect(event,offset)` lets the model
-read detailed journal output without repeating a command. The final checkpoint
+Action observations use bounded previews whose budget scales with what the
+prompt has left after its governing knowledge and output schema, so a wide
+window is spent on the evidence the model just retrieved instead of left idle;
+`inspect(event,offset)` lets the model read detailed journal output without
+repeating a command. Each prompt states how many distinct records the graph has
+delivered so far. A byte-identical repeat of an earlier query is answered from
+the stored result without re-running it, and consecutive searches matching
+nothing are counted: the second states that the channel is exhausted and names
+the actions the current mode still offers. The final checkpoint
 consumes the whole journal since the last checkpoint in one note; the checkpoint
 position persists across interruption. The Journal view displays a compact
 index; complete requests and observations remain in the task JSON. Unchanged checkpoints skip redundant
@@ -398,17 +406,30 @@ contract 3 and intent contract 2.
   journaled and the defaults used. The check reads wording only; required checks
   judge the code.
 - Dossiers. A file dossier lists each knowledge-bearing entity's direct records
-  with their complete claims, rendered like linked evidence (superseded records
-  show only their header line), and its component's records by title: accepted
-  Constraints always, other kinds up to twelve, then a count. Each claim and
-  each component list appears once per file dossier. The harness requests
-  dossiers without a byte bound; context that exceeds the prompt budget fails
-  instead of being truncated. Harness file dossiers, search results and topic
-  fallback render compact claims (`ClaimStyle::Harness`): each relationship line
-  names its target's title instead of its IRI, at most three are shown before
-  the omission line, and record lines carry no workbench links. This is a
+  rendered like linked evidence (superseded records show only their header
+  line), and its component's records by title: accepted Constraints always,
+  other kinds up to twelve, then a count. One deduplication state spans every
+  file in the prompt. A daemon-owned per-prompt claim budget preserves every
+  record line and counts withheld claims by kind; the line retains kind, title,
+  lifecycle status and linking predicate, and the notice gives the working
+  retrieval route. Harness file dossiers, search results and topic fallback
+  render compact claims (`ClaimStyle::Harness`): each relationship line names
+  its target's title instead of its IRI, at most three are shown before the
+  omission line, and record lines carry no workbench links. This is a
   harness-only exception to push == MCP: MCP, hover and policy push keep the
   full claims, and linked evidence and Project rules keep the full renderer.
+- Bounded search evidence. Before an evidence-only context request, the runner
+  computes a safe next-prompt observation capacity after mandatory
+  context and the action schema. The daemon receives that byte budget and
+  admits atomic record blocks through four deterministic tiers: full claim,
+  first sentence, title plus retrieval pointer, then counted omission.
+  Accepted Constraints never fall below the title tier; a protected core that
+  cannot fit fails loudly. `evidence_iris` names only records the model saw, and
+  a typed delivery receipt (overall requested/rendered bytes plus each record's
+  tier and reason) is persisted with the search in the task journal. Repository matches
+  use only the remaining last-result capacity and are admitted as complete
+  lines, so the generic observation preview no longer cuts graph evidence
+  through the middle of a record.
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). The first no-op edit runs the

@@ -15,7 +15,8 @@ use super::{Mode, PendingEdit, Phase, Progress, Runner};
 use crate::harness::protocol::CheckOutcome;
 use anyhow::Result;
 pub use state::{
-    CaptureNoteState, SymbolicAssociation, SymbolicState, MAX_RETYPES, MAX_SCOPE_ESCAPES,
+    CaptureNoteState, SymbolicAssociation, SymbolicState, FRUITLESS_SEARCH_LIMIT, MAX_RETYPES,
+    MAX_SCOPE_ESCAPES,
 };
 use state::{NoteAnswer, CAPTURE_NOTE_QUESTION};
 
@@ -106,6 +107,98 @@ impl Runner {
                 "Edit to {file} is outside the approved plan files [{scope}]; replan with every file the change needs."
             ),
         }))
+    }
+
+    /// A query this task has already searched, answered from its stored result.
+    ///
+    /// `knowledge_searches` is never pruned, so the whole task's retrieval
+    /// history is available and a byte-identical repeat needs no daemon round
+    /// trip. A step is still charged, because the model did take an action and
+    /// because a free repeat would let one query loop forever without ever
+    /// reaching the task's step bound -- which is exactly what was observed:
+    /// one query repeated 71 times in a single turn.
+    ///
+    /// Only answered from cache while the workspace cannot have changed since
+    /// that search, so a repeat after an edit still re-reads the repository.
+    pub(in crate::harness::runner) fn repeat_search_answer(
+        &mut self,
+        query: &str,
+    ) -> Option<String> {
+        if !self.task.edits.is_empty() {
+            return None;
+        }
+        let earlier = self
+            .task
+            .knowledge_searches
+            .iter()
+            .find(|search| search.query == query)?;
+        let records = earlier.evidence_iris.len();
+        let omitted = earlier.omitted_record_count();
+        let context = earlier.context.trim().to_owned();
+        self.intent_event(
+            "repeat_search",
+            &format!("{records} records already delivered: {query}"),
+        );
+        // Show the stored records again rather than only naming them. Answering
+        // a repeat with a bare "you already asked" would withhold the evidence
+        // the model asked for, which is the defect this whole change corrects;
+        // the point of the short circuit is to skip the daemon, not the answer.
+        let body = if context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nAccepted project knowledge for '{query}' (authoritative):\n{context}")
+        };
+        let delivery = if omitted == 0 {
+            format!("{records} accepted record(s)")
+        } else {
+            format!("{records} accepted record(s) shown and {omitted} counted as omitted")
+        };
+        Some(format!(
+            "You already searched the literal string '{query}' in this task; it returned {delivery}, unchanged and repeated below. Searching it again cannot add anything -- use a different action.{body}"
+        ))
+    }
+
+    /// What to append to a search result: how many searches in a row have now
+    /// matched nothing, and, once that reaches the limit, what is left to try.
+    ///
+    /// `search` matches LITERAL text, so rewording rarely rescues an empty
+    /// result -- the knowledge is simply not recorded. A model that cannot tell
+    /// it has exhausted the channel rewords forever (fourteen consecutive
+    /// searches observed). The harness can count, so it counts and states the
+    /// fact; it never asks the model to judge its own sufficiency, which would
+    /// be a structured decision the symbolic layer can derive (Constraint
+    /// cd9f1a96). The note does not block searching, and a search that returns
+    /// anything resets the count.
+    pub(in crate::harness::runner) fn fruitless_search_note(&mut self, fruitless: bool) -> String {
+        let consecutive = {
+            let state = self.symbolic_state_mut();
+            state.fruitless_searches = if fruitless {
+                state.fruitless_searches + 1
+            } else {
+                0
+            };
+            state.fruitless_searches
+        };
+        if !fruitless {
+            return String::new();
+        }
+        let mut note = format!(" Searches in a row matching nothing: {consecutive}.");
+        if consecutive == FRUITLESS_SEARCH_LIMIT {
+            // Name only the actions this mode actually offers: in Plan mode
+            // `command` is not among them, so a model cannot consult history.
+            let remaining = match self.task.mode {
+                Mode::Plan => "read(file) to look at the source, question(...) to ask the human, or reply(...) saying it is not recorded",
+                Mode::Auto => "read(file) or command(...) to look at the source and its history, question(...) to ask the human, or reply(...) saying it is not recorded",
+            };
+            note.push_str(&format!(
+                "\n\nSearching has not found this, and rewording will not help: the query is matched literally and the accepted graph holds no record of it. What remains: {remaining}."
+            ));
+            self.intent_event(
+                "search_exhausted",
+                &format!("{consecutive} consecutive searches matched nothing"),
+            );
+        }
+        note
     }
 
     /// The first no-op edit of a task means the source already matches: run
@@ -208,6 +301,116 @@ impl Runner {
 mod tests {
     use super::super::test_support::{context_router, serve, Project};
     use super::*;
+
+    #[tokio::test]
+    async fn empty_searches_are_counted_and_the_exhausted_note_names_only_offered_actions() {
+        let project = Project::new("fruitless-search");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(
+            project.0.clone(),
+            daemon,
+            "When was the MOOSE emoji added?".into(),
+        )
+        .await
+        .unwrap();
+
+        // The first empty search states the count and nothing more: one poor
+        // choice of words is not evidence that the knowledge is absent.
+        let first = runner.fruitless_search_note(true);
+        assert!(
+            first.contains("Searches in a row matching nothing: 1"),
+            "{first}"
+        );
+        assert!(!first.contains("What remains"), "{first}");
+
+        // The second says the channel is exhausted. This is Plan mode, where
+        // `command` is not offered, so it must not be suggested.
+        let second = runner.fruitless_search_note(true);
+        assert!(
+            second.contains("Searches in a row matching nothing: 2"),
+            "{second}"
+        );
+        assert!(second.contains("rewording will not help"), "{second}");
+        assert!(
+            second.contains("reply(...)") && second.contains("question(...)"),
+            "{second}"
+        );
+        assert!(
+            !second.contains("command(...)"),
+            "must not offer an action Plan mode denies"
+        );
+
+        // It fires once per run, not on every later empty search...
+        let third = runner.fruitless_search_note(true);
+        assert!(
+            third.contains("Searches in a row matching nothing: 3"),
+            "{third}"
+        );
+        assert!(!third.contains("What remains"), "{third}");
+
+        // ...and a search that finds something resets the count entirely.
+        assert_eq!(runner.fruitless_search_note(false), "");
+        assert_eq!(runner.task.symbolic.as_ref().unwrap().fruitless_searches, 0);
+        let after = runner.fruitless_search_note(true);
+        assert!(
+            after.contains("Searches in a row matching nothing: 1"),
+            "{after}"
+        );
+
+        // In Auto mode history is reachable, so the note may offer it.
+        runner.task.mode = Mode::Auto;
+        let auto = runner.fruitless_search_note(true);
+        assert!(auto.contains("command(...)"), "{auto}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_repeated_query_is_answered_from_the_stored_result_while_nothing_changed() {
+        let project = Project::new("repeat-search");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Explain the harness".into())
+            .await
+            .unwrap();
+
+        // Nothing searched yet, and a different query, are both dispatched.
+        assert!(runner.repeat_search_answer("harness").is_none());
+        runner.search_knowledge("harness", None).await.unwrap();
+        assert!(runner.repeat_search_answer("harness for models").is_none());
+
+        // Give the stored search a body, so the repeat can be checked for
+        // repeating the evidence rather than only naming it.
+        runner.task.knowledge_searches[0].context = "[Lesson] Something durable".into();
+        runner.task.knowledge_searches[0].evidence_iris = vec!["urn:record:1".into()];
+
+        // A byte-identical repeat is served from the stored result, every time:
+        // one query was observed repeated 71 times in a single turn, so this
+        // must not be bounded into giving up and looping again.
+        for _ in 0..70 {
+            let answer = runner.repeat_search_answer("harness").unwrap();
+            assert!(answer.contains("You already searched"), "{answer}");
+            assert!(answer.contains("use a different action"), "{answer}");
+            // Skip the daemon round trip, never the records themselves.
+            assert!(answer.contains("[Lesson] Something durable"), "{answer}");
+            assert!(answer.contains("1 accepted record(s)"), "{answer}");
+        }
+        assert_eq!(
+            runner.task.knowledge_searches.len(),
+            1,
+            "no repeat re-ran the search"
+        );
+
+        // Once an edit lands the workspace may differ, so a repeat is dispatched
+        // again rather than answered from a stale result.
+        runner.task.edits.push(PendingEdit {
+            file: "code.rs".into(),
+            before: None,
+            after: Some("fn main() {}".into()),
+            reason: "applied".into(),
+            revision: "r1".into(),
+        });
+        assert!(runner.repeat_search_answer("harness").is_none());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn record_symbolic_check_ends_the_unchanged_window() {

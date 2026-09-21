@@ -47,6 +47,9 @@ pub struct KnowledgeContextSnapshot {
     pub governing_constraints: Vec<GoverningConstraint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<ContextRecord>,
+    /// Exact record-delivery accounting supplied by the daemon, when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_receipt: Option<ContextDeliveryReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +60,27 @@ pub struct KnowledgeSearchResult {
     pub evidence_iris: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<ContextRecord>,
+    /// Exact record-delivery accounting supplied by the daemon, when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_receipt: Option<ContextDeliveryReceipt>,
+}
+
+impl KnowledgeSearchResult {
+    pub(super) fn selected_record_count(&self) -> usize {
+        self.delivery_receipt
+            .as_ref()
+            .map_or(self.evidence_iris.len(), |receipt| receipt.records.len())
+    }
+
+    pub(super) fn omitted_record_count(&self) -> usize {
+        self.delivery_receipt.as_ref().map_or(0, |receipt| {
+            receipt
+                .records
+                .iter()
+                .filter(|record| record.tier == ContextRecordDeliveryTier::Omitted)
+                .count()
+        })
+    }
 }
 
 /// The graph evidence retrieved while one exact human query was active.

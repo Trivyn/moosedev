@@ -839,6 +839,25 @@ fn legacy_knowledge_text(task: &Task) -> String {
             search.query,
             search.revision
         ));
+        if let Some(receipt) = &search.delivery_receipt {
+            text.push_str(&format!(
+                "Delivery: {} bytes{}\n",
+                receipt.context_bytes,
+                receipt
+                    .max_bytes
+                    .map(|max| format!(" of {max}"))
+                    .unwrap_or_else(|| " (unbounded)".into())
+            ));
+            for record in &receipt.records {
+                text.push_str(&format!(
+                    "- {}: {} ({}) — {}\n",
+                    record.tier.as_str(),
+                    record.kind,
+                    record.iri,
+                    record.reason
+                ));
+            }
+        }
         if search.context.trim().is_empty() {
             text.push_str("No accepted project knowledge matched.\n");
         } else {
@@ -1730,6 +1749,7 @@ mod tests {
                 via: "src/parser.rs".into(),
             }],
             records: vec![],
+            delivery_receipt: None,
         });
         task.knowledge_searches = vec![
             super::super::runner::KnowledgeSearchResult {
@@ -1738,6 +1758,16 @@ mod tests {
                 context: "Requirement · Parser output stays deterministic".into(),
                 evidence_iris: vec!["https://moosedev.dev/kg/Requirement/parser".into()],
                 records: vec![],
+                delivery_receipt: Some(super::super::protocol::ContextDeliveryReceipt {
+                    max_bytes: Some(4096),
+                    context_bytes: 96,
+                    records: vec![super::super::protocol::ContextRecordDelivery {
+                        iri: "https://moosedev.dev/kg/Requirement/parser".into(),
+                        kind: "Requirement".into(),
+                        tier: super::super::protocol::ContextRecordDeliveryTier::FirstSentence,
+                        reason: "complete claim did not fit".into(),
+                    }],
+                }),
             },
             super::super::runner::KnowledgeSearchResult {
                 query: "missing".into(),
@@ -1745,6 +1775,7 @@ mod tests {
                 context: String::new(),
                 evidence_iris: vec![],
                 records: vec![],
+                delivery_receipt: None,
             },
         ];
 
@@ -1757,6 +1788,8 @@ mod tests {
         assert!(text.contains("PROJECT RULES\nDeterministic parser"));
         assert!(text.contains("FILE DOSSIERS\n\nsrc/parser.rs\nParser dossier"));
         assert!(text.contains("SEARCH 1 · 1 accepted record(s)\nQuery: parser"));
+        assert!(text.contains("Delivery: 96 bytes of 4096"));
+        assert!(text.contains("- first_sentence: Requirement"));
         assert!(text.contains("SEARCH 2 · 0 accepted record(s)\nQuery: missing"));
         assert!(text.contains("No accepted project knowledge matched."));
     }
@@ -1813,6 +1846,7 @@ mod tests {
                         "Sort before rendering.",
                         "topic match",
                     )],
+                    delivery_receipt: None,
                 }],
             },
         ];

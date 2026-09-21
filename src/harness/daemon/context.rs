@@ -42,11 +42,14 @@ pub fn context_snapshot(
     let mut context_records = Vec::new();
     let mut record_indexes = std::collections::BTreeMap::new();
     let mut file_record_iris = Vec::new();
+    let mut delivery_receipt = None;
     let evidence_iris = if request.evidence_only {
-        // An evidence-only request (the model's search) returns just the
-        // topic's records with their complete claims.
+        // An evidence-only request (the model's search) returns only atomic
+        // record blocks. When the caller supplies a byte budget the daemon,
+        // which owns retrieval policy, degrades whole records and accounts for
+        // every selected record instead of leaving the runner to cut arbitrary
+        // bytes through the middle of a claim.
         let records = graph::relevant_context_snapshot(state, Some(&request.topic), 12, false)?;
-        render_topic_records(state, &mut context, &records);
         for record in &records {
             merge_context_record(
                 &mut context_records,
@@ -54,7 +57,10 @@ pub fn context_snapshot(
                 context_record(state, record, true, "topic match"),
             );
         }
-        records.into_iter().map(|record| record.iri).collect()
+        let rendered = render_topic_records_within(state, &records, request.max_bytes)?;
+        context = rendered.context;
+        delivery_receipt = Some(rendered.receipt);
+        rendered.evidence_iris
     } else {
         // Linked evidence leads (AD 85da8700): the walk from the files' code
         // replaces similarity-ranked topic recall, which remains only as a
@@ -237,6 +243,7 @@ pub fn context_snapshot(
         files,
         records: context_records,
         evidence_iris,
+        delivery_receipt,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
         governing_constraints,
@@ -289,12 +296,216 @@ const RECALL: &str = "search with words from a record name returns its complete 
 /// Topic recall records: a header per record, then its harness-style claim body.
 fn render_topic_records(state: &AppState, context: &mut String, records: &[graph::ContextItem]) {
     for record in records {
-        context.push_str(&format!(
-            "\n[{}] {} ({})\n",
-            record.kind, record.label, record.iri
-        ));
-        graph::render_styled_claim_body(state, record, graph::ClaimStyle::Harness, context);
+        context.push_str(&topic_record_header(record));
+        context.push_str(&topic_record_claim(state, record));
     }
+}
+
+struct TopicDelivery<'a> {
+    record: &'a graph::ContextItem,
+    full_block: String,
+    first_sentence_block: String,
+    title_block: String,
+    tier: ContextRecordDeliveryTier,
+}
+
+impl<'a> TopicDelivery<'a> {
+    fn new(state: &AppState, record: &'a graph::ContextItem) -> Self {
+        const SHORTENED: &str =
+            "claim shortened by the caller byte bound; search this record title for the complete claim\n";
+        const WITHHELD: &str =
+            "claim withheld by the caller byte bound; search this record title for the complete claim\n";
+
+        let header = topic_record_header(record);
+        let claim = topic_record_claim(state, record);
+        let full_block = format!("{header}{claim}");
+        let mut first_sentence_block = format!("{header}{}", first_claim_sentence(&claim));
+        if !first_sentence_block.ends_with('\n') {
+            first_sentence_block.push('\n');
+        }
+        first_sentence_block.push_str(SHORTENED);
+        let title_block = format!("{header}{WITHHELD}");
+        Self {
+            record,
+            full_block,
+            first_sentence_block,
+            title_block,
+            tier: ContextRecordDeliveryTier::FullClaim,
+        }
+    }
+
+    fn block(&self) -> &str {
+        match self.tier {
+            ContextRecordDeliveryTier::FullClaim => &self.full_block,
+            ContextRecordDeliveryTier::FirstSentence => &self.first_sentence_block,
+            ContextRecordDeliveryTier::TitleOnly => &self.title_block,
+            ContextRecordDeliveryTier::Omitted => "",
+        }
+    }
+
+    fn next_tier(&self) -> Option<ContextRecordDeliveryTier> {
+        match self.tier {
+            ContextRecordDeliveryTier::FullClaim => Some(ContextRecordDeliveryTier::FirstSentence),
+            ContextRecordDeliveryTier::FirstSentence => Some(ContextRecordDeliveryTier::TitleOnly),
+            ContextRecordDeliveryTier::TitleOnly if self.record.kind != "Constraint" => {
+                Some(ContextRecordDeliveryTier::Omitted)
+            }
+            ContextRecordDeliveryTier::TitleOnly | ContextRecordDeliveryTier::Omitted => None,
+        }
+    }
+}
+
+struct RenderedTopicEvidence {
+    context: String,
+    evidence_iris: Vec<String>,
+    receipt: ContextDeliveryReceipt,
+}
+
+/// Render topic evidence as indivisible record blocks within a caller budget.
+///
+/// The ranked order is authoritative, except that a bounded request moves every
+/// accepted Constraint ahead of non-Constraints. Starting at the lowest-ranked
+/// record, claims degrade through the requirement's explicit ladder until the
+/// complete blocks plus their counted receipt fit: full claim, first sentence,
+/// title with a retrieval pointer, then omission. Constraints stop at the title
+/// tier; if even that protected core cannot fit, retrieval fails loudly.
+fn render_topic_records_within(
+    state: &AppState,
+    records: &[graph::ContextItem],
+    max_bytes: Option<usize>,
+) -> anyhow::Result<RenderedTopicEvidence> {
+    let mut deliveries: Vec<_> = records
+        .iter()
+        .map(|record| TopicDelivery::new(state, record))
+        .collect();
+    if max_bytes.is_some() {
+        deliveries.sort_by_key(|delivery| usize::from(delivery.record.kind != "Constraint"));
+    }
+
+    if let Some(limit) = max_bytes {
+        loop {
+            let rendered = render_topic_deliveries(&deliveries);
+            if rendered.len() <= limit {
+                break;
+            }
+            let Some(delivery) = deliveries
+                .iter_mut()
+                .rev()
+                .find(|delivery| delivery.next_tier().is_some())
+            else {
+                anyhow::bail!(
+                    "context byte budget {limit} is smaller than the protected Constraint titles and counted delivery notice"
+                );
+            };
+            delivery.tier = delivery.next_tier().unwrap();
+        }
+    }
+
+    let context = render_topic_deliveries(&deliveries);
+    let evidence_iris = deliveries
+        .iter()
+        .filter(|delivery| delivery.tier != ContextRecordDeliveryTier::Omitted)
+        .map(|delivery| delivery.record.iri.clone())
+        .collect();
+    let records = deliveries
+        .iter()
+        .map(|delivery| ContextRecordDelivery {
+            iri: delivery.record.iri.clone(),
+            kind: delivery.record.kind.clone(),
+            tier: delivery.tier,
+            reason: delivery_reason(max_bytes, delivery.tier).into(),
+        })
+        .collect();
+    Ok(RenderedTopicEvidence {
+        receipt: ContextDeliveryReceipt {
+            max_bytes,
+            context_bytes: context.len(),
+            records,
+        },
+        context,
+        evidence_iris,
+    })
+}
+
+fn delivery_reason(max_bytes: Option<usize>, tier: ContextRecordDeliveryTier) -> &'static str {
+    match (max_bytes, tier) {
+        (None, _) => "unbounded request",
+        (_, ContextRecordDeliveryTier::FullClaim) => "complete claim fit within caller byte budget",
+        (_, ContextRecordDeliveryTier::FirstSentence) => {
+            "complete claim did not fit; first sentence and retrieval pointer fit"
+        }
+        (_, ContextRecordDeliveryTier::TitleOnly) => {
+            "claim did not fit; title and retrieval pointer fit"
+        }
+        (_, ContextRecordDeliveryTier::Omitted) => {
+            "record block did not fit; counted in the delivery notice"
+        }
+    }
+}
+
+fn render_topic_deliveries(deliveries: &[TopicDelivery<'_>]) -> String {
+    let mut out = String::new();
+    for delivery in deliveries {
+        out.push_str(delivery.block());
+    }
+    if deliveries
+        .iter()
+        .any(|delivery| delivery.tier != ContextRecordDeliveryTier::FullClaim)
+    {
+        out.push_str(&delivery_notice(deliveries));
+    }
+    out
+}
+
+fn topic_record_header(record: &graph::ContextItem) -> String {
+    format!("\n[{}] {} ({})\n", record.kind, record.label, record.iri)
+}
+
+fn topic_record_claim(state: &AppState, record: &graph::ContextItem) -> String {
+    let mut claim = String::new();
+    graph::render_styled_claim_body(state, record, graph::ClaimStyle::Harness, &mut claim);
+    claim
+}
+
+/// The first sentence of the first rendered claim line, on a UTF-8 boundary.
+fn first_claim_sentence(claim: &str) -> &str {
+    let line = claim.lines().next().unwrap_or_default();
+    for (index, ch) in line.char_indices() {
+        if matches!(ch, '.' | '!' | '?') {
+            let end = index + ch.len_utf8();
+            if end == line.len() || line[end..].chars().next().is_some_and(char::is_whitespace) {
+                return &line[..end];
+            }
+        }
+    }
+    line
+}
+
+fn delivery_notice(deliveries: &[TopicDelivery<'_>]) -> String {
+    let count = |wanted| {
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.tier == wanted)
+            .count()
+    };
+    let mut affected = std::collections::BTreeMap::<&str, usize>::new();
+    for delivery in deliveries {
+        if delivery.tier != ContextRecordDeliveryTier::FullClaim {
+            *affected.entry(&delivery.record.kind).or_default() += 1;
+        }
+    }
+    let kinds = affected
+        .into_iter()
+        .map(|(kind, n)| format!("{kind}: {n}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "\nDelivery under caller byte bound: {} full claim(s), {} first-sentence claim(s), {} title-only record(s), {} omitted record(s) ({kinds}). Search a record title to retrieve its complete claim.\n",
+        count(ContextRecordDeliveryTier::FullClaim),
+        count(ContextRecordDeliveryTier::FirstSentence),
+        count(ContextRecordDeliveryTier::TitleOnly),
+        count(ContextRecordDeliveryTier::Omitted),
+    )
 }
 
 /// The current knowledge records offered to the link path: the bounded

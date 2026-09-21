@@ -7,6 +7,8 @@ use std::time::Duration;
 use super::protocol::{ContextRequest, ContextResponse};
 use crate::{llm::LlmConfig, runtime};
 
+const BOUNDED_CONTEXT_PROBE_BYTES: usize = 4_096;
+
 #[derive(Clone, Debug)]
 pub struct StartupOptions {
     pub root: PathBuf,
@@ -208,7 +210,8 @@ async fn verify_daemon(url: &str, root: &Path, data_dir: &Path) -> Result<()> {
         .json(&ContextRequest {
             topic: "harness startup".into(),
             files: vec![],
-            evidence_only: false,
+            evidence_only: true,
+            max_bytes: Some(BOUNDED_CONTEXT_PROBE_BYTES),
         })
         .send()
         .await?;
@@ -230,6 +233,10 @@ async fn verify_daemon(url: &str, root: &Path, data_dir: &Path) -> Result<()> {
     ensure!(
         Path::new(&context.project_root) == root && !context.revision.is_empty(),
         "daemon harness context identity is incompatible"
+    );
+    ensure!(
+        context.delivery_receipt.is_some(),
+        "daemon lacks bounded harness context delivery; restart with an updated moosedev binary"
     );
     Ok(())
 }
@@ -463,6 +470,23 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("harness API"));
+        let legacy_app = app.clone().route(
+            "/api/v1/harness/context",
+            post(|| async {
+                Json(json!({
+                    "project_root":"/project",
+                    "revision":"r1",
+                    "context":"",
+                    "files":[]
+                }))
+            }),
+        );
+        let (legacy_url, legacy_task) = serve(legacy_app).await;
+        assert!(verify_daemon(&legacy_url, &root, &data_dir)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("bounded harness context delivery"));
         let app = app.route(
             "/api/v1/harness/context",
             post(|Json(request): Json<ContextRequest>| async move {
@@ -474,7 +498,19 @@ mod tests {
                     request.files.is_empty(),
                     "startup must not request file work"
                 );
-                Json(json!({"project_root":"/project","revision":"r1","context":"","files":[]}))
+                assert!(request.evidence_only);
+                assert_eq!(request.max_bytes, Some(BOUNDED_CONTEXT_PROBE_BYTES));
+                Json(json!({
+                    "project_root":"/project",
+                    "revision":"r1",
+                    "context":"",
+                    "files":[],
+                    "delivery_receipt": {
+                        "max_bytes": BOUNDED_CONTEXT_PROBE_BYTES,
+                        "context_bytes": 0,
+                        "records": []
+                    }
+                }))
             }),
         );
         let (url, task) = serve(app).await;
@@ -488,6 +524,7 @@ mod tests {
             .await
             .is_err());
         task.abort();
+        legacy_task.abort();
         old_task.abort();
     }
 

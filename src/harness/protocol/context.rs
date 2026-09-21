@@ -9,10 +9,16 @@ pub struct ContextRequest {
     pub topic: String,
     #[serde(default)]
     pub files: Vec<String>,
-    /// Only the topic's accepted records with their complete claims: no
-    /// inventory and no file dossiers. Serves the model's `search` action.
+    /// Only the topic's accepted records: no inventory or file dossiers. With
+    /// `max_bytes`, claims may use a reduced delivery tier. Serves the model's
+    /// `search` action.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub evidence_only: bool,
+    /// Maximum bytes the daemon may spend on an evidence-only model-facing
+    /// `context`. `None` preserves the legacy unbounded response; ordinary
+    /// file-context requests use their established dossier claim bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +57,49 @@ pub struct ContextRecord {
     pub provenance: Vec<String>,
 }
 
+/// How much of one selected record reached the model-facing context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRecordDeliveryTier {
+    FullClaim,
+    FirstSentence,
+    TitleOnly,
+    Omitted,
+}
+
+impl ContextRecordDeliveryTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FullClaim => "full_claim",
+            Self::FirstSentence => "first_sentence",
+            Self::TitleOnly => "title_only",
+            Self::Omitted => "omitted",
+        }
+    }
+}
+
+/// The auditable delivery outcome for one record considered by retrieval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRecordDelivery {
+    pub iri: String,
+    pub kind: String,
+    pub tier: ContextRecordDeliveryTier,
+    /// Deterministic explanation of why this tier was selected.
+    pub reason: String,
+}
+
+/// Receipt for the exact record-aware context assembled under a byte budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextDeliveryReceipt {
+    /// Budget requested by the caller; `None` means the legacy unbounded path.
+    pub max_bytes: Option<usize>,
+    /// Bytes in the response's model-facing `context` string.
+    pub context_bytes: usize,
+    /// Every record considered for delivery, in deterministic selection order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ContextRecordDelivery>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextResponse {
     pub project_root: String,
@@ -62,9 +111,13 @@ pub struct ContextResponse {
     /// never substituted for the model-facing `context` string.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<ContextRecord>,
-    /// IRIs of the records an evidence-only request returned, in order.
+    /// IRIs of non-omitted records present in model-facing `context`, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_iris: Vec<String>,
+    /// Record-aware delivery accounting for audit and durable task journals.
+    /// Absent on responses from daemons predating bounded context delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_receipt: Option<ContextDeliveryReceipt>,
     /// Supported durable capture protocol versions.
     #[serde(default)]
     pub capture_contracts: Vec<u32>,
@@ -83,4 +136,34 @@ pub struct CheckpointResponse {
     pub durable: bool,
     pub revision: String,
     pub pending: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_budget_is_additive_but_unknown_request_fields_still_fail() {
+        let legacy: ContextRequest = serde_json::from_value(serde_json::json!({
+            "topic": "legacy client"
+        }))
+        .unwrap();
+        assert_eq!(legacy.max_bytes, None);
+        assert!(legacy.files.is_empty());
+        assert!(!legacy.evidence_only);
+
+        let bounded: ContextRequest = serde_json::from_value(serde_json::json!({
+            "topic": "bounded search",
+            "evidence_only": true,
+            "max_bytes": 4096
+        }))
+        .unwrap();
+        assert_eq!(bounded.max_bytes, Some(4096));
+
+        assert!(serde_json::from_value::<ContextRequest>(serde_json::json!({
+            "topic": "typo",
+            "max_byte": 4096
+        }))
+        .is_err());
+    }
 }

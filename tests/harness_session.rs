@@ -6,7 +6,9 @@ use axum::{
     Json, Router,
 };
 use moosedev::harness::{
-    protocol::{CheckpointResponse, ContextRequest, ContextResponse, FileContext},
+    protocol::{
+        CheckpointResponse, ContextDeliveryReceipt, ContextRequest, ContextResponse, FileContext,
+    },
     runner::Phase,
     session::{Command, Controller, Conversation, Snapshot, Update},
     startup::{ProviderSettings, StartupOptions},
@@ -48,15 +50,22 @@ async fn context(
     State(state): State<Shared>,
     Json(request): Json<ContextRequest>,
 ) -> Json<ContextResponse> {
+    let context = "Constraint: reading must precede work.".to_string();
+    let delivery_receipt = request.evidence_only.then(|| ContextDeliveryReceipt {
+        max_bytes: request.max_bytes,
+        context_bytes: context.len(),
+        records: vec![],
+    });
     Json(ContextResponse {
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),
         evidence_iris: vec![],
+        delivery_receipt,
         records: vec![],
         governing_constraints: vec![],
-        context: "Constraint: reading must precede work.".into(),
+        context,
         files: request
             .files
             .into_iter()

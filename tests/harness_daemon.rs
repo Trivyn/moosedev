@@ -473,6 +473,7 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
         topic: topic.into(),
         files,
         evidence_only,
+        max_bytes: None,
     };
     let full =
         daemon::context_snapshot(&state, &request("coding constraint", false, vec![])).unwrap();
@@ -549,6 +550,152 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
     .is_err());
 }
 
+#[test]
+fn evidence_budget_degrades_whole_records_and_receipts_every_selected_record() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let rule = record_with(
+        &state,
+        "Constraint",
+        "Budget probe governing rule",
+        &format!(
+            "The budget probe rule governs delivery. {}",
+            "constraint-tail-λ".repeat(180)
+        ),
+        "accepted",
+    );
+    let first_lesson = record_with(
+        &state,
+        "Lesson",
+        "Budget probe first lesson",
+        &format!(
+            "The budget probe first sentence is sufficient. {}",
+            "first-lesson-tail-λ".repeat(180)
+        ),
+        "accepted",
+    );
+    let second_lesson = record_with(
+        &state,
+        "Lesson",
+        "Budget probe second lesson",
+        &format!(
+            "The budget probe second sentence is sufficient. {}",
+            "second-lesson-tail-λ".repeat(180)
+        ),
+        "accepted",
+    );
+    state.note_project_write();
+    let request = |max_bytes| ContextRequest {
+        topic: "budget probe".into(),
+        files: vec![],
+        evidence_only: true,
+        max_bytes,
+    };
+
+    let unbounded = daemon::context_snapshot(&state, &request(None)).unwrap();
+    assert!(
+        unbounded.context.contains("constraint-tail-λ"),
+        "{}",
+        unbounded.context
+    );
+    assert!(
+        unbounded.context.contains("first-lesson-tail-λ"),
+        "{}",
+        unbounded.context
+    );
+    assert!(
+        unbounded.context.contains("second-lesson-tail-λ"),
+        "{}",
+        unbounded.context
+    );
+    let receipt = unbounded.delivery_receipt.as_ref().unwrap();
+    assert_eq!(receipt.max_bytes, None);
+    assert_eq!(receipt.context_bytes, unbounded.context.len());
+    assert!(receipt
+        .records
+        .iter()
+        .all(|record| record.tier == ContextRecordDeliveryTier::FullClaim));
+
+    // One byte below the all-full rendering forces the lowest-ranked record
+    // through the first rung as an atomic block, never through a byte slice.
+    let first = daemon::context_snapshot(
+        &state,
+        &request(Some(unbounded.context.len().saturating_sub(1))),
+    )
+    .unwrap();
+    let first_receipt = first.delivery_receipt.as_ref().unwrap();
+    assert!(first.context.len() <= first_receipt.max_bytes.unwrap());
+    assert!(first_receipt
+        .records
+        .iter()
+        .any(|record| record.tier == ContextRecordDeliveryTier::FirstSentence));
+    assert!(first
+        .context
+        .contains("claim shortened by the caller byte bound"));
+    assert!(first.context.contains("Delivery under caller byte bound:"));
+
+    // Tighten against the exact prior result: the same record becomes a title
+    // pointer, then a counted omission. No tail fragment ever appears.
+    let title = daemon::context_snapshot(
+        &state,
+        &request(Some(first.context.len().saturating_sub(1))),
+    )
+    .unwrap();
+    assert!(title
+        .delivery_receipt
+        .as_ref()
+        .unwrap()
+        .records
+        .iter()
+        .any(|record| record.tier == ContextRecordDeliveryTier::TitleOnly));
+    let omitted = daemon::context_snapshot(
+        &state,
+        &request(Some(title.context.len().saturating_sub(1))),
+    )
+    .unwrap();
+    let omitted_receipt = omitted.delivery_receipt.as_ref().unwrap();
+    assert!(omitted.context.contains("omitted record(s) (Lesson: 1)"));
+    assert!(omitted_receipt
+        .records
+        .iter()
+        .any(|record| record.tier == ContextRecordDeliveryTier::Omitted));
+    assert_eq!(omitted_receipt.context_bytes, omitted.context.len());
+    assert!(omitted.context.len() <= omitted_receipt.max_bytes.unwrap());
+    for tail in [
+        "constraint-tail-λ",
+        "first-lesson-tail-λ",
+        "second-lesson-tail-λ",
+    ] {
+        assert!(
+            matches!(omitted.context.matches(tail).count(), 0 | 180),
+            "a tail is either delivered whole in its record or absent: {tail}"
+        );
+    }
+    let delivered = &omitted.evidence_iris;
+    for record in &omitted_receipt.records {
+        assert_eq!(
+            delivered.contains(&record.iri),
+            record.tier != ContextRecordDeliveryTier::Omitted,
+            "evidence_iris must describe only what the model saw"
+        );
+    }
+    let governing = omitted_receipt
+        .records
+        .iter()
+        .find(|record| record.iri == rule)
+        .unwrap();
+    assert_ne!(governing.tier, ContextRecordDeliveryTier::Omitted);
+    assert_eq!(omitted_receipt.records.len(), 3);
+    assert!(omitted_receipt
+        .records
+        .iter()
+        .any(|record| record.iri == first_lesson));
+    assert!(omitted_receipt
+        .records
+        .iter()
+        .any(|record| record.iri == second_lesson));
+}
+
 #[tokio::test]
 async fn file_dossier_carries_the_topic_evidence_claim_body() {
     let fixture = Fixture::new();
@@ -568,6 +715,7 @@ async fn file_dossier_carries_the_topic_evidence_claim_body() {
         topic: "harness constraint".into(),
         files,
         evidence_only,
+        max_bytes: None,
     };
 
     let evidence = daemon::context_snapshot(&state, &request(true, vec![])).unwrap();
@@ -624,6 +772,7 @@ fn linked_context(state: &AppState, topic: &str, files: &[&str]) -> ContextRespo
             topic: topic.into(),
             files: files.iter().map(|file| file.to_string()).collect(),
             evidence_only: false,
+            max_bytes: None,
         },
     )
     .unwrap()
@@ -1106,6 +1255,7 @@ async fn harness_claims_are_compact_while_push_keeps_full_claims() {
             topic: "harness compact decision".into(),
             files: vec![],
             evidence_only: true,
+            max_bytes: None,
         },
     )
     .unwrap();
@@ -1201,6 +1351,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
         topic: "coding constraint".into(),
         files: vec![],
         evidence_only: false,
+        max_bytes: None,
     };
     let before = server.post("/api/v1/harness/context").json(&body).await;
     before.assert_status_ok();
@@ -1215,6 +1366,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
             topic: "zz_unmatched_inventory_probe".into(),
             files: vec![],
             evidence_only: false,
+            max_bytes: None,
         },
     )
     .unwrap();
@@ -1358,6 +1510,7 @@ fn supersession_and_retraction_leave_predecessor_current_until_review() {
         topic: "requirement".into(),
         files: vec![],
         evidence_only: false,
+        max_bytes: None,
     };
     assert!(daemon::context_snapshot(&state, &context)
         .unwrap()
@@ -1832,6 +1985,7 @@ async fn simple_review_attests_its_revision_transition_and_retries_keep_that_pai
             topic: "review".into(),
             files: vec![],
             evidence_only: false,
+            max_bytes: None,
         },
     )
     .unwrap()
@@ -1901,6 +2055,7 @@ fn review_base(state: &AppState) -> String {
             topic: "review".into(),
             files: vec![],
             evidence_only: false,
+            max_bytes: None,
         },
     )
     .unwrap()

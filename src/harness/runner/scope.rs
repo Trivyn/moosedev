@@ -345,6 +345,7 @@ mod tests {
             files: vec![],
             records: vec![],
             evidence_iris: vec![],
+            delivery_receipt: None,
             capture_contracts,
             intent_contracts: vec![2],
             governing_constraints: vec![],

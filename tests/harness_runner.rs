@@ -147,8 +147,13 @@ async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     assert!(prompt.contains("\n[Constraint] Retries stop at the configured limit (urn:rule:retry)\nvia: component Transfers\nhasDescription: A retry loop stops after the configured attempt limit.\n"));
     assert!(prompt.contains("each project rule: Retries stop at the configured limit."));
     assert!(prompt.contains(
-        "search(query) returns matching accepted knowledge first, then repository matches."
+        "search(query) returns matching accepted knowledge first, then repository matches;"
     ));
+    // The prompt must say what `search` actually does: the repository half is a
+    // literal substring match, so operators match themselves and a reworded
+    // query does not broaden an empty result.
+    assert!(prompt.contains("matched as LITERAL text"));
+    assert!(prompt.contains("the knowledge is not recorded: say so with reply"));
 
     fixture.shared.lock().unwrap().governing_constraints.clear();
     fixture.reply("harness_action", json!({"action":"read","file":"code.txt"}));
@@ -2408,9 +2413,15 @@ async fn search_returns_accepted_knowledge_before_repository_matches() {
         .find("Repository matches:\ncode.txt:1: original")
         .unwrap_or_else(|| panic!("{response}"));
     assert!(knowledge < repository, "{response}");
-    assert_eq!(
-        requests_of_kind(&fixture, "knowledge_search"),
-        vec![json!({"kind":"knowledge_search","topic":"original"})]
+    let requests = requests_of_kind(&fixture, "knowledge_search");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["topic"], "original");
+    assert!(
+        requests[0]["max_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "the runner must give the daemon the real next-prompt capacity: {}",
+        requests[0]
     );
     assert_eq!(
         intent_details(&runner, "knowledge_search"),
@@ -2422,6 +2433,22 @@ async fn search_returns_accepted_knowledge_before_repository_matches() {
     assert!(runner.task.knowledge_searches[0]
         .context
         .contains("Never rename the original marker."));
+    let receipt = runner.task.knowledge_searches[0]
+        .delivery_receipt
+        .as_ref()
+        .expect("daemon delivery receipt is durable in the task journal");
+    assert_eq!(
+        receipt.max_bytes,
+        requests[0]["max_bytes"].as_u64().map(|n| n as usize)
+    );
+    assert_eq!(
+        receipt.context_bytes,
+        runner.task.knowledge_searches[0].context.len()
+    );
+    assert_eq!(
+        receipt.records[0].tier,
+        ContextRecordDeliveryTier::FullClaim
+    );
     assert_eq!(
         runner.task.knowledge_events,
         vec![runner.task.events.len() - 1]
@@ -2441,7 +2468,13 @@ async fn search_with_no_knowledge_match_returns_repository_matches_only() {
     );
     fixture.conversational(json!({"action":"search","query":"zz-absent"}));
     runner.advance().await.unwrap();
-    assert_eq!(runner.task.last_response, "No matches.");
+    // A search that matched nothing names the literal string it searched and
+    // how long this has gone on; the bare "No matches." told a looping model
+    // nothing it could act on.
+    assert_eq!(
+        runner.task.last_response,
+        "No accepted knowledge and no repository text matched the literal string 'zz-absent'. Searches in a row matching nothing: 1."
+    );
     assert_eq!(requests_of_kind(&fixture, "knowledge_search").len(), 2);
     assert_eq!(
         intent_details(&runner, "knowledge_search"),
@@ -2465,4 +2498,60 @@ async fn search_with_no_knowledge_match_returns_repository_matches_only() {
         .iter()
         .all(|search| search.context.is_empty() && search.evidence_iris.is_empty()));
     assert_eq!(runner.task.knowledge_events.len(), 2);
+}
+
+#[tokio::test]
+async fn a_second_empty_search_states_that_the_channel_is_exhausted() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for query in ["zz-absent", "zz-also-absent"] {
+        fixture.conversational(json!({"action":"search","query": query}));
+        runner.advance().await.unwrap();
+    }
+    let response = runner.task.last_response.clone();
+    assert!(
+        response.contains("Searches in a row matching nothing: 2"),
+        "{response}"
+    );
+    assert!(response.contains("rewording will not help"), "{response}");
+    assert!(response.contains("reply(...)"), "{response}");
+    // Planning does not offer `command`, so the note must not name it: the
+    // model in the observed loop could not have consulted history if it tried.
+    assert!(!response.contains("command(...)"), "{response}");
+    assert_eq!(
+        intent_details(&runner, "search_exhausted"),
+        vec!["2 consecutive searches matched nothing"]
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_query_is_answered_without_re_running_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    assert_eq!(requests_of_kind(&fixture, "knowledge_search").len(), 1);
+
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    let response = runner.task.last_response.clone();
+    assert!(response.contains("You already searched"), "{response}");
+    // This fixture's search matched no accepted knowledge, so the cached answer
+    // must not invent a knowledge block; the with-knowledge case is covered in
+    // the runner's own tests.
+    assert!(
+        !response.contains("Accepted project knowledge"),
+        "{response}"
+    );
+    // No second daemon round trip and no second entry in the retrieval history;
+    // a step is still charged, so a model that repeats one query forever still
+    // advances toward the task's step bound instead of looping for free.
+    assert_eq!(requests_of_kind(&fixture, "knowledge_search").len(), 1);
+    assert_eq!(runner.task.knowledge_searches.len(), 1);
+    assert_eq!(
+        intent_details(&runner, "repeat_search"),
+        vec!["0 records already delivered: original"]
+    );
 }
