@@ -14,10 +14,12 @@ target/debug/moosedev-harness
 
 Use `--project DIR` to select another project. Launching from a subdirectory uses
 the repository root. The full-screen interface opens with a persistent composer,
-a chronological transcript, and visible activity. Enter submits; Alt-Enter adds a
-newline. Multiline paste is preserved. Escape interrupts active work. Follow-ups
-submitted during work queue before the next action; steering an approved task
-returns it to planning before further edits.
+a chronological transcript, and visible activity. Enter submits; Ctrl-J adds a
+newline portably, including in macOS Terminal. Alt-Enter also works when the terminal
+sends Option/Alt as Meta, and Shift-Enter works with enhanced keyboard reporting.
+Multiline paste is preserved. Escape interrupts active work. Follow-ups submitted
+during work queue before the next action; steering an approved task returns it to
+planning before further edits.
 
 ## Startup and model selection
 
@@ -181,6 +183,21 @@ operation, and omitting the number reviews all displayed operations.
 the mouse wheel scrolls one line at a time within the current pane, while Page
 Up/Down provides keyboard scrolling (Alt-Up/Down selects queries in Knowledge).
 `/help` lists the controls.
+
+Use `/approve-spec <repo-relative-path>` while planning to prepare a graph-backed
+spec approval. The harness reads the current file, validates source evidence, and
+shows the exact Requirements and Constraints it would create, reuse, supersede,
+or retract. Preparation does not modify the project graph. Review the complete
+preview, then enter `/approve-spec` without a path to accept that exact batch.
+At the displayed spec gate, `I approve the spec` and `approve the spec` are also
+accepted as case-insensitive aliases (with collapsed whitespace and an optional
+trailing `.` or `!`). Those phrases remain ordinary steering everywhere else.
+
+Spec approval records the accepted batch and its approval marker, refreshes
+project knowledge, and returns the task to Planning. It does not authorize code
+execution: review the refreshed implementation plan and use `/approve`
+separately. If the source file or graph revision changes before acceptance, the
+harness rejects the stale preview and requires `/approve-spec <path>` again.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`
 begins a conversation. `/resume` lists saved conversations; `/resume ID` opens one.

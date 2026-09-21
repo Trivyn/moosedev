@@ -118,6 +118,24 @@ impl Runner {
         Ok(serde_json::from_str(&text)?)
     }
 
+    /// Read the current validated revision without enriching or publishing the
+    /// project graph. Spec preview preparation must be graph-read-only.
+    pub(super) async fn checkpoint_status(&self) -> Result<CheckpointResponse> {
+        let response = self
+            .http
+            .get(format!("{}/api/v1/harness/checkpoint", self.daemon))
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "checkpoint status failed: {status}: {}",
+            bounded(&text, 4000)
+        );
+        Ok(serde_json::from_str(&text)?)
+    }
+
     pub(super) async fn refresh(&mut self, files: &[String]) -> Result<ContextResponse> {
         let topic = format!("{} {}", self.task.objective, self.task.guidance)
             .trim()

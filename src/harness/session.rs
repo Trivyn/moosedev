@@ -671,7 +671,7 @@ impl Controller {
                             break None;
                         },
                         Some(Command::Input(text)) => {
-                            if matches!(text.split_whitespace().next(), Some("/approve" | "/accept" | "/reject" | "/no-knowledge")) {
+                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/accept" | "/reject" | "/no-knowledge")) {
                                 self.status = "Review commands must be submitted while the gate is displayed. Your command is retained for resubmission.".into();
                                 let _ = self.output.send(Update::RestoreInput(text));
                             } else {
@@ -769,9 +769,18 @@ impl Controller {
         let _ = self.output.send(Update::Progress(event));
     }
     async fn input(&mut self, text: String) -> Result<()> {
-        let text = text.trim().to_string();
+        let mut text = text.trim().to_string();
         if text.is_empty() {
             return Ok(());
+        }
+        let submitted_text = text.clone();
+        if !text.starts_with('/')
+            && self
+                .runner
+                .as_ref()
+                .is_some_and(|runner| is_spec_approval_alias(&runner.task.phase, &text))
+        {
+            text = "/approve-spec".into();
         }
         if !text.starts_with('/') {
             anyhow::ensure!(
@@ -784,7 +793,7 @@ impl Controller {
             return Ok(());
         }
         if !self.startup.needs_initialization() {
-            self.conversation.push("control", text.clone());
+            self.conversation.push("control", submitted_text);
             self.save_conversation()?;
         }
         let mut parts = text.split_whitespace();
@@ -875,8 +884,8 @@ impl Controller {
                     self.auto = !self.conversation.queued.is_empty();
                 }
             }
-            "/approve" | "/accept" | "/reject" | "/no-knowledge" | "/plan" | "/review"
-            | "/continue" => {
+            "/approve" | "/approve-spec" | "/accept" | "/reject" | "/no-knowledge" | "/plan"
+            | "/review" | "/continue" => {
                 let runner = self
                     .runner
                     .as_mut()
@@ -887,6 +896,18 @@ impl Controller {
                         Phase::AwaitingPolicy => runner.approve_policy().await?,
                         _ => bail!("There is no plan or edit approval pending."),
                     },
+                    "/approve-spec" => {
+                        let path = parts.collect::<Vec<_>>().join(" ");
+                        if path.is_empty() {
+                            anyhow::ensure!(
+                                runner.task.phase == Phase::AwaitingSpecApproval,
+                                "There is no spec approval pending. Use /approve-spec <path> first."
+                            );
+                            runner.approve_spec().await?;
+                        } else {
+                            runner.begin_spec_approval(&path).await?;
+                        }
+                    }
                     "/accept" | "/reject" => {
                         let accept = command == "/accept";
                         if let Some(id) = parts.next() {
@@ -944,6 +965,22 @@ impl Controller {
     }
 }
 
+fn is_spec_approval_alias(phase: &Phase, value: &str) -> bool {
+    if *phase != Phase::AwaitingSpecApproval {
+        return false;
+    }
+    let value = value.trim().trim_end_matches(['.', '!']).trim_end();
+    let normalized = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "i approve the spec" | "approve the spec"
+    )
+}
+
 fn assistant_suffix(
     interrupted: bool,
     failed: bool,
@@ -971,7 +1008,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan or exact edit\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Alt-Enter inserts a newline · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan or exact edit\n/approve-spec <path> — preview a repository spec for graph approval; repeat without a path to accept\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll.";
 
 #[cfg(test)]
 mod tests {
@@ -1130,6 +1167,22 @@ mod tests {
         );
         let capture = serde_json::json!({"purpose":"harness_capture_note","response":null});
         assert!(assistant_suffix(false, true, Some(&capture)).contains("capture assessment failed"));
+    }
+    #[test]
+    fn spec_approval_phrases_are_narrow_and_normalized() {
+        let gate = Phase::AwaitingSpecApproval;
+        assert!(is_spec_approval_alias(&gate, "I APPROVE   the spec!"));
+        assert!(is_spec_approval_alias(&gate, " approve the spec. "));
+        assert!(!is_spec_approval_alias(&gate, "I approve this spec"));
+        assert!(!is_spec_approval_alias(
+            &gate,
+            "I approve the spec and the plan"
+        ));
+        assert!(!is_spec_approval_alias(&gate, "approve the spec?"));
+        assert!(!is_spec_approval_alias(
+            &Phase::AwaitingPlan,
+            "I approve the spec"
+        ));
     }
     #[tokio::test]
     async fn quitting_uninitialized_project_does_not_initialize_it() {

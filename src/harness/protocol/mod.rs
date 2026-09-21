@@ -6,6 +6,7 @@ mod candidates;
 mod capture;
 mod context;
 mod scope;
+mod spec;
 mod typing;
 
 pub use associate::*;
@@ -13,4 +14,5 @@ pub use candidates::*;
 pub use capture::*;
 pub use context::*;
 pub use scope::*;
+pub use spec::*;
 pub use typing::*;

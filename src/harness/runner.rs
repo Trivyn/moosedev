@@ -30,6 +30,7 @@ mod model;
 mod recovery;
 mod review;
 mod scope;
+mod spec;
 mod symbolic;
 mod task;
 #[cfg(test)]
@@ -46,7 +47,8 @@ pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
 pub use task::{
     CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier, KnowledgeSearchResult,
-    KnowledgeTurn, Mode, PendingEdit, Phase, Plan, ReviewItem, StandingGuidance, Task,
+    KnowledgeTurn, Mode, PendingEdit, PendingSpecApproval, Phase, Plan, ReviewItem,
+    StandingGuidance, Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;
@@ -163,6 +165,7 @@ impl Runner {
             capture_request: None,
             capture_reason: None,
             pending_edit: None,
+            pending_spec: None,
             edits: vec![],
             last_error: None,
             last_error_kind: None,

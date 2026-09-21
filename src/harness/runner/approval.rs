@@ -20,6 +20,10 @@ impl Runner {
             "review new governing knowledge before approving execution"
         );
         anyhow::ensure!(
+            self.task.pending_spec.is_none(),
+            "approve or revise the pending specification before approving execution"
+        );
+        anyhow::ensure!(
             self.task.phase == Phase::AwaitingPlan && !self.task.capture_due,
             "no plan awaiting approval"
         );
@@ -155,6 +159,11 @@ impl Runner {
             }
         }
         self.abandon_pending_intent("new human guidance").await?;
+        if self.task.pending_spec.take().is_some() {
+            self.event(
+                "Discarded the pending spec preview because the human supplied new guidance.",
+            );
+        }
         self.event(format!("Human response: {text}"));
         if let Some(id) = id {
             self.task.delivered_messages.push(id.to_owned());
@@ -212,6 +221,9 @@ impl Runner {
             .await?;
         self.task.mode = Mode::Plan;
         self.task.phase = Phase::Planning;
+        if self.task.pending_spec.take().is_some() {
+            self.event("Discarded the pending spec preview because the human returned to Plan.");
+        }
         self.task.approved_revision = None;
         self.discard_pending_edit("human returned the task to Plan")?;
         self.task.completion_pending = false;

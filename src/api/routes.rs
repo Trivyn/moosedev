@@ -85,6 +85,14 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
             post(crate::harness::daemon::capture_type::capture_type),
         )
         .route(
+            "/harness/spec/prepare",
+            post(crate::harness::daemon::spec::prepare),
+        )
+        .route(
+            "/harness/spec/approve",
+            post(crate::harness::daemon::spec::approve),
+        )
+        .route(
             "/harness/intent/link",
             post(crate::harness::daemon::intent::link),
         )

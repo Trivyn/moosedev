@@ -12,6 +12,7 @@ pub enum Mode {
 pub enum Phase {
     Planning,
     AwaitingPlan,
+    AwaitingSpecApproval,
     Working,
     AwaitingInput,
     AwaitingPolicy,
@@ -128,6 +129,16 @@ pub struct ReviewItem {
     pub reason: String,
 }
 
+/// The exact daemon-prepared batch displayed at the spec approval gate.
+///
+/// Keeping the preview in the task journal makes approval replayable after a
+/// restart without asking the model to extract the specification again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingSpecApproval {
+    pub preview: SpecPrepareResponse,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -157,6 +168,8 @@ pub struct Task {
     pub capture_request: Option<CaptureRequest>,
     pub capture_reason: Option<String>,
     pub pending_edit: Option<PendingEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_spec: Option<PendingSpecApproval>,
     #[serde(default)]
     pub edits: Vec<PendingEdit>,
     pub last_error: Option<String>,

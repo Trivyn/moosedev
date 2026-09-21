@@ -35,6 +35,7 @@ pub mod reconcile_score;
 mod review;
 mod revision;
 pub mod scope;
+pub mod spec;
 
 pub use capture::{capture_operation, capture_v2, capture_v2_operation};
 pub use checkpoint::{checkpoint, checkpoint_snapshot, publish_checkpoint, CheckpointQuery};

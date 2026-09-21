@@ -1,5 +1,8 @@
 //! Thin interactive frontend. Human review commands never enter the model action surface.
-use super::protocol::{AssociatePage, DerivedBasis, TypedDisposition, TypingMode};
+use super::protocol::{
+    AssociatePage, DerivedBasis, SpecDisposition, SpecPrepareResponse, SpecRetirementDisposition,
+    TypedDisposition, TypingMode,
+};
 use super::runner::{Phase, ReviewItem, Runner, Task};
 use super::{
     markdown,
@@ -9,6 +12,7 @@ use super::{
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{
     event::{
@@ -93,10 +97,14 @@ struct Screen {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
 }
 static SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANIC_HOOK: Once = Once::new();
 
 fn restore_terminal() {
     if SCREEN_ACTIVE.swap(false, Ordering::SeqCst) {
+        if KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst) {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -123,12 +131,18 @@ impl Screen {
         enable_raw_mode()?;
         SCREEN_ACTIVE.store(true, Ordering::SeqCst);
         let result = (|| {
-            execute!(
-                io::stdout(),
-                EnterAlternateScreen,
-                EnableBracketedPaste,
-                EnableMouseCapture
-            )?;
+            execute!(io::stdout(), EnterAlternateScreen)?;
+            if matches!(
+                crossterm::terminal::supports_keyboard_enhancement(),
+                Ok(true)
+            ) {
+                execute!(
+                    io::stdout(),
+                    PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+                )?;
+                KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+            }
+            execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
             Ok(Self {
                 terminal: Terminal::new(CrosstermBackend::new(io::stdout()))?,
             })
@@ -139,6 +153,16 @@ impl Screen {
         result
     }
 }
+
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    // Disambiguation deliberately preserves legacy Enter. Reporting every key
+    // is what lets the terminal encode Shift-Enter as CSI 13;2u; alternate keys
+    // preserve the shifted text for ordinary characters in that mode.
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+}
+
 impl Drop for Screen {
     fn drop(&mut self) {
         restore_terminal();
@@ -286,6 +310,11 @@ fn gate(task: &Task) -> String {
             text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
             text
         }).unwrap_or_default(),
+        Phase::AwaitingSpecApproval => task
+            .pending_spec
+            .as_ref()
+            .map(|pending| spec_approval_gate(&pending.preview))
+            .unwrap_or_else(|| "SPEC APPROVAL · preview unavailable; run /approve-spec <path> again.".into()),
         Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Review (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
         Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
         Phase::AwaitingInput => if task.turn_finished { "Your turn. Ask a follow-up or describe the next change.".into() } else { "Your input is needed. Reply below.".into() },
@@ -293,6 +322,62 @@ fn gate(task: &Task) -> String {
         Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
         _ => String::new(),
     }
+}
+
+fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
+    let mut text = format!(
+        "SPEC APPROVAL · human approval required\nSource: {}\nSHA-256: {}\nKnowledge revision: {}\n",
+        preview.path, preview.source_sha256, preview.knowledge_revision
+    );
+    if preview.already_approved {
+        text.push_str("\nUNCHANGED · this source and active record set are already approved\n");
+    }
+    for entry in &preview.entries {
+        let (effect, identity) = match &entry.disposition {
+            SpecDisposition::New { iri } => ("NEW", iri.clone()),
+            SpecDisposition::Reuse { iri } => ("REUSE", iri.clone()),
+            SpecDisposition::Supersede { iri, previous_iri } => {
+                ("SUPERSEDE", format!("{previous_iri} -> {iri}"))
+            }
+        };
+        text.push_str(&format!(
+            "\n{effect} · {} · {}\nExtracted claim: {}\nIRI: {identity}\n",
+            entry.draft.kind, entry.draft.title, entry.draft.description
+        ));
+        text.push_str("Evidence:\n");
+        for evidence in &entry.draft.evidence {
+            text.push_str(&format!("  {evidence}\n"));
+        }
+        if let Some(existing) = &entry.existing {
+            text.push_str(&format!(
+                "Existing accepted record: {} · {}\nExisting claim and evidence:\n{}\n",
+                existing.title, existing.iri, existing.description
+            ));
+        }
+    }
+    for retirement in &preview.retirements {
+        let effect = match retirement.disposition {
+            SpecRetirementDisposition::Retract => "RETRACT",
+            SpecRetirementDisposition::RetainShared => "RETAIN SHARED",
+        };
+        text.push_str(&format!(
+            "\n{effect} · {} · {}\nIRI: {}\nExisting claim and evidence:\n{}\n",
+            retirement.kind, retirement.title, retirement.iri, retirement.description
+        ));
+    }
+    if let Some(previous) = &preview.previous_approval_iri {
+        let effect = if preview.already_approved {
+            "CURRENT APPROVAL"
+        } else {
+            "SUPERSEDE PRIOR APPROVAL"
+        };
+        text.push_str(&format!("\n{effect}\nIRI: {previous}\n"));
+    }
+    text.push_str(&format!(
+        "\nApproval marker: spec-approval: {}\n/approve-spec or ‘I approve the spec’ records this exact batch.\nA separate /approve is still required before code execution.",
+        preview.path
+    ));
+    text
 }
 
 fn push_plain_lines(lines: &mut Vec<Line<'static>>, value: &str, style: Style) {
@@ -1229,7 +1314,7 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
     let help = if view.tab == 3 {
         "Click query headers · Alt-↑/↓ select · Alt-←/→ collapse/expand · wheel/PageUp/PageDown scroll"
     } else {
-        "Enter send · Alt-Enter newline · Esc interrupt · /help · Mouse wheel/PageUp/PageDown scroll"
+        "Enter send · Ctrl-J newline · Alt/Shift-Enter when supported · Esc interrupt · /help · Mouse wheel/PageUp/PageDown scroll"
     };
     frame.render_widget(
         Paragraph::new(format!("{spinner} {}\n{help}", visible(notice))).style(
@@ -1301,6 +1386,7 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
             KeyCode::Char('d') if view.composer.text.is_empty() => return Some(Command::Quit),
             KeyCode::Char('a') => view.composer.home(),
             KeyCode::Char('e') => view.composer.end(),
+            KeyCode::Char('j') => view.composer.insert("\n"),
             KeyCode::Char('u') => {
                 view.composer.text.clear();
                 view.composer.cursor = 0;
@@ -1719,6 +1805,58 @@ mod tests {
         assert!(text.ends_with("/approve to execute · send feedback to revise"));
     }
     #[test]
+    fn spec_gate_renders_exact_records_and_separate_execution_approval() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingSpecApproval;
+        task.pending_spec = Some(serde_json::from_value(serde_json::json!({
+            "preview": {
+                "operation_id": "spec-1",
+                "owner_id": "task-1",
+                "path": "specs/labels.md",
+                "source_sha256": "0123456789abcdef",
+                "knowledge_revision": "accepted-v3",
+                "entries": [
+                    {
+                        "draft": {"kind": "Requirement", "title": "Preserve labels", "description": "Labels retain meaningful whitespace.", "evidence": ["specs/labels.md:7-8"]},
+                        "disposition": {"kind": "new", "iri": "https://moosedev.dev/kg/Requirement/preserve-labels"}
+                    },
+                    {
+                        "draft": {"kind": "Constraint", "title": "Local only", "description": "Processing remains local.", "evidence": ["specs/labels.md:11"]},
+                        "disposition": {"kind": "reuse", "iri": "https://moosedev.dev/kg/Constraint/local-only"},
+                        "existing": {"iri": "https://moosedev.dev/kg/Constraint/local-only", "kind": "Constraint", "title": "Existing local processing", "description": "Processing remains local.\n\nEvidence:\n- specs/original.md:4"}
+                    },
+                    {
+                        "draft": {"kind": "Constraint", "title": "Bounded labels", "description": "Labels are bounded.", "evidence": ["specs/labels.md:12"]},
+                        "disposition": {"kind": "supersede", "iri": "https://moosedev.dev/kg/Constraint/bounded-v2", "previous_iri": "https://moosedev.dev/kg/Constraint/bounded-v1"},
+                        "existing": {"iri": "https://moosedev.dev/kg/Constraint/bounded-v1", "kind": "Constraint", "title": "Bounded labels", "description": "Labels had the old bound.\n\nEvidence:\n- specs/labels.md:3"}
+                    }
+                ],
+                "retirements": [
+                    {"iri": "https://moosedev.dev/kg/Requirement/old", "kind": "Requirement", "title": "Old behavior", "description": "The old claim.\n\nEvidence:\n- specs/labels.md:2", "disposition": "retract"},
+                    {"iri": "https://moosedev.dev/kg/Constraint/shared", "kind": "Constraint", "title": "Shared behavior", "description": "The shared claim.\n\nEvidence:\n- specs/shared.md:8", "disposition": "retain_shared"}
+                ],
+                "previous_approval_iri": "https://moosedev.dev/kg/ArchitecturalDecision/approval-v1",
+                "already_approved": false
+            }
+        })).unwrap());
+        let text = gate(&task);
+        assert!(text.contains("SPEC APPROVAL · human approval required"));
+        assert!(text.contains(
+            "NEW · Requirement · Preserve labels\nExtracted claim: Labels retain meaningful whitespace."
+        ));
+        assert!(text.contains("Evidence:\n  specs/labels.md:7-8"));
+        assert!(text.contains("Existing claim and evidence:\nProcessing remains local."));
+        assert!(text.contains("Existing claim and evidence:\nLabels had the old bound."));
+        assert!(text.contains("Existing claim and evidence:\nThe old claim."));
+        assert!(text.contains("REUSE · Constraint · Local only"));
+        assert!(text.contains("SUPERSEDE · Constraint · Bounded labels"));
+        assert!(text.contains("RETRACT · Requirement · Old behavior"));
+        assert!(text.contains("RETAIN SHARED · Constraint · Shared behavior"));
+        assert!(text.contains("SUPERSEDE PRIOR APPROVAL\nIRI: https://moosedev.dev/kg/ArchitecturalDecision/approval-v1"));
+        assert!(text.contains("Approval marker: spec-approval: specs/labels.md"));
+        assert!(text.contains("A separate /approve is still required before code execution."));
+    }
+    #[test]
     fn review_tab_renders_derived_obligations_for_the_approved_plan() {
         let text = text_content(&body(&snapshot_for(symbolic_task()), &review_view()));
         assert!(text.contains("Derived scope\nlabels.py\n  Constraint · https://moosedev.dev/kg/Constraint/preserve-names\n  Requirement · https://moosedev.dev/kg/Requirement/label-intent\nutil.py · ungoverned\n"));
@@ -2030,18 +2168,46 @@ mod tests {
         assert!(!composer.text.contains('\u{1b}'));
     }
     #[test]
-    fn enter_submits_alt_enter_adds_newline_and_escape_interrupts() {
+    fn control_j_adds_a_newline_without_submitting() {
         let mut view = View::default();
         view.composer.insert("hello");
-        assert!(key(&mut view, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)).is_none());
-        assert_eq!(view.composer.text, "hello\n");
+        assert!(key(
+            &mut view,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)
+        )
+        .is_none());
+        view.composer.insert("world");
+        assert_eq!(view.composer.text, "hello\nworld");
         assert!(
-            matches!(key(&mut view,KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)),Some(Command::Input(text)) if text=="hello\n")
+            matches!(key(&mut view,KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)),Some(Command::Input(text)) if text=="hello\nworld")
+        );
+    }
+    #[test]
+    fn enter_submits_modified_enter_adds_newline_and_escape_interrupts() {
+        let mut view = View::default();
+        view.composer.insert("hello");
+        assert!(key(
+            &mut view,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+        )
+        .is_none());
+        assert_eq!(view.composer.text, "hello\n");
+        assert!(key(&mut view, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)).is_none());
+        assert_eq!(view.composer.text, "hello\n\n");
+        assert!(
+            matches!(key(&mut view,KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)),Some(Command::Input(text)) if text=="hello\n\n")
         );
         assert!(matches!(
             key(&mut view, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(Command::Interrupt)
         ));
+    }
+    #[test]
+    fn keyboard_enhancement_reports_modified_enter() {
+        let flags = keyboard_enhancement_flags();
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
     #[test]
     fn tab_navigation_includes_knowledge_and_review() {
