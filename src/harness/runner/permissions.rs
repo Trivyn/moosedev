@@ -207,7 +207,7 @@ impl Runner {
         }
         self.end_unchanged_window();
         let result = self.run_command(&pending.command).await?;
-        self.commit_command_result(result)
+        self.commit_command_result(&pending.command, result)
     }
 
     pub fn deny_permission(&mut self) -> Result<()> {

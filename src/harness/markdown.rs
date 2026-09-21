@@ -335,11 +335,15 @@ pub(crate) fn render(input: &str, base: Style) -> Text<'static> {
 }
 
 /// Hard-wrap styled text with the same display-width semantics as the old transcript renderer.
-pub(crate) fn wrap(text: Text<'static>, width: usize) -> Text<'static> {
+/// Also reports which output rows continue the row before them, so copied text can rejoin
+/// one logical line.
+pub(crate) fn wrap_rows(text: Text<'static>, width: usize) -> (Text<'static>, Vec<bool>) {
     let width = width.max(1);
     let text_style = text.style;
     let mut output = Vec::new();
+    let mut continues = Vec::new();
     for line in text.lines {
+        continues.push(false);
         if line.spans.is_empty() {
             output.push(Line::default());
             continue;
@@ -353,6 +357,7 @@ pub(crate) fn wrap(text: Text<'static>, width: usize) -> Text<'static> {
                 let size = c.width().unwrap_or(0);
                 if col > 0 && col + size > width {
                     output.push(Line::from(std::mem::take(&mut current)));
+                    continues.push(true);
                     col = 0;
                 }
                 if let Some(last) = current.last_mut().filter(|span| span.style == style) {
@@ -365,7 +370,7 @@ pub(crate) fn wrap(text: Text<'static>, width: usize) -> Text<'static> {
         }
         output.push(Line::from(current));
     }
-    Text::from(output)
+    (Text::from(output), continues)
 }
 
 #[cfg(test)]
@@ -401,9 +406,12 @@ mod tests {
             "```rust\nlet animal = \"🫎日本\";",
             Style::default().fg(Color::LightCyan),
         );
-        let wrapped = wrap(text, 8);
+        let (wrapped, continues) = wrap_rows(text, 8);
         assert!(wrapped.height() > 2);
         assert!(plain(&wrapped).replace('\n', "").contains("animal"));
+        // One flag per row; only rows cut from a longer line continue one.
+        assert_eq!(continues.len(), wrapped.height());
+        assert!(!continues[0] && continues.contains(&true));
     }
 
     #[test]

@@ -527,7 +527,6 @@ fn runtime_allowlist_excludes_user_credentials_and_unrelated_system_files() {
         for suffix in [
             ".ssh/id_ed25519",
             ".cargo/credentials.toml",
-            ".cargo/config.toml",
             ".aws/credentials",
         ] {
             denied.push(Path::new(&home).join(suffix));
@@ -543,6 +542,79 @@ fn runtime_allowlist_excludes_user_credentials_and_unrelated_system_files() {
         );
         assert!(!readable_files().contains(&denied));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn only_a_regular_secret_free_cargo_config_joins_the_runtime_allowlist() {
+    let fixture = Fixture::new();
+    let config = fixture.0.join("config.toml");
+    fs::write(&config, "[net]\ngit-fetch-with-cli = true\n").unwrap();
+    assert!(secret_free_cargo_config(&config));
+
+    for secret in [
+        "[registry]\ntoken = \"fake\"\n",
+        "[registries.private]\nindex = \"sparse+https://example.invalid/\"\nsecret-key = \"fake\"\n",
+        "not = [valid",
+    ] {
+        fs::write(&config, secret).unwrap();
+        assert!(!secret_free_cargo_config(&config), "{secret}");
+    }
+
+    let clean = fixture.0.join("clean.toml");
+    fs::write(&clean, "[build]\njobs = 2\n").unwrap();
+    let alias = fixture.0.join("alias.toml");
+    std::os::unix::fs::symlink(&clean, &alias).unwrap();
+    assert!(secret_free_cargo_config(&clean));
+    assert!(!secret_free_cargo_config(&alias));
+    assert!(!secret_free_cargo_config(&fixture.0.join("absent.toml")));
+}
+
+/// Task scratch normally lives under HOME, where Cargo's ancestor walk finds
+/// the user's configuration. Must run outside a parent sandbox.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires functional OS sandbox; run explicitly outside nested sandbox"]
+async fn confinement_reads_cargo_configuration_but_never_cargo_credentials() {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let config = home.join(".cargo/config.toml");
+    if !secret_free_cargo_config(&config) {
+        eprintln!("skipped: no secret-free {}", config.display());
+        return;
+    }
+    // Under HOME, as a real project and its task scratch are.
+    let under_home = |name: &str| {
+        let path = home.join(format!(".mdx-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).unwrap();
+        Fixture(path)
+    };
+    let (fixture, scratch) = (under_home("project"), under_home("scratch"));
+    fs::write(
+        fixture.0.join("Cargo.toml"),
+        "[package]\nname = \"harness-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("lib.rs"), "").unwrap();
+    let metadata = command(
+        &fixture.0,
+        &scratch.0,
+        "cargo metadata --offline --no-deps --format-version 1 >/dev/null",
+    )
+    .await
+    .unwrap();
+    assert!(metadata.success, "{}", metadata.output);
+    let credentials = home.join(".cargo/credentials.toml");
+    if credentials.is_file() {
+        let denied = command(
+            &fixture.0,
+            &scratch.0,
+            &format!("cat '{}' >/dev/null", credentials.display()),
+        )
+        .await
+        .unwrap();
+        assert!(!denied.success, "cargo credentials were readable");
+    }
+    cleanup_task(&scratch.0).unwrap();
 }
 
 #[cfg(unix)]

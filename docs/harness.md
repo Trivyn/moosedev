@@ -166,7 +166,10 @@ paths, and whether network access is needed. The command does not run until the
 request is displayed to the human. `/approve` records the grant for the current
 task and runs that exact command as the next step, where it streams progress and
 can be interrupted like any other command; revoking the grant first voids it.
-`/deny` refuses the request and returns the denial to the model. Existing files
+`/deny` refuses the request and returns the denial to the model. The harness never
+infers a permission need itself: when a failed command's output shows the sandbox
+blocked a path or the network, it tells the model so and names `request_permission`
+as the next action, and records a `sandbox_denial` event. Existing files
 and Unix sockets are granted exactly and directories recursively. Write
 access includes create, modify, and delete. Grants never expose the live project
 workspace or task scratch space, and they do not restore ambient environment
@@ -266,6 +269,14 @@ operation, and omitting the number reviews all displayed operations.
 `/no-knowledge` confirms a consolidated no-change assessment. Tab switches views;
 the mouse wheel scrolls one line at a time within the current pane, while Page
 Up/Down provides keyboard scrolling (Alt-Up/Down selects queries in Knowledge).
+Dragging with the left button selects text in the content pane and copies it to
+the clipboard on release (`pbcopy` on macOS, `wl-copy`/`xclip`/`xsel` on Linux,
+the OSC 52 escape sequence over SSH or when no tool exists; Terminal.app ignores
+OSC 52, so over SSH from Terminal.app use its own selection instead). The copy is the
+displayed text; rows wrapped from one line rejoin without a newline, and dragging
+past the top or bottom edge scrolls. The highlight stays until the next click.
+Because the TUI captures the mouse, the terminal's own selection needs its bypass
+modifier: Fn-drag in Terminal.app, Option-drag in iTerm2.
 `/help` lists the controls.
 
 Use `/approve-spec <repo-relative-path>` while planning to prepare a graph-backed
@@ -345,7 +356,10 @@ Commands run in a filtered, read-only copy of project source with separate
 writable scratch space. Use project-relative paths. The live project, unrelated
 home files, protected configuration, symlinks and hardlinks are excluded;
 installed runtime/toolchain directories and specific package caches are trusted
-read-only inputs. Confinement uses `sandbox-exec` on macOS and requires `bubblewrap` on
+read-only inputs. `~/.cargo/config.toml` is one of them, because Cargo reads every
+ancestor directory's configuration and fails when it can see the file but not read
+it; a configuration that holds a `token` or `secret-key`, is a symlink, or does not
+parse stays blocked, and `credentials.toml` is never exposed. Confinement uses `sandbox-exec` on macOS and requires `bubblewrap` on
 Linux (x86-64 or ARM64); unsupported platforms cannot execute commands. Commands
 have no network, a clean environment, and bounded output. The default command
 timeout is 900 seconds; human configuration `MOOSEDEV_COMMAND_TIMEOUT_SECONDS`

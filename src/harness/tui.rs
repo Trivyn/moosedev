@@ -5,7 +5,8 @@ use super::protocol::{
 };
 use super::runner::{Phase, ReviewItem, Runner, Task};
 use super::{
-    markdown,
+    clipboard, markdown,
+    selection::{self, Pos, Selection},
     session::{Command, Controller, Conversation, Snapshot, Update},
     startup::{ProviderSettings, StartupOptions},
 };
@@ -306,7 +307,15 @@ struct View {
     knowledge_selected: Option<u64>,
     knowledge_latest: Option<u64>,
     knowledge_reveal_selection: bool,
-    knowledge_area: Rect,
+    content_area: Rect,
+    line_count: usize,
+    /// Content rows that continue the row before them (hard-wrap breaks).
+    soft_breaks: BTreeSet<usize>,
+    /// Where the left button went down; a selection begins once it moves.
+    press: Option<Pos>,
+    selection: Option<Selection>,
+    copy_pending: bool,
+    copy_request: Option<String>,
 }
 
 fn visible(value: &str) -> String {
@@ -720,11 +729,19 @@ fn sync_knowledge_state(view: &mut View, task: &Task) {
 
 fn push_wrapped_text(
     lines: &mut Vec<Line<'static>>,
+    soft_breaks: &mut BTreeSet<usize>,
     text: Text<'static>,
     width: usize,
 ) -> (usize, usize) {
     let start = lines.len();
-    lines.extend(markdown::wrap(text, width.max(1)).lines);
+    let (wrapped, continues) = markdown::wrap_rows(text, width.max(1));
+    soft_breaks.extend(
+        continues
+            .iter()
+            .enumerate()
+            .filter_map(|(row, continues)| continues.then_some(start + row)),
+    );
+    lines.extend(wrapped.lines);
     (start, lines.len())
 }
 
@@ -742,12 +759,14 @@ fn record_color(kind: &str) -> Color {
 
 fn push_record_cards(
     lines: &mut Vec<Line<'static>>,
+    soft_breaks: &mut BTreeSet<usize>,
     records: &[super::protocol::ContextRecord],
     width: usize,
 ) {
     for record in records {
         push_wrapped_text(
             lines,
+            soft_breaks,
             Text::from(Line::from(vec![
                 Span::styled(
                     format!("[{}]", visible(&record.kind)),
@@ -765,6 +784,7 @@ fn push_record_cards(
         if record.claim.trim().is_empty() {
             push_wrapped_text(
                 lines,
+                soft_breaks,
                 Text::from(Line::from(Span::styled(
                     "Claim not supplied by this retrieval.",
                     Style::default().fg(Color::DarkGray),
@@ -776,11 +796,12 @@ fn push_record_cards(
                 &visible(record.claim.trim()),
                 Style::default().fg(Color::White),
             );
-            lines.extend(markdown::wrap(claim, width.max(1)).lines);
+            push_wrapped_text(lines, soft_breaks, claim, width);
         }
         for source in &record.provenance {
             push_wrapped_text(
                 lines,
+                soft_breaks,
                 Text::from(Line::from(Span::styled(
                     format!("via · {}", visible(source)),
                     Style::default().fg(Color::DarkGray),
@@ -790,6 +811,7 @@ fn push_record_cards(
         }
         push_wrapped_text(
             lines,
+            soft_breaks,
             Text::from(Line::from(Span::styled(
                 visible(&record.iri),
                 Style::default().fg(Color::DarkGray),
@@ -804,10 +826,14 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
     sync_knowledge_state(view, task);
     view.knowledge_headers.clear();
     if task.knowledge_turns.is_empty() {
-        return markdown::wrap(
+        let mut lines = Vec::new();
+        push_wrapped_text(
+            &mut lines,
+            &mut view.soft_breaks,
             Text::raw(visible(&legacy_knowledge_text(task))),
-            width.max(1),
+            width,
         );
+        return Text::from(lines);
     }
 
     let mut lines = Vec::new();
@@ -832,6 +858,7 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
         };
         let (start, end) = push_wrapped_text(
             &mut lines,
+            &mut view.soft_breaks,
             Text::from(Line::from(vec![
                 Span::styled(if collapsed { "▶ " } else { "▼ " }, header_style),
                 Span::styled(
@@ -864,6 +891,7 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
         }
         push_wrapped_text(
             &mut lines,
+            &mut view.soft_breaks,
             Text::from(Line::from(Span::styled(
                 visible(&detail),
                 Style::default().fg(Color::DarkGray),
@@ -874,6 +902,7 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
         if turn.records.is_empty() {
             push_wrapped_text(
                 &mut lines,
+                &mut view.soft_breaks,
                 Text::from(Line::from(Span::styled(
                     "No accepted project knowledge matched this turn.",
                     Style::default().fg(Color::DarkGray),
@@ -882,12 +911,13 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
             );
             lines.push(Line::default());
         } else {
-            push_record_cards(&mut lines, &turn.records, width);
+            push_record_cards(&mut lines, &mut view.soft_breaks, &turn.records, width);
         }
 
         for (search_index, search) in turn.searches.iter().enumerate() {
             push_wrapped_text(
                 &mut lines,
+                &mut view.soft_breaks,
                 Text::from(Line::from(Span::styled(
                     format!(
                         "Model search {} · {} — {}",
@@ -905,6 +935,7 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
             if search.records.is_empty() {
                 push_wrapped_text(
                     &mut lines,
+                    &mut view.soft_breaks,
                     Text::from(Line::from(Span::styled(
                         "No accepted project knowledge matched this search.",
                         Style::default().fg(Color::DarkGray),
@@ -913,7 +944,7 @@ fn knowledge_body(task: &Task, view: &mut View, width: usize) -> Text<'static> {
                 );
                 lines.push(Line::default());
             } else {
-                push_record_cards(&mut lines, &search.records, width);
+                push_record_cards(&mut lines, &mut view.soft_breaks, &search.records, width);
             }
         }
     }
@@ -1315,17 +1346,38 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
         header,
     );
     let inner = Block::default().borders(Borders::ALL).inner(main);
-    view.knowledge_area = inner;
-    let body = if view.tab == 3 {
+    view.content_area = inner;
+    view.soft_breaks.clear();
+    let mut body = if view.tab == 3 {
         match &snapshot.task {
             Some(task) => knowledge_body(task, view, inner.width as usize),
             None => Text::raw("No active task. Graph context appears here after work begins."),
         }
     } else {
         view.knowledge_headers.clear();
-        markdown::wrap(body(snapshot, view), inner.width as usize)
+        let text = body(snapshot, view);
+        let mut lines = Vec::new();
+        push_wrapped_text(
+            &mut lines,
+            &mut view.soft_breaks,
+            text,
+            inner.width as usize,
+        );
+        Text::from(lines)
     };
     let line_count = body.height();
+    view.line_count = line_count;
+    if let Some(selection) = view.selection {
+        if std::mem::take(&mut view.copy_pending) {
+            let rows: Vec<String> = body.lines.iter().map(ToString::to_string).collect();
+            view.copy_request = Some(selection::text(&rows, &view.soft_breaks, selection));
+        }
+        for (index, line) in body.lines.iter_mut().enumerate() {
+            if let Some((from, to)) = selection.columns(index) {
+                *line = selection::highlight(std::mem::take(line), from, to);
+            }
+        }
+    }
     let paragraph = Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(
         [
             " Conversation ",
@@ -1366,9 +1418,9 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
         view.notice.as_str()
     };
     let help = if view.tab == 3 {
-        "Click query headers · Alt-↑/↓ select · Alt-←/→ collapse/expand · wheel/PageUp/PageDown scroll"
+        "Click query headers · drag selects and copies · Alt-↑/↓ select · Alt-←/→ collapse/expand · wheel/PageUp/PageDown scroll"
     } else {
-        "Enter send · Ctrl-J newline · Alt/Shift-Enter when supported · Esc interrupt · /help · Mouse wheel/PageUp/PageDown scroll"
+        "Enter send · Ctrl-J newline · Alt/Shift-Enter when supported · Esc interrupt · /help · drag selects and copies · wheel/PageUp/PageDown scroll"
     };
     frame.render_widget(
         Paragraph::new(format!("{spinner} {}\n{help}", visible(notice))).style(
@@ -1523,6 +1575,7 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
         KeyCode::Tab | KeyCode::BackTab => {
             let offset = if key.code == KeyCode::Tab { 1 } else { 5 };
             view.tab = (view.tab + offset) % 6;
+            clear_selection(view);
             view.scroll = 0;
             view.follow = view.tab < 2;
         }
@@ -1531,31 +1584,100 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
     None
 }
 
+fn clear_selection(view: &mut View) {
+    view.press = None;
+    view.selection = None;
+    view.copy_pending = false;
+}
+
+/// The content position under the pointer, clamped into the pane so a drag
+/// that leaves it keeps extending the selection along the nearest edge.
+fn content_position(view: &View, event: &MouseEvent) -> Pos {
+    let area = view.content_area;
+    let row = event
+        .row
+        .clamp(area.y, area.bottom().saturating_sub(1).max(area.y));
+    let column = event
+        .column
+        .clamp(area.x, area.right().saturating_sub(1).max(area.x));
+    Pos {
+        line: (view.scroll as usize + (row - area.y) as usize)
+            .min(view.line_count.saturating_sub(1)),
+        col: (column - area.x) as usize,
+    }
+}
+
+fn toggle_knowledge_header(view: &mut View, line: usize) -> bool {
+    let Some(header) = view
+        .knowledge_headers
+        .iter()
+        .find(|header| line >= header.start && line < header.end)
+        .copied()
+    else {
+        return false;
+    };
+    view.knowledge_selected = Some(header.sequence);
+    if !view.knowledge_collapsed.remove(&header.sequence) {
+        view.knowledge_collapsed.insert(header.sequence);
+    }
+    view.knowledge_reveal_selection = true;
+    view.follow = false;
+    true
+}
+
 fn mouse(view: &mut View, event: MouseEvent) -> bool {
+    let area = view.content_area;
+    let inside = event.column >= area.x
+        && event.column < area.right()
+        && event.row >= area.y
+        && event.row < area.bottom();
     match event.kind {
-        MouseEventKind::Down(MouseButton::Left)
-            if view.tab == 3
-                && event.column >= view.knowledge_area.x
-                && event.column < view.knowledge_area.right()
-                && event.row >= view.knowledge_area.y
-                && event.row < view.knowledge_area.bottom() =>
-        {
-            let line = view.scroll as usize + (event.row - view.knowledge_area.y) as usize;
-            if let Some(header) = view
-                .knowledge_headers
-                .iter()
-                .find(|header| line >= header.start && line < header.end)
-                .copied()
-            {
-                view.knowledge_selected = Some(header.sequence);
-                if !view.knowledge_collapsed.remove(&header.sequence) {
-                    view.knowledge_collapsed.insert(header.sequence);
-                }
-                view.knowledge_reveal_selection = true;
-                view.follow = false;
-                return true;
+        MouseEventKind::Down(MouseButton::Left) => {
+            let had_selection = view.selection.is_some();
+            clear_selection(view);
+            if inside {
+                view.press = Some(content_position(view, &event));
             }
-            false
+            had_selection
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(anchor) = view.press else {
+                return false;
+            };
+            // Dragging past an edge scrolls toward it; the content must stop
+            // following new output or the text would move under the pointer.
+            let scroll = if event.row < area.y {
+                view.scroll.saturating_sub(MOUSE_SCROLL_LINES)
+            } else if event.row >= area.bottom() {
+                view.scroll
+                    .saturating_add(MOUSE_SCROLL_LINES)
+                    .min(view.scroll_max)
+            } else {
+                view.scroll
+            };
+            let scrolled = scroll != view.scroll;
+            view.scroll = scroll;
+            let head = content_position(view, &event);
+            let selection =
+                (head != anchor || view.selection.is_some()).then_some(Selection { anchor, head });
+            let changed = scrolled || selection != view.selection;
+            if selection.is_some() {
+                view.follow = false;
+            }
+            view.selection = selection;
+            changed
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(press) = view.press.take() else {
+                return false;
+            };
+            if view.selection.is_some() {
+                // The rendered rows live in `render`; it fills `copy_request`.
+                view.copy_pending = true;
+                true
+            } else {
+                view.tab == 3 && toggle_knowledge_header(view, press.line)
+            }
         }
         MouseEventKind::ScrollUp => {
             view.follow = false;
@@ -1632,7 +1754,11 @@ async fn show(
                                 (None, true)
                             }
                             Event::Mouse(event) => (None, mouse(&mut view, event)),
-                            Event::Resize(_, _) => (None, true),
+                            Event::Resize(_, _) => {
+                                // Rewrapping moves every cell a selection names.
+                                clear_selection(&mut view);
+                                (None, true)
+                            }
                             _ => (None, false),
                         };
                         dirty |= event_dirty;
@@ -1657,6 +1783,19 @@ async fn show(
                     if dirty || (snapshot.busy && view.tick.is_multiple_of(3)) {
                         screen.terminal.draw(|frame| render(frame, &snapshot, &mut view))?;
                         dirty = false;
+                    }
+                    if let Some(text) = view.copy_request.take().filter(|text| !text.is_empty()) {
+                        view.notice = match clipboard::copy(&text) {
+                            Ok(clipboard::Route::Tool) => {
+                                format!("Copied {} characters", text.chars().count())
+                            }
+                            Ok(clipboard::Route::Terminal) => format!(
+                                "Sent {} characters to the terminal's clipboard (OSC 52); if paste is empty, this terminal does not support it",
+                                text.chars().count()
+                            ),
+                            Err(error) => format!("Copy failed: {error}"),
+                        };
+                        dirty = true;
                     }
                 }
             }
@@ -2133,21 +2272,37 @@ mod tests {
             tab: 3,
             ..Default::default()
         };
-        let _ = knowledge_body(&task, &mut view, 18);
+        view.line_count = knowledge_body(&task, &mut view, 18).height();
         let first = view.knowledge_headers[0];
         assert!(first.end - first.start > 1, "header should wrap");
-        view.knowledge_area = Rect::new(1, 2, 18, 12);
-        let click_row = view.knowledge_area.y + first.start as u16 + 1;
-        let clicked = mouse(
+        assert!(view.soft_breaks.contains(&(first.start + 1)));
+        view.content_area = Rect::new(1, 2, 18, 12);
+        let click_row = view.content_area.y + first.start as u16 + 1;
+        let at = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // A click toggles on release, so a drag that starts on a header can
+        // select its text instead.
+        let left = MouseButton::Left;
+        assert!(!mouse(
             &mut view,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 2,
-                row: click_row,
-                modifiers: KeyModifiers::NONE,
-            },
-        );
-        assert!(clicked);
+            at(MouseEventKind::Down(left), 2, click_row)
+        ));
+        assert!(view.knowledge_collapsed.contains(&0));
+        assert!(mouse(&mut view, at(MouseEventKind::Up(left), 2, click_row)));
+        assert!(!mouse(
+            &mut view,
+            at(MouseEventKind::Down(left), 2, click_row)
+        ));
+        assert!(mouse(
+            &mut view,
+            at(MouseEventKind::Drag(left), 6, click_row)
+        ));
+        assert!(mouse(&mut view, at(MouseEventKind::Up(left), 6, click_row)));
+        assert!(view.copy_pending, "a drag is a selection, not a click");
         assert!(!view.knowledge_collapsed.contains(&0));
         assert!(!view.knowledge_collapsed.contains(&1));
 
@@ -2349,6 +2504,120 @@ mod tests {
         assert_eq!(view.scroll, 5);
         assert!(!view.follow);
     }
+    #[test]
+    fn dragging_selects_rendered_text_scrolls_past_edges_and_requests_a_copy() {
+        let mut conversation = Conversation::new(PathBuf::from("/project"));
+        conversation.push(
+            "user",
+            (1..=30)
+                .map(|n| format!("line {n:02} of the transcript"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let snapshot = Snapshot {
+            conversation,
+            task: None,
+            status: String::new(),
+            busy: false,
+            endpoint: String::new(),
+            model: String::new(),
+            live: Default::default(),
+        };
+        let mut view = View::default();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+        let mut draw = |view: &mut View| {
+            terminal
+                .draw(|frame| render(frame, &snapshot, view))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        draw(&mut view);
+        let area = view.content_area;
+        let at = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let left = MouseButton::Left;
+        let row_of = |view: &View, needle: &str| {
+            let rows: Vec<String> = body(&snapshot, view)
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            rows.iter().position(|row| row.contains(needle)).unwrap()
+        };
+        let first = row_of(&view, "line 01") as u16;
+        let column = |text: &str| area.x + text.len() as u16;
+
+        // A press alone selects nothing; pointer motion without it is ignored.
+        assert!(!mouse(&mut view, at(MouseEventKind::Moved, 5, area.y)));
+        assert!(!mouse(
+            &mut view,
+            at(MouseEventKind::Down(left), column("line "), area.y + first)
+        ));
+        assert!(mouse(
+            &mut view,
+            at(
+                MouseEventKind::Drag(left),
+                column("line 02"),
+                area.y + first + 1
+            )
+        ));
+        // The same cell again changes nothing, so it must not redraw.
+        assert!(!mouse(
+            &mut view,
+            at(
+                MouseEventKind::Drag(left),
+                column("line 02"),
+                area.y + first + 1
+            )
+        ));
+        let buffer = draw(&mut view);
+        let reversed =
+            |column: u16, row: u16| buffer[(column, row)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(column("line "), area.y + first));
+        assert!(!reversed(column("line"), area.y + first));
+        assert!(reversed(area.x, area.y + first + 1));
+        assert!(!reversed(column("line 02 "), area.y + first + 1));
+
+        // Dragging below the pane scrolls toward the rest of the content.
+        assert!(mouse(
+            &mut view,
+            at(
+                MouseEventKind::Drag(left),
+                column("line"),
+                area.bottom() + 3
+            )
+        ));
+        assert_eq!(view.scroll, 1);
+        assert!(mouse(&mut view, at(MouseEventKind::Up(left), 0, 0)));
+        assert!(view.copy_request.is_none());
+        draw(&mut view);
+        let copied = view.copy_request.take().unwrap();
+        assert!(
+            copied.starts_with("01 of the transcript\nline 02 of the transcript\n"),
+            "{copied:?}"
+        );
+        // Both end cells are inclusive: the cell after "line" is its space.
+        assert!(copied.ends_with("\nline "), "{copied:?}");
+        assert!(
+            view.selection.is_some(),
+            "highlight stays until the next click"
+        );
+
+        assert!(mouse(&mut view, at(MouseEventKind::Down(left), 0, 0)));
+        assert!(view.selection.is_none());
+        mouse(&mut view, at(MouseEventKind::Down(left), area.x, area.y));
+        mouse(
+            &mut view,
+            at(MouseEventKind::Drag(left), area.x + 3, area.y),
+        );
+        key(&mut view, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(view.selection.is_none() && view.press.is_none());
+    }
+
     #[test]
     fn mouse_wheel_saturates_and_ignores_unrelated_events() {
         let mut view = View {

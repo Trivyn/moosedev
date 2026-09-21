@@ -82,9 +82,40 @@ pub(super) fn readable_files() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     paths.push(PathBuf::from("/etc/ld.so.cache"));
     if let Some(home) = std::env::var_os("HOME") {
-        paths.push(Path::new(&home).join(".rustup/settings.toml"));
+        let home = Path::new(&home);
+        paths.push(home.join(".rustup/settings.toml"));
+        // Cargo reads every ancestor's `.cargo/config.toml`, and task scratch
+        // usually lives under HOME, so a config Cargo can see but not read
+        // fails every Cargo command. credentials.toml is never exposed.
+        paths.extend(
+            [".cargo/config.toml", ".cargo/config"]
+                .map(|suffix| home.join(suffix))
+                .into_iter()
+                .filter(|path| secret_free_cargo_config(path)),
+        );
     }
     paths.into_iter().filter(|path| path.is_file()).collect()
+}
+
+/// A regular, non-symlink Cargo configuration that parses and holds no
+/// registry secret. Anything else stays blocked and needs a task permission.
+pub(super) fn secret_free_cargo_config(path: &Path) -> bool {
+    fn holds_secret(value: &toml::Value) -> bool {
+        match value {
+            toml::Value::Table(table) => table.iter().any(|(key, value)| {
+                matches!(key.as_str(), "token" | "secret-key") || holds_secret(value)
+            }),
+            toml::Value::Array(values) => values.iter().any(holds_secret),
+            _ => false,
+        }
+    }
+    const MAX_BYTES: u64 = 256 * 1024;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_BYTES)
+        && std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .is_some_and(|table| !holds_secret(&toml::Value::Table(table)))
 }
 
 #[cfg(target_os = "macos")]

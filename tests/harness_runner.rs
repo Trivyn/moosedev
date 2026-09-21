@@ -262,6 +262,64 @@ async fn awaiting_read_permission(fixture: &Fixture) -> (Runner, std::path::Path
     (runner, outside, command)
 }
 
+/// The real sandbox denies an ungranted external read. The model must then be
+/// told what that failure means, or it never reaches the permission gate.
+#[tokio::test]
+async fn a_sandbox_denial_tells_the_model_to_request_permission() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let outside =
+        std::env::temp_dir().join(format!("moosedev-permission-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&outside).unwrap();
+    let outside = outside.canonicalize().unwrap();
+    std::fs::write(outside.join("note.txt"), "granted\n").unwrap();
+    let command = format!("cat '{}'", outside.join("note.txt").display());
+
+    fixture.conversational(json!({"action":"command","command":command}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.permission_grants.is_empty());
+    assert!(
+        runner
+            .task
+            .last_response
+            .contains("sandbox blocked this command")
+            && runner.task.last_response.contains("request_permission"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "sandbox_denial" && event.detail == command));
+
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":command,
+        "justification":"Read a sibling dependency",
+        "read_paths":[outside.to_string_lossy()],
+        "write_paths":[],
+        "network":false
+    }));
+    // A model-free capture checkpoint follows the command.
+    let calls = fixture.model_calls();
+    for _ in 0..3 {
+        if fixture.model_calls() == calls {
+            runner.advance().await.unwrap();
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    let prompt = requests_of_kind(&fixture, "model").last().unwrap()["body"].to_string();
+    assert!(prompt.contains("sandbox blocked this command"), "{prompt}");
+
+    runner.approve_permission().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.last_response.trim(), "granted");
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
 #[tokio::test]
 async fn approval_grants_then_the_next_step_runs_the_exact_command() {
     let _env_lock = ENVIRONMENT.lock().await;

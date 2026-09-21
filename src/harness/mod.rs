@@ -5,6 +5,8 @@
 pub const CONFIG_FILE_NAME: &str = "moosedev.toml";
 
 #[cfg(feature = "harness")]
+mod clipboard;
+#[cfg(feature = "harness")]
 pub mod config;
 pub mod coverage;
 pub mod daemon;
@@ -20,6 +22,8 @@ pub mod protocol;
 pub mod response;
 #[cfg(feature = "harness")]
 pub mod runner;
+#[cfg(feature = "harness")]
+mod selection;
 #[cfg(feature = "harness")]
 pub mod session;
 #[cfg(feature = "harness")]

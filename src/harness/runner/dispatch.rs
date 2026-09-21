@@ -362,7 +362,7 @@ impl Runner {
                 }
                 self.end_unchanged_window();
                 let result = self.run_command(&command).await?;
-                self.commit_command_result(result)?;
+                self.commit_command_result(&command, result)?;
             }
             Step::RequestPermission {
                 command,
@@ -376,7 +376,7 @@ impl Runner {
                 }
                 if let Some(result) = self
                     .begin_permission_request(
-                        command,
+                        command.clone(),
                         justification,
                         read_paths,
                         write_paths,
@@ -385,7 +385,7 @@ impl Runner {
                     .await?
                 {
                     self.end_unchanged_window();
-                    self.commit_command_result(result)?;
+                    self.commit_command_result(&command, result)?;
                 }
             }
             Step::Question { question } => {
@@ -517,12 +517,35 @@ impl Runner {
         result
     }
 
-    pub(super) fn commit_command_result(&mut self, result: executor::CommandResult) -> Result<()> {
+    pub(super) fn commit_command_result(
+        &mut self,
+        command: &str,
+        result: executor::CommandResult,
+    ) -> Result<()> {
+        let denied = self.note_sandbox_denial(command, &result);
         self.task.last_response = result.output;
+        if denied {
+            self.task.last_response.push_str(SANDBOX_DENIAL_HINT);
+        }
         self.task.capture_due = true;
         self.task.after_review = Phase::Working;
         self.task.intent = None;
         self.persist()
+    }
+
+    /// Journal a command the OS sandbox appears to have blocked. The caller
+    /// appends the hint; nothing is granted here (Constraint 3a829c5c).
+    fn note_sandbox_denial(&mut self, command: &str, result: &executor::CommandResult) -> bool {
+        let network_granted = self
+            .task
+            .permission_grants
+            .iter()
+            .any(|grant| grant.network);
+        let denied = sandbox_denial(result, network_granted);
+        if denied {
+            self.intent_event("sandbox_denial", command);
+        }
+        denied
     }
 
     pub(super) fn scratch_path(&self) -> PathBuf {
@@ -538,7 +561,9 @@ impl Runner {
         if let Some(command) = plan.checks.get(index).cloned() {
             let result = self.run_command(&command).await?;
             self.record_symbolic_check(&command, result.success);
-            let failure = (!result.success).then(|| check_failure_response(&command, &result));
+            let denied = self.note_sandbox_denial(&command, &result);
+            let failure =
+                (!result.success).then(|| check_failure_response(&command, &result, denied));
             if let (false, Some(code)) = (result.success, unrunnable_exit(&result)) {
                 self.intent_event("check_unrunnable", &format!("exit {code}: {command}"));
             }
@@ -607,13 +632,50 @@ fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
     result.exit_code.filter(|code| matches!(code, 126 | 127))
 }
 
+const PATH_DENIALS: [&str; 5] = [
+    "Operation not permitted",
+    "Permission denied",
+    "os error 1)",
+    "os error 13)",
+    "Read-only file system",
+];
+const NETWORK_DENIALS: [&str; 4] = [
+    "Could not resolve host",
+    "failed to lookup address",
+    "Temporary failure in name resolution",
+    "Network is unreachable",
+];
+/// Appended to a failed command's observation when the output shows the OS
+/// sandbox blocked it. It steers the model to the typed request; it never
+/// requests or grants anything itself.
+const SANDBOX_DENIAL_HINT: &str = "\nThe harness sandbox blocked this command; this is not a defect in the project and not something to work around. If the command needs a path outside the project or network access, your next action is request_permission with this exact command, the blocked absolute path in read_paths or write_paths (or network true), and a short justification; the human then approves or denies it. Do not reply that it cannot be done, replan, or substitute a weaker check.\n";
+
+/// Whether a failed command's output carries an OS denial signature. This
+/// only selects what the model is told; permission is still requested by the
+/// model and granted by the human.
+fn sandbox_denial(result: &executor::CommandResult, network_granted: bool) -> bool {
+    !result.success
+        && (PATH_DENIALS
+            .iter()
+            .any(|signature| result.output.contains(signature))
+            || (!network_granted
+                && NETWORK_DENIALS
+                    .iter()
+                    .any(|signature| result.output.contains(signature))))
+}
+
 /// What the model is told about a failed required check. A check the shell
 /// could not start tested nothing, so it is named as an invalid check rather
-/// than a failure to repair in the code.
-fn check_failure_response(command: &str, result: &executor::CommandResult) -> String {
+/// than a failure to repair in the code; a check the sandbox blocked is named
+/// as a permission need rather than either.
+fn check_failure_response(command: &str, result: &executor::CommandResult, denied: bool) -> String {
     match unrunnable_exit(result) {
         Some(code) => format!(
             "Required check could not run: the shell exited {code} (command not found or not executable), so the change was not tested. The check itself is invalid, not the environment: replan with checks that are shell command lines, such as the task's verification commands.\nCheck: {command}\n{}",
+            result.output
+        ),
+        None if denied => format!(
+            "Required check was blocked by the sandbox, so the change was not tested.\nCheck: {command}\n{}{SANDBOX_DENIAL_HINT}",
             result.output
         ),
         None => format!(
@@ -638,7 +700,8 @@ mod check_failure_tests {
     #[test]
     fn a_check_the_shell_cannot_start_is_named_invalid_not_a_code_failure() {
         let missing = result(Some(127), "/bin/sh: The: command not found");
-        let response = check_failure_response("The implementation must be idempotent.", &missing);
+        let response =
+            check_failure_response("The implementation must be idempotent.", &missing, false);
         assert!(
             response.starts_with("Required check could not run"),
             "{response}"
@@ -652,9 +715,36 @@ mod check_failure_tests {
             result(None, "killed"),
         ] {
             assert_eq!(unrunnable_exit(&ordinary), None);
-            assert!(check_failure_response("python3 -m unittest", &ordinary)
-                .starts_with("Required verification failed. Repair before completion."));
+            assert!(!sandbox_denial(&ordinary, false));
+            assert!(
+                check_failure_response("python3 -m unittest", &ordinary, false)
+                    .starts_with("Required verification failed. Repair before completion.")
+            );
         }
+    }
+
+    #[test]
+    fn a_check_the_sandbox_blocked_is_named_a_permission_need() {
+        let blocked = result(
+            Some(101),
+            "failed to read configuration file `/outside/config.toml`\nOperation not permitted (os error 1)",
+        );
+        assert!(sandbox_denial(&blocked, false));
+        let response = check_failure_response("cargo check", &blocked, true);
+        assert!(response.starts_with("Required check was blocked by the sandbox"));
+        assert!(response.contains("request_permission"), "{response}");
+        assert!(!response.contains("Repair before completion"), "{response}");
+
+        let offline = result(Some(6), "curl: (6) Could not resolve host: example.org");
+        assert!(sandbox_denial(&offline, false));
+        // With network already granted, a lookup failure is a real failure.
+        assert!(!sandbox_denial(&offline, true));
+        let passed = executor::CommandResult {
+            success: true,
+            output: "Permission denied".into(),
+            exit_code: Some(0),
+        };
+        assert!(!sandbox_denial(&passed, false));
     }
 }
 
