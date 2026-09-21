@@ -45,6 +45,15 @@ class DaemonTests(unittest.TestCase):
                 self.daemon().__enter__()
             popen.assert_not_called()
 
+    def test_project_configuration_files_fail_before_spawn(self):
+        for name, message in ((".env", "dotenv"), ("moosedev.toml", "moosedev.toml")):
+            with self.subTest(name=name), mock.patch("bench.harness_study.daemon.subprocess.Popen") as popen:
+                (self.workspace / name).touch()
+                with self.assertRaisesRegex(ValueError, message):
+                    self.daemon().__enter__()
+                (self.workspace / name).unlink()
+                popen.assert_not_called()
+
     def test_environment_is_explicit_and_never_inherits_credentials(self):
         with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "secret", "MOOSEDEV_LLM_MODEL": "wrong"}):
             env = self.daemon()._controlled_environment("127.0.0.1:12345")

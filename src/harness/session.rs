@@ -1,7 +1,8 @@
 //! Durable conversation and human input, independent of the model's action protocol.
 use super::{
+    config::ModelRole,
     progress::{Progress as ProgressEvent, ProgressSender},
-    runner::{PermissionGrant, Phase, Runner, Task},
+    runner::{Mode, PermissionGrant, Phase, Runner, Task},
     startup::{ProviderSettings, StartupOptions},
 };
 use anyhow::{bail, Context, Result};
@@ -310,6 +311,7 @@ impl Controller {
         }
     }
     fn publish(&self, busy: bool) {
+        let active = self.active_model();
         let _ = self.output.send(Update::State(Box::new(Snapshot {
             conversation: self.conversation.clone(),
             task: self
@@ -319,8 +321,8 @@ impl Controller {
                 .or_else(|| self.active_snapshot.clone()),
             status: self.status.clone(),
             busy,
-            endpoint: self.provider.config.base_url.clone(),
-            model: self.provider.config.model.clone(),
+            endpoint: active.base_url,
+            model: active.model,
             live: self.live.clone(),
         })));
     }
@@ -371,11 +373,38 @@ impl Controller {
             self.status = "Interrupted. /continue resumes; follow-up text replans.".into();
         }
     }
+    /// Persist a choice to `moosedev.toml` and apply whatever the reload
+    /// resolved, even when an environment override makes the save ineffective.
+    fn select_model(
+        &mut self,
+        role: Option<ModelRole>,
+        endpoint: Option<&str>,
+        model: &str,
+    ) -> Result<()> {
+        let saved = self
+            .provider
+            .persist_selection(&self.conversation.root, role, endpoint, model);
+        self.configure()?;
+        saved
+    }
+    /// The model answering now: the plan model until a plan is approved, the
+    /// implementation model after. The header and the state feed show this one.
+    fn active_model(&self) -> crate::llm::LlmConfig {
+        let mode = self
+            .runner
+            .as_ref()
+            .map(|runner| runner.task.mode)
+            .or_else(|| self.active_snapshot.as_ref().map(|task| task.mode));
+        let role = match mode {
+            Some(Mode::Auto) => ModelRole::Implement,
+            Some(Mode::Plan) | None => ModelRole::Plan,
+        };
+        self.provider.for_role(role).config
+    }
     fn configure(&mut self) -> Result<()> {
         if let Some(runner) = &mut self.runner {
             runner.enable_interactive()?;
-            runner.configure(self.provider.config.clone(), Some(self.progress.clone()));
-            runner.set_response_policy(self.provider.response_policy);
+            runner.configure_provider(&self.provider, Some(self.progress.clone()));
             runner.set_conversation_context(self.conversation.context());
         }
         Ok(())
@@ -482,9 +511,7 @@ impl Controller {
         if self.available_models.len() == 1 && select_single && !self.startup.needs_initialization()
         {
             let model = self.available_models[0].clone();
-            self.provider.select(None, &model)?;
-            self.provider.save(&self.conversation.root)?;
-            self.configure()?;
+            self.select_model(None, None, &model)?;
             self.conversation.push(
                 "system",
                 format!(
@@ -505,7 +532,7 @@ impl Controller {
                 .map(|(i, model)| format!("{}. {model}", i + 1))
                 .collect::<Vec<_>>()
                 .join("\n");
-            self.conversation.push("system",format!("Models at {}:\n{listing}\nChoose with /model <number> or /model <model ID>. To use another endpoint: /model <endpoint> <model ID>.",self.provider.config.base_url));
+            self.conversation.push("system",format!("Models at {}:\n{listing}\nChoose with /model <number> or /model <model ID>. To use another endpoint: /model <endpoint> <model ID>.\nIn use: {}. Give planning or implementation its own model with /model plan <model ID> or /model implement <model ID>.",self.provider.config.base_url,self.provider.describe()));
             self.status = "Select a model with /model <number> or its exact ID.".into();
         }
         self.save_conversation()
@@ -851,10 +878,18 @@ impl Controller {
                     self.discover_models(self.provider.config.model.is_empty())
                         .await?;
                 } else {
-                    let (endpoint, model) = match arguments.as_slice() {
+                    // A leading role word scopes the choice; alone it is a model ID.
+                    let (role, arguments) = match arguments.as_slice() {
+                        [role, rest @ ..] if !rest.is_empty() => match ModelRole::parse(role) {
+                            Some(role) => (Some(role), rest),
+                            None => (None, arguments.as_slice()),
+                        },
+                        _ => (None, arguments.as_slice()),
+                    };
+                    let (endpoint, model) = match arguments {
                         [model] => (None, *model),
                         [endpoint, model] => (Some(*endpoint), *model),
-                        _ => bail!("Use /model <id> or /model <endpoint> <id>."),
+                        _ => bail!("Use /model [plan|implement] <id> or /model [plan|implement] <endpoint> <id>."),
                     };
                     anyhow::ensure!(
                         !self.startup.needs_initialization(),
@@ -871,16 +906,11 @@ impl Controller {
                     } else {
                         model.to_string()
                     };
-                    self.provider.select(endpoint, &model)?;
-                    if endpoint.is_some() {
+                    self.select_model(role, endpoint, &model)?;
+                    if endpoint.is_some() && role.is_none() {
                         self.available_models.clear();
                     }
-                    self.provider.save(&self.conversation.root)?;
-                    self.configure()?;
-                    self.status = format!(
-                        "Selected {} at {}",
-                        self.provider.config.model, self.provider.config.base_url
-                    );
+                    self.status = format!("Selected {}", self.provider.describe());
                     self.auto = !self.conversation.queued.is_empty();
                 }
             }

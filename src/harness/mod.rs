@@ -1,4 +1,11 @@
 //! Daemon-backed coding workflow with mandatory reading and capture.
+
+/// The harness's local model configuration, in the project root. Named here,
+/// outside the `harness` feature, because `moosedev init` must ignore it.
+pub const CONFIG_FILE_NAME: &str = "moosedev.toml";
+
+#[cfg(feature = "harness")]
+pub mod config;
 pub mod coverage;
 pub mod daemon;
 pub mod digest;

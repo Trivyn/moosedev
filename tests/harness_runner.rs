@@ -23,6 +23,92 @@ mod tools;
 use mock::*;
 
 #[tokio::test]
+async fn each_role_is_answered_by_its_own_model_and_journaled() {
+    use moosedev::harness::{config::ModelRole, response::ResponsePolicy, startup::RoleSettings};
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let role = |model: &str, window: usize| RoleSettings {
+        config: moosedev::llm::LlmConfig {
+            model: model.into(),
+            context_window_tokens: window,
+            ..fixture.config()
+        },
+        response_policy: ResponsePolicy::Auto,
+        action_contract: ActionContract::Tools,
+    };
+    runner.set_role(ModelRole::Plan, Some(role("planner", 65536)));
+    runner.set_role(ModelRole::Implement, Some(role("implementer", 16384)));
+
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"command","command":"true"}));
+    runner.advance().await.unwrap();
+    // Back to planning: the plan model answers again, without a second probe.
+    runner.mode_plan().await.unwrap();
+    fixture.conversational(json!({"action":"reply","message":"Replanning."}));
+    // The command's capture checkpoint comes first and asks no model.
+    let calls = fixture.model_calls();
+    for _ in 0..3 {
+        if fixture.model_calls() == calls {
+            runner.advance().await.unwrap();
+        }
+    }
+
+    let sent: Vec<String> = requests_of_kind(&fixture, "model")
+        .iter()
+        .filter(|request| request["schema"] == "harness_action")
+        .map(|request| request["body"]["model"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(sent, ["planner", "planner", "implementer", "planner"]);
+
+    let journaled: Vec<(&str, &str, u64)> = runner
+        .task
+        .model_requests
+        .iter()
+        .map(|request| {
+            (
+                request["role"].as_str().unwrap(),
+                request["model"].as_str().unwrap(),
+                request["context_window_tokens"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        journaled,
+        [
+            ("plan", "planner", 65536),
+            ("plan", "planner", 65536),
+            ("implement", "implementer", 16384),
+            ("plan", "planner", 65536),
+        ]
+    );
+    assert_eq!(runner.task.model_requests[0]["timeouts_secs"]["idle"], 120);
+    let journal = journal_value(&runner).to_string();
+    assert!(
+        !journal.contains("\"fixture\""),
+        "the API key reached the journal"
+    );
+    let probes = runner
+        .task
+        .events
+        .iter()
+        .filter(|event| {
+            event
+                .message
+                .starts_with("Model response compatibility verified")
+        })
+        .count();
+    assert_eq!(
+        probes, 2,
+        "one probe per model across Plan, Auto and Plan again"
+    );
+}
+
+#[tokio::test]
 async fn permission_request_is_canonical_durable_and_denial_resumes_auto() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;

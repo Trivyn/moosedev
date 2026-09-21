@@ -1,9 +1,11 @@
 //! The model proposes; this state machine owns reading, execution and capture.
 use super::{
+    config::ModelRole,
     executor::{self, Workspace},
     progress::{Progress, ProgressSender},
     protocol::*,
     response::{ActionContract, ResponseKey, ResponsePolicy, ResponseReceipt},
+    startup::{ProviderSettings, RoleSettings},
 };
 use crate::llm::{LlmConfig, OpenAiCompatClient};
 use crate::policy::{GateDisposition, PolicyDecision};
@@ -71,7 +73,12 @@ pub struct Runner {
     _lock: File,
     context: Option<ContextResponse>,
     config: Option<LlmConfig>,
-    model_client: Option<(ResponseKey, OpenAiCompatClient)>,
+    /// Per-role settings from `moosedev.toml`; a role without one uses `config`.
+    plan: Option<RoleSettings>,
+    implement: Option<RoleSettings>,
+    /// One verified client per distinct model, so a task that moves between
+    /// planning and implementation probes each model once, not on every switch.
+    model_clients: Vec<(ResponseKey, OpenAiCompatClient)>,
     response_policy: Option<ResponsePolicy>,
     action_contract: Option<ActionContract>,
     progress: Option<ProgressSender>,
@@ -219,7 +226,9 @@ impl Runner {
             _lock: lock,
             context: None,
             config: None,
-            model_client: None,
+            plan: None,
+            implement: None,
+            model_clients: vec![],
             response_policy: None,
             action_contract: None,
             progress: None,
@@ -264,7 +273,9 @@ impl Runner {
             _lock: lock,
             context: None,
             config: None,
-            model_client: None,
+            plan: None,
+            implement: None,
+            model_clients: vec![],
             response_policy: None,
             action_contract: None,
             progress: None,
@@ -298,6 +309,30 @@ impl Runner {
     pub fn configure(&mut self, config: LlmConfig, progress: Option<ProgressSender>) {
         self.config = Some(config);
         self.progress = progress;
+    }
+
+    /// Apply every role's resolved settings. Both frontends configure a runner
+    /// through here, so they cannot disagree about which model answers.
+    pub fn configure_provider(
+        &mut self,
+        provider: &ProviderSettings,
+        progress: Option<ProgressSender>,
+    ) {
+        self.configure(provider.config.clone(), progress);
+        self.set_response_policy(provider.response_policy);
+        if let Some(contract) = provider.action_contract {
+            self.set_action_contract(contract);
+        }
+        self.set_role(ModelRole::Plan, provider.plan.clone());
+        self.set_role(ModelRole::Implement, provider.implement.clone());
+    }
+
+    /// Give one role its own model and levers, or return it to the default.
+    pub fn set_role(&mut self, role: ModelRole, settings: Option<RoleSettings>) {
+        match role {
+            ModelRole::Plan => self.plan = settings,
+            ModelRole::Implement => self.implement = settings,
+        }
     }
 
     pub fn set_response_policy(&mut self, policy: ResponsePolicy) {

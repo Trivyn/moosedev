@@ -41,11 +41,68 @@ The default model endpoint is `http://127.0.0.1:1234/v1`. Without a configured o
 remembered model, startup discovers the server's model IDs and selects the model
 automatically if exactly one is advertised. Otherwise it presents a numbered
 list. `/model` refreshes that list; `/model NUMBER` or `/model MODEL_ID` selects one, and
-`/model http://HOST:PORT/v1 MODEL_ID` selects an endpoint and model. Non-secret
-preferences are remembered in `.moosedev/harness/provider.json`. Explicit
-`MOOSEDEV_LLM_BASE_URL` and `MOOSEDEV_LLM_MODEL` environment variables or project
-`.env` values take precedence at launch. Model selection affects the harness's
-coding session; it does not reconfigure a shared daemon.
+`/model http://HOST:PORT/v1 MODEL_ID` selects an endpoint and model. Model selection
+affects the harness's coding session; it does not reconfigure a shared daemon.
+
+### Model configuration: `moosedev.toml`
+
+The harness reads its models from `moosedev.toml` in the project root. The file is
+local to this machine (`moosedev init` adds `/moosedev.toml` to `.gitignore`): it
+names endpoints and model IDs, holds no project knowledge, and never an API key.
+`/model` edits it in place and keeps your comments.
+
+```toml
+[harness.model]                       # the default for every role
+endpoint = "http://127.0.0.1:1234/v1"
+model = "qwen/qwen3.8-27b"
+api_key_env = "MOOSEDEV_LLM_API_KEY"  # the variable holding the key, never the key
+context_window_tokens = 32768
+structured_output = "auto"            # auto | required | disabled
+response_policy = "auto"              # auto | provider-default | reasoning-off
+action_contract = "tools"             # tools | json_schema
+connect_timeout_secs = 10
+first_chunk_timeout_secs = 300
+idle_timeout_secs = 120
+
+[harness.model.plan]                  # unset keys inherit from [harness.model]
+model = "qwen/qwen3.8-27b"
+
+[harness.model.implement]
+model = "google/gemma-4-26b-a4b"
+context_window_tokens = 16384
+```
+
+There are two roles, and the role follows the task's mode. `plan` answers while the
+task is in Plan: planning actions, replies, and `/approve-spec` extraction.
+`implement` answers once a plan is approved: its actions, and the final capture
+note, which the model that did the work writes. A role without its own table uses
+`[harness.model]`, so one model needs no role tables at all. The prompt budget,
+response policy and action contract follow the role's model, and each model is
+probed for compatibility once. `/model plan MODEL_ID` and `/model implement
+MODEL_ID` set one role; plain `/model MODEL_ID` sets the default. Every form
+reports the resulting `plan=… implement=…` mapping. The TUI header shows the model
+answering now. A local server may need to swap models between roles; the
+first-chunk timeout covers a load.
+
+Each key is resolved separately, highest first:
+
+1. a variable set in the real environment (`MOOSEDEV_LLM_MODEL=x moosedev-harness`),
+   which overrides every role for that invocation;
+2. the role's table, then `[harness.model]`;
+3. a value that only the project `.env` supplies. The daemon reads the same `.env`
+   for its own model, so it is the shared project default and does not flatten the
+   roles;
+4. `.moosedev/harness/provider.json`, the earlier remembered selection, read only
+   while `moosedev.toml` does not exist and never written again;
+5. the built-in default.
+
+Unknown keys under `[harness]`, invalid values, a symlinked file, and an
+`api_key_env` naming an unset variable are errors, never silent defaults. Other
+top-level tables are ignored. Every journaled model request records its role,
+model, endpoint, context window and timeouts, so the settings that produced an
+answer are never hidden. Thresholds, the command timeout and daemon options are
+not in this file; they remain environment-only. Headless commands use the same
+file as the interactive session.
 
 `MOOSEDEV_LLM_API_KEY` provides authentication;
 `MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS` declares the model context window.

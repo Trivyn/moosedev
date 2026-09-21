@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::config::{self, Environment, ModelFile, ModelKeys, ModelRole};
 use super::protocol::{ContextRequest, ContextResponse};
+use super::response::{ActionContract, ResponsePolicy};
 use crate::{llm::LlmConfig, runtime};
 
 const BOUNDED_CONTEXT_PROBE_BYTES: usize = 4_096;
@@ -282,18 +284,122 @@ fn checked_executable(path: &Path, current: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// One role's fully resolved model and the levers that follow it.
+#[derive(Clone, Debug)]
+pub struct RoleSettings {
+    pub config: LlmConfig,
+    pub response_policy: ResponsePolicy,
+    pub action_contract: ActionContract,
+}
+
+/// `config` and `response_policy` are the default every role uses; `plan` and
+/// `implement` are present only when `moosedev.toml` gives that role a table.
 #[derive(Clone, Debug)]
 pub struct ProviderSettings {
     pub config: LlmConfig,
-    pub response_policy: super::response::ResponsePolicy,
+    pub response_policy: ResponsePolicy,
+    /// `None` leaves the runner on `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
+    pub action_contract: Option<ActionContract>,
+    pub plan: Option<RoleSettings>,
+    pub implement: Option<RoleSettings>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct RememberedProvider {
     #[serde(default)]
-    response_policy: super::response::ResponsePolicy,
+    response_policy: ResponsePolicy,
     base_url: String,
     model: String,
+}
+
+const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1234/v1";
+const DEFAULT_API_KEY_ENV: &str = "MOOSEDEV_LLM_API_KEY";
+
+fn nonblank(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+/// Resolve one table. Per key: a variable set in the real environment, then
+/// `layers` in order (a role's keys before the default's), then a value only the
+/// project `.env` supplied, then the legacy remembered provider, then the
+/// built-in default. Values pass through the validators the environment uses.
+fn resolve(
+    environment: &Environment,
+    layers: &[&ModelKeys],
+    remembered: &RememberedProvider,
+) -> Result<RoleSettings> {
+    let pick = |name: &str, key: fn(&ModelKeys) -> Option<String>| {
+        environment
+            .explicit(name)
+            .or_else(|| layers.iter().find_map(|keys| key(keys)))
+            .or_else(|| environment.project(name))
+    };
+    let endpoint = pick("MOOSEDEV_LLM_BASE_URL", |keys| keys.endpoint.clone())
+        .or_else(|| nonblank(remembered.base_url.clone()))
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.into());
+    validate_provider_url(&endpoint)?;
+    let model = pick("MOOSEDEV_LLM_MODEL", |keys| keys.model.clone())
+        .or_else(|| nonblank(remembered.model.clone()))
+        .unwrap_or_default();
+    let key_variable = layers
+        .iter()
+        .find_map(|keys| keys.api_key_env.clone())
+        .unwrap_or_else(|| DEFAULT_API_KEY_ENV.into());
+    ensure!(
+        !key_variable.is_empty()
+            && key_variable
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "api_key_env must name an environment variable, not hold a key"
+    );
+    let api_key = environment.value(&key_variable);
+    ensure!(
+        api_key.is_some() || key_variable == DEFAULT_API_KEY_ENV,
+        "api_key_env names {key_variable}, which is not set"
+    );
+    let mut config = LlmConfig::from_values(
+        Some(endpoint.trim_end_matches('/').to_owned()),
+        api_key,
+        None,
+        pick("MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS", |keys| {
+            keys.context_window_tokens.map(|tokens| tokens.to_string())
+        }),
+        pick("MOOSEDEV_LLM_STRUCTURED_OUTPUT", |keys| {
+            keys.structured_output.clone()
+        }),
+    )?;
+    // An unset model means "choose one", never the library's default model.
+    config.configured = !model.is_empty();
+    config.model = model;
+    config.timeouts = crate::llm::LlmTimeouts::from_values(
+        pick("MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS", |keys| {
+            keys.connect_timeout_secs.map(|secs| secs.to_string())
+        }),
+        pick("MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS", |keys| {
+            keys.first_chunk_timeout_secs.map(|secs| secs.to_string())
+        }),
+        pick("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS", |keys| {
+            keys.idle_timeout_secs.map(|secs| secs.to_string())
+        }),
+    )?;
+    let response_policy = ResponsePolicy::parse(
+        pick("MOOSEDEV_HARNESS_RESPONSE_POLICY", |keys| {
+            keys.response_policy.clone()
+        })
+        .as_deref(),
+    )?
+    .unwrap_or(remembered.response_policy);
+    let action_contract = ActionContract::parse(
+        pick("MOOSEDEV_HARNESS_ACTION_CONTRACT", |keys| {
+            keys.action_contract.clone()
+        })
+        .as_deref(),
+    )?;
+    Ok(RoleSettings {
+        config,
+        response_policy,
+        action_contract,
+    })
 }
 
 impl ProviderSettings {
@@ -302,11 +408,13 @@ impl ProviderSettings {
     /// selection; this does not silently execute with a different provider.
     pub fn fallback() -> Self {
         Self {
-            response_policy: super::response::ResponsePolicy::Auto,
+            response_policy: ResponsePolicy::Auto,
+            action_contract: None,
+            plan: None,
+            implement: None,
             config: LlmConfig {
-                base_url: "http://127.0.0.1:1234/v1".into(),
-                api_key: std::env::var("MOOSEDEV_LLM_API_KEY")
-                    .unwrap_or_else(|_| "lm-studio".into()),
+                base_url: DEFAULT_ENDPOINT.into(),
+                api_key: std::env::var(DEFAULT_API_KEY_ENV).unwrap_or_else(|_| "lm-studio".into()),
                 model: String::new(),
                 configured: false,
                 context_window_tokens: crate::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
@@ -317,8 +425,15 @@ impl ProviderSettings {
     }
 
     pub fn load(root: &Path) -> Result<Self> {
+        Self::load_with(root, &Environment::load(root)?)
+    }
+
+    fn load_with(root: &Path, environment: &Environment) -> Result<Self> {
+        let file = ModelFile::load(root)?;
+        // The remembered provider predates moosedev.toml and yields to it.
         let path = root.join(".moosedev/harness/provider.json");
         let remembered: RememberedProvider = match std::fs::read(&path) {
+            Ok(_) if file.present => RememberedProvider::default(),
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).context("invalid remembered provider settings")?
             }
@@ -327,25 +442,81 @@ impl ProviderSettings {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut config = LlmConfig::from_env()?;
-        if std::env::var("MOOSEDEV_LLM_BASE_URL").map_or(true, |s| s.trim().is_empty()) {
-            config.base_url = if remembered.base_url.is_empty() {
-                "http://127.0.0.1:1234/v1".into()
-            } else {
-                remembered.base_url
-            };
-        }
-        if std::env::var("MOOSEDEV_LLM_MODEL").map_or(true, |s| s.trim().is_empty()) {
-            config.model = remembered.model;
-        }
-        validate_provider_url(&config.base_url)?;
-        config.configured = !config.model.is_empty();
-        let response_policy =
-            super::response::ResponsePolicy::from_env()?.unwrap_or(remembered.response_policy);
+        let default = resolve(environment, &[&file.default], &remembered)
+            .with_context(|| format!("[harness.model] in {}", config::FILE_NAME))?;
+        let role = |role: ModelRole| {
+            file.role(role)
+                .map(|keys| {
+                    resolve(environment, &[keys, &file.default], &remembered).with_context(|| {
+                        format!("[harness.model.{}] in {}", role.as_str(), config::FILE_NAME)
+                    })
+                })
+                .transpose()
+        };
         Ok(Self {
-            config,
-            response_policy,
+            plan: role(ModelRole::Plan)?,
+            implement: role(ModelRole::Implement)?,
+            config: default.config,
+            response_policy: default.response_policy,
+            action_contract: Some(default.action_contract),
         })
+    }
+
+    /// The settings a role runs with: its own table, else the default.
+    pub fn for_role(&self, role: ModelRole) -> RoleSettings {
+        let own = match role {
+            ModelRole::Plan => &self.plan,
+            ModelRole::Implement => &self.implement,
+        };
+        own.clone().unwrap_or_else(|| RoleSettings {
+            config: self.config.clone(),
+            response_policy: self.response_policy,
+            action_contract: self.action_contract.unwrap_or_default(),
+        })
+    }
+
+    /// `plan=<model> implement=<model>`, or the one model when they agree.
+    pub fn describe(&self) -> String {
+        let [plan, implement] = ModelRole::ALL.map(|role| self.for_role(role).config.model);
+        if plan == implement {
+            plan
+        } else {
+            format!("plan={plan} implement={implement}")
+        }
+    }
+
+    /// Persist a choice in `moosedev.toml` and reload, so inheritance and
+    /// precedence are resolved by the one loader. `role` of `None` sets the
+    /// default. Errors when a real environment variable still overrides it.
+    pub fn persist_selection(
+        &mut self,
+        root: &Path,
+        role: Option<ModelRole>,
+        base_url: Option<&str>,
+        model: &str,
+    ) -> Result<()> {
+        ensure!(!model.trim().is_empty(), "select a model ID");
+        // The default table is self-contained: it records the endpoint in use
+        // with the model, as the remembered provider did. A role inherits it.
+        let current = self.config.base_url.clone();
+        let endpoint = base_url
+            .or_else(|| role.is_none().then_some(current.as_str()))
+            .map(|url| url.trim_end_matches('/'));
+        if let Some(endpoint) = endpoint {
+            validate_provider_url(endpoint)?;
+        }
+        config::set_model(root, role, endpoint, model)?;
+        *self = Self::load(root)?;
+        let chosen = match role {
+            Some(role) => self.for_role(role).config,
+            None => self.config.clone(),
+        };
+        ensure!(
+            chosen.model == model && endpoint.is_none_or(|endpoint| chosen.base_url == endpoint),
+            "saved to {}, but MOOSEDEV_LLM_MODEL or MOOSEDEV_LLM_BASE_URL in the environment overrides it; unset it to use {model}",
+            config::FILE_NAME
+        );
+        Ok(())
     }
 
     pub async fn models(&self) -> Result<Vec<String>> {
@@ -385,35 +556,6 @@ impl ProviderSettings {
         self.config.configured = true;
         Ok(())
     }
-
-    pub fn save(&self, root: &Path) -> Result<()> {
-        let directory = root.join(".moosedev/harness");
-        for dir in [root.join(".moosedev"), directory.clone()] {
-            if let Ok(metadata) = std::fs::symlink_metadata(&dir) {
-                ensure!(
-                    metadata.is_dir() && !metadata.file_type().is_symlink(),
-                    "provider settings directory must not be a symlink"
-                );
-            } else {
-                std::fs::create_dir(&dir)?;
-            }
-        }
-        let temporary = directory.join(format!("provider-{}.tmp", uuid::Uuid::new_v4()));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        use std::io::Write;
-        file.write_all(&serde_json::to_vec_pretty(&RememberedProvider {
-            response_policy: self.response_policy,
-            base_url: self.config.base_url.clone(),
-            model: self.config.model.clone(),
-        })?)?;
-        file.sync_all()?;
-        std::fs::rename(temporary, directory.join("provider.json"))?;
-        std::fs::File::open(directory)?.sync_all()?;
-        Ok(())
-    }
 }
 
 fn validate_provider_url(value: &str) -> Result<()> {
@@ -443,10 +585,7 @@ mod tests {
         let (url, task) = serve(Router::new().route("/v1/models", get(|| async {
             Json(json!({"data":[{"id":"qwen/local-model"},{"id":"a"},{"id":"a"},{"id":""},{"name":"missing-id"}]}))
         }))).await;
-        let mut settings = ProviderSettings {
-            response_policy: super::super::response::ResponsePolicy::Auto,
-            config: LlmConfig::from_env().unwrap(),
-        };
+        let mut settings = ProviderSettings::fallback();
         settings
             .select(Some(&format!("{url}/v1")), "qwen/local-model")
             .unwrap();
@@ -609,40 +748,156 @@ mod tests {
         assert!(validate_provider_url("http://127.0.0.1/v1?api_key=secret").is_err());
     }
 
-    #[test]
-    fn remembered_settings_never_include_api_key() {
+    fn project(files: &[(&str, &str)]) -> PathBuf {
         let root = std::env::temp_dir().join(format!("md-provider-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        let mut settings = ProviderSettings {
-            response_policy: super::super::response::ResponsePolicy::Auto,
-            config: LlmConfig::from_env().unwrap(),
-        };
-        settings.config.api_key = "do-not-store-this-key".into();
-        settings.response_policy = super::super::response::ResponsePolicy::ReasoningOff;
-        settings
-            .select(Some("http://127.0.0.1:1234/v1"), "exact-id")
-            .unwrap();
-        settings.save(&root).unwrap();
-        let saved = std::fs::read_to_string(root.join(".moosedev/harness/provider.json")).unwrap();
-        assert!(!saved.contains("do-not-store-this-key"));
-        assert!(!saved.contains("api_key"));
-        let remembered: RememberedProvider = serde_json::from_str(&saved).unwrap();
-        assert_eq!(
-            remembered.response_policy,
-            super::super::response::ResponsePolicy::ReasoningOff
+        for (name, text) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        root
+    }
+
+    const ROLES: &str = "[harness.model]\nendpoint = \"http://127.0.0.1:1234/v1\"\nmodel = \"base\"\ncontext_window_tokens = 65536\nidle_timeout_secs = 240\n\n[harness.model.implement]\nmodel = \"small\"\ncontext_window_tokens = 16384\naction_contract = \"json_schema\"\nresponse_policy = \"reasoning-off\"\n";
+
+    #[test]
+    fn roles_inherit_the_default_and_override_only_their_own_keys() {
+        let root = project(&[("moosedev.toml", ROLES)]);
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap();
+        assert!(
+            settings.plan.is_none(),
+            "no plan table, so plan is the default"
         );
-        let legacy: RememberedProvider =
-            serde_json::from_value(json!({"base_url":"http://127.0.0.1:1234/v1","model":"old"}))
+        let plan = settings.for_role(ModelRole::Plan);
+        assert_eq!(plan.config.model, "base");
+        assert_eq!(plan.config.context_window_tokens, 65536);
+        assert_eq!(plan.action_contract, ActionContract::Tools);
+        let implement = settings.for_role(ModelRole::Implement);
+        assert_eq!(implement.config.model, "small");
+        assert_eq!(implement.config.context_window_tokens, 16384);
+        assert_eq!(implement.config.base_url, "http://127.0.0.1:1234/v1");
+        assert_eq!(implement.config.timeouts.idle, Duration::from_secs(240));
+        assert_eq!(implement.action_contract, ActionContract::JsonSchema);
+        assert_eq!(implement.response_policy, ResponsePolicy::ReasoningOff);
+        assert_eq!(settings.describe(), "plan=base implement=small");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_real_environment_outranks_the_file_and_the_project_dotenv_does_not() {
+        let root = project(&[("moosedev.toml", ROLES)]);
+        let model = "MOOSEDEV_LLM_MODEL";
+        let window = "MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS";
+        // The daemon's model in the project .env must not flatten the roles.
+        let dotenv = [(model, "daemon-model"), (window, "131072")];
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &dotenv)).unwrap();
+        assert_eq!(settings.describe(), "plan=base implement=small");
+        assert_eq!(settings.config.context_window_tokens, 65536);
+        // A per-invocation override still wins, for every role.
+        let settings =
+            ProviderSettings::load_with(&root, &Environment::of(&[(model, "one-off")], &dotenv))
                 .unwrap();
+        assert_eq!(settings.describe(), "one-off");
         assert_eq!(
-            legacy.response_policy,
-            super::super::response::ResponsePolicy::Auto
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["model"],
-            "exact-id"
+            settings
+                .for_role(ModelRole::Implement)
+                .config
+                .context_window_tokens,
+            16384
         );
         std::fs::remove_dir_all(root).unwrap();
+
+        // Keys the file leaves unset fall through to the project .env.
+        let root = project(&[(
+            "moosedev.toml",
+            "[harness.model.plan]\nmodel = \"planner\"\n",
+        )]);
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &dotenv)).unwrap();
+        assert_eq!(settings.describe(), "plan=planner implement=daemon-model");
+        assert_eq!(
+            settings
+                .for_role(ModelRole::Plan)
+                .config
+                .context_window_tokens,
+            131072
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_remembered_provider_is_read_only_until_the_file_exists() {
+        let remembered = r#"{"response_policy":"reasoning-off","base_url":"http://127.0.0.1:9/v1","model":"old"}"#;
+        let root = project(&[(".moosedev/harness/provider.json", remembered)]);
+        let none = Environment::of(&[], &[]);
+        let settings = ProviderSettings::load_with(&root, &none).unwrap();
+        assert_eq!(settings.config.model, "old");
+        assert_eq!(settings.config.base_url, "http://127.0.0.1:9/v1");
+        assert_eq!(settings.response_policy, ResponsePolicy::ReasoningOff);
+        std::fs::write(root.join("moosedev.toml"), "").unwrap();
+        let settings = ProviderSettings::load_with(&root, &none).unwrap();
+        assert!(settings.config.model.is_empty() && !settings.config.configured);
+        assert_eq!(settings.config.base_url, DEFAULT_ENDPOINT);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn api_keys_come_only_from_the_variable_the_file_names() {
+        let text = "[harness.model]\nmodel = \"local\"\n\n[harness.model.plan]\nmodel = \"hosted\"\napi_key_env = \"PLANNER_KEY\"\n";
+        let root = project(&[("moosedev.toml", text)]);
+        let error = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("PLANNER_KEY, which is not set"),
+            "{error:#}"
+        );
+        let environment = Environment::of(&[("PLANNER_KEY", "secret-1")], &[]);
+        let settings = ProviderSettings::load_with(&root, &environment).unwrap();
+        assert_eq!(
+            settings.for_role(ModelRole::Plan).config.api_key,
+            "secret-1"
+        );
+        assert_eq!(
+            settings.for_role(ModelRole::Implement).config.api_key,
+            "lm-studio"
+        );
+        std::fs::write(
+            root.join("moosedev.toml"),
+            "[harness.model]\napi_key_env = \"sk-live key\"\n",
+        )
+        .unwrap();
+        let error = ProviderSettings::load_with(&root, &environment).unwrap_err();
+        assert!(format!("{error:#}").contains("not hold a key"), "{error:#}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_file_values_fail_with_their_table() {
+        for (text, expected) in [
+            (
+                "[harness.model]\ncontext_window_tokens = 100\n",
+                "[harness.model] in moosedev.toml",
+            ),
+            (
+                "[harness.model.plan]\naction_contract = \"xml\"\n",
+                "[harness.model.plan] in moosedev.toml",
+            ),
+            (
+                "[harness.model]\nendpoint = \"http://user:pw@host/v1\"\n",
+                "without embedded secrets",
+            ),
+            (
+                "[harness.model]\nidle_timeout_secs = 0\n",
+                "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS",
+            ),
+        ] {
+            let root = project(&[("moosedev.toml", text)]);
+            let error = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{text:?}: {error:#}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

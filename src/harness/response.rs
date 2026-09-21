@@ -28,7 +28,7 @@ impl ResponsePolicy {
         )
     }
 
-    fn parse(value: Option<&str>) -> anyhow::Result<Option<Self>> {
+    pub(super) fn parse(value: Option<&str>) -> anyhow::Result<Option<Self>> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             None => Ok(None),
             Some("auto") => Ok(Some(Self::Auto)),
@@ -59,7 +59,7 @@ impl ActionContract {
         )
     }
 
-    fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+    pub(super) fn parse(value: Option<&str>) -> anyhow::Result<Self> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             None | Some("tools") => Ok(Self::Tools),
             Some("json_schema") => Ok(Self::JsonSchema),

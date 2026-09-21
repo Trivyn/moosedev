@@ -139,6 +139,14 @@ Use programmatic daemon calls and a configurable local model endpoint. Headless
 clients and the TUI share task operations: start, inspect, approve, switch mode,
 cancel, and resume.
 
+Models are configurable per role from one local, untracked file in the project
+root. Planning and implementation may use different models, each with its own
+endpoint, context window, output contract and timeouts; the role follows the task
+mode, and a role without its own settings inherits the default. The file holds no
+project knowledge and no credential. A variable set in the real environment
+overrides it; the project `.env` does not. Every model request journals the role
+and resolved settings that answered it.
+
 Acceptance tests must demonstrate:
 
 - A model that never requests memory or volunteers capture still receives

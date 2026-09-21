@@ -19,7 +19,8 @@ const HELP: &str =
 
 All five arguments are required. The project and study-owned daemon must already
 be initialized and running. No daemon discovery, autospawn, remembered provider,
-dotenv loading, or automatic model selection is performed by this adapter.
+moosedev.toml, dotenv loading, or automatic model selection is performed by this
+adapter: one frozen model answers every role.
 The driver must validate repository target origins and freeze binary hashes.
 
 stdin JSONL: {\"type\":\"input\",\"text\":\"...\"}, {\"type\":\"interrupt\"}, {\"type\":\"quit\"}
@@ -65,6 +66,10 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
         response_policy: moosedev::harness::response::ResponsePolicy::from_env()?
             .unwrap_or_default(),
         config: LlmConfig::from_env()?,
+        // One frozen model for every role; moosedev.toml is never read here.
+        action_contract: None,
+        plan: None,
+        implement: None,
     };
     provider.select(Some(endpoint), model)?;
     Ok(provider)

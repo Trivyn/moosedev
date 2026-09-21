@@ -1049,6 +1049,10 @@ fn write_gitignore(
             opts.data_dir
         )),
     }
+    // The harness's local model configuration names this machine's endpoints
+    // and model IDs. It lives in the root whatever the data dir, so it is
+    // ignored even when the data dir is absolute.
+    lines.push(format!("/{}", crate::harness::CONFIG_FILE_NAME));
     if ignore_env {
         // ANCHORED: `init` authored the root `.env` and only that one. A bare
         // `.env` pattern is recursive, so it would also hide a nested package's
@@ -2561,6 +2565,11 @@ env = { MOOSEDEV_DATA_DIR = \"real-store\" }
         assert!(!ignored(".moosedev/GUIDANCE.md"));
         assert!(!ignored(".moosedev/kg.nq"));
         assert!(ignored(".moosedev/instance-vectors.db"));
+        // The harness's local model configuration is per-machine: ignored at
+        // the root only, so a nested package's own file is left alone.
+        assert_eq!(gitignore.matches("/moosedev.toml").count(), 1);
+        assert!(ignored("moosedev.toml"));
+        assert!(!ignored("nested/moosedev.toml"));
         let _ = std::fs::remove_dir_all(&target);
     }
 

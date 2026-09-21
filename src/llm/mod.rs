@@ -89,7 +89,8 @@ impl LlmTimeouts {
         )
     }
 
-    fn from_values(
+    /// The same validation for values that did not come from the environment.
+    pub fn from_values(
         connect: Option<String>,
         first_chunk: Option<String>,
         idle: Option<String>,
@@ -167,7 +168,9 @@ impl LlmConfig {
         Ok(config)
     }
 
-    fn from_values(
+    /// The same validation and defaults for values that did not come from the
+    /// environment; `timeouts` is left at its default for the caller to set.
+    pub fn from_values(
         base_url: Option<String>,
         api_key: Option<String>,
         model: Option<String>,

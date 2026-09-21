@@ -131,6 +131,10 @@ class OwnedDaemon:
                 raise ValueError(f"refusing preexisting daemon rendezvous state: {path}")
         if os.path.lexists(self.workspace / ".env"):
             raise ValueError("study daemon refuses project dotenv overrides; use its controlled environment")
+        # The study session adapter never reads the harness's local model
+        # configuration; its presence still means the workspace is not the frozen one.
+        if os.path.lexists(self.workspace / "moosedev.toml"):
+            raise ValueError("study daemon refuses a project moosedev.toml; one frozen model answers every role")
         reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             reservation.bind(("127.0.0.1", 0))

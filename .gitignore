@@ -22,6 +22,8 @@ moose_sessions.db
 # cannot re-include a file beneath an excluded directory.
 /.moosedev/*
 !/.moosedev/kg.nq
+# The harness's local model configuration: this machine's endpoints and model IDs.
+/moosedev.toml
 
 .zed/
 

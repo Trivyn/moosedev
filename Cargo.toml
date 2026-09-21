@@ -72,6 +72,8 @@ pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 unicode-width = { version = "0.2", optional = true }
 fs2 = { version = "0.4", optional = true }
 libc = { version = "0.2", optional = true }
+# Format-preserving edits of the user's moosedev.toml when /model persists a choice.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"], optional = true }
 
 # Timestamps for PROV-O edit provenance.
 chrono = { version = "0.4", features = ["serde"] }
@@ -103,7 +105,7 @@ axum-test = "17"
 default = ["embedded-frontend"]
 embedded-frontend = ["dep:include_dir", "dep:mime_guess"]
 headless = []
-harness = ["dep:ratatui", "dep:crossterm", "dep:pulldown-cmark", "dep:unicode-width", "dep:fs2", "dep:libc", "tokio/process"]
+harness = ["dep:ratatui", "dep:crossterm", "dep:pulldown-cmark", "dep:unicode-width", "dep:fs2", "dep:libc", "dep:toml_edit", "tokio/process"]
 
 # Build the engine's embedding backbone (Arctic-Embed-S) on the Apple GPU via
 # candle's Metal backend. candle-cpu (declared on the `moose` dep above) stays the

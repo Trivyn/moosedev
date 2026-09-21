@@ -2,9 +2,11 @@
 use super::task::KnowledgeSearchResult;
 use super::tools;
 use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
+use crate::harness::config::ModelRole;
 use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningConstraint;
 use crate::harness::response::{self, ActionContract, ResponsePolicy};
+use crate::harness::startup::RoleSettings;
 use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion, UsageContext};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -173,26 +175,56 @@ pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     format!("{}{NOTICE}{}", &text[..head], &text[tail..])
 }
 
+/// Distinct models a runner keeps verified at once; two roles need two.
+const MAX_MODEL_CLIENTS: usize = 4;
+
 impl Runner {
-    /// The action contract: the runner's explicit choice, else `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
+    /// The role follows the mode: planning work is the plan model's; approved
+    /// work, and the capture note about it, is the implementation model's.
+    pub(super) fn active_role(&self) -> ModelRole {
+        match self.task.mode {
+            Mode::Plan => ModelRole::Plan,
+            Mode::Auto => ModelRole::Implement,
+        }
+    }
+
+    fn role_settings(&self) -> Option<&RoleSettings> {
+        match self.active_role() {
+            ModelRole::Plan => self.plan.as_ref(),
+            ModelRole::Implement => self.implement.as_ref(),
+        }
+    }
+
+    /// The active role's model: its own settings, else the runner's
+    /// configuration, else the environment.
+    pub(super) fn active_config(&self) -> Result<LlmConfig> {
+        match (self.role_settings(), &self.config) {
+            (Some(settings), _) => Ok(settings.config.clone()),
+            (None, Some(config)) => Ok(config.clone()),
+            (None, None) => LlmConfig::from_env(),
+        }
+    }
+
+    /// The action contract: the active role's, else the runner's explicit
+    /// choice, else `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
     pub(super) fn action_contract(&self) -> Result<ActionContract> {
-        match self.action_contract {
-            Some(contract) => Ok(contract),
-            None => ActionContract::from_env(),
+        match (self.role_settings(), self.action_contract) {
+            (Some(settings), _) => Ok(settings.action_contract),
+            (None, Some(contract)) => Ok(contract),
+            (None, None) => ActionContract::from_env(),
         }
     }
 
     async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
-        let policy = match self.response_policy {
-            Some(policy) => policy,
-            None => ResponsePolicy::from_env()?.unwrap_or_default(),
+        let policy = match (self.role_settings(), self.response_policy) {
+            (Some(settings), _) => settings.response_policy,
+            (None, Some(policy)) => policy,
+            (None, None) => ResponsePolicy::from_env()?.unwrap_or_default(),
         };
         let contract = self.action_contract()?;
         let key = response::cache_key(config, policy, contract);
-        if let Some((cached_key, client)) = &self.model_client {
-            if *cached_key == key {
-                return Ok(client.clone());
-            }
+        if let Some((_, client)) = self.model_clients.iter().find(|(cached, _)| *cached == key) {
+            return Ok(client.clone());
         }
         if let Some(progress) = &self.progress {
             let _ = progress.send(Progress::Status(
@@ -227,17 +259,16 @@ impl Runner {
         if let Some(progress) = &self.progress {
             let _ = progress.send(Progress::Status(notice));
         }
-        self.model_client = Some((key, prepared.client.clone()));
+        if self.model_clients.len() == MAX_MODEL_CLIENTS {
+            self.model_clients.remove(0);
+        }
+        self.model_clients.push((key, prepared.client.clone()));
         self.persist()?;
         Ok(prepared.client)
     }
 
     pub(super) fn prompt_budget(&self) -> Result<usize> {
-        let config = self
-            .config
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(LlmConfig::from_env)?;
+        let config = self.active_config()?;
         Ok(MAX_CONTEXT
             .min(
                 config
@@ -254,14 +285,11 @@ impl Runner {
         name: &str,
         schema: Value,
     ) -> Result<T> {
-        let config = self
-            .config
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(LlmConfig::from_env)?;
+        let config = self.active_config()?;
         anyhow::ensure!(
             config.configured,
-            "set MOOSEDEV_LLM_BASE_URL to enable the harness model"
+            "no {} model is configured: choose one with /model, set [harness.model] in moosedev.toml, or set MOOSEDEV_LLM_BASE_URL and MOOSEDEV_LLM_MODEL",
+            self.active_role().as_str()
         );
         // Never silently truncate governing knowledge to fit the model.
         let limit = MAX_CONTEXT.min(
@@ -339,7 +367,7 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null,"contract":contract.as_str()}));
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model
@@ -547,11 +575,7 @@ impl Runner {
     /// accounting before it asks the daemon for evidence, so the daemon can
     /// shape whole records to the real next-prompt capacity.
     fn mandatory_prompt(&self, context: &ContextResponse) -> Result<(String, usize)> {
-        let config = self
-            .config
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(LlmConfig::from_env)?;
+        let config = self.active_config()?;
         let mut prompt = String::from(ROLE_OPENING);
         let standing = self
             .task

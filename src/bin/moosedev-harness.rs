@@ -2,6 +2,7 @@
 use anyhow::{bail, Context, Result};
 use moosedev::harness::{
     runner::{default_daemon_url, Runner},
+    startup::ProviderSettings,
     tui::{self, Action},
 };
 use std::path::{Path, PathBuf};
@@ -184,11 +185,25 @@ async fn run() -> Result<()> {
         }
         command => Some(action(command, &args.arguments)?),
     };
-    let mut runner = Runner::load(root, daemon, id)?;
+    let mut runner = Runner::load(root.clone(), daemon, id)?;
     if args.command == "tui" {
         return tui::run(runner).await;
     }
     let result = if let Some(operation) = operation {
+        // The same moosedev.toml roles as the interactive session. A broken
+        // file must not strand a task, so operations that ask no model proceed.
+        match ProviderSettings::load(&root) {
+            Ok(provider) => runner.configure_provider(&provider, None),
+            Err(_)
+                if matches!(
+                    operation,
+                    Action::Cancel
+                        | Action::Permissions
+                        | Action::DenyPermission
+                        | Action::RevokePermission(_)
+                ) => {}
+            Err(error) => return Err(error.context("model configuration")),
+        }
         // Dropping the operation interrupts generation/verification; cancellation
         // preserves its durable obligations rather than declaring success.
         let interrupted = tokio::select! {

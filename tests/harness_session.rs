@@ -266,7 +266,34 @@ async fn startup_selects_a_single_model_and_offers_numbered_multiple_models() {
     })
     .await;
     assert_eq!(ready.model, "model-b");
+    assert_eq!(ready.endpoint, format!("{}/v1", fixture.url));
     assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 0);
+
+    // A role gets its own model; planning, which answers first, keeps the default.
+    input
+        .send(Command::Input("/model implement model-a".into()))
+        .unwrap();
+    let ready = until(&mut updates, |state| {
+        !state.busy && state.status.contains("implement=model-a")
+    })
+    .await;
+    assert_eq!(ready.status, "Selected plan=model-b implement=model-a");
+    assert_eq!(ready.model, "model-b");
+    let saved = std::fs::read_to_string(fixture.root.join("moosedev.toml")).unwrap();
+    assert!(
+        saved.contains(&format!("endpoint = \"{}/v1\"", fixture.url)),
+        "{saved}"
+    );
+    assert!(saved.contains("[harness.model]\n"), "{saved}");
+    assert!(saved.contains("model = \"model-b\""), "{saved}");
+    assert!(
+        saved.contains("[harness.model.implement]\nmodel = \"model-a\""),
+        "{saved}"
+    );
+    assert!(!fixture
+        .root
+        .join(".moosedev/harness/provider.json")
+        .exists());
     input.send(Command::Quit).unwrap();
     handle.await.unwrap();
 }
