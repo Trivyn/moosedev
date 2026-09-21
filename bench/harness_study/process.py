@@ -20,6 +20,7 @@ def _gate_key(event, decision):
     """Gate identity excludes incidental transcript/output changes in snapshots."""
     task = event.get("task") or {}
     fields = ("id", "phase", "steps", "plan", "pending_edit", "knowledge_revision",
+              "pending_permission",
               "capture_request", "reviews", "capture_cursor", "capture_offset",
               "capture_end", "capture_end_offset", "capture_checkpoint_end",
               "last_response", "turn_finished")
@@ -225,7 +226,8 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
     buffers = {"stdout": b"", "stderr": b""}
     pending_input = bytearray()
     outcome = {"status": "agent_failure", "returncode": None, "metrics": {
-        "elapsed_seconds": None, "simulated_approvals": 0, "input_tokens": None,
+        "elapsed_seconds": None, "simulated_approvals": 0, "simulated_permission_denials": 0,
+        "input_tokens": None,
         "output_tokens": None, "cache_read_tokens": None, "helper_tokens": None}}
     seen_reviews = set()
     token_usage = UsageLedger(backend)
@@ -351,7 +353,9 @@ def observe(command, *, backend, workspace, environment, prompt, episode,
             last_suppressed_phase = task.get("phase")
             return
         seen_reviews.add(key)
-        if decision["input"].startswith("/"):
+        if decision.get("kind") == "permission_denial":
+            outcome["metrics"]["simulated_permission_denials"] += 1
+        elif decision["input"].startswith("/"):
             outcome["metrics"]["simulated_approvals"] += 1
         else:
             clarification_count += 1

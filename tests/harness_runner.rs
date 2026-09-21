@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use moosedev::harness::protocol::*;
 use moosedev::harness::response::ActionContract;
-use moosedev::harness::runner::{CheckResult, Mode, Phase, Runner};
+use moosedev::harness::runner::{CheckResult, Mode, PermissionGrant, Phase, Runner};
 use serde_json::{json, Value};
 
 #[path = "harness_runner/links.rs"]
@@ -21,6 +21,274 @@ mod symbolic;
 mod tools;
 
 use mock::*;
+
+#[tokio::test]
+async fn permission_request_is_canonical_durable_and_denial_resumes_auto() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let outside =
+        std::env::temp_dir().join(format!("moosedev-permission-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&outside).unwrap();
+    let outside = outside.canonicalize().unwrap();
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":"true",
+        "justification":"Read a sibling dependency",
+        "read_paths":[outside.to_string_lossy()],
+        "write_paths":[],
+        "network":false
+    }));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    let pending = runner.task.pending_permission.as_ref().unwrap();
+    assert_eq!(pending.command, "true");
+    assert_eq!(
+        pending.read_paths,
+        vec![outside.to_string_lossy().into_owned()]
+    );
+    assert!(runner.task.permission_grants.is_empty());
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    assert_eq!(
+        runner.task.pending_permission.as_ref().unwrap().command,
+        "true"
+    );
+    runner.deny_permission().unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.pending_permission.is_none());
+    assert!(runner.task.permission_grants.is_empty());
+    assert!(runner.task.last_response.contains("did not run"));
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "permission_denied"));
+    std::fs::remove_dir(outside).unwrap();
+}
+
+#[tokio::test]
+async fn changed_evidence_discards_a_pending_permission_durably() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let outside =
+        std::env::temp_dir().join(format!("moosedev-permission-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&outside).unwrap();
+    let outside = outside.canonicalize().unwrap();
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":"true",
+        "justification":"Read a sibling dependency",
+        "read_paths":[outside.to_string_lossy()],
+        "write_paths":[],
+        "network":false
+    }));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+
+    std::fs::write(
+        fixture.root.join("code.txt"),
+        "changed outside the runner\n",
+    )
+    .unwrap();
+    let error = runner.approve_permission().await.unwrap_err().to_string();
+    assert!(error.contains("plan evidence changed"), "{error}");
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.pending_permission.is_none());
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.pending_permission.is_none());
+    std::fs::remove_dir(outside).unwrap();
+}
+
+#[tokio::test]
+async fn permission_request_cannot_overlap_the_live_workspace() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":"cat .env",
+        "justification":"Read protected project state",
+        "read_paths":[fixture.root.to_string_lossy()],
+        "write_paths":[],
+        "network":false
+    }));
+    let error = runner.advance().await.unwrap_err().to_string();
+    assert!(
+        error.contains("overlaps the protected workspace"),
+        "{error}"
+    );
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.pending_permission.is_none());
+}
+
+#[tokio::test]
+async fn task_permission_can_be_revoked_by_id() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    runner.task.permission_grants.push(PermissionGrant {
+        id: "grant-1".into(),
+        justification: "test grant".into(),
+        read_paths: vec![],
+        write_paths: vec![],
+        network: true,
+        approved_at: "2026-09-21T00:00:00Z".into(),
+    });
+    runner.revoke_permission("grant-1").unwrap();
+    assert!(runner.task.permission_grants.is_empty());
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "permission_revoked"));
+    assert!(runner.revoke_permission("grant-1").is_err());
+}
+
+/// Park an approved-plan task on a request to `cat` a file in one external
+/// directory; returns the runner, that directory and the frozen command.
+async fn awaiting_read_permission(fixture: &Fixture) -> (Runner, std::path::PathBuf, String) {
+    let mut runner = fixture.approved_interactive().await;
+    let outside =
+        std::env::temp_dir().join(format!("moosedev-permission-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&outside).unwrap();
+    let outside = outside.canonicalize().unwrap();
+    std::fs::write(outside.join("note.txt"), "granted\n").unwrap();
+    let command = format!("cat '{}'", outside.join("note.txt").display());
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":command,
+        "justification":"Read a sibling dependency",
+        "read_paths":[outside.to_string_lossy()],
+        "write_paths":[],
+        "network":false
+    }));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    (runner, outside, command)
+}
+
+#[tokio::test]
+async fn approval_grants_then_the_next_step_runs_the_exact_command() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let (mut runner, outside, command) = awaiting_read_permission(&fixture).await;
+
+    runner.approve_permission().await.unwrap();
+    // Approval only records authority; the command has not run yet.
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.permission_grants.len(), 1);
+    let grant = runner.task.permission_grants[0].id.clone();
+    let pending = runner.task.pending_permission.as_ref().unwrap();
+    assert_eq!(pending.approved_grant.as_deref(), Some(grant.as_str()));
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("Command:")));
+
+    // The approved request survives a restart and runs without asking the model.
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = reload(&fixture, &id);
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    assert!(runner.task.pending_permission.is_none());
+    assert_eq!(runner.task.last_response.trim(), "granted");
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .starts_with(&format!("Command: {command}\nPermission grants: {grant}"))));
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[tokio::test]
+async fn revoking_the_grant_before_the_next_step_voids_the_approved_command() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let (mut runner, outside, _command) = awaiting_read_permission(&fixture).await;
+    runner.approve_permission().await.unwrap();
+    let grant = runner.task.permission_grants[0].id.clone();
+    runner.revoke_permission(&grant).unwrap();
+
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    assert!(runner.task.pending_permission.is_none());
+    assert!(runner.task.last_response.contains("did not run"));
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("Command:")));
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_grant_that_stops_validating_names_itself_for_revocation() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let (mut runner, outside, _command) = awaiting_read_permission(&fixture).await;
+    runner.approve_permission().await.unwrap();
+    let grant = runner.task.permission_grants[0].id.clone();
+    // After approval, something links out of the granted directory.
+    std::os::unix::fs::symlink("/usr", outside.join("escape")).unwrap();
+
+    let error = format!("{:#}", runner.advance().await.unwrap_err());
+    assert!(
+        error.contains(&format!("/revoke-permission {grant}")),
+        "{error}"
+    );
+    assert!(error.contains("escaping symlink"), "{error}");
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("Command:")));
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[tokio::test]
+async fn task_permissions_expire_durably_at_completion() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.ready_for_final().await;
+    runner.task.permission_grants.push(PermissionGrant {
+        id: "grant-1".into(),
+        justification: "test grant".into(),
+        read_paths: vec![],
+        write_paths: vec![],
+        network: true,
+        approved_at: "2026-09-21T00:00:00Z".into(),
+    });
+    fixture.note("Every caller must preserve the observed contract.");
+    fixture.typed_one("Constraint", "Preserve the observed contract");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.permission_grants.len(), 1);
+    let operation = runner.task.reviews[0].request.operation_id.clone();
+    runner.review_operation(&operation, false).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Complete);
+    assert!(runner.task.permission_grants.is_empty());
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "permission_expired" && event.detail == "grant-1"));
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert!(runner.task.permission_grants.is_empty());
+}
 
 #[tokio::test]
 async fn first_edit_guard_and_deny_gate_precede_any_write() {

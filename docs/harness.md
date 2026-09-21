@@ -103,6 +103,27 @@ interruption, and `/continue`. New human guidance permits a fresh repair cycle.
 Permission denials and source/knowledge changes still require the applicable
 human review; correction never grants approval.
 
+In Auto mode, a model may request a narrowly scoped sandbox expansion for one
+exact command. The request names its reason, external read paths, external write
+paths, and whether network access is needed. The command does not run until the
+request is displayed to the human. `/approve` records the grant for the current
+task and runs that exact command as the next step, where it streams progress and
+can be interrupted like any other command; revoking the grant first voids it.
+`/deny` refuses the request and returns the denial to the model. Existing files
+and Unix sockets are granted exactly and directories recursively. Write
+access includes create, modify, and delete. Grants never expose the live project
+workspace or task scratch space, and they do not restore ambient environment
+variables, inject credentials, enable GUI access, or start an unsandboxed host
+process. An explicitly granted external path is readable as displayed, so its
+contents must be reviewed like any other capability. A network grant enables
+general TCP/UDP access, together with the system name resolver and CA bundle that
+hostnames and TLS need. On macOS a Unix socket still requires the corresponding
+filesystem grant, either its exact path or a directory containing it. On Linux a
+network grant shares the host network namespace, so only IP sockets are admitted
+and Unix sockets stay unavailable. If a granted tree stops validating after
+approval, for example because a tool links out of it, later commands fail with
+the grant ID to revoke.
+
 A failed step records `last_error` and a typed `last_error_kind` in the journal:
 `model_output` (validation of model output, spends the repair budget),
 `daemon_rejection` (daemon HTTP 4xx), `service` (daemon 5xx or transport), or
@@ -168,8 +189,14 @@ turns use a green `YOU` label, while assistant turns use a cyan `🫎 MOOSEDev`
 label and render common Markdown structures with terminal-native styling. System,
 activity, and human text remain literal.
 
-Use `/approve` to approve the displayed plan or exact policy-gated edit. The
-Knowledge tab shows chronological graph context grouped by the exact human query
+Use `/approve` to approve the displayed plan, exact policy-gated edit, or sandbox
+permission request. Use `/deny` to refuse a permission request. Approved access
+applies to later commands and required checks in the same task, survives task
+restart/resume, and expires when that task completes. Grants also survive a
+return to planning, so the plan gate shows how many are still active.
+`/permissions` lists grants with their IDs; `/revoke-permission ID` removes one
+before later commands run.
+The Knowledge tab shows chronological graph context grouped by the exact human query
 that caused it, without adding retrieval payloads to Conversation. Each query
 contains typed record cards (kind, title, full supplied claim, provenance, and
 IRI), with model-requested graph searches nested beneath it. The newest query
@@ -565,6 +592,8 @@ moosedev-harness new 'Fix the parser regression and verify the result'
 moosedev-harness status TASK_ID
 moosedev-harness run TASK_ID
 moosedev-harness approve TASK_ID
+moosedev-harness approve-permission TASK_ID
+moosedev-harness permissions TASK_ID
 moosedev-harness review TASK_ID accept
 moosedev-harness no-knowledge TASK_ID
 moosedev-harness tui TASK_ID
@@ -575,7 +604,10 @@ Headless tasks require one no-change confirmation at the final checkpoint when
 the typed note proposes nothing. They retain individual proposal reviews;
 opening a task in the TUI enables conversational batching while preserving its
 outstanding obligations.
-`approve-policy`, `review ID reject`, `plan`, `cancel`, `resume`, and `answer ID TEXT`
-retain their task semantics. Headless `resume ID` resumes a task; interactive
+`approve-policy`, `deny-permission`, `revoke-permission ID GRANT`,
+`review ID reject`, `plan`, `cancel`, `resume`, and `answer ID TEXT` retain their
+task semantics. `status` includes the pending permission request and active
+grants; `permissions` prints only the active grants. Headless `resume ID` resumes
+a task; interactive
 `resume-session ID` resumes a conversation. `--help` lists all commands. Options
 precede the command. Errors produce JSON on stderr and a nonzero exit status.

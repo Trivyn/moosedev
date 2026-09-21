@@ -1,4 +1,5 @@
 //! Trusted runtime inputs and platform command confinement policies.
+use super::CommandPermissions;
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use std::fs::{self, File};
@@ -100,11 +101,53 @@ fn sandbox_literal(path: &Path) -> Result<String> {
 }
 
 #[cfg(target_os = "macos")]
+fn permitted_unix_sockets(permissions: &CommandPermissions) -> Result<Vec<PathBuf>> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let granted = || {
+        permissions
+            .read_paths
+            .iter()
+            .chain(&permissions.write_paths)
+    };
+    let mut sockets = Vec::new();
+    for path in granted() {
+        if super::is_socket(&std::fs::metadata(path)?) {
+            sockets.push(path.clone());
+        }
+    }
+    let mut pending = granted()
+        .filter(|path| path.is_dir())
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                let target = path.canonicalize()?;
+                if std::fs::metadata(&target)?.file_type().is_socket() {
+                    sockets.push(target);
+                }
+            } else if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.file_type().is_socket() {
+                sockets.push(path.canonicalize()?);
+            }
+        }
+    }
+    sockets.sort();
+    sockets.dedup();
+    Ok(sockets)
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn confined_command(
-    root: &Path,
+    source: &Path,
     scratch: &Path,
     temporary: &Path,
     command: &str,
+    permissions: &CommandPermissions,
 ) -> Result<tokio::process::Command> {
     // Metadata is not file contents. Runtime path resolution needs ancestor
     // metadata even though those ancestors must not grant recursive data reads.
@@ -131,6 +174,35 @@ pub(super) fn confined_command(
             sandbox_literal(&path)?
         ));
     }
+    for path in &permissions.read_paths {
+        let selector = if path.is_dir() { "subpath" } else { "literal" };
+        profile.push_str(&format!(
+            "(allow file-read* ({selector} {}))",
+            sandbox_literal(path)?
+        ));
+    }
+    for path in &permissions.write_paths {
+        let selector = if path.is_dir() { "subpath" } else { "literal" };
+        profile.push_str(&format!(
+            "(allow file-read* file-write* ({selector} {}))",
+            sandbox_literal(path)?
+        ));
+    }
+    if permissions.network {
+        // Keep pathname-based Unix sockets behind filesystem-scoped rules;
+        // a general network grant covers only TCP and UDP.
+        profile.push_str("(allow network-outbound (remote tcp) (remote udp))(allow network-inbound (local tcp) (local udp))");
+        // TCP alone reaches only IP literals over plaintext. Name resolution
+        // goes through the system resolver's socket and TLS verification reads
+        // the system CA bundle; both are fixed system paths, not user data.
+        profile.push_str("(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))(allow file-read* (literal \"/private/etc/ssl/cert.pem\"))");
+        for socket in permitted_unix_sockets(permissions)? {
+            profile.push_str(&format!(
+                "(allow network-outbound (remote unix-socket (path-literal {})))",
+                sandbox_literal(&socket)?
+            ));
+        }
+    }
     for writable in [
         scratch.join("build"),
         scratch.join("cargo-home"),
@@ -142,7 +214,7 @@ pub(super) fn confined_command(
         ));
     }
     profile.push_str("(deny file-write-flags)");
-    profile.push_str(&format!("(deny file-write* (subpath {}))(deny file-write-unlink (literal {}) (literal {}) (literal {}))(allow file-write-data (literal \"/dev/null\"))", sandbox_literal(root)?, sandbox_literal(&scratch.join("build").canonicalize()?)?, sandbox_literal(temporary)?, sandbox_literal(&scratch.join("cargo-home").canonicalize()?)?));
+    profile.push_str(&format!("(deny file-write* (subpath {}))(deny file-write-unlink (literal {}) (literal {}) (literal {}))(allow file-write-data (literal \"/dev/null\"))", sandbox_literal(source)?, sandbox_literal(&scratch.join("build").canonicalize()?)?, sandbox_literal(temporary)?, sandbox_literal(&scratch.join("cargo-home").canonicalize()?)?));
     let mut process = tokio::process::Command::new("/usr/bin/sandbox-exec");
     process.args(["-p", &profile, "/bin/sh", "-c", command]);
     Ok(process)
@@ -153,10 +225,11 @@ pub(super) fn confined_command(
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub(super) fn confined_command(
-    root: &Path,
+    source: &Path,
     scratch: &Path,
     temporary: &Path,
     command: &str,
+    permissions: &CommandPermissions,
 ) -> Result<tokio::process::Command> {
     use std::os::fd::AsRawFd;
     let binary = ["/usr/bin/bwrap", "/bin/bwrap"]
@@ -164,21 +237,21 @@ pub(super) fn confined_command(
         .find(|path| Path::new(path).is_file())
         .context("bubblewrap is required for confined commands")?;
     let mut process = tokio::process::Command::new(binary);
-    process
-        .args([
-            "--die-with-parent",
-            "--new-session",
-            "--unshare-all",
-            "--cap-drop",
-            "ALL",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--ro-bind",
-        ])
-        .arg(scratch)
-        .arg(scratch);
+    process.args([
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-all",
+        "--cap-drop",
+        "ALL",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+    ]);
+    if permissions.network {
+        process.arg("--share-net");
+    }
+    process.arg("--ro-bind").arg(scratch).arg(scratch);
     for writable in [
         scratch.join("build"),
         scratch.join("cargo-home"),
@@ -191,30 +264,54 @@ pub(super) fn confined_command(
         // remain the tool paths expected by the dynamic loader and PATH.
         process.arg("--ro-bind").arg(path.canonicalize()?).arg(path);
     }
+    for path in &permissions.read_paths {
+        process.arg("--ro-bind").arg(path).arg(path);
+    }
+    for path in &permissions.write_paths {
+        process.arg("--bind").arg(path).arg(path);
+    }
     process
         .arg("--ro-bind")
-        .arg(root)
-        .arg(root)
+        .arg(source)
+        .arg(source)
         .arg("--chdir")
-        .arg(root)
+        .arg(source)
         .args(["--seccomp", "198", "/bin/sh", "-c", command]);
     // Network namespaces do not block pathname-based Unix sockets. Deny socket
     // creation in seccomp as well, including foreign syscall architectures.
+    // A network grant shares the host network namespace, where abstract Unix
+    // sockets (X11, some session buses) live beside TCP; it therefore permits
+    // only IP sockets plus the netlink queries name resolution makes.
     #[cfg(target_arch = "x86_64")]
     const ARCH: u32 = 0xc000003e;
     #[cfg(target_arch = "aarch64")]
     const ARCH: u32 = 0xc00000b7;
-    let filter: [(u16, u8, u8, u32); 9] = [
+    // Jump offsets count from the following instruction.
+    let mut filter: Vec<(u16, u8, u8, u32)> = vec![
         (0x20, 0, 0, 4),
         (0x15, 1, 0, ARCH),
         (0x06, 0, 0, 0x80000000),
         (0x20, 0, 0, 0),
         (0x35, 0, 1, 0x40000000),
         (0x06, 0, 0, 0x80000000),
-        (0x15, 0, 1, libc::SYS_socket as u32),
+    ];
+    if permissions.network {
+        filter.extend([
+            // Not socket(): allow. Otherwise load the address family, the low
+            // word of the first argument on these little-endian targets.
+            (0x15, 0, 5, libc::SYS_socket as u32),
+            (0x20, 0, 0, 16),
+            (0x15, 3, 0, libc::AF_INET as u32),
+            (0x15, 2, 0, libc::AF_INET6 as u32),
+            (0x15, 1, 0, libc::AF_NETLINK as u32),
+        ]);
+    } else {
+        filter.push((0x15, 0, 1, libc::SYS_socket as u32));
+    }
+    filter.extend([
         (0x06, 0, 0, 0x00050000 | libc::EPERM as u32),
         (0x06, 0, 0, 0x7fff0000),
-    ];
+    ]);
     let filter_path = temporary.join("seccomp.bpf");
     let mut bytes = Vec::new();
     for (code, jt, jf, k) in filter {
@@ -243,10 +340,11 @@ pub(super) fn confined_command(
     )
 )))]
 pub(super) fn confined_command(
-    _root: &Path,
+    _source: &Path,
     _scratch: &Path,
     _temporary: &Path,
     _command: &str,
+    _permissions: &CommandPermissions,
 ) -> Result<tokio::process::Command> {
     anyhow::bail!("command confinement is unsupported on this platform")
 }

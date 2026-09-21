@@ -344,10 +344,20 @@ class ReviewerControls(unittest.TestCase):
         self.assertNotIn("correct", choice)
 
     def test_busy_controller_never_receives_approval_or_terminal_verdict(self):
-        for phase in ("AwaitingPlan", "AwaitingPolicy", "AwaitingReview", "Complete"):
+        for phase in ("AwaitingPlan", "AwaitingPolicy", "AwaitingPermission", "AwaitingReview", "Complete"):
             state = self.state(phase)
             state["busy"] = True
             self.assertIsNone(reviewer.review_input(state, self.episode))
+
+    def test_unexpected_permission_request_is_deterministically_denied(self):
+        state = self.state("AwaitingPermission", id="task-7", pending_permission={
+            "request_id": "permission-3", "command": ["git", "fetch"],
+            "justification": "refresh refs", "read_paths": [], "write_paths": [], "network": True})
+        self.assertEqual(reviewer.review_input(state, self.episode), {
+            "input": "/deny",
+            "reason": "frozen study denies unexpected permission requests",
+            "kind": "permission_denial",
+        })
 
     def test_outside_scope_cannot_be_approved(self):
         for path in ("/tmp/out.py", "../out.py", "pkg/../../out.py", "pkg\\out.py", "secrets.txt", ""):

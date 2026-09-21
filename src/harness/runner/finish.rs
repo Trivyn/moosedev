@@ -51,6 +51,7 @@ impl Runner {
         );
         self.update_knowledge_revision(checkpoint.revision);
         executor::cleanup_task(&self.scratch_path())?;
+        self.expire_permissions();
         self.task.phase = Phase::Complete;
         self.task.completion_pending = false;
         self.task.final_capture = false;
@@ -135,7 +136,7 @@ impl Runner {
                         self.task.last_response = "Interrupted edit has not reached its expected result. Inspect the file and answer before proceeding; it will not be replayed automatically.".into();
                     }
                 }
-                Intent::Command(command) => {
+                Intent::Command(command) | Intent::PermissionedCommand { command, .. } => {
                     self.task.phase = Phase::AwaitingInput;
                     self.task.last_response = format!("Command outcome is unknown after interruption: {command}. Inspect and acknowledge before proceeding. It will not be replayed automatically.");
                 }

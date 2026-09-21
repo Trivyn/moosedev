@@ -229,6 +229,31 @@ sys.exit(2)''',
         state["task"]["capture_cursor"] = 2
         self.assertNotEqual(previous, _gate_key(state, decision))
 
+    def test_permission_denials_are_distinct_gates_and_not_clarifications(self):
+        result, records = self.run_client('''
+            import json, sys
+            json.loads(sys.stdin.readline())
+            task = {"id":"one", "phase":"AwaitingPermission", "steps":1}
+            state = {"type":"state", "model":"frozen-model", "busy":False, "task":task}
+            for request in range(4):
+                task["pending_permission"] = {"request_id":f"permission-{request}",
+                    "command":["git", "fetch"], "justification":"refresh refs",
+                    "read_paths":[], "write_paths":[], "network":True}
+                print(json.dumps(state), flush=True)
+                denial = json.loads(sys.stdin.readline())
+                assert denial["text"] == "/deny", denial
+            task.update(phase="Complete", pending_permission=None)
+            print(json.dumps(state), flush=True)
+            command = json.loads(sys.stdin.readline())
+            assert command["type"] == "quit", command
+            print(json.dumps({"type":"closed"}))
+        ''', backend="harness", expected_model="frozen-model")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["metrics"]["simulated_permission_denials"], 4)
+        self.assertEqual(result["metrics"]["simulated_approvals"], 0)
+        self.assertEqual(sum(kind == "input" and value.get("text") == "/deny"
+                             for kind, value in records), 4)
+
     def test_timeout_drains_native_cancellation_before_shutdown(self):
         result, records = self.run_client('''
             import json, sys

@@ -42,14 +42,14 @@ const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief 
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
-const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with network disabled and writable build scratch. Use project-relative paths; protected files, filesystem aliases, and sibling path dependencies are unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
+const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; never infer approval from a failed command. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
 /// execution and finishing wait for approval, and a replan while planning changes nothing.
 const PLAN_MODE_ACTION_NAMES: [&str; 6] =
     ["read", "search", "inspect", "question", "reply", "plan"];
 const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, question, reply, plan. Editing and execution require human plan approval.";
-const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
+const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
 
 /// The governing rules the daemon delivered, each with its `via:` line and claim.
 fn project_rules(rules: &[GoverningConstraint]) -> String {
@@ -761,6 +761,13 @@ pub(super) enum Action {
     Command {
         command: String,
     },
+    RequestPermission {
+        command: String,
+        justification: String,
+        read_paths: Vec<String>,
+        write_paths: Vec<String>,
+        network: bool,
+    },
     Question {
         question: String,
     },
@@ -944,7 +951,7 @@ pub(super) fn action_schema(mode: Mode) -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a)]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
+    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
     if mode == Mode::Plan {
         retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
     }
@@ -1193,16 +1200,35 @@ mod tests {
         assert_eq!(
             variant_names(&action_schema(Mode::Auto)),
             vec![
-                "inspect", "reply", "read", "search", "plan", "replace", "write", "command",
-                "question", "replan", "finish"
+                "inspect",
+                "reply",
+                "read",
+                "search",
+                "plan",
+                "replace",
+                "write",
+                "command",
+                "request_permission",
+                "question",
+                "replan",
+                "finish"
             ]
         );
         let conversational = conversational_schema(Mode::Auto);
         assert_eq!(
             variant_names(&conversational["properties"]["action"]),
             vec![
-                "inspect", "reply", "read", "search", "replace", "write", "command", "question",
-                "replan", "finish"
+                "inspect",
+                "reply",
+                "read",
+                "search",
+                "replace",
+                "write",
+                "command",
+                "request_permission",
+                "question",
+                "replan",
+                "finish"
             ]
         );
     }

@@ -1,5 +1,5 @@
-//! Human decisions on a task: plan and edit approval, review requests,
-//! steering messages, returning to Plan, and answering a question.
+//! Human decisions on a task: plan, edit and permission approval, review
+//! requests, steering messages, returning to Plan, and answering a question.
 use super::*;
 
 impl Runner {
@@ -177,6 +177,7 @@ impl Runner {
         self.end_intent_cycle("new human guidance");
         self.task.approved_revision = None;
         self.discard_pending_edit("new human guidance invalidated the proposed edit")?;
+        self.discard_pending_permission("new human guidance invalidated the request")?;
         self.task.completion_pending = false;
         self.task.check_results.clear();
         self.task.final_capture = false;
@@ -226,6 +227,7 @@ impl Runner {
         }
         self.task.approved_revision = None;
         self.discard_pending_edit("human returned the task to Plan")?;
+        self.discard_pending_permission("human returned the task to Plan")?;
         self.task.completion_pending = false;
         self.task.final_capture = false;
         self.task.check_results.clear();

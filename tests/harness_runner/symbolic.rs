@@ -351,8 +351,17 @@ async fn model_requests_carry_the_action_schema_for_the_current_mode() {
     assert_eq!(
         offered_actions(&actions[2]),
         [
-            "command", "finish", "inspect", "question", "read", "replace", "replan", "reply",
-            "search", "write"
+            "command",
+            "finish",
+            "inspect",
+            "question",
+            "read",
+            "replace",
+            "replan",
+            "reply",
+            "request_permission",
+            "search",
+            "write"
         ]
     );
 }

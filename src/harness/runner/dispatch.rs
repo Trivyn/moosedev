@@ -56,6 +56,7 @@ impl Runner {
             self.task.snapshots = sources;
             self.task.check_results.clear();
             self.discard_pending_edit("source or accepted knowledge changed")?;
+            self.discard_pending_permission("source or accepted knowledge changed")?;
             self.abandon_pending_intent("source or accepted knowledge changed")
                 .await?;
             self.invalidate_capture_typing("source or accepted knowledge changed");
@@ -138,6 +139,9 @@ impl Runner {
         }
         if self.task.mode == Mode::Auto && !self.fresh_approval().await? {
             return Ok(());
+        }
+        if self.task.mode == Mode::Auto && self.permission_approved() {
+            return self.run_approved_permission().await;
         }
         if self.task.phase == Phase::Verifying {
             return self.verify_next().await;
@@ -358,10 +362,31 @@ impl Runner {
                 }
                 self.end_unchanged_window();
                 let result = self.run_command(&command).await?;
-                self.task.last_response = result.output;
-                self.task.capture_due = true;
-                self.task.after_review = Phase::Working;
-                self.task.intent = None;
+                self.commit_command_result(result)?;
+            }
+            Step::RequestPermission {
+                command,
+                justification,
+                read_paths,
+                write_paths,
+                network,
+            } => {
+                if !self.fresh_approval().await? {
+                    return Ok(());
+                }
+                if let Some(result) = self
+                    .begin_permission_request(
+                        command,
+                        justification,
+                        read_paths,
+                        write_paths,
+                        network,
+                    )
+                    .await?
+                {
+                    self.end_unchanged_window();
+                    self.commit_command_result(result)?;
+                }
             }
             Step::Question { question } => {
                 self.event(format!("Assistant: {question}"));
@@ -443,25 +468,46 @@ impl Runner {
         self.persist()
     }
 
-    async fn run_command(&mut self, command: &str) -> Result<executor::CommandResult> {
+    pub(super) async fn run_command(&mut self, command: &str) -> Result<executor::CommandResult> {
         anyhow::ensure!(
             !command.trim().is_empty() && command.len() <= 4000,
             "command must contain 1..4000 bytes"
         );
-        self.task.intent = Some(Intent::Command(command.to_string()));
+        let permissions = self.command_permissions()?;
+        let grant_ids: Vec<_> = self
+            .task
+            .permission_grants
+            .iter()
+            .map(|grant| grant.id.clone())
+            .collect();
+        self.task.intent = Some(if grant_ids.is_empty() {
+            Intent::Command(command.to_string())
+        } else {
+            Intent::PermissionedCommand {
+                command: command.to_string(),
+                grant_ids: grant_ids.clone(),
+            }
+        });
         self.persist()?;
         let scratch = self.scratch_path();
-        let result = executor::command_with_progress(
+        let result = executor::command_with_permissions(
             self.workspace.root(),
             &scratch,
             command,
+            &permissions,
             self.progress.clone(),
         )
         .await;
         if let Ok(result) = &result {
             self.event(format!(
-                "Command: {command}\nSuccess: {}\n{}",
-                result.success, result.output
+                "Command: {command}\nPermission grants: {}\nSuccess: {}\n{}",
+                if grant_ids.is_empty() {
+                    "none".into()
+                } else {
+                    grant_ids.join(", ")
+                },
+                result.success,
+                result.output
             ));
             // Keep the persisted intent until the caller commits its typed
             // check result or capture obligation in the same task-journal
@@ -469,6 +515,14 @@ impl Runner {
             // as uncertain, never replay a command whose outcome was lost.
         }
         result
+    }
+
+    pub(super) fn commit_command_result(&mut self, result: executor::CommandResult) -> Result<()> {
+        self.task.last_response = result.output;
+        self.task.capture_due = true;
+        self.task.after_review = Phase::Working;
+        self.task.intent = None;
+        self.persist()
     }
 
     pub(super) fn scratch_path(&self) -> PathBuf {

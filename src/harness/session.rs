@@ -1,7 +1,7 @@
 //! Durable conversation and human input, independent of the model's action protocol.
 use super::{
     progress::{Progress as ProgressEvent, ProgressSender},
-    runner::{Phase, Runner, Task},
+    runner::{PermissionGrant, Phase, Runner, Task},
     startup::{ProviderSettings, StartupOptions},
 };
 use anyhow::{bail, Context, Result};
@@ -671,7 +671,7 @@ impl Controller {
                             break None;
                         },
                         Some(Command::Input(text)) => {
-                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/accept" | "/reject" | "/no-knowledge")) {
+                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/deny" | "/accept" | "/reject" | "/no-knowledge")) {
                                 self.status = "Review commands must be submitted while the gate is displayed. Your command is retained for resubmission.".into();
                                 let _ = self.output.send(Update::RestoreInput(text));
                             } else {
@@ -884,8 +884,8 @@ impl Controller {
                     self.auto = !self.conversation.queued.is_empty();
                 }
             }
-            "/approve" | "/approve-spec" | "/accept" | "/reject" | "/no-knowledge" | "/plan"
-            | "/review" | "/continue" => {
+            "/approve" | "/approve-spec" | "/deny" | "/permissions" | "/revoke-permission"
+            | "/accept" | "/reject" | "/no-knowledge" | "/plan" | "/review" | "/continue" => {
                 let runner = self
                     .runner
                     .as_mut()
@@ -894,8 +894,32 @@ impl Controller {
                     "/approve" => match runner.task.phase {
                         Phase::AwaitingPlan => runner.approve_plan().await?,
                         Phase::AwaitingPolicy => runner.approve_policy().await?,
-                        _ => bail!("There is no plan or edit approval pending."),
+                        Phase::AwaitingPermission => runner.approve_permission().await?,
+                        _ => bail!("There is no plan, edit, or permission approval pending."),
                     },
+                    "/deny" => {
+                        anyhow::ensure!(
+                            runner.task.phase == Phase::AwaitingPermission,
+                            "There is no permission request pending."
+                        );
+                        runner.deny_permission()?;
+                    }
+                    "/permissions" => {
+                        self.conversation.push(
+                            "system",
+                            format_permission_grants(&runner.task.permission_grants),
+                        );
+                    }
+                    "/revoke-permission" => {
+                        let id = parts.next().context(
+                            "Use /revoke-permission <grant ID>; /permissions lists grants.",
+                        )?;
+                        anyhow::ensure!(
+                            parts.next().is_none(),
+                            "Use /revoke-permission <grant ID>."
+                        );
+                        runner.revoke_permission(id)?;
+                    }
                     "/approve-spec" => {
                         let path = parts.collect::<Vec<_>>().join(" ");
                         if path.is_empty() {
@@ -954,7 +978,7 @@ impl Controller {
                 }
                 self.conversation.sync_task(&runner.task);
                 self.save_conversation()?;
-                self.auto = command != "/review";
+                self.auto = !matches!(command, "/review" | "/permissions" | "/revoke-permission");
             }
             "/quit" => {
                 self.quitting = true;
@@ -979,6 +1003,43 @@ fn is_spec_approval_alias(phase: &Phase, value: &str) -> bool {
         normalized.as_str(),
         "i approve the spec" | "approve the spec"
     )
+}
+
+fn format_permission_grants(grants: &[PermissionGrant]) -> String {
+    if grants.is_empty() {
+        return "No active task-scoped permission grants.".into();
+    }
+    let mut text = String::from("Active task-scoped permission grants:\n");
+    for grant in grants {
+        text.push_str(&format!(
+            "\n{} · {}\n  approved: {}\n",
+            grant.id,
+            grant.justification.replace('\n', " "),
+            grant.approved_at
+        ));
+        text.push_str(&format!(
+            "  read: {}\n",
+            if grant.read_paths.is_empty() {
+                "none".into()
+            } else {
+                grant.read_paths.join(", ")
+            }
+        ));
+        text.push_str(&format!(
+            "  write: {}\n",
+            if grant.write_paths.is_empty() {
+                "none".into()
+            } else {
+                grant.write_paths.join(", ")
+            }
+        ));
+        text.push_str(&format!(
+            "  network: {}\n",
+            if grant.network { "enabled" } else { "disabled" }
+        ));
+    }
+    text.push_str("\nUse /revoke-permission <grant ID> to revoke one.");
+    text
 }
 
 fn assistant_suffix(
@@ -1008,7 +1069,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan or exact edit\n/approve-spec <path> — preview a repository spec for graph approval; repeat without a path to accept\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> — preview a repository spec for graph approval; repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll.";
 
 #[cfg(test)]
 mod tests {
@@ -1029,6 +1090,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn permission_grant_summary_includes_ids_and_capabilities() {
+        let grants = vec![serde_json::from_value(serde_json::json!({
+            "id": "grant-1",
+            "justification": "Use the system toolchain",
+            "read_paths": ["/opt/toolchain"],
+            "write_paths": ["/tmp/tool-cache"],
+            "network": true,
+            "approved_at": "2026-09-21T00:00:00Z"
+        }))
+        .unwrap()];
+        let text = format_permission_grants(&grants);
+        assert!(text.contains("grant-1 · Use the system toolchain"));
+        assert!(text.contains("approved: 2026-09-21T00:00:00Z"));
+        assert!(text.contains("read: /opt/toolchain"));
+        assert!(text.contains("write: /tmp/tool-cache"));
+        assert!(text.contains("network: enabled"));
+        assert!(text.contains("/revoke-permission <grant ID>"));
+        assert_eq!(
+            format_permission_grants(&[]),
+            "No active task-scoped permission grants."
+        );
     }
     #[test]
     fn transcript_queue_and_task_links_survive_reload() {

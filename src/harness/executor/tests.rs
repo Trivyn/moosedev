@@ -62,6 +62,147 @@ fn command_timeout_defaults_and_bounds_are_explicit() {
     }
 }
 
+#[test]
+fn permission_requests_are_canonical_deduplicated_and_typed() {
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let external = Fixture::new();
+    fs::create_dir(external.0.join("directory")).unwrap();
+    fs::write(external.0.join("directory/file"), "readable").unwrap();
+    fs::write(external.0.join("writable"), "old").unwrap();
+    let directory = external.0.join("directory").display().to_string();
+    let nested = external.0.join("directory/file").display().to_string();
+    let writable = external.0.join("writable").display().to_string();
+    let permissions = CommandPermissions::requested(
+        &project.0,
+        &scratch.0,
+        &[nested, directory.clone(), directory.clone()],
+        std::slice::from_ref(&writable),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        permissions.read_paths,
+        vec![external.0.join("directory").canonicalize().unwrap()]
+    );
+    assert_eq!(
+        permissions.write_paths,
+        vec![external.0.join("writable").canonicalize().unwrap()]
+    );
+    assert!(permissions.read_paths[0].is_dir());
+    assert!(permissions.write_paths[0].is_file());
+    assert!(permissions.network);
+}
+
+#[test]
+fn permission_requests_reject_nonexistent_root_and_protected_overlaps() {
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let outside = Fixture::new();
+    let missing = outside.0.join("missing").display().to_string();
+    assert!(
+        CommandPermissions::requested(&project.0, &scratch.0, &[missing], &[], false)
+            .unwrap_err()
+            .to_string()
+            .contains("canonicalize external read path")
+    );
+    for protected in [&project.0, &scratch.0] {
+        let protected = protected.display().to_string();
+        assert!(CommandPermissions::requested(
+            &project.0,
+            &scratch.0,
+            std::slice::from_ref(&protected),
+            &[],
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("overlaps the protected"));
+    }
+    let root = if cfg!(windows) {
+        Path::new(r"C:\")
+    } else {
+        Path::new("/")
+    };
+    if root.exists() {
+        assert!(CommandPermissions::requested(
+            &project.0,
+            &scratch.0,
+            &[root.display().to_string()],
+            &[],
+            false,
+        )
+        .is_err());
+    }
+    assert!(CommandPermissions::requested(
+        &project.0,
+        &scratch.0,
+        &["relative/path".into()],
+        &[],
+        false,
+    )
+    .is_err());
+}
+
+#[test]
+fn permission_requests_normalize_a_not_yet_created_scratch_path() {
+    let project = Fixture::new();
+    let outside = Fixture::new();
+    let scratch = project.0.join(".moosedev/harness/scratch/task");
+    let permissions = CommandPermissions::requested(
+        &project.0,
+        &scratch,
+        &[outside.0.display().to_string()],
+        &[],
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        permissions.read_paths,
+        vec![outside.0.canonicalize().unwrap()]
+    );
+    assert!(CommandPermissions::requested(
+        &project.0,
+        &scratch,
+        &[project.0.display().to_string()],
+        &[],
+        false,
+    )
+    .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn permission_requests_reject_aliases_that_expand_the_displayed_scope() {
+    use std::os::unix::fs::symlink;
+
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let external = Fixture::new();
+    fs::write(project.0.join("protected"), "secret").unwrap();
+    fs::create_dir(external.0.join("scope")).unwrap();
+    symlink(project.0.join("protected"), external.0.join("scope/alias")).unwrap();
+    let scope = external.0.join("scope").display().to_string();
+    assert!(CommandPermissions::requested(
+        &project.0,
+        &scratch.0,
+        std::slice::from_ref(&scope),
+        &[],
+        false,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("escaping symlink"));
+    fs::remove_file(external.0.join("scope/alias")).unwrap();
+    fs::hard_link(project.0.join("protected"), external.0.join("scope/alias")).unwrap();
+    assert!(
+        CommandPermissions::requested(&project.0, &scratch.0, &[scope], &[], false,)
+            .unwrap_err()
+            .to_string()
+            .contains("hardlinked file")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn scratch_parent_symlinks_cannot_redirect_creation_or_cleanup() {
@@ -759,6 +900,194 @@ async fn confinement_denies_host_and_project_secret_reads_including_aliases() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires functional OS sandbox; run explicitly outside nested sandbox"]
+async fn confinement_honors_only_explicit_external_file_and_directory_grants() {
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let external = Fixture::new();
+    fs::write(project.0.join("source"), "unchanged").unwrap();
+    fs::write(external.0.join("readable"), "approved-read").unwrap();
+    fs::write(external.0.join("hidden"), "must-not-read").unwrap();
+    fs::create_dir(external.0.join("writable")).unwrap();
+    fs::write(external.0.join("writable/existing"), "old").unwrap();
+    let readable = external.0.join("readable").display().to_string();
+    let hidden = external.0.join("hidden").display().to_string();
+    let writable = external.0.join("writable").display().to_string();
+    let permissions = CommandPermissions::requested(
+        &project.0,
+        &scratch.0,
+        std::slice::from_ref(&readable),
+        std::slice::from_ref(&writable),
+        false,
+    )
+    .unwrap();
+    let command_text = format!(
+        "set -e; cat '{readable}'; ! cat '{hidden}'; ! sh -c \"echo bad > '{readable}'\"; \
+         echo changed > '{writable}/existing'; echo created > '{writable}/new'; \
+         rm '{writable}/existing'; test ! -e '{writable}/existing'; printf success"
+    );
+    let result =
+        command_with_permissions(&project.0, &scratch.0, &command_text, &permissions, None)
+            .await
+            .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("approved-read"), "{}", result.output);
+    assert!(
+        !result.output.contains("must-not-read"),
+        "{}",
+        result.output
+    );
+    assert_eq!(
+        fs::read_to_string(external.0.join("readable")).unwrap(),
+        "approved-read"
+    );
+    assert_eq!(
+        fs::read_to_string(external.0.join("writable/new")).unwrap(),
+        "created\n"
+    );
+    assert!(!external.0.join("writable/existing").exists());
+    assert_eq!(
+        fs::read_to_string(project.0.join("source")).unwrap(),
+        "unchanged"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires curl, internet access and a functional OS sandbox"]
+async fn network_grant_resolves_names_and_verifies_tls() {
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    fs::write(project.0.join("source"), "source").unwrap();
+    let fetch = "curl -sS --max-time 10 -o /dev/null -w '%{http_code}' https://example.com/";
+    let granted = CommandPermissions::requested(&project.0, &scratch.0, &[], &[], true).unwrap();
+    let result = command_with_permissions(&project.0, &scratch.0, fetch, &granted, None)
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("200"), "{}", result.output);
+    // Without the grant the same fetch stays confined.
+    let result = command(&project.0, &scratch.0, fetch).await.unwrap();
+    assert!(!result.success, "{}", result.output);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires curl and functional OS sandbox; run explicitly outside nested sandbox"]
+async fn confinement_enables_host_network_only_when_granted() {
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let external = Fixture::new();
+    fs::write(project.0.join("source"), "source").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let permissions =
+        CommandPermissions::requested(&project.0, &scratch.0, &[], &[], true).unwrap();
+    let result = command_with_permissions(
+        &project.0,
+        &scratch.0,
+        &format!(
+            "curl --max-time 1 http://{} >/dev/null 2>&1 || true",
+            listener.local_addr().unwrap()
+        ),
+        &permissions,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(
+        listener.accept().is_ok(),
+        "network grant did not reach listener"
+    );
+    let socket_path = external.0.join("daemon.sock");
+    let unix_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+    unix_listener.set_nonblocking(true).unwrap();
+    let result = command_with_permissions(
+        &project.0,
+        &scratch.0,
+        &format!(
+            "curl --max-time 1 --unix-socket '{}' http://localhost",
+            socket_path.display()
+        ),
+        &permissions,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!result.success, "filesystem-ungranted socket was reachable");
+    assert_eq!(
+        unix_listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let socket_permissions = CommandPermissions::requested(
+        &project.0,
+        &scratch.0,
+        &[external.0.display().to_string()],
+        &[],
+        true,
+    )
+    .unwrap();
+    let result = command_with_permissions(
+        &project.0,
+        &scratch.0,
+        &format!(
+            "curl --max-time 1 --unix-socket '{}' http://localhost >/dev/null 2>&1 || true",
+            socket_path.display()
+        ),
+        &socket_permissions,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.output);
+    // Linux shares the host network namespace under a grant, so it admits only
+    // IP sockets there; macOS scopes Unix sockets by their filesystem path.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        unix_listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    #[cfg(target_os = "macos")]
+    {
+        assert!(
+            unix_listener.accept().is_ok(),
+            "filesystem-granted Unix socket was unreachable"
+        );
+        // One socket can be granted by its exact path, without its directory.
+        let exact = CommandPermissions::requested(
+            &project.0,
+            &scratch.0,
+            &[socket_path.display().to_string()],
+            &[],
+            true,
+        )
+        .unwrap();
+        assert_eq!(exact.read_paths, vec![socket_path.canonicalize().unwrap()]);
+        fs::write(external.0.join("sibling"), "not granted").unwrap();
+        let result = command_with_permissions(
+            &project.0,
+            &scratch.0,
+            &format!(
+                "curl --max-time 1 --unix-socket '{}' http://localhost >/dev/null 2>&1; cat '{}'",
+                socket_path.display(),
+                external.0.join("sibling").display()
+            ),
+            &exact,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            unix_listener.accept().is_ok(),
+            "exactly granted Unix socket was unreachable"
+        );
+        assert!(!result.success, "socket grant exposed its directory");
+    }
+}
+
 /// Must run outside a parent sandbox which forbids installing OS sandboxes.
 #[tokio::test]
 #[ignore = "requires Rust toolchain and functional OS sandbox; run explicitly"]
@@ -924,6 +1253,7 @@ async fn timeout_kills_process_group() {
         &scratch.0,
         "sleep 30 & echo $! > \"$CARGO_TARGET_DIR/child\"; wait",
         Duration::from_millis(500),
+        &CommandPermissions::default(),
         None,
     )
     .await;

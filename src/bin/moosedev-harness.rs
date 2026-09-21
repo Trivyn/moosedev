@@ -18,6 +18,11 @@ Usage: moosedev-harness [--project DIR] [--daemon URL] [--daemon-exe PATH] [COMM
   run ID                   Advance up to 32 steps, stopping at human gates
   approve ID               Approve the current plan and enter Auto
   approve-policy ID        Approve the pending policy-gated edit
+  approve-permission ID    Approve the pending sandbox permission request
+  deny-permission ID       Deny the pending sandbox permission request
+  permissions ID           List active task-scoped permission grants
+  revoke-permission ID GRANT
+                            Revoke an active permission grant
   review ID accept|reject  Review pending knowledge proposals
   no-knowledge ID          Confirm no durable knowledge changed
   plan ID                  Return to planning
@@ -83,6 +88,7 @@ fn action(command: &str, args: &[String]) -> Result<Action> {
     let expected = match command {
         "review" => 2,
         "answer" => 2,
+        "revoke-permission" => 2,
         _ => 1,
     };
     if command == "answer" {
@@ -98,6 +104,10 @@ fn action(command: &str, args: &[String]) -> Result<Action> {
         "run" => Action::Run,
         "approve" => Action::Approve,
         "approve-policy" => Action::ApprovePolicy,
+        "approve-permission" => Action::ApprovePermission,
+        "deny-permission" => Action::DenyPermission,
+        "permissions" => Action::Permissions,
+        "revoke-permission" => Action::RevokePermission(args[1].clone()),
         "review" => match args[1].as_str() {
             "accept" => Action::Accept,
             "reject" => Action::Reject,
@@ -192,7 +202,14 @@ async fn run() -> Result<()> {
     } else {
         Ok(())
     };
-    println!("{}", serde_json::to_string_pretty(&runner.task)?);
+    if args.command == "permissions" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&runner.task.permission_grants)?
+        );
+    } else {
+        println!("{}", serde_json::to_string_pretty(&runner.task)?);
+    }
     result
 }
 
@@ -228,6 +245,12 @@ mod tests {
     fn human_commands_reject_ambiguous_arguments() {
         assert!(action("review", &["task".into(), "yes".into()]).is_err());
         assert!(action("approve", &["task".into(), "extra".into()]).is_err());
+        assert!(action("deny-permission", &["task".into(), "extra".into()]).is_err());
+        assert!(action("revoke-permission", &["task".into()]).is_err());
+        assert!(matches!(
+            action("revoke-permission", &["task".into(), "grant-1".into()]).unwrap(),
+            Action::RevokePermission(id) if id == "grant-1"
+        ));
         assert!(action("no-knowledge", &[]).is_err());
         assert!(action("run", &["task".into()]).is_ok());
     }

@@ -81,6 +81,17 @@ Commands read a filtered source snapshot and allowlisted installed tools/caches;
 unrelated host files and filesystem aliases are inaccessible. Browser-origin and
 Host checks protect HTTP ratification and other project mutations.
 
+In Auto mode, the model may request the minimum additional filesystem or network
+access required by an exact command. The runner must durably pause before that
+command, display its justification and normalized read/write/network capabilities,
+and require explicit human approval or denial. Approval applies only to the
+current task, is inherited by its later commands and required checks, survives
+restart/resume, remains auditable and revocable, and expires on completion.
+Pending requests do not survive replanning or changed evidence as executable
+authority. The sandbox must reject grants that expose the live workspace, task
+scratch, or another route around gated edits; it must not offer full-host,
+ambient credential/environment-secret, GUI, or arbitrary privilege grants.
+
 Retrieval and delivery are enforceable. Assess understanding through observable
 results, tests, and checkable constraints; model acknowledgment is not proof.
 

@@ -16,6 +16,7 @@ pub enum Phase {
     Working,
     AwaitingInput,
     AwaitingPolicy,
+    AwaitingPermission,
     Verifying,
     AwaitingReview,
     Cancelled,
@@ -114,10 +115,43 @@ pub struct PendingEdit {
     pub reason: String,
     pub revision: String,
 }
+
+/// One exact command/capability request frozen for human review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingPermission {
+    pub request_id: String,
+    pub command: String,
+    pub justification: String,
+    pub read_paths: Vec<String>,
+    pub write_paths: Vec<String>,
+    pub network: bool,
+    pub revision: String,
+    /// Set once the human approves: the grant that authorizes this exact
+    /// command, which the next step then runs inside the interruptible loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_grant: Option<String>,
+}
+
+/// A durable capability approved for the remainder of this task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionGrant {
+    pub id: String,
+    pub justification: String,
+    pub read_paths: Vec<String>,
+    pub write_paths: Vec<String>,
+    pub network: bool,
+    pub approved_at: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) enum Intent {
     Edit(PendingEdit),
     Command(String),
+    PermissionedCommand {
+        command: String,
+        grant_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +202,10 @@ pub struct Task {
     pub capture_request: Option<CaptureRequest>,
     pub capture_reason: Option<String>,
     pub pending_edit: Option<PendingEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permission: Option<PendingPermission>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_grants: Vec<PermissionGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spec: Option<PendingSpecApproval>,
     #[serde(default)]

@@ -40,6 +40,9 @@ fn description(name: &str) -> &'static str {
         "replace" => "Replace exactly one unique literal occurrence of old_text in a file.",
         "write" => "Write a file's whole UTF-8 content; null content requests deletion.",
         "command" => "Run a shell command in the read-only source snapshot.",
+        "request_permission" => {
+            "Ask the human to grant explicit external paths or network access for an exact command."
+        }
         "question" => "Ask the human a question.",
         "reply" => "Answer in prose without declaring a code task complete.",
         "replan" => "Say why the approved files or checks must change.",

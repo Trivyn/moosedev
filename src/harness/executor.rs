@@ -20,7 +20,13 @@ pub use scratch::cleanup_task;
 #[cfg(unix)]
 use scratch::{prepare_cargo_home, FixedDirectoryCleanup, TaskScratch, TemporaryDirectory};
 use serde::{Deserialize, Serialize};
-use std::{ffi::CString, fs, path::Path, process::Stdio, time::Duration};
+use std::{
+    ffi::CString,
+    fs,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 use workspace::snapshot_source;
 pub use workspace::Workspace;
 
@@ -31,6 +37,231 @@ pub struct CommandResult {
     /// The shell's exit status; absent when a signal ended the command.
     #[serde(default)]
     pub exit_code: Option<i32>,
+}
+
+/// Narrow, user-approved additions to the baseline command sandbox.
+///
+/// Paths are canonical host paths. Existing files grant access to that exact
+/// file; existing directories grant recursive access. Construct requests with
+/// [`CommandPermissions::requested`] rather than trusting model-supplied paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandPermissions {
+    pub read_paths: Vec<PathBuf>,
+    pub write_paths: Vec<PathBuf>,
+    pub network: bool,
+}
+
+impl CommandPermissions {
+    /// Canonicalize and validate a requested permission set for one task.
+    ///
+    /// Permissions may only name existing files or directories outside both
+    /// the live workspace and task scratch. Rejecting ancestors as well as
+    /// descendants prevents a broad grant from exposing either protected tree.
+    pub fn requested(
+        root: &Path,
+        scratch: &Path,
+        read_paths: &[String],
+        write_paths: &[String],
+        network: bool,
+    ) -> Result<Self> {
+        let root = root
+            .canonicalize()
+            .context("canonicalize command workspace")?;
+        anyhow::ensure!(root.is_dir(), "command workspace must be a directory");
+        let scratch = canonical_or_absolute(scratch)?;
+        let read_paths = validated_permission_paths(read_paths, &root, &scratch, "read")?;
+        let write_paths = validated_permission_paths(write_paths, &root, &scratch, "write")?;
+        Ok(Self {
+            read_paths,
+            write_paths,
+            network,
+        })
+    }
+
+    fn revalidate(&self, root: &Path, scratch: &Path) -> Result<Self> {
+        let reads = self
+            .read_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let writes = self
+            .write_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        Self::requested(root, scratch, &reads, &writes, self.network)
+    }
+}
+
+fn canonical_or_absolute(path: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(path.is_absolute(), "task scratch path must be absolute");
+    let mut cursor = path;
+    let mut missing = Vec::new();
+    loop {
+        match cursor.canonicalize() {
+            Ok(mut canonical) => {
+                for child in missing.iter().rev() {
+                    canonical.push(child);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if cursor.symlink_metadata().is_ok() => {
+                return Err(error)
+                    .with_context(|| format!("canonicalize task scratch path {}", path.display()));
+            }
+            Err(_) => {
+                let child = cursor.file_name().with_context(|| {
+                    format!("find existing ancestor of task scratch {}", path.display())
+                })?;
+                missing.push(child.to_os_string());
+                cursor = cursor.parent().with_context(|| {
+                    format!("find existing ancestor of task scratch {}", path.display())
+                })?;
+            }
+        }
+    }
+}
+
+fn validated_permission_paths(
+    requested: &[String],
+    root: &Path,
+    scratch: &Path,
+    access: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::with_capacity(requested.len());
+    for raw in requested {
+        let path = Path::new(raw);
+        anyhow::ensure!(
+            path.is_absolute(),
+            "external {access} permission path must be absolute: {raw:?}"
+        );
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("canonicalize external {access} path {raw:?}"))?;
+        anyhow::ensure!(
+            path.to_str().is_some(),
+            "external {access} permission path must be UTF-8"
+        );
+        let metadata = path
+            .metadata()
+            .with_context(|| format!("inspect external {access} path {}", path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file() || metadata.is_dir() || is_socket(&metadata),
+            "external {access} path must be an existing file, directory, or Unix socket: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            path.parent().is_some(),
+            "external {access} permission cannot grant the filesystem root"
+        );
+        for (name, protected) in [("workspace", root), ("task scratch", scratch)] {
+            anyhow::ensure!(
+                !paths_overlap(&path, protected),
+                "external {access} permission overlaps the protected {name}: {}",
+                path.display()
+            );
+        }
+        validate_permission_tree(&path, access)?;
+        paths.push(path);
+    }
+    paths.sort();
+    paths.dedup();
+    // A recursive directory grant subsumes paths beneath it. Compacting here
+    // makes approval displays stable and avoids redundant sandbox rules.
+    let mut compact: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for path in paths {
+        if compact
+            .iter()
+            .any(|parent| parent.is_dir() && path.starts_with(parent))
+        {
+            continue;
+        }
+        compact.push(path);
+    }
+    Ok(compact)
+}
+
+/// A socket may be granted by its exact path, so reaching one service does
+/// not require exposing the directory around it.
+#[cfg(unix)]
+pub(super) fn is_socket(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    metadata.file_type().is_socket()
+}
+
+#[cfg(not(unix))]
+pub(super) fn is_socket(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(unix)]
+fn validate_permission_tree(scope: &Path, access: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    const MAX_PERMISSION_ENTRIES: usize = 100_000;
+    let metadata = fs::metadata(scope)?;
+    if !metadata.is_dir() {
+        anyhow::ensure!(
+            metadata.nlink() == 1,
+            "external {access} permission rejects hardlinked file {}",
+            scope.display()
+        );
+        return Ok(());
+    }
+    let mut pending = vec![scope.to_path_buf()];
+    let mut entries = 0usize;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).with_context(|| {
+            format!(
+                "inspect external {access} directory {}",
+                directory.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "inspect external {access} directory {}",
+                    directory.display()
+                )
+            })?;
+            entries += 1;
+            anyhow::ensure!(
+                entries <= MAX_PERMISSION_ENTRIES,
+                "external {access} directory exceeds the {MAX_PERMISSION_ENTRIES} entry validation limit: {}",
+                scope.display()
+            );
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect external {access} entry {}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                let target = path.canonicalize().with_context(|| {
+                    format!("resolve external {access} symlink {}", path.display())
+                })?;
+                anyhow::ensure!(
+                    target.starts_with(scope),
+                    "external {access} directory contains an escaping symlink: {}",
+                    path.display()
+                );
+            } else if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() {
+                anyhow::ensure!(
+                    metadata.nlink() == 1,
+                    "external {access} directory contains a hardlinked file: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_permission_tree(_scope: &Path, _access: &str) -> Result<()> {
+    Ok(())
 }
 
 /// Execute against a filtered, read-only source snapshot with no network.
@@ -48,7 +279,36 @@ pub async fn command_with_progress(
     command: &str,
     progress: Option<ProgressSender>,
 ) -> Result<CommandResult> {
-    run_command(root, scratch, command, command_timeout()?, progress).await
+    command_with_permissions(
+        root,
+        scratch,
+        command,
+        &CommandPermissions::default(),
+        progress,
+    )
+    .await
+}
+
+/// Execute with task-scoped, user-approved additions to the baseline sandbox.
+/// The permissions are revalidated here so journal corruption or an unsafe
+/// direct caller cannot turn persisted strings into ambient host access.
+pub async fn command_with_permissions(
+    root: &Path,
+    scratch: &Path,
+    command: &str,
+    permissions: &CommandPermissions,
+    progress: Option<ProgressSender>,
+) -> Result<CommandResult> {
+    let permissions = permissions.revalidate(root, scratch)?;
+    run_command(
+        root,
+        scratch,
+        command,
+        command_timeout()?,
+        &permissions,
+        progress,
+    )
+    .await
 }
 
 #[cfg(unix)]
@@ -57,6 +317,7 @@ async fn run_command(
     scratch: &Path,
     command: &str,
     timeout: Duration,
+    permissions: &CommandPermissions,
     progress: Option<ProgressSender>,
 ) -> Result<CommandResult> {
     anyhow::ensure!(
@@ -102,7 +363,7 @@ async fn run_command(
     }
     #[cfg(not(target_os = "macos"))]
     prepare_cargo_home(&cargo_home)?;
-    let mut process = confined_command(&source, scratch, &temporary.path, command)?;
+    let mut process = confined_command(&source, scratch, &temporary.path, command, permissions)?;
     process
         .current_dir(&source)
         .env_clear()
@@ -113,7 +374,10 @@ async fn run_command(
         .env("TEMP", temporary.path.join("tmp"))
         .env("CARGO_HOME", cargo_home)
         .env("CARGO_TARGET_DIR", scratch.join("build"))
-        .env("CARGO_NET_OFFLINE", "true")
+        .env(
+            "CARGO_NET_OFFLINE",
+            if permissions.network { "false" } else { "true" },
+        )
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LANG", "en_US.UTF-8")
         .stdin(Stdio::null())
@@ -199,6 +463,7 @@ async fn run_command(
     _scratch: &Path,
     _command: &str,
     _timeout: Duration,
+    _permissions: &CommandPermissions,
     _progress: Option<ProgressSender>,
 ) -> Result<CommandResult> {
     anyhow::bail!("command confinement is unsupported on this platform")

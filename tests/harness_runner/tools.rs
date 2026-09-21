@@ -58,8 +58,17 @@ async fn tool_requests_offer_the_mode_tools_and_require_one_call() {
     assert_eq!(
         tool_names(&actions[2]),
         [
-            "command", "finish", "inspect", "question", "read", "replace", "replan", "reply",
-            "search", "write"
+            "command",
+            "finish",
+            "inspect",
+            "question",
+            "read",
+            "replace",
+            "replan",
+            "reply",
+            "request_permission",
+            "search",
+            "write"
         ]
     );
     for request in &actions {

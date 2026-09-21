@@ -55,6 +55,10 @@ pub enum Action {
     Run,
     Approve,
     ApprovePolicy,
+    ApprovePermission,
+    DenyPermission,
+    Permissions,
+    RevokePermission(String),
     Accept,
     Reject,
     NoKnowledge,
@@ -83,6 +87,15 @@ pub async fn execute(runner: &mut Runner, action: Action) -> Result<()> {
         }
         Action::Approve => runner.approve_plan().await,
         Action::ApprovePolicy => runner.approve_policy().await,
+        Action::ApprovePermission => {
+            // Headless approval keeps its one-call meaning: grant, then run
+            // the approved command as the next step.
+            runner.approve_permission().await?;
+            runner.advance().await
+        }
+        Action::DenyPermission => runner.deny_permission(),
+        Action::Permissions => Ok(()),
+        Action::RevokePermission(id) => runner.revoke_permission(&id),
         Action::Accept => runner.review(true).await,
         Action::Reject => runner.review(false).await,
         Action::NoKnowledge => runner.confirm_no_knowledge().await,
@@ -307,6 +320,10 @@ fn gate(task: &Task) -> String {
     match task.phase {
         Phase::AwaitingPlan => task.plan.as_ref().map(|plan| {
             let mut text = format!("PLAN · human approval required\n{}\nFiles: {}\nChecks:\n{}", plan.summary, plan.files.join(", "), plan.checks.join("\n"));
+            if !task.permission_grants.is_empty() {
+                // Grants outlive a replan, so re-approval must not hide them.
+                text.push_str(&format!("\nActive sandbox grants: {} · /permissions lists them", task.permission_grants.len()));
+            }
             text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
             text
         }).unwrap_or_default(),
@@ -316,12 +333,49 @@ fn gate(task: &Task) -> String {
             .map(|pending| spec_approval_gate(&pending.preview))
             .unwrap_or_else(|| "SPEC APPROVAL · preview unavailable; run /approve-spec <path> again.".into()),
         Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Review (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
+        Phase::AwaitingPermission => task
+            .pending_permission
+            .as_ref()
+            .map(permission_gate)
+            .unwrap_or_else(|| {
+                "PERMISSION REQUEST · details unavailable; deny it and retry the task.".into()
+            }),
         Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
         Phase::AwaitingInput => if task.turn_finished { "Your turn. Ask a follow-up or describe the next change.".into() } else { "Your input is needed. Reply below.".into() },
         Phase::Cancelled => "Interrupted; obligations are saved. /continue resumes, or send follow-up guidance.".into(),
         Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
         _ => String::new(),
     }
+}
+
+fn permission_gate(request: &super::runner::PendingPermission) -> String {
+    let mut text = format!(
+        "PERMISSION REQUEST · human approval required\nRequest: {}\nCommand:\n  {}\nReason:\n  {}\n",
+        request.request_id,
+        request.command.replace('\n', "\n  "),
+        request.justification.replace('\n', "\n  ")
+    );
+    if request.read_paths.is_empty() {
+        text.push_str("Read access: none\n");
+    } else {
+        text.push_str(&format!(
+            "Read access:\n  {}\n",
+            request.read_paths.join("\n  ")
+        ));
+    }
+    if request.write_paths.is_empty() {
+        text.push_str("Write access: none\n");
+    } else {
+        text.push_str(&format!(
+            "Write access (create, modify, and delete):\n  {}\n",
+            request.write_paths.join("\n  ")
+        ));
+    }
+    text.push_str(&format!(
+        "Network: {}\n/approve grants this access for the current task and runs the command · /deny refuses it",
+        if request.network { "enabled" } else { "disabled" }
+    ));
+    text
 }
 
 fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
@@ -1803,6 +1857,46 @@ mod tests {
         assert!(text.contains(SYMBOLIC_APPROVAL));
         assert!(text.contains("no model call"));
         assert!(text.ends_with("/approve to execute · send feedback to revise"));
+        assert!(!text.contains("Active sandbox grants"));
+
+        task.permission_grants = vec![serde_json::from_value(serde_json::json!({
+            "id": "grant-1",
+            "justification": "Fetch dependencies",
+            "read_paths": [],
+            "write_paths": [],
+            "network": true,
+            "approved_at": "2026-09-21T00:00:00Z"
+        }))
+        .unwrap()];
+        let text = gate(&task);
+        assert!(text.contains("Active sandbox grants: 1 · /permissions lists them"));
+        assert!(text.ends_with("/approve to execute · send feedback to revise"));
+    }
+    #[test]
+    fn permission_gate_displays_exact_capabilities_and_decision_commands() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingPermission;
+        task.pending_permission = Some(
+            serde_json::from_value(serde_json::json!({
+                "request_id": "permission-1",
+                "command": "cargo install example",
+                "justification": "Install the required local tool",
+                "read_paths": ["/opt/toolchain"],
+                "write_paths": ["/tmp/tool-cache"],
+                "network": true,
+                "revision": "accepted-v3"
+            }))
+            .unwrap(),
+        );
+        let text = gate(&task);
+        assert!(text.contains("PERMISSION REQUEST · human approval required"));
+        assert!(text.contains("Request: permission-1"));
+        assert!(text.contains("Command:\n  cargo install example"));
+        assert!(text.contains("Read access:\n  /opt/toolchain"));
+        assert!(text.contains("Write access (create, modify, and delete):\n  /tmp/tool-cache"));
+        assert!(text.contains("Network: enabled"));
+        assert!(text.contains("/approve grants this access for the current task"));
+        assert!(text.contains("/deny refuses it"));
     }
     #[test]
     fn spec_gate_renders_exact_records_and_separate_execution_approval() {

@@ -48,6 +48,10 @@ def review_input(state, episode):
                     "reason": "native harness parked for human guidance: " + str(task.get("last_response", ""))}
     if task.get("last_error"):
         return {"terminal": "agent_failure", "reason": task["last_error"], "cause": "runner_error"}
+    if phase == "AwaitingPermission":
+        return {"input": "/deny",
+                "reason": "frozen study denies unexpected permission requests",
+                "kind": "permission_denial"}
     if phase in ("AwaitingPlan", "AwaitingPolicy"):
         if phase == "AwaitingPlan":
             plan = task.get("plan") or {}

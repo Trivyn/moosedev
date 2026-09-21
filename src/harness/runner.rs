@@ -27,6 +27,7 @@ mod dispatch;
 mod finish;
 mod links;
 mod model;
+mod permissions;
 mod recovery;
 mod review;
 mod scope;
@@ -47,8 +48,8 @@ pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
 pub use task::{
     CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier, KnowledgeSearchResult,
-    KnowledgeTurn, Mode, PendingEdit, PendingSpecApproval, Phase, Plan, ReviewItem,
-    StandingGuidance, Task,
+    KnowledgeTurn, Mode, PendingEdit, PendingPermission, PendingSpecApproval, PermissionGrant,
+    Phase, Plan, ReviewItem, StandingGuidance, Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;
@@ -165,6 +166,8 @@ impl Runner {
             capture_request: None,
             capture_reason: None,
             pending_edit: None,
+            pending_permission: None,
+            permission_grants: vec![],
             pending_spec: None,
             edits: vec![],
             last_error: None,

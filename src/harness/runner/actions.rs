@@ -36,6 +36,13 @@ pub(super) enum Step {
     Command {
         command: String,
     },
+    RequestPermission {
+        command: String,
+        justification: String,
+        read_paths: Vec<String>,
+        write_paths: Vec<String>,
+        network: bool,
+    },
     Question {
         question: String,
     },
@@ -65,10 +72,12 @@ impl Runner {
                     "edit is outside approved file scope; return to Plan"
                 );
             }
-            Action::Command { .. } | Action::Finish { .. } => ensure!(
-                self.task.mode == Mode::Auto,
-                "Plan mode cannot execute or finish code work; human approval is required"
-            ),
+            Action::Command { .. } | Action::RequestPermission { .. } | Action::Finish { .. } => {
+                ensure!(
+                    self.task.mode == Mode::Auto,
+                    "Plan mode cannot execute or finish code work; human approval is required"
+                )
+            }
             Action::Plan { .. } => ensure!(
                 self.task.mode == Mode::Plan,
                 "switch to Plan before changing the approved approach"
@@ -135,6 +144,30 @@ impl Runner {
                     "command must contain 1..4000 bytes"
                 );
             }
+            Action::RequestPermission {
+                command,
+                justification,
+                read_paths,
+                write_paths,
+                network,
+            } => {
+                ensure!(
+                    !command.trim().is_empty() && command.len() <= 4000,
+                    "permission request command must contain 1..4000 bytes"
+                );
+                ensure!(
+                    !justification.trim().is_empty() && justification.len() <= 2000,
+                    "permission request justification must contain 1..2000 bytes"
+                );
+                ensure!(
+                    !read_paths.is_empty() || !write_paths.is_empty() || *network,
+                    "permission request must name at least one capability"
+                );
+                ensure!(
+                    read_paths.len() <= 32 && write_paths.len() <= 32,
+                    "permission request supports at most 32 read and 32 write paths"
+                );
+            }
             _ => {}
         }
         let file = match action {
@@ -157,6 +190,21 @@ impl Runner {
                 })
             }
             Action::Command { command } => return Ok(Step::Command { command }),
+            Action::RequestPermission {
+                command,
+                justification,
+                read_paths,
+                write_paths,
+                network,
+            } => {
+                return Ok(Step::RequestPermission {
+                    command,
+                    justification,
+                    read_paths,
+                    write_paths,
+                    network,
+                })
+            }
             Action::Question { question } => return Ok(Step::Question { question }),
             Action::Replan { reason } => return Ok(Step::Replan { reason }),
             Action::Finish { summary } => return Ok(Step::Finish { summary }),
