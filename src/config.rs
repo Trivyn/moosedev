@@ -453,6 +453,41 @@ kept = true
     }
 
     #[test]
+    fn the_shipped_example_loads_for_both_processes() {
+        let text = include_str!("../moosedev.toml.example");
+        let file = ProjectFile::parse(text).expect("moosedev.toml.example parses");
+        let settings = DaemonSettings::load_with(&Environment::of(&[], &[]), &file).unwrap();
+        assert_eq!(settings.llm.model, "your-model-id");
+        assert!(settings.llm.configured);
+        assert!(
+            file.harness.is_some(),
+            "the [harness] table is part of the example"
+        );
+        // Every commented key must be a real one: uncomment them all and reparse.
+        let is_setting = |rest: &str| {
+            rest.starts_with('[')
+                || rest.split_once(" = ").is_some_and(|(key, _)| {
+                    !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                })
+        };
+        let uncommented: String = text
+            .lines()
+            .map(|line| {
+                line.strip_prefix("# ")
+                    .filter(|rest| is_setting(rest))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file = ProjectFile::parse(&uncommented).expect("every commented key is valid");
+        let environment = Environment::of(&[("MOOSEDEV_LLM_API_KEY", "k")], &[]);
+        let settings = DaemonSettings::load_with(&environment, &file).unwrap();
+        assert_eq!(settings.http_addr.to_string(), "127.0.0.1:7474");
+        assert_eq!(settings.allowed_origins.len(), 2);
+        assert_eq!(settings.llm.model, "google/gemma-4-26b-a4b");
+    }
+
+    #[test]
     fn invalid_file_values_name_their_key() {
         let environment = Environment::of(&[], &[]);
         for (text, expected) in [

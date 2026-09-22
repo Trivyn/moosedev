@@ -1,0 +1,78 @@
+# MOOSEDev local configuration — copy to `moosedev.toml` in the project root and
+# adjust. The daemon (`moosedev --serve`) and the harness (`moosedev-harness`)
+# both read it. Keep it OUT of version control (`moosedev init` gitignores it):
+# model ids and endpoints belong to this machine. Every key is optional.
+#
+# Precedence per key, highest first, in both processes:
+#   1. a variable set in the real environment (MOOSEDEV_LLM_MODEL=x …);
+#   2. the most specific table, then its parents (see each table below);
+#   3. a value only the project .env supplies;
+#   4. (harness only) .moosedev/harness/provider.json, while this file is absent;
+#   5. the built-in default.
+# A daemon reads the file once at startup; restart it after editing.
+# API keys never go here: `api_key_env` names the variable that holds one.
+
+# --- [model]: the default model for every process -----------------------------
+# One local model needs only this table.
+[model]
+# Any OpenAI-compatible endpoint: LM Studio / Ollama locally, or a hosted provider.
+# Setting an endpoint (here, in [daemon.model], or MOOSEDEV_LLM_BASE_URL) is what
+# enables the daemon's LLM-assisted features; without one it stays pure-symbolic.
+endpoint = "http://127.0.0.1:1234/v1"
+model = "your-model-id"
+# The environment variable holding the API key (default MOOSEDEV_LLM_API_KEY).
+# A variable other than the default must be set, or loading fails.
+# api_key_env = "MOOSEDEV_LLM_API_KEY"
+# Loaded model capacity, at least 4096 (default 32768). Story uses at most one
+# quarter, capped at 32K tokens, for its complete narration request.
+# context_window_tokens = 32768
+# JSON-schema output: auto (default), required, or disabled.
+# structured_output = "auto"
+# Request bounds in whole seconds, 1..=86400: establishing the connection, the
+# wait for the first streamed chunk (covers a local server loading a model on
+# demand), and the longest gap between chunks.
+# connect_timeout_secs = 10
+# first_chunk_timeout_secs = 300
+# idle_timeout_secs = 120
+
+# --- [daemon]: moosedev --serve -------------------------------------------------
+[daemon]
+# Where the web UI binds. Default 127.0.0.1:0 — an ephemeral loopback port,
+# discoverable via `moosedev --status`. Set a stable port for a fixed URL, or
+# 0.0.0.0:PORT to expose the UI on every interface (do so only on purpose).
+# http_addr = "127.0.0.1:7474"
+# Browser origins to trust besides the daemon's own address, such as a Vite dev
+# server. Each entry's authority is also accepted as the request Host, which is
+# how a network-exposed UI is opened by hostname from another machine
+# (otherwise the DNS-rebinding defence answers 403).
+# allowed_origins = ["http://localhost:5173", "http://my-mac.local:7474"]
+
+# The daemon's own model (assisted query, chat, Story narration); unset keys
+# inherit [model]. Same keys as [model].
+# [daemon.model]
+# endpoint = "http://other-host:1234/v1"
+# model = "google/gemma-4-26b-a4b"
+
+# --- [harness]: moosedev-harness ------------------------------------------------
+[harness]
+# Whether the harness rebuilds the code index itself when a task finishes with
+# edits: auto (default: every producer that detects the project), frozen-python
+# (only the study pilot's frozen producer, through the daemon), or off.
+# index_refresh = "auto"
+
+# The harness default; unset keys inherit [model]. Same keys as [model], plus:
+# [harness.model]
+# response_policy = "auto"     # auto | provider-default | reasoning-off
+# action_contract = "tools"    # tools | json_schema
+
+# Per role: `plan` answers while a task is in Plan (planning, replies,
+# /approve-spec extraction); `implement` answers approved work and the final
+# capture note. Unset keys inherit [harness.model], then [model]. `/model plan ID`
+# and `/model implement ID` edit these in place; plain `/model ID` edits
+# the [harness.model] table.
+# [harness.model.plan]
+# model = "qwen/qwen3.8-27b"
+#
+# [harness.model.implement]
+# model = "google/gemma-4-26b-a4b"
+# context_window_tokens = 16384

@@ -49,7 +49,9 @@ affects the harness's coding session; it does not reconfigure a shared daemon.
 The daemon and the harness read one file, `moosedev.toml` in the project root.
 The file is local to this machine (`moosedev init` adds `/moosedev.toml` to
 `.gitignore`): it names endpoints and model IDs, holds no project knowledge, and
-never an API key. `/model` edits it in place and keeps your comments.
+never an API key. `/model` edits it in place and keeps your comments. The
+repository's `moosedev.toml.example` lists every key with its default; copy it
+to start.
 
 ```toml
 [model]                               # every process's default model
