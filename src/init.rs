@@ -192,6 +192,7 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     // `.env` (and therefore whether ignoring it is our call to make).
     let created_env = write_env(opts, &mut report)?;
     write_gitignore(opts, &mut report, created_env)?;
+    write_config_example(opts, &mut report)?;
     write_claude_md(opts, &mut report)?;
     write_skills(opts, &mut report)?;
     if opts.codex {
@@ -1120,6 +1121,33 @@ fn memory_block() -> &'static str {
 /// template. Existing: **append** the managed project-memory block (idempotent —
 /// skipped if the marker is already present), never rewriting the user's file.
 /// `--force` overwrites the whole file with the fresh template.
+/// The reference for `moosedev.toml`, which is gitignored: every key of the
+/// daemon's and the harness's configuration, commented, from the copy this
+/// binary was built with. Meant to be committed beside the project's own
+/// (untracked) `moosedev.toml`.
+const CONFIG_EXAMPLE: &str = include_str!("../moosedev.toml.example");
+
+fn write_config_example(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let path = opts
+        .target_dir
+        .join(format!("{}.example", crate::harness::CONFIG_FILE_NAME));
+    let existed = path.exists();
+    if existed && !opts.force {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
+        return Ok(());
+    }
+    std::fs::write(&path, CONFIG_EXAMPLE).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    Ok(())
+}
+
 fn write_claude_md(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
     let path = opts.target_dir.join("CLAUDE.md");
     let existed = path.exists();
@@ -1408,6 +1436,40 @@ mod tests {
             .iter()
             .find(|e| e.path.ends_with(name))
             .map(|e| &e.outcome)
+    }
+
+    #[test]
+    fn installs_the_config_example_and_keeps_an_edited_one() {
+        let target = temp_project("config-example");
+        let report = init_project(&opts(&target)).unwrap();
+        let path = target.join("moosedev.toml.example");
+        assert_eq!(
+            outcome_for(&report, "moosedev.toml.example"),
+            Some(&Outcome::Created)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), CONFIG_EXAMPLE);
+        // The example is meant to be committed; the real file stays ignored.
+        assert!(!std::fs::read_to_string(target.join(".gitignore"))
+            .unwrap()
+            .contains("moosedev.toml.example"));
+
+        std::fs::write(&path, "# mine\n").unwrap();
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(
+            outcome_for(&report, "moosedev.toml.example"),
+            Some(&Outcome::Skipped)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+
+        let mut forced = opts(&target);
+        forced.force = true;
+        let report = init_project(&forced).unwrap();
+        assert_eq!(
+            outcome_for(&report, "moosedev.toml.example"),
+            Some(&Outcome::Merged)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), CONFIG_EXAMPLE);
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]

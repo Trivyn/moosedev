@@ -71,7 +71,7 @@ cd /path/to/your/project
 moosedev init
 ```
 
-`init` safely merges a MOOSEDev MCP entry into the project, adds the version-control rules for project memory, and installs the agent workflow files. It does not overwrite an existing `CLAUDE.md` or remove other MCP servers.
+`init` safely merges a MOOSEDev MCP entry into the project, adds the version-control rules for project memory, installs the agent workflow files, and drops a commented `moosedev.toml.example` (models, web UI address, trusted origins) to copy into the gitignored `moosedev.toml`. It does not overwrite an existing `CLAUDE.md` or remove other MCP servers.
 
 Add only the integrations you use:
 
