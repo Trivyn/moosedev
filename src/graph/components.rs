@@ -147,11 +147,16 @@ pub fn resolve_component_query<'a>(
         .collect()
 }
 
+/// The `coversPath` value that covers every repository path: a component
+/// whose rules are project-wide, such as one a top-level spec governs.
+pub const COVERS_WHOLE_PROJECT: &str = ".";
+
 /// Return the most specific component that covers `path`.
 ///
 /// `coversPath` values ending in `/` are directory prefixes. Values without a
-/// trailing slash are exact file paths. If several entries match, the longest
-/// matching `coversPath` wins.
+/// trailing slash are exact file paths. [`COVERS_WHOLE_PROJECT`] covers
+/// everything and loses to any other match. If several entries match, the
+/// longest matching `coversPath` wins.
 pub fn best_component_for_path<'a>(
     path: &str,
     components: &'a [ComponentEntry],
@@ -159,13 +164,15 @@ pub fn best_component_for_path<'a>(
     let mut best: Option<(&ComponentEntry, usize)> = None;
     for component in components {
         for covers_path in &component.covers_paths {
-            let matched = if covers_path.ends_with('/') {
-                path.starts_with(covers_path)
+            let (matched, specificity) = if covers_path == COVERS_WHOLE_PROJECT {
+                (true, 0)
+            } else if covers_path.ends_with('/') {
+                (path.starts_with(covers_path), covers_path.len())
             } else {
-                path == covers_path
+                (path == covers_path, covers_path.len())
             };
-            if matched && best.is_none_or(|(_, len)| covers_path.len() > len) {
-                best = Some((component, covers_path.len()));
+            if matched && best.is_none_or(|(_, len)| specificity > len) {
+                best = Some((component, specificity));
             }
         }
     }
@@ -416,6 +423,26 @@ mod tests {
     fn miss_returns_none() {
         let components = vec![component("graph", &["src/graph/"])];
         assert!(best_component_for_path("../moose/src/core.rs", &components).is_none());
+    }
+
+    #[test]
+    fn the_whole_project_marker_covers_everything_but_yields_to_any_other_match() {
+        let components = vec![
+            component("project", &[COVERS_WHOLE_PROJECT]),
+            component("graph", &["src/graph/"]),
+        ];
+        assert_eq!(
+            best_component_for_path("README.md", &components)
+                .unwrap()
+                .name,
+            "project"
+        );
+        assert_eq!(
+            best_component_for_path("src/graph/capture.rs", &components)
+                .unwrap()
+                .name,
+            "graph"
+        );
     }
 
     #[test]

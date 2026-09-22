@@ -98,14 +98,15 @@ impl std::fmt::Display for InvalidModelOutput {
 }
 impl std::error::Error for InvalidModelOutput {}
 
-/// An edit whose result equals the current source. The first one in a task
-/// is treated as `finish` (the required checks run) instead of spending the
-/// repair budget; a repeat is repaired like any other invalid output.
+/// An edit whose result equals the current source. It is treated as `finish`
+/// (the required checks run) instead of spending the repair budget, unless
+/// exactly this source already failed a command or check; then it is repaired
+/// naming that failure (`Runner::symbolic_noop_continuation`).
 #[derive(Debug)]
 pub(super) struct NoopEdit;
 impl std::fmt::Display for NoopEdit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("edit makes no change; choose a different edit or finish if the objective is already satisfied")
+        f.write_str("edit makes no change")
     }
 }
 impl std::error::Error for NoopEdit {}

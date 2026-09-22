@@ -52,6 +52,9 @@ names endpoints and model IDs, holds no project knowledge, and never an API key.
 `/model` edits it in place and keeps your comments.
 
 ```toml
+[harness]
+index_refresh = "auto"                # auto | frozen-python | off
+
 [harness.model]                       # the default for every role
 endpoint = "http://127.0.0.1:1234/v1"
 model = "qwen/qwen3.8-27b"
@@ -95,6 +98,18 @@ Each key is resolved separately, highest first:
 4. `.moosedev/harness/provider.json`, the earlier remembered selection, read only
    while `moosedev.toml` does not exist and never written again;
 5. the built-in default.
+
+`index_refresh` says whether the harness rebuilds the code index itself when a
+task finishes with edits, before it derives associations and anchors the capture
+note. The harness writes files directly, so nothing else rebuilds the index in
+time: the daemon's save scheduler listens to the editor, and the git hooks run on
+commits. `auto` (the default) runs every producer that detects the project
+(rust-analyzer, scip-typescript, scip-python) and journals `index_refreshed`,
+`index_refresh_failed` or `index_refresh_skipped`; a failure costs links, never
+the task. `frozen-python` keeps the study pilot's behaviour, where only the
+daemon's frozen Python producer may refresh; `off` leaves indexing to `moosedev
+index` and the hooks. A full producer run takes seconds on a small project and a
+minute or more on a large one.
 
 Unknown keys under `[harness]`, invalid values, a symlinked file, and an
 `api_key_env` naming an unset variable are errors, never silent defaults. Other
@@ -279,11 +294,22 @@ Because the TUI captures the mouse, the terminal's own selection needs its bypas
 modifier: Fn-drag in Terminal.app, Option-drag in iTerm2.
 `/help` lists the controls.
 
-Use `/approve-spec <repo-relative-path>` while planning to prepare a graph-backed
-spec approval. The harness reads the current file, validates source evidence, and
-shows the exact Requirements and Constraints it would create, reuse, supersede,
-or retract. Preparation does not modify the project graph. Review the complete
-preview, then enter `/approve-spec` without a path to accept that exact batch.
+Use `/approve-spec <repo-relative-path> [covered paths]` while planning to prepare
+a graph-backed spec approval. The harness reads the current file, validates source
+evidence, and shows the exact Requirements and Constraints it would create, reuse,
+supersede, or retract. Preparation does not modify the project graph. Review the
+complete preview, then enter `/approve-spec` without a path to accept that exact
+batch.
+
+The covered paths name what the spec governs: a directory (`badciv-map/`, which
+need not exist yet), an exact file, or `.` for the whole project. Approval then
+mints a `SystemComponent` named after the first path (an existing component with
+that name is reused and gains the new paths) and links every record in the batch
+to it with `concerns`. That link is what makes the records govern code: the
+Constraints appear under Project rules for any file the component covers, before
+the file is indexed, and decisions captured for those files concern the same
+component. Without covered paths the records are approved but float: they reach
+the model only as an inventory of titles.
 At the displayed spec gate, `I approve the spec` and `approve the spec` are also
 accepted as case-insensitive aliases (with collapsed whitespace and an optional
 trailing `.` or `!`). Those phrases remain ordinary steering everywhere else.
@@ -342,10 +368,11 @@ execution. If review succeeds but the
 final checkpoint fails, `/continue` retries completion without repeating capture
 or claiming that no knowledge changed.
 
-Automatic index refresh currently supports Python projects with an explicit
-absolute `MOOSEDEV_SCIP_PYTHON` launcher; it refuses registry/PATH fallback and mixed
-producer refreshes. Source must match its indexed evidence before a derived
-association can be reviewed.
+The daemon's own intent routes refresh the index only for Python projects with an
+explicit absolute `MOOSEDEV_SCIP_PYTHON` launcher (the study pilot's frozen
+producer); every other project is indexed by the harness at finish under
+`index_refresh = "auto"` (see the configuration section) or externally. Source
+must match its indexed evidence before a derived association can be reviewed.
 
 Daemon or model-server outages pause work without consuming the model-repair
 budget. Restore the connection, then use `/continue` (headless `step` or `run`) to
@@ -368,6 +395,14 @@ Dependencies must be available in that view. Sibling path dependencies, includin
 this repository's `../moose`, are not automatically exposed. Source snapshots
 fail explicitly above 512 MiB total, 100,000 entries, or 64 directory levels. Source
 edits use a separately gated action; policy-gated edits require human approval.
+The one file a command may write in the snapshot is a Cargo project's
+`Cargo.lock`: Cargo cannot build a project that has no lockfile unless it can
+create one, so the snapshot of a project without `Cargo.lock` carries an empty
+one the toolchain may fill, and the generated lockfile is carried into the next
+command's snapshot for the rest of the task. A lockfile the project commits always
+wins, and nothing is written back to the project. A `request_permission` write
+path may name a file that does not exist yet inside a directory that does; the
+command creates it.
 
 Source snapshots use a stable task path and preserve file timestamps; each command
 refreshes them from the live project. Build artifacts persist in a task-local
@@ -547,9 +582,17 @@ contract 3 and intent contract 2.
   through the middle of a record.
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
-  for guidance as `scope_escape_exhausted`). The first no-op edit runs the
-  required checks instead of consuming the repair budget
-  (`noop_edit_continuation`). A model replan with no edit, command, required
+  for guidance as `scope_escape_exhausted`). A no-op edit (the result equals
+  the current source) runs the required checks instead of consuming the repair
+  budget (`noop_edit_continuation`). Neither a no-op edit nor a finish reruns
+  the required checks while the last failed required check ran against exactly
+  this source (no edit since): the rerun would only repeat the result, so the
+  action is repaired with the check named (`finish_retest_refused`), a
+  sandbox-blocked check pointing at `request_permission`, and the third refusal
+  parks the task for the human, who can answer or change the plan's checks. A
+  human answer or a permission grant re-arms one rerun; a failed command the
+  model chose to run does not arm the guard, as the plan's checks decide
+  completion. A model replan with no edit, command, required
   check result or human answer since approval continues the approved plan
   instead of reopening planning (`replan_continuation`, unbounded); a replan
   while already planning changes nothing (`replan_noop`). A real replan keeps
@@ -619,9 +662,17 @@ contract 3 and intent contract 2.
   final checkpoint the note is journaled (`capture_note`) and
   `POST /api/v1/harness/capture/type` types it: a symbolic decision for the
   change, a symbolic lesson for a check that failed then passed, and, when the
-  daemon has an LLM sensor, bounded sensor proposals. Each proposal is scored
-  against same-kind accepted records (title 0.5, rank 0.3, overlap 0.2) and
-  receives a durable receipt: `restates` (receipt only, no record), `refines`
+  daemon has an LLM sensor, bounded sensor proposals. A note that opens with
+  "nothing beyond the diff" (or is empty) is the model's answer that nothing
+  durable happened: no decision is proposed, the journal says so
+  (`capture_typed … note declares nothing durable`), and `/no-knowledge`
+  confirms it. Otherwise the decision is titled by the note's first sentence,
+  without an opener such as "I decided to", and its description carries the
+  note, the approved plan once and the changed files. Each proposal is scored
+  against same-kind accepted records (title 0.5, rank 0.3, overlap 0.2); the
+  title term compares approved plans, not display titles, when the description
+  carries one, so consecutive plans over one area still reconcile. Each
+  proposal receives a durable receipt: `restates` (receipt only, no record), `refines`
   (proposal plus a confidence-annotated edge written at capture) or distinct
   (plain proposal). Thresholds are frozen defaults (`MOOSEDEV_RECONCILE_RESTATES`
   0.80, `MOOSEDEV_RECONCILE_REFINES` 0.55,
@@ -631,6 +682,15 @@ contract 3 and intent contract 2.
   same note under fresh operation IDs without a model call (`capture_retyped`,
   three per note, then `capture_retype_exhausted`); a source or knowledge change
   between typing and capture does the same (`capture_note_invalidated`).
+- Index refresh. A finish with edits first rebuilds the code index with the
+  project's producers when `index_refresh` is `auto` (`index_refreshed`,
+  `index_refresh_failed` or `index_refresh_skipped`), so the associations and
+  capture links below are proven against the source the task produced.
+- Approved specs. Every context refresh re-hashes each spec with a current
+  approval marker; one whose file changed is reported to the model and journaled
+  once per task (`spec_stale`). An edit to such a file is journaled
+  (`spec_edited`) and the completion event names it, since `/approve-spec` on
+  the changed file is what previews the supersessions.
 - Capture links. Each proposal links to the leaf definitions the hunks of its
   files touch, proven against the loaded index: the changed ranges when the
   index holds the changed source, or the original ranges when it holds the

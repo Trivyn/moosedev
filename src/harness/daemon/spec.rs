@@ -62,6 +62,7 @@ pub fn prepare_operation(
     validate_id(&request.owner_id, "owner_id")?;
     validate_source(state, &request.path, &request.source_sha256)?;
     validate_drafts(&request.path, &request.drafts, state)?;
+    let component = plan_component(state, &request)?;
 
     let _operations = lock_operations()?;
     let path = journal_path(state, &request.operation_id, "spec.json")?;
@@ -218,7 +219,7 @@ pub fn prepare_operation(
     }
     retirements.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.title.cmp(&b.title)));
 
-    let already_approved = previous.as_ref().is_some_and(|marker| {
+    let records_unchanged = previous.as_ref().is_some_and(|marker| {
         marker.source_sha256.as_deref() == Some(request.source_sha256.as_str())
             && retirements.is_empty()
             && entries.iter().all(|entry| {
@@ -231,10 +232,28 @@ pub fn prepare_operation(
         .is_some_and(|marker| marker.source_sha256.as_deref() == Some(&request.source_sha256))
     {
         anyhow::ensure!(
-            already_approved,
+            records_unchanged,
             "the same spec source digest produced a different record preview; keep the prior approval or change the spec"
         );
     }
+    // An unchanged batch still needs an approval when it is being anchored to
+    // a component for the first time, or the component gains paths.
+    let component_pending = match &component {
+        None => false,
+        Some(plan) => {
+            let concerns = state.resolve_object_property("concerns")?;
+            plan.new
+                || !plan.added.is_empty()
+                || entries.iter().try_fold(false, |pending, entry| {
+                    anyhow::Ok(
+                        pending
+                            || !direct_objects(state, entry.disposition.active_iri(), &concerns)?
+                                .contains(&plan.iri),
+                    )
+                })?
+        }
+    };
+    let already_approved = records_unchanged && !component_pending;
 
     let preview = SpecPrepareResponse {
         operation_id: request.operation_id.clone(),
@@ -244,6 +263,7 @@ pub fn prepare_operation(
         knowledge_revision: request.knowledge_revision.clone(),
         entries,
         retirements,
+        component,
         previous_approval_iri: previous.as_ref().map(|marker| marker.iri.clone()),
         already_approved,
     };
@@ -487,6 +507,32 @@ fn verify_committed_operation(state: &AppState, operation: &SpecOperation) -> an
             "committed spec retirement differs from its durable preview"
         );
     }
+    if let Some(plan) = &operation.preview.component {
+        let concerns = state.resolve_object_property("concerns")?;
+        let covered = graph::load_components(state)?
+            .into_iter()
+            .find(|component| component.iri.as_deref() == Some(plan.iri.as_str()))
+            .map(|component| component.covers_paths)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            plan.covers.iter().all(|path| covered.contains(path))
+                && operation
+                    .preview
+                    .entries
+                    .iter()
+                    .try_fold(true, |all, entry| {
+                        anyhow::Ok(
+                            all && direct_objects(
+                                state,
+                                entry.disposition.active_iri(),
+                                &concerns,
+                            )?
+                            .contains(&plan.iri),
+                        )
+                    })?,
+            "committed spec component differs from its durable preview"
+        );
+    }
     Ok(())
 }
 
@@ -589,9 +635,24 @@ fn validate_planned_relations(state: &AppState, operation: &SpecOperation) -> an
     let superseded_by = state.resolve_object_property("isSupersededBy")?;
     let has_rationale = state.resolve_object_property("hasRationale")?;
 
+    let component = operation
+        .preview
+        .component
+        .as_ref()
+        .map(|_| {
+            anyhow::Ok((
+                state.resolve_object_property("concerns")?,
+                state.resolve_class("SystemComponent")?,
+            ))
+        })
+        .transpose()?;
+
     for entry in &operation.preview.entries {
         let class = state.resolve_class(&entry.draft.kind)?;
         ensure_legal_relation(state, &decision, &motivated_by, &class)?;
+        if let Some((concerns, component_class)) = &component {
+            ensure_legal_relation(state, &class, concerns, component_class)?;
+        }
         if matches!(entry.disposition, SpecDisposition::Supersede { .. }) {
             ensure_legal_relation(state, &class, &supersedes, &class)?;
             ensure_legal_relation(state, &class, &has_rationale, &rationale)?;
@@ -682,6 +743,15 @@ fn preflight_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Re
         anyhow::ensure!(
             current_status(state, previous).as_deref() == Some("accepted"),
             "previous spec approval is no longer current"
+        );
+    }
+    if let Some(plan) = &operation.preview.component {
+        let minted = graph::load_components(state)?
+            .into_iter()
+            .any(|component| component.iri.as_deref() == Some(plan.iri.as_str()));
+        anyhow::ensure!(
+            minted != plan.new,
+            "the spec's component changed since the preview; prepare it again"
         );
     }
     Ok(())
@@ -783,6 +853,9 @@ fn commit_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Resul
         .iter()
         .map(|entry| entry.disposition.active_iri().to_string())
         .collect();
+    if let Some(plan) = &operation.preview.component {
+        insertions.extend(component_quads(state, plan, &active_iris, &stamp)?);
+    }
     let marker_description = marker_description(operation);
     let marker_class = state.resolve_class("ArchitecturalDecision")?;
     let marker_props = vec![
@@ -799,12 +872,25 @@ fn commit_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Resul
             .rationales
             .get(previous)
             .expect("frozen marker rationale");
+        let reason = match &operation.preview.component {
+            Some(plan)
+                if previous_marker_sha256(state, previous)?.as_deref()
+                    == Some(operation.request.source_sha256.as_str()) =>
+            {
+                format!(
+                    "The approval now anchors the specification's records to component {}; the source digest is unchanged.",
+                    plan.name
+                )
+            }
+            _ => "A changed source digest replaced the previous approval of this specification."
+                .to_string(),
+        };
         insertions.extend(rationale_quads(
             state,
             rationale,
             &rationale_class,
             &format!("Rationale: {marker_title}"),
-            "A changed source digest replaced the previous approval of this specification.",
+            &reason,
             &stamp,
         )?);
         marker_edges.push((supersedes.clone(), previous.clone()));
@@ -876,6 +962,171 @@ fn rationale_quads(
         ],
         &[],
         stamp,
+    )
+}
+
+/// The component the approval anchors its records to, from the paths the
+/// human named: an existing component with that name gains any new paths,
+/// otherwise one is minted. A directory keeps or gains its trailing `/` and
+/// need not exist yet (a spec may describe a crate still to be created); a
+/// file path is exact and must exist; `.` covers the whole project.
+fn plan_component(
+    state: &AppState,
+    request: &SpecPrepareRequest,
+) -> anyhow::Result<Option<SpecComponentPlan>> {
+    if request.covers.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        request.covers.len() <= 16,
+        "a specification covers at most 16 paths"
+    );
+    let root = state.project_root().canonicalize()?;
+    let mut covers: Vec<String> = Vec::new();
+    for raw in &request.covers {
+        let path = if raw == graph::COVERS_WHOLE_PROJECT {
+            raw.clone()
+        } else {
+            let directory = raw.ends_with('/');
+            let trimmed = raw.trim_end_matches('/');
+            validate_path(trimmed)?;
+            anyhow::ensure!(
+                !trimmed.is_empty()
+                    && trimmed.len() <= 4096
+                    && !trimmed.chars().any(char::is_control),
+                "covered path is empty, too long or contains control characters"
+            );
+            match root.join(trimmed).canonicalize() {
+                Ok(target) => {
+                    anyhow::ensure!(
+                        target.starts_with(&root),
+                        "covered path escapes the project"
+                    );
+                    if target.is_dir() {
+                        format!("{trimmed}/")
+                    } else {
+                        anyhow::ensure!(
+                            !directory,
+                            "covered path {raw} is a file, not a directory"
+                        );
+                        trimmed.to_string()
+                    }
+                }
+                Err(_) if directory => format!("{trimmed}/"),
+                Err(_) => anyhow::bail!(
+                    "covered path {raw} does not exist; name a directory with a trailing slash to cover one not created yet"
+                ),
+            }
+        };
+        if !covers.contains(&path) {
+            covers.push(path);
+        }
+    }
+    let name = match covers[0].as_str() {
+        graph::COVERS_WHOLE_PROJECT => Path::new(&request.path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("project")
+            .to_string(),
+        first => first
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(first)
+            .to_string(),
+    };
+    let components = graph::load_components(state)?;
+    let existing = components
+        .iter()
+        .find(|component| component.name.eq_ignore_ascii_case(&name));
+    Ok(Some(match existing {
+        Some(component) => {
+            let added: Vec<String> = covers
+                .iter()
+                .filter(|path| !component.covers_paths.contains(*path))
+                .cloned()
+                .collect();
+            let mut all: Vec<String> = component.covers_paths.iter().cloned().collect();
+            all.extend(added.iter().cloned());
+            SpecComponentPlan {
+                iri: component
+                    .iri
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("component {name} has no IRI"))?,
+                name: component.name.clone(),
+                new: false,
+                covers: all,
+                added,
+            }
+        }
+        None => SpecComponentPlan {
+            iri: graph::mint_instance_iri("SystemComponent"),
+            name,
+            new: true,
+            covers: covers.clone(),
+            added: covers,
+        },
+    }))
+}
+
+/// The quads that mint or extend the component and attach every active
+/// record to it with `concerns`.
+fn component_quads(
+    state: &AppState,
+    plan: &SpecComponentPlan,
+    active_iris: &[String],
+    stamp: &CaptureStamp<'_>,
+) -> anyhow::Result<Vec<Quad>> {
+    let covers_path = graph::datatype_property_iri(&state.arch_vocab, "coversPath")?;
+    let concerns = state.resolve_object_property("concerns")?;
+    let graph_name = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
+    let mut quads = Vec::new();
+    if plan.new {
+        let class = state.resolve_class("SystemComponent")?;
+        let mut properties = vec![
+            (moose::RDFS_LABEL.to_string(), plan.name.clone()),
+            (state.capture.title.clone(), plan.name.clone()),
+        ];
+        properties.extend(
+            plan.covers
+                .iter()
+                .map(|path| (covers_path.clone(), path.clone())),
+        );
+        quads.extend(graph::capture_instance_quads(
+            &state.store,
+            &plan.iri,
+            &class,
+            &properties,
+            &[],
+            stamp,
+        )?);
+    } else {
+        for path in &plan.added {
+            quads.push(Quad::new(
+                NamedNode::new(&plan.iri)?,
+                NamedNode::new(&covers_path)?,
+                Literal::new_simple_literal(path.as_str()),
+                graph_name.clone(),
+            ));
+        }
+    }
+    for iri in active_iris {
+        quads.push(object_quad(iri, &concerns, &plan.iri)?);
+    }
+    Ok(quads)
+}
+
+/// The `spec-sha256` line of an approval marker.
+fn previous_marker_sha256(state: &AppState, marker_iri: &str) -> anyhow::Result<Option<String>> {
+    Ok(
+        graph::first_literal(&state.store, marker_iri, &state.capture.description)
+            .as_deref()
+            .and_then(|description| {
+                description
+                    .lines()
+                    .find_map(|line| line.strip_prefix("spec-sha256: "))
+                    .map(str::to_string)
+            }),
     )
 }
 
@@ -951,11 +1202,42 @@ struct ApprovalMarker {
     source_sha256: Option<String>,
 }
 
+/// Every approved specification against its file: a digest that no longer
+/// matches, or a file that is gone, marks the approval's records as possibly
+/// stale until the spec is approved again.
+pub(super) fn approved_spec_statuses(state: &AppState) -> anyhow::Result<Vec<ApprovedSpecStatus>> {
+    let root = state.project_root();
+    let mut statuses = Vec::new();
+    for (path, marker) in current_approval_markers(state)? {
+        let current = std::fs::read(root.join(&path)).ok().map(sha256_hex);
+        statuses.push(ApprovedSpecStatus {
+            stale: current.is_none() || current != marker.source_sha256,
+            record_count: marker_targets(state, &marker.iri)?.len(),
+            path,
+        });
+    }
+    statuses.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(statuses)
+}
+
 fn current_approval_for_path(
     state: &AppState,
     path: &str,
 ) -> anyhow::Result<Option<ApprovalMarker>> {
-    let marker = format!("spec-approval: {path}");
+    let mut found: Vec<ApprovalMarker> = current_approval_markers(state)?
+        .into_iter()
+        .filter(|(marked, _)| marked == path)
+        .map(|(_, marker)| marker)
+        .collect();
+    anyhow::ensure!(
+        found.len() <= 1,
+        "multiple current approval markers exist for this spec path"
+    );
+    Ok(found.pop())
+}
+
+/// Every accepted approval marker with the spec path it carries.
+fn current_approval_markers(state: &AppState) -> anyhow::Result<Vec<(String, ApprovalMarker)>> {
     let mut found = Vec::new();
     for quad in state.store.quads_for_pattern(
         None,
@@ -972,28 +1254,32 @@ fn current_approval_for_path(
         let oxigraph::model::NamedOrBlankNode::NamedNode(subject) = quad.subject else {
             continue;
         };
-        if !description.value().lines().any(|line| line == marker)
-            || current_status(state, subject.as_str()).as_deref() != Some("accepted")
-        {
+        let Some(path) = description
+            .value()
+            .lines()
+            .find_map(|line| line.strip_prefix("spec-approval: "))
+        else {
+            continue;
+        };
+        if current_status(state, subject.as_str()).as_deref() != Some("accepted") {
             continue;
         }
         let class = graph::require_information_record(state, &subject)?;
         if graph::local_name(&class) != "ArchitecturalDecision" {
             continue;
         }
-        found.push(ApprovalMarker {
-            iri: subject.as_str().to_string(),
-            source_sha256: description
-                .value()
-                .lines()
-                .find_map(|line| line.strip_prefix("spec-sha256: ").map(str::to_string)),
-        });
+        found.push((
+            path.to_string(),
+            ApprovalMarker {
+                iri: subject.as_str().to_string(),
+                source_sha256: description
+                    .value()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("spec-sha256: ").map(str::to_string)),
+            },
+        ));
     }
-    anyhow::ensure!(
-        found.len() <= 1,
-        "multiple current approval markers exist for this spec path"
-    );
-    Ok(found.pop())
+    Ok(found)
 }
 
 fn marker_targets(state: &AppState, marker: &str) -> anyhow::Result<Vec<ExistingRecord>> {
@@ -1269,6 +1555,7 @@ mod tests {
             source_sha256: hash,
             knowledge_revision: revision,
             drafts,
+            covers: vec![],
         }
     }
 
@@ -1293,6 +1580,190 @@ mod tests {
             }),
             "The harness supports multiline input.\n\nEvidence:\n- docs/spec.md:8-9"
         );
+    }
+
+    #[test]
+    fn approval_anchors_its_records_to_the_covering_component() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.0.join("badciv-map/src")).unwrap();
+        let hash =
+            fixture.write_spec("# Map crate\nParse SCRATCHMAP 1 files.\nNo rusqlite dependency.\n");
+        let state = fixture.state();
+        let revision = accepted_revision(&state).unwrap();
+        let drafts = vec![
+            draft(
+                "Requirement",
+                "Parse SCRATCHMAP 1",
+                "The crate parses SCRATCHMAP 1 files.",
+                2,
+            ),
+            draft(
+                "Constraint",
+                "No rusqlite",
+                "The crate must not depend on rusqlite.",
+                3,
+            ),
+        ];
+        let mut request = prepare_request("spec-map", hash.clone(), revision, drafts.clone());
+        // A directory not created yet keeps its trailing slash; an existing one
+        // gains it; the component is named after the first path.
+        request.covers = vec!["badciv-map".into(), "badciv-sim/".into()];
+        let preview = prepare_operation(&state, request).unwrap();
+        let plan = preview.component.clone().unwrap();
+        assert!(plan.new);
+        assert_eq!(plan.name, "badciv-map");
+        assert_eq!(
+            plan.covers,
+            vec!["badciv-map/".to_string(), "badciv-sim/".into()]
+        );
+        assert_eq!(plan.added, plan.covers);
+        assert!(
+            graph::load_components(&state).unwrap().is_empty(),
+            "prepare writes nothing"
+        );
+
+        let approved = approve_operation(
+            &state,
+            SpecApproveRequest {
+                operation_id: "spec-map".into(),
+                owner_id: "spec-test".into(),
+            },
+        )
+        .unwrap();
+        assert!(approved.checkpoint.conforms);
+        let components = graph::load_components(&state).unwrap();
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].iri.as_deref(), Some(plan.iri.as_str()));
+        assert_eq!(components[0].name, "badciv-map");
+        assert_eq!(
+            components[0]
+                .covers_paths
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["badciv-map/".to_string(), "badciv-sim/".into()]
+        );
+        let concerns = state.resolve_object_property("concerns").unwrap();
+        for record in &approved.records {
+            assert_eq!(
+                direct_objects(&state, &record.iri, &concerns).unwrap(),
+                HashSet::from([plan.iri.clone()]),
+                "{}",
+                record.title
+            );
+        }
+        assert_eq!(
+            graph::best_component_for_path("badciv-map/src/parse.rs", &components)
+                .unwrap()
+                .name,
+            "badciv-map"
+        );
+        assert!(crate::validation::validate_project(&state)
+            .unwrap()
+            .conforms());
+
+        // The same spec with one more covered path: records unchanged, but the
+        // component gains the path, so the batch is approved again rather than
+        // reported as already approved.
+        let revision = accepted_revision(&state).unwrap();
+        let mut request = prepare_request("spec-map-2", hash.clone(), revision, drafts.clone());
+        request.covers = vec!["badciv-map/".into(), "docs/spec.md".into()];
+        let preview = prepare_operation(&state, request).unwrap();
+        assert!(!preview.already_approved);
+        assert!(preview
+            .entries
+            .iter()
+            .all(|entry| matches!(entry.disposition, SpecDisposition::Reuse { .. })));
+        let plan = preview.component.clone().unwrap();
+        assert!(!plan.new);
+        assert_eq!(plan.added, vec!["docs/spec.md".to_string()]);
+        let again = approve_operation(
+            &state,
+            SpecApproveRequest {
+                operation_id: "spec-map-2".into(),
+                owner_id: "spec-test".into(),
+            },
+        )
+        .unwrap();
+        assert_ne!(again.approval_iri, approved.approval_iri);
+        assert_eq!(
+            current_status(&state, &approved.approval_iri).as_deref(),
+            Some("superseded")
+        );
+        let components = graph::load_components(&state).unwrap();
+        assert_eq!(components.len(), 1);
+        assert!(components[0].covers_paths.contains("docs/spec.md"));
+        assert!(components[0].covers_paths.contains("badciv-sim/"));
+
+        // Nothing new for the component either: already approved.
+        let revision = accepted_revision(&state).unwrap();
+        let mut request = prepare_request("spec-map-3", hash, revision, drafts);
+        request.covers = vec!["badciv-map/".into()];
+        let preview = prepare_operation(&state, request).unwrap();
+        assert!(preview.already_approved);
+        assert!(crate::validation::validate_project(&state)
+            .unwrap()
+            .conforms());
+    }
+
+    #[test]
+    fn context_reports_an_approved_spec_whose_file_changed() {
+        let fixture = Fixture::new();
+        let hash = fixture.write_spec("# Spec\nThe harness accepts specs.\n");
+        let state = fixture.state();
+        let revision = accepted_revision(&state).unwrap();
+        let request = prepare_request(
+            "spec-drift",
+            hash,
+            revision,
+            vec![draft(
+                "Requirement",
+                "Approve explicit specs",
+                "The harness accepts an explicit spec approval.",
+                2,
+            )],
+        );
+        prepare_operation(&state, request).unwrap();
+        approve_operation(
+            &state,
+            SpecApproveRequest {
+                operation_id: "spec-drift".into(),
+                owner_id: "spec-test".into(),
+            },
+        )
+        .unwrap();
+        let context = |state: &AppState| {
+            crate::harness::daemon::context_snapshot(
+                state,
+                &ContextRequest {
+                    topic: "specs".into(),
+                    files: vec![],
+                    evidence_only: false,
+                    max_bytes: None,
+                },
+            )
+            .unwrap()
+        };
+        let fresh = context(&state);
+        assert_eq!(
+            fresh.approved_specs,
+            vec![ApprovedSpecStatus {
+                path: "docs/spec.md".into(),
+                stale: false,
+                record_count: 1,
+            }]
+        );
+        assert!(!fresh.context.contains("changed since its approval"));
+
+        fixture.write_spec("# Spec\nThe harness accepts specs and more.\n");
+        let drifted = context(&state);
+        assert!(drifted.approved_specs[0].stale);
+        assert!(drifted.context.contains(
+            "Approved spec docs/spec.md changed since its approval (1 record(s) may be stale); run /approve-spec docs/spec.md to reconcile them."
+        ), "{}", drifted.context);
+
+        std::fs::remove_file(fixture.0.join("docs/spec.md")).unwrap();
+        assert!(context(&state).approved_specs[0].stale);
     }
 
     #[test]

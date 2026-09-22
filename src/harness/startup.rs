@@ -302,6 +302,7 @@ pub struct ProviderSettings {
     pub action_contract: Option<ActionContract>,
     pub plan: Option<RoleSettings>,
     pub implement: Option<RoleSettings>,
+    pub index_refresh: config::IndexRefresh,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -412,6 +413,7 @@ impl ProviderSettings {
             action_contract: None,
             plan: None,
             implement: None,
+            index_refresh: config::IndexRefresh::default(),
             config: LlmConfig {
                 base_url: DEFAULT_ENDPOINT.into(),
                 api_key: std::env::var(DEFAULT_API_KEY_ENV).unwrap_or_else(|_| "lm-studio".into()),
@@ -459,6 +461,7 @@ impl ProviderSettings {
             config: default.config,
             response_policy: default.response_policy,
             action_contract: Some(default.action_contract),
+            index_refresh: file.index_refresh,
         })
     }
 

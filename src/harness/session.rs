@@ -950,18 +950,19 @@ impl Controller {
                         );
                         runner.revoke_permission(id)?;
                     }
-                    "/approve-spec" => {
-                        let path = parts.collect::<Vec<_>>().join(" ");
-                        if path.is_empty() {
+                    "/approve-spec" => match parts.next() {
+                        None => {
                             anyhow::ensure!(
                                 runner.task.phase == Phase::AwaitingSpecApproval,
-                                "There is no spec approval pending. Use /approve-spec <path> first."
+                                "There is no spec approval pending. Use /approve-spec <path> [covered paths] first."
                             );
                             runner.approve_spec().await?;
-                        } else {
-                            runner.begin_spec_approval(&path).await?;
                         }
-                    }
+                        Some(path) => {
+                            let covers: Vec<String> = parts.map(str::to_string).collect();
+                            runner.begin_spec_approval(path, &covers).await?;
+                        }
+                    },
                     "/accept" | "/reject" => {
                         let accept = command == "/accept";
                         if let Some(id) = parts.next() {
@@ -1099,7 +1100,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> — preview a repository spec for graph approval; repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
 
 #[cfg(test)]
 mod tests {

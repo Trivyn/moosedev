@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use moosedev::harness::protocol::*;
 use moosedev::harness::response::ActionContract;
-use moosedev::harness::runner::{CheckResult, Mode, PermissionGrant, Phase, Runner};
+use moosedev::harness::runner::{CheckResult, FailedRun, Mode, PermissionGrant, Phase, Runner};
 use serde_json::{json, Value};
 
 #[path = "harness_runner/links.rs"]
@@ -325,11 +325,28 @@ async fn approval_grants_then_the_next_step_runs_the_exact_command() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
     let (mut runner, outside, command) = awaiting_read_permission(&fixture).await;
+    // A check that failed before the grant ran under a narrower sandbox.
+    runner
+        .task
+        .symbolic
+        .get_or_insert_with(Default::default)
+        .last_failure = Some(FailedRun {
+        command: "cargo test".into(),
+        edits: 0,
+        denied: true,
+    });
 
     runner.approve_permission().await.unwrap();
     // Approval only records authority; the command has not run yet.
     assert_eq!(runner.task.phase, Phase::Working);
     assert_eq!(runner.task.permission_grants.len(), 1);
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .last_failure
+        .is_none());
     let grant = runner.task.permission_grants[0].id.clone();
     let pending = runner.task.pending_permission.as_ref().unwrap();
     assert_eq!(pending.approved_grant.as_deref(), Some(grant.as_str()));
@@ -2965,5 +2982,144 @@ async fn a_repeated_query_is_answered_without_re_running_it() {
     assert_eq!(
         intent_details(&runner, "repeat_search"),
         vec!["0 records already delivered: original"]
+    );
+}
+
+/// The index refresh at finish is journaled, never fatal, and off when the
+/// setting says so; associations and the capture note run after it.
+#[tokio::test]
+async fn finishing_with_edits_refreshes_the_code_index_and_journals_the_outcome() {
+    use moosedev::harness::config::IndexRefresh;
+    let _env_lock = ENVIRONMENT.lock().await;
+
+    // Nothing detects the fixture as a project: skipped, and finish proceeds.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    runner.set_index_refresh(IndexRefresh::Auto);
+    fixture.edit();
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"Ready for required checks."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert_eq!(
+        intent_details(&runner, "index_refresh_skipped"),
+        vec!["no SCIP producer detects this project".to_string()]
+    );
+    assert!(intent_details(&runner, "index_refreshed").is_empty());
+
+    // A producer that fails costs links, not the task, and is not retried for
+    // the same edits.
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("requirements.txt"), "requests\n").unwrap();
+    let previous = std::env::var_os("MOOSEDEV_SCIP_PYTHON");
+    std::env::set_var("MOOSEDEV_SCIP_PYTHON", "/usr/bin/false");
+    let mut runner = fixture.approved_interactive().await;
+    runner.set_index_refresh(IndexRefresh::Auto);
+    fixture.edit();
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"Ready for required checks."}));
+    let outcome = runner.advance().await;
+    match previous {
+        Some(value) => std::env::set_var("MOOSEDEV_SCIP_PYTHON", value),
+        None => std::env::remove_var("MOOSEDEV_SCIP_PYTHON"),
+    }
+    outcome.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    let failed = intent_details(&runner, "index_refresh_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.contains("Code index refresh failed")));
+    let events: Vec<&str> = runner
+        .task
+        .intent_events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect();
+    let refresh = events
+        .iter()
+        .position(|kind| *kind == "index_refresh_failed")
+        .unwrap();
+    assert!(
+        events[..refresh]
+            .iter()
+            .all(|kind| !kind.starts_with("association")),
+        "{events:?}"
+    );
+
+    // Off: the task never indexes.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    runner.set_index_refresh(IndexRefresh::Off);
+    fixture.edit();
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"Ready for required checks."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .all(|event| !event.kind.starts_with("index_refresh")));
+}
+
+/// An approved spec the task edits is journaled and named at completion; one
+/// that changed before the task is journaled once when context is refreshed.
+#[tokio::test]
+async fn editing_an_approved_spec_is_journaled_and_named_at_completion() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().approved_specs = vec![
+        ApprovedSpecStatus {
+            path: "code.txt".into(),
+            stale: false,
+            record_count: 3,
+        },
+        ApprovedSpecStatus {
+            path: "old-spec.md".into(),
+            stale: true,
+            record_count: 2,
+        },
+    ];
+    let mut runner = fixture.ready_for_final().await;
+    assert_eq!(
+        intent_details(&runner, "spec_edited"),
+        vec!["code.txt".to_string()]
+    );
+    assert_eq!(
+        intent_details(&runner, "spec_stale"),
+        vec!["old-spec.md: 2 record(s)".to_string()],
+        "journaled once, not on every refresh"
+    );
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .contains("Approved spec old-spec.md changed since its approval; /approve-spec old-spec.md reconciles its 2 record(s).")));
+    fixture.note("nothing beyond the diff");
+    fixture.typed(vec![]);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(
+        runner.task.capture_reason.as_deref(),
+        Some("Typing proposed no knowledge; /no-knowledge confirms it and completes the task.")
+    );
+    runner.confirm_no_knowledge().await.unwrap();
+    let complete = runner
+        .task
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.message.starts_with("Complete:"))
+        .map(|event| event.message.clone())
+        .unwrap_or_default();
+    assert!(
+        complete.contains(
+            "Approved spec code.txt changed in this task; /approve-spec code.txt reconciles its records."
+        ),
+        "{complete}"
     );
 }

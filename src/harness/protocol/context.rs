@@ -128,6 +128,20 @@ pub struct ContextResponse {
     /// runner renders them as Project rules; linked evidence points there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub governing_constraints: Vec<GoverningConstraint>,
+    /// Every specification with a current approval marker, and whether its
+    /// file still matches the approved digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved_specs: Vec<ApprovedSpecStatus>,
+}
+
+/// An approved specification's standing against its file on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedSpecStatus {
+    pub path: String,
+    /// The file changed, or is gone, since the approval that governs it.
+    pub stale: bool,
+    /// Accepted Requirements and Constraints the approval owns.
+    pub record_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

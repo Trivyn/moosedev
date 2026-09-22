@@ -246,6 +246,14 @@ pub(super) fn confined_command(
     }
     profile.push_str("(deny file-write-flags)");
     profile.push_str(&format!("(deny file-write* (subpath {}))(deny file-write-unlink (literal {}) (literal {}) (literal {}))(allow file-write-data (literal \"/dev/null\"))", sandbox_literal(source)?, sandbox_literal(&scratch.join("build").canonicalize()?)?, sandbox_literal(temporary)?, sandbox_literal(&scratch.join("cargo-home").canonicalize()?)?));
+    // After the source deny, so the later rule wins: the toolchain may fill
+    // the lockfile the snapshot carries, and nothing else in the source.
+    for file in super::writable_snapshot_files(source) {
+        profile.push_str(&format!(
+            "(allow file-read* file-write* (literal {}))",
+            sandbox_literal(&file)?
+        ));
+    }
     let mut process = tokio::process::Command::new("/usr/bin/sandbox-exec");
     process.args(["-p", &profile, "/bin/sh", "-c", command]);
     Ok(process)
@@ -299,12 +307,25 @@ pub(super) fn confined_command(
         process.arg("--ro-bind").arg(path).arg(path);
     }
     for path in &permissions.write_paths {
+        // A granted write may name a file the command is to create.
+        if !path.exists() {
+            std::fs::File::create(path)?;
+        }
         process.arg("--bind").arg(path).arg(path);
     }
+    process.arg("--ro-bind").arg(source).arg(source);
+    // The toolchain's lockfile is served from a writable build-side copy
+    // bound over the read-only snapshot; `carry_generated_lockfile` reads it
+    // back for the next command.
+    for file in super::writable_snapshot_files(source) {
+        let backing = scratch.join("build").join(
+            file.file_name()
+                .context("writable snapshot file has a name")?,
+        );
+        std::fs::copy(&file, &backing)?;
+        process.arg("--bind").arg(&backing).arg(&file);
+    }
     process
-        .arg("--ro-bind")
-        .arg(source)
-        .arg(source)
         .arg("--chdir")
         .arg(source)
         .args(["--seccomp", "198", "/bin/sh", "-c", command]);

@@ -1,6 +1,6 @@
 //! The model proposes; this state machine owns reading, execution and capture.
 use super::{
-    config::ModelRole,
+    config::{self, ModelRole},
     executor::{self, Workspace},
     progress::{Progress, ProgressSender},
     protocol::*,
@@ -27,6 +27,7 @@ mod approval;
 mod capture;
 mod dispatch;
 mod finish;
+mod index;
 mod links;
 mod model;
 mod permissions;
@@ -46,7 +47,7 @@ pub use links::IntentEvent;
 use model::{action_schema, conversational_schema, ModelOutput, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
 pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
-pub use symbolic::{CaptureNoteState, SymbolicAssociation, SymbolicState};
+pub use symbolic::{CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
 pub use task::{
     CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier, KnowledgeSearchResult,
@@ -81,6 +82,10 @@ pub struct Runner {
     model_clients: Vec<(ResponseKey, OpenAiCompatClient)>,
     response_policy: Option<ResponsePolicy>,
     action_contract: Option<ActionContract>,
+    /// Set by `configure_provider`; a runner nobody configured never indexes.
+    index_refresh: Option<config::IndexRefresh>,
+    /// Edits counted at the last refresh, so a repeated finish does not rebuild.
+    indexed_edits: Option<usize>,
     progress: Option<ProgressSender>,
     streaming: Option<Arc<Mutex<StreamedMessage>>>,
     last_saved: Mutex<Option<[u8; 32]>>,
@@ -231,6 +236,8 @@ impl Runner {
             model_clients: vec![],
             response_policy: None,
             action_contract: None,
+            index_refresh: None,
+            indexed_edits: None,
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
@@ -278,6 +285,8 @@ impl Runner {
             model_clients: vec![],
             response_policy: None,
             action_contract: None,
+            index_refresh: None,
+            indexed_edits: None,
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
@@ -325,6 +334,12 @@ impl Runner {
         }
         self.set_role(ModelRole::Plan, provider.plan.clone());
         self.set_role(ModelRole::Implement, provider.implement.clone());
+        self.index_refresh = Some(provider.index_refresh);
+    }
+
+    /// Whether this runner rebuilds the code index at finish.
+    pub fn set_index_refresh(&mut self, policy: config::IndexRefresh) {
+        self.index_refresh = Some(policy);
     }
 
     /// Give one role its own model and levers, or return it to the default.

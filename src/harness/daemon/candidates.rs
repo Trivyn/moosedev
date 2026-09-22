@@ -47,19 +47,22 @@ pub fn candidate_page(
                 .map_err(|_| anyhow::anyhow!("invalid candidate cursor"))?
         }
     };
-    let exact: BTreeSet<String> = graph::resolve_record_exact_all(state, &request.proposal.title)
+    let topic = request
+        .topic
+        .as_deref()
+        .filter(|topic| !topic.trim().is_empty())
+        .unwrap_or(&request.proposal.title);
+    // Exact titles first: the proposal's own, and the topic when the caller
+    // reconciles under a key other than the title (an approved plan).
+    let exact: BTreeSet<String> = [request.proposal.title.as_str(), topic]
         .into_iter()
+        .flat_map(|title| graph::resolve_record_exact_all(state, title))
         .map(|(iri, _)| iri)
         .collect();
     anyhow::ensure!(
         exact.len() <= MAX_EXACT_CANDIDATES,
         "more than 100 records share this exact title; resolve the duplicate set outside the harness"
     );
-    let topic = request
-        .topic
-        .as_deref()
-        .filter(|topic| !topic.trim().is_empty())
-        .unwrap_or(&request.proposal.title);
     let mut iris: Vec<String> = exact.iter().cloned().collect();
     for item in graph::relevant_context_snapshot(state, Some(topic), 100, true)? {
         if !iris.contains(&item.iri) {

@@ -51,12 +51,37 @@ pub struct ModelKeys {
     pub idle_timeout_secs: Option<u64>,
 }
 
+/// When the harness rebuilds the code index itself, so that associations and
+/// capture anchors are proven against the source the task produced.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IndexRefresh {
+    /// At finish, with every producer that detects the project.
+    #[default]
+    Auto,
+    /// Only the study pilot's frozen Python producer, through the daemon.
+    FrozenPython,
+    /// Never; the project indexes through `moosedev index` or its git hooks.
+    Off,
+}
+
+impl IndexRefresh {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::FrozenPython => "frozen-python",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub present: bool,
     pub default: ModelKeys,
     pub plan: Option<ModelKeys>,
     pub implement: Option<ModelKeys>,
+    pub index_refresh: IndexRefresh,
 }
 
 impl ModelFile {
@@ -86,8 +111,17 @@ impl ModelFile {
             return Ok(file);
         };
         let harness = harness.as_table().context("[harness] must be a table")?;
-        if let Some(unknown) = harness.keys().find(|key| *key != "model") {
+        if let Some(unknown) = harness
+            .keys()
+            .find(|key| !matches!(key.as_str(), "model" | "index_refresh"))
+        {
             bail!("unknown key harness.{unknown}");
+        }
+        if let Some(value) = harness.get("index_refresh") {
+            file.index_refresh = value
+                .clone()
+                .try_into()
+                .context("harness.index_refresh must be \"auto\", \"frozen-python\" or \"off\"")?;
         }
         let Some(model) = harness.get("model") else {
             return Ok(file);
@@ -333,6 +367,7 @@ mod tests {
         .unwrap();
         let file = ModelFile::load(&fixture.0).unwrap();
         assert!(file.present);
+        assert_eq!(file.index_refresh, IndexRefresh::Auto);
         assert_eq!(file.default.model.as_deref(), Some("base"));
         assert_eq!(file.default.context_window_tokens, Some(32768));
         assert!(file.plan.is_none());
@@ -354,9 +389,33 @@ mod tests {
                 "harness.model",
             ),
             ("[harness.model]\napi_key = \"secret\"\n", "api_key"),
+            ("[harness]\nindex_refresh = \"always\"\n", "index_refresh"),
+            ("[harness]\nindex_refresh = true\n", "index_refresh"),
         ] {
             let error = format!("{:#}", ModelFile::parse(text).unwrap_err());
             assert!(error.contains(expected), "{text:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn index_refresh_parses_its_three_settings_and_defaults_to_auto() {
+        assert_eq!(
+            ModelFile::parse("[harness.model]\nmodel = \"x\"\n")
+                .unwrap()
+                .index_refresh,
+            IndexRefresh::Auto
+        );
+        for (text, expected) in [
+            ("auto", IndexRefresh::Auto),
+            ("frozen-python", IndexRefresh::FrozenPython),
+            ("off", IndexRefresh::Off),
+        ] {
+            let file = ModelFile::parse(&format!(
+                "[harness]\nindex_refresh = \"{text}\"\n\n[harness.model]\nmodel = \"x\"\n"
+            ))
+            .unwrap();
+            assert_eq!(file.index_refresh, expected, "{text}");
+            assert_eq!(file.default.model.as_deref(), Some("x"));
         }
     }
 

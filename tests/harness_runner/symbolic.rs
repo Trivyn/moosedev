@@ -490,7 +490,7 @@ async fn symbolic_scope_escapes_are_bounded_per_task_and_park_for_guidance() {
 }
 
 #[tokio::test]
-async fn symbolic_first_noop_edit_runs_checks_and_the_second_repairs() {
+async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
@@ -504,23 +504,193 @@ async fn symbolic_first_noop_edit_runs_checks_and_the_second_repairs() {
     assert_eq!(intent_details(&runner, "noop_edit_continuation").len(), 1);
     assert_eq!(runner.task.symbolic.as_ref().unwrap().noop_continuations, 1);
 
+    // Exactly this source already failed a check: retesting it proves
+    // nothing, so the no-op is repaired and the failure is named.
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
-    runner.task.symbolic.as_mut().unwrap().noop_continuations = 1;
+    runner.task.symbolic.as_mut().unwrap().last_failure = Some(FailedRun {
+        command: "cargo check".into(),
+        edits: 0,
+        denied: false,
+    });
     for _ in 0..3 {
         fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
     }
     let error = runner.advance().await.unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("edit makes no change"), "{rendered}");
     assert!(
-        format!("{error:#}").contains("edit makes no change"),
-        "{error:#}"
+        rendered.contains("`cargo check` failed against exactly this source"),
+        "{rendered}"
     );
     assert_eq!(runner.task.recovery.as_ref().unwrap().attempts, 3);
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
     assert_eq!(runner.task.last_error_kind.as_deref(), Some("model_output"));
     assert!(intent_details(&runner, "noop_edit_continuation").is_empty());
     assert_eq!(intent_details(&runner, "repair_exhausted").len(), 1);
+
+    // A fix applied after the failure has not been tested: the no-op that
+    // follows it runs the checks, however many no-ops the task has had.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    {
+        let state = runner.task.symbolic.as_mut().unwrap();
+        state.noop_continuations = 1;
+        state.last_failure = Some(FailedRun {
+            command: "cargo check".into(),
+            edits: 0,
+            denied: false,
+        });
+    }
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return value.strip()","new_text":"return value.strip()"}));
+    runner.advance().await.unwrap();
+    assert!(runner.task.recovery.is_none());
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().noop_continuations, 2);
+    assert_eq!(intent_details(&runner, "noop_edit_continuation").len(), 1);
+    // The finish derives the helper's association first, then verifies.
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
+    runner.review(true).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    // The check passes, which clears the remembered failure.
+    runner.advance().await.unwrap();
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .last_failure
+        .is_none());
+}
+
+/// A finish reruns the required checks; with nothing edited since one of
+/// them failed, the rerun would only repeat the failure. badciv 301f7887
+/// looped nine finish/deny cycles on `cargo run` of a TUI before it was
+/// stopped by hand.
+#[tokio::test]
+async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    // A check the sandbox appears to block, naming no path the model could
+    // request.
+    runner.task.plan.as_mut().unwrap().checks =
+        vec!["sh -c 'echo Operation not permitted; exit 1'".into()];
+    runner.approve_plan().await.unwrap();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
+    runner.review(true).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    let check_runs = |runner: &Runner| {
+        runner
+            .task
+            .events
+            .iter()
+            .filter(|event| event.message.starts_with("Command: sh -c"))
+            .count()
+    };
+    runner.advance().await.unwrap();
+    assert_eq!(check_runs(&runner), 1);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(intent_details(&runner, "sandbox_denial").len(), 1);
+    // The capture checkpoint the failed check made due.
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().last_failure,
+        Some(FailedRun {
+            command: "sh -c 'echo Operation not permitted; exit 1'".into(),
+            edits: 1,
+            denied: true,
+        })
+    );
+
+    // Finishing again changes nothing: the check is not rerun, the finish is
+    // repaired naming the check and the permission request, and the third
+    // refusal parks the task for the human.
+    for _ in 0..3 {
+        fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    }
+    let error = runner.advance().await.unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains(
+            "required check `sh -c 'echo Operation not permitted; exit 1'` was blocked by the sandbox against exactly this source"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.contains("request_permission"), "{rendered}");
+    assert_eq!(check_runs(&runner), 1);
+    assert_eq!(runner.task.recovery.as_ref().unwrap().attempts, 3);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(runner.task.last_error_kind.as_deref(), Some("model_output"));
+    assert_eq!(intent_details(&runner, "finish_retest_refused").len(), 3);
+    assert_eq!(intent_details(&runner, "repair_exhausted").len(), 1);
+
+    // The human's answer re-arms exactly one rerun.
+    runner
+        .answer("That check cannot run here; finish anyway.".into())
+        .await
+        .unwrap();
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .last_failure
+        .is_none());
+    // The capture checkpoint the answer made due.
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    runner.advance().await.unwrap();
+    assert_eq!(check_runs(&runner), 2);
+    assert_eq!(runner.task.phase, Phase::Working);
+    runner.advance().await.unwrap();
+    for _ in 0..3 {
+        fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    }
+    runner.advance().await.unwrap_err();
+    assert_eq!(check_runs(&runner), 2);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "finish_retest_refused").len(), 6);
+}
+
+/// A failed command the model chose to run is not a required check; the
+/// plan's checks decide completion, so the finish runs them.
+#[tokio::test]
+async fn a_failed_free_command_does_not_refuse_the_finish() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"command","command":"false"}));
+    runner.advance().await.unwrap();
+    // The capture checkpoint the command made due.
+    runner.advance().await.unwrap();
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .last_failure
+        .is_none());
+    fixture.conversational(json!({"action":"finish","summary":"Nothing to change."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert!(intent_details(&runner, "finish_retest_refused").is_empty());
 }
 
 #[tokio::test]

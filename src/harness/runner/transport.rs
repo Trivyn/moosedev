@@ -187,8 +187,32 @@ impl Runner {
             .iter()
             .map(|file| file.file.clone())
             .collect();
+        // A stale approval is news once per task, not on every refresh.
+        for spec in response.approved_specs.iter().filter(|spec| spec.stale) {
+            let detail = format!("{}: {} record(s)", spec.path, spec.record_count);
+            if self
+                .task
+                .intent_events
+                .iter()
+                .any(|event| event.kind == "spec_stale" && event.detail == detail)
+            {
+                continue;
+            }
+            self.intent_event("spec_stale", &detail);
+            self.event(format!(
+                "Approved spec {} changed since its approval; /approve-spec {} reconciles its {} record(s).",
+                spec.path, spec.path, spec.record_count
+            ));
+        }
         self.context = Some(response.clone());
         Ok(response)
+    }
+
+    /// Whether `file` carries a current spec approval, per the last context.
+    pub(super) fn is_approved_spec(&self, file: &str) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|context| context.approved_specs.iter().any(|spec| spec.path == file))
     }
 
     /// Where the code index defines what an edit compares, and which compared

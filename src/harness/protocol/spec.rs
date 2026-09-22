@@ -23,6 +23,26 @@ pub struct SpecPrepareRequest {
     pub source_sha256: String,
     pub knowledge_revision: String,
     pub drafts: Vec<SpecRecordDraft>,
+    /// Repository paths the specification governs: directories end in `/`,
+    /// a file path is exact, `.` is the whole project. Empty leaves the
+    /// records unanchored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
+}
+
+/// The SystemComponent an approval anchors its records to, minted or reused
+/// at approval so the records govern every file under its paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecComponentPlan {
+    pub iri: String,
+    pub name: String,
+    /// Minted by this approval rather than reused.
+    pub new: bool,
+    /// Every path the component covers after approval.
+    pub covers: Vec<String>,
+    /// The paths this approval adds to an existing component.
+    pub added: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +108,8 @@ pub struct SpecPrepareResponse {
     pub knowledge_revision: String,
     pub entries: Vec<SpecPreviewEntry>,
     pub retirements: Vec<SpecRetirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<SpecComponentPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_approval_iri: Option<String>,
     /// The same source digest and active record set are already approved.

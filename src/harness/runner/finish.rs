@@ -55,7 +55,21 @@ impl Runner {
         self.task.phase = Phase::Complete;
         self.task.completion_pending = false;
         self.task.final_capture = false;
-        self.event("Complete: required checks passed, human knowledge review resolved, graph validated and durably checkpointed.");
+        // A task that changed an approved spec leaves its records to reconcile;
+        // the re-approval previews the supersessions.
+        let mut edited_specs: Vec<String> = self
+            .task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "spec_edited")
+            .map(|event| event.detail.clone())
+            .collect();
+        edited_specs.dedup();
+        let specs = edited_specs
+            .iter()
+            .map(|path| format!(" Approved spec {path} changed in this task; /approve-spec {path} reconciles its records."))
+            .collect::<String>();
+        self.event(format!("Complete: required checks passed, human knowledge review resolved, graph validated and durably checkpointed.{specs}"));
         self.persist()
     }
 

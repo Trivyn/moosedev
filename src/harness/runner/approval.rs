@@ -250,6 +250,7 @@ impl Runner {
         );
         self.event(format!("Human response: {text}"));
         self.end_unchanged_window();
+        self.forget_failure();
         self.task.knowledge_turn_sequence = self.task.knowledge_turn_sequence.saturating_add(1);
         self.task.guidance = text.clone();
         self.task.recovery = None;

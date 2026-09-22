@@ -1378,3 +1378,124 @@ async fn cancellation_kills_process_group() {
     assert!(started, "sandboxed command never started");
     assert_child_terminated(&scratch).await;
 }
+
+/// A project without a lockfile gets an empty one in its snapshot; the one the
+/// toolchain generates is carried into the next snapshot; a project lockfile
+/// always wins.
+#[test]
+fn a_generated_lockfile_is_carried_between_snapshots_until_the_project_has_one() {
+    let scratch = Fixture::new();
+    let previous = scratch.0.join("source");
+    let staged = scratch.0.join("staged");
+    fs::create_dir_all(&previous).unwrap();
+    fs::create_dir_all(&staged).unwrap();
+    fs::create_dir_all(scratch.0.join("build")).unwrap();
+
+    // Not a Cargo project: nothing is added and nothing is writable.
+    carry_generated_lockfile(&scratch.0, &previous, &staged).unwrap();
+    assert!(!staged.join("Cargo.lock").exists());
+    assert!(writable_snapshot_files(&staged).is_empty());
+
+    // A Cargo project without a lockfile carries an empty one.
+    fs::write(staged.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    carry_generated_lockfile(&scratch.0, &previous, &staged).unwrap();
+    assert_eq!(fs::read(staged.join("Cargo.lock")).unwrap(), b"");
+    assert_eq!(
+        writable_snapshot_files(&staged),
+        vec![staged.join("Cargo.lock")]
+    );
+
+    // The toolchain filled the previous snapshot's lockfile: carried.
+    fs::remove_file(staged.join("Cargo.lock")).unwrap();
+    fs::write(previous.join("Cargo.lock"), "version = 4\n").unwrap();
+    carry_generated_lockfile(&scratch.0, &previous, &staged).unwrap();
+    assert_eq!(
+        fs::read_to_string(staged.join("Cargo.lock")).unwrap(),
+        "version = 4\n"
+    );
+
+    // A build-side copy (the Linux backing) is preferred over the snapshot's.
+    fs::remove_file(staged.join("Cargo.lock")).unwrap();
+    fs::write(scratch.0.join("build/Cargo.lock"), "version = 4\n# build\n").unwrap();
+    carry_generated_lockfile(&scratch.0, &previous, &staged).unwrap();
+    assert_eq!(
+        fs::read_to_string(staged.join("Cargo.lock")).unwrap(),
+        "version = 4\n# build\n"
+    );
+
+    // A project lockfile in the snapshot is left alone.
+    fs::write(staged.join("Cargo.lock"), "version = 4\n# project\n").unwrap();
+    carry_generated_lockfile(&scratch.0, &previous, &staged).unwrap();
+    assert_eq!(
+        fs::read_to_string(staged.join("Cargo.lock")).unwrap(),
+        "version = 4\n# project\n"
+    );
+}
+
+/// A write grant may name a file that does not exist yet in a directory that
+/// does; a read grant, or a write into a missing directory, still must exist.
+#[test]
+fn permission_requests_accept_a_new_file_to_write_but_not_to_read() {
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let outside = Fixture::new();
+    let new_file = outside.0.join("report.txt").display().to_string();
+    let permissions = CommandPermissions::requested(
+        &project.0,
+        &scratch.0,
+        &[],
+        std::slice::from_ref(&new_file),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        permissions.write_paths,
+        vec![outside.0.canonicalize().unwrap().join("report.txt")]
+    );
+    assert!(!permissions.write_paths[0].exists());
+    assert!(
+        CommandPermissions::requested(&project.0, &scratch.0, &[new_file], &[], false)
+            .unwrap_err()
+            .to_string()
+            .contains("canonicalize external read path")
+    );
+    let missing_parent = outside.0.join("missing/report.txt").display().to_string();
+    assert!(
+        CommandPermissions::requested(&project.0, &scratch.0, &[], &[missing_parent], false)
+            .unwrap_err()
+            .to_string()
+            .contains("canonicalize external write path")
+    );
+}
+
+/// Must run outside a parent sandbox which forbids installing OS sandboxes.
+#[tokio::test]
+#[ignore = "requires Rust toolchain and functional OS sandbox; run explicitly"]
+async fn confinement_lets_cargo_generate_a_lockfile_the_project_lacks() {
+    let fixture = Fixture::new();
+    let scratch = Fixture::new();
+    fs::write(fixture.0.join("Cargo.toml"), "[package]\nname = \"greenfield\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    fs::write(fixture.0.join("lib.rs"), "pub fn answer() -> u8 { 42 }\n").unwrap();
+    let result = command(&fixture.0, &scratch.0, "cargo check --offline")
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(
+        !fixture.0.join("Cargo.lock").exists(),
+        "the project is untouched"
+    );
+    let generated = fs::read_to_string(scratch.0.join("source/Cargo.lock")).unwrap();
+    assert!(generated.contains("greenfield"), "{generated}");
+    // The next command sees the same lockfile without regenerating it.
+    let again = command(&fixture.0, &scratch.0, "cat Cargo.lock")
+        .await
+        .unwrap();
+    assert!(again.success, "{}", again.output);
+    assert!(again.output.contains("greenfield"), "{}", again.output);
+    // Anything else in the snapshot stays read-only.
+    let denied = command(&fixture.0, &scratch.0, "echo x > lib.rs")
+        .await
+        .unwrap();
+    assert!(!denied.success, "{}", denied.output);
+    cleanup_task(&scratch.0).unwrap();
+}

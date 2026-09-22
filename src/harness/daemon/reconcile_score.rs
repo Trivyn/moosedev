@@ -144,6 +144,27 @@ fn normalize_title(text: &str) -> String {
         .to_lowercase()
 }
 
+const APPROVED_PLAN_MARKER: &str = "Approved plan: ";
+
+/// The description paragraph that carries a symbolic decision's approved plan.
+pub fn approved_plan_line(plan_summary: &str) -> String {
+    format!("{APPROVED_PLAN_MARKER}{}", plan_summary.trim())
+}
+
+/// The text that stands for a record in the title term of the score: the
+/// approved plan when the description carries one, else the title. Consecutive
+/// plans over one area extend each other, which is what the title term detects;
+/// a title that names the claim instead would silence it (Lesson "A captured
+/// record's title feeds reconciliation, so retitling disables dedup").
+pub fn reconcile_key(title: &str, description: &str) -> String {
+    description
+        .split("\n\n")
+        .find_map(|paragraph| paragraph.trim().strip_prefix(APPROVED_PLAN_MARKER))
+        .map(|plan| plan.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|plan| !plan.is_empty())
+        .unwrap_or_else(|| title.to_string())
+}
+
 fn round(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
 }
@@ -158,12 +179,13 @@ pub fn score_proposal(
     thresholds: ReconcileThresholds,
 ) -> anyhow::Result<ScoredProposal> {
     validate_id(owner_id, "owner_id")?;
+    let key = reconcile_key(&proposal.title, &proposal.description);
     let page = candidate_page(
         state,
         &CaptureCandidateRequest {
             owner_id: owner_id.into(),
             proposal: proposal.clone(),
-            topic: None,
+            topic: (key != proposal.title).then(|| key.clone()),
             cursor: None,
             limit: Some(CANDIDATE_LIMIT),
         },
@@ -174,9 +196,9 @@ pub fn score_proposal(
             .into_iter()
             .map(|item| item.iri)
             .collect();
-    let proposal_title = tokens(&proposal.title);
+    let proposal_title = tokens(&key);
     let proposal_text = tokens(&query);
-    let normalized_title = normalize_title(&proposal.title);
+    let normalized_title = normalize_title(&key);
     let title_local = graph::local_name(&state.capture.title).to_string();
     let description_local = graph::local_name(&state.capture.description).to_string();
     let mut candidates = Vec::new();
@@ -197,7 +219,6 @@ pub fn score_proposal(
         } else {
             candidate.title.clone()
         };
-        let candidate_title = tokens(&title);
         let description = candidate
             .literals
             .iter()
@@ -205,8 +226,10 @@ pub fn score_proposal(
             .map(|literal| literal.value.as_str())
             .collect::<Vec<_>>()
             .join(" ");
+        let candidate_key = reconcile_key(&title, &description);
+        let candidate_title = tokens(&candidate_key);
         let candidate_text = tokens(&format!("{title} {description}"));
-        let title_score = if normalize_title(&title) == normalized_title {
+        let title_score = if normalize_title(&candidate_key) == normalized_title {
             1.0
         } else {
             jaccard(&proposal_title, &candidate_title)
@@ -307,4 +330,37 @@ pub fn record_receipt(state: &AppState, receipt: ScoreReceipt) -> anyhow::Result
 
 pub fn load_receipt(state: &AppState, id: &str) -> anyhow::Result<Option<ScoreReceipt>> {
     load(&receipt_path(state, id)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{approved_plan_line, reconcile_key};
+
+    #[test]
+    fn the_key_is_the_approved_plan_when_the_description_carries_one() {
+        let description = format!(
+            "Split into three crates to keep the engine free of UI types.\n\n{}\n\nFiles changed: Cargo.toml.",
+            approved_plan_line("Create the modular  skeleton\nas a workspace")
+        );
+        assert_eq!(
+            reconcile_key("Split into three crates", &description),
+            "Create the modular skeleton as a workspace"
+        );
+        // Records typed before the change: title and plan are the same text.
+        assert_eq!(
+            reconcile_key("Create the modular skeleton", &description),
+            "Create the modular skeleton as a workspace"
+        );
+        assert_eq!(
+            reconcile_key(
+                "Preserve display behavior",
+                "Labels keep their rendered form."
+            ),
+            "Preserve display behavior"
+        );
+        assert_eq!(
+            reconcile_key("A spec claim", "Approved plan: \n\nnothing"),
+            "A spec claim"
+        );
+    }
 }

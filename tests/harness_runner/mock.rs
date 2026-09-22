@@ -62,6 +62,8 @@ pub(super) struct Script {
     pub(super) context: Option<String>,
     /// Governing rules the full context returns.
     pub(super) governing_constraints: Vec<GoverningConstraint>,
+    /// Approved specs the full context reports.
+    pub(super) approved_specs: Vec<ApprovedSpecStatus>,
     /// What `ground` answers (default: nothing to ground), and what it was asked.
     pub(super) ground_response: Option<GroundResponse>,
     pub(super) ground_requests: Vec<GroundRequest>,
@@ -298,6 +300,7 @@ pub(super) async fn context(
                 files: vec![],
                 records: vec![],
                 governing_constraints: vec![],
+                approved_specs: vec![],
             }),
         );
     }
@@ -320,6 +323,7 @@ pub(super) async fn context(
             delivery_receipt: None,
             records: vec![],
             governing_constraints: script.governing_constraints.clone(),
+            approved_specs: script.approved_specs.clone(),
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."
                     .into()

@@ -14,7 +14,9 @@ use serde_json::json;
 
 use super::current_status;
 use super::journal::{journal_path, load, save_operation, validate_id};
-use super::reconcile_score::{record_receipt, score_proposal, ScoreReceipt, ScoredDisposition};
+use super::reconcile_score::{
+    approved_plan_line, record_receipt, score_proposal, ScoreReceipt, ScoredDisposition,
+};
 use super::revision::ensure_unchanged;
 use crate::api::error::ApiError;
 use crate::graph::{self, AppState};
@@ -51,6 +53,75 @@ fn cap_title(text: &str) -> String {
     }
     let capped: String = text.chars().take(MAX_TITLE_CHARS - 3).collect();
     format!("{}…", capped.trim_end())
+}
+
+/// The answer the capture question invites when nothing durable happened.
+const NOTHING_DURABLE: &str = "nothing beyond the diff";
+
+/// Whether the note declares that the change carries nothing durable: empty,
+/// or opening with the phrase the question offers for that case. A note that
+/// states a claim and only ends with the phrase still carries the claim.
+pub(crate) fn declares_nothing(note: &str) -> bool {
+    let normalized: String = note
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized.is_empty() || normalized.starts_with(NOTHING_DURABLE)
+}
+
+/// Openers a model puts before the claim itself; the title keeps the claim.
+const CLAIM_OPENERS: [&str; 7] = [
+    "i decided that",
+    "i decided to",
+    "i chose to",
+    "we decided to",
+    "we chose to",
+    "decision:",
+    "decided to",
+];
+
+/// The note's first sentence, without a decision opener, as the record title.
+/// `None` when the note has no sentence to name.
+pub(crate) fn claim_title(note: &str) -> Option<String> {
+    let note = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut sentence = note.as_str();
+    for (index, c) in note.char_indices() {
+        let closes = match c {
+            '!' | '?' => true,
+            '.' => note[index + 1..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace),
+            _ => false,
+        };
+        if closes && index > 0 {
+            sentence = &note[..index];
+            break;
+        }
+    }
+    let lowered = sentence.to_lowercase();
+    let stripped = CLAIM_OPENERS
+        .iter()
+        .find(|opener| lowered.starts_with(*opener))
+        .map(|opener| sentence[opener.len()..].trim_start())
+        .unwrap_or(sentence)
+        .trim();
+    let mut chars = stripped.chars();
+    let first = chars.next()?;
+    Some(cap_title(&format!(
+        "{}{}",
+        first.to_uppercase(),
+        chars.as_str()
+    )))
 }
 
 /// `title (qualifier)` within the title cap. The base is shortened, never the
@@ -252,28 +323,23 @@ async fn type_note(
     if evidence.is_empty() {
         evidence.push(format!("approved plan: {}", request.plan_summary));
     }
-    if !request.changed_files.is_empty() {
-        let mut description = String::new();
-        if !note.is_empty() {
-            description.push_str(note);
-            description.push_str("\n\n");
-        }
-        description.push_str(&format!("Approved plan: {}", request.plan_summary.trim()));
-        description.push_str(&format!(
-            "\n\nFiles changed: {}.",
+    // A change carries a decision only when the note states one: a note that
+    // declares nothing durable is the model's answer, not a record (no forced
+    // records). The title names the note's claim; the approved plan stays in
+    // the description, where reconciliation reads it as the record's key.
+    let nothing_declared = declares_nothing(note);
+    if !request.changed_files.is_empty() && !nothing_declared {
+        let description = format!(
+            "{note}\n\n{}\n\nFiles changed: {}.",
+            approved_plan_line(&request.plan_summary),
             request.changed_files.join(", ")
-        ));
-        let mut decision_evidence = evidence.clone();
-        let plan_line = format!("plan approved: {}", request.plan_summary.trim());
-        if !decision_evidence.contains(&plan_line) {
-            decision_evidence.push(plan_line);
-        }
+        );
         raw.push((
             base_proposal(
                 "ArchitecturalDecision",
-                cap_title(&request.plan_summary),
+                claim_title(note).unwrap_or_else(|| cap_title(&request.plan_summary)),
                 description,
-                decision_evidence,
+                evidence.clone(),
                 request.changed_files.clone(),
             ),
             ProposalOrigin::SymbolicDecision,
@@ -326,6 +392,8 @@ async fn type_note(
             TypingMode::SymbolicOnly,
             Some(if note.is_empty() {
                 "empty note; symbolic typing only".to_string()
+            } else if nothing_declared {
+                "note declares nothing durable; no decision proposed".to_string()
             } else {
                 "no daemon LLM sensor configured; symbolic typing only".to_string()
             }),
@@ -334,7 +402,11 @@ async fn type_note(
     if sensor_enabled {
         match sensor_typing(state, request).await {
             Ok(typed) => {
-                let known: Vec<String> = raw.iter().map(|(p, _)| normalized(&p.title)).collect();
+                // A sensor proposal that only re-titles the plan duplicates the
+                // symbolic decision, whichever sentence names that one.
+                let mut known: Vec<String> =
+                    raw.iter().map(|(p, _)| normalized(&p.title)).collect();
+                known.push(normalized(&request.plan_summary));
                 for proposal in typed.proposals.into_iter().take(MAX_SENSOR_PROPOSALS) {
                     if !is_record_kind(&proposal.kind)
                         || proposal.title.trim().is_empty()
@@ -660,8 +732,49 @@ async fn sensor_tiebreak(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_relation, derive_relations};
+    use super::{claim_title, declares_nothing, derive_relation, derive_relations};
     use crate::harness::protocol::KnowledgeProposal;
+
+    #[test]
+    fn a_note_declares_nothing_only_when_it_opens_with_the_phrase() {
+        assert!(declares_nothing(""));
+        assert!(declares_nothing("  \n"));
+        assert!(declares_nothing("nothing beyond the diff"));
+        assert!(declares_nothing("Nothing beyond the diff."));
+        assert!(declares_nothing(
+            "\"Nothing beyond the diff\"; the setup follows standard conventions."
+        ));
+        // A claim that merely ends with the phrase is still a claim.
+        assert!(!declares_nothing(
+            "I decided to split the crates to keep the engine free of UI types. Nothing beyond the diff."
+        ));
+        assert!(!declares_nothing("Nothing else surprised me."));
+    }
+
+    #[test]
+    fn the_title_is_the_first_sentence_without_its_decision_opener() {
+        assert_eq!(
+            claim_title(
+                "I decided to split the project into three crates (map, sim, tui) rather than \
+                 modules within one crate to keep the engine free of UI types. Nothing else."
+            )
+            .as_deref(),
+            Some(
+                "Split the project into three crates (map, sim, tui) rather than modules within \
+                 one crate to keep…"
+            )
+        );
+        assert_eq!(
+            claim_title("Decision: `.map` files and sqlite are the only crate boundary.\nWhy: …")
+                .as_deref(),
+            Some("`.map` files and sqlite are the only crate boundary")
+        );
+        assert_eq!(
+            claim_title("v1.0 keeps the parser strict! Anything else is a bump.").as_deref(),
+            Some("V1.0 keeps the parser strict")
+        );
+        assert_eq!(claim_title("   "), None);
+    }
 
     const REQ: &str = "https://moosedev.dev/kg/Requirement/r1";
     const REQ2: &str = "https://moosedev.dev/kg/Requirement/r2";

@@ -220,6 +220,20 @@ impl Runner {
         self.task.capture_reason = Some(reason.clone());
         self.event(format!("Capture assessment: {reason}"));
         if proposals.is_empty() && restated_records.is_empty() {
+            // Nothing to review, but completion still needs the human to
+            // confirm that no durable knowledge changed; say so where the
+            // status line and the journal will show it.
+            let reason = if response
+                .typing_note
+                .as_deref()
+                .is_some_and(|note| note.contains("declares nothing durable"))
+            {
+                "The model reported nothing beyond the diff; /no-knowledge confirms it and completes the task."
+            } else {
+                "Typing proposed no knowledge; /no-knowledge confirms it and completes the task."
+            };
+            self.task.capture_reason = Some(reason.to_string());
+            self.event(reason);
             self.advance_after_capture_page(checkpoint_end)?;
             return Ok(false);
         }

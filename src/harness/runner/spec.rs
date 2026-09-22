@@ -22,12 +22,13 @@ struct SpecExtraction {
 impl Runner {
     /// Extract and reconcile a repository specification, then stop at a
     /// durable human gate. This operation does not write project knowledge.
-    pub async fn begin_spec_approval(&mut self, path: &str) -> Result<()> {
+    pub async fn begin_spec_approval(&mut self, path: &str, covers: &[String]) -> Result<()> {
         let path = path.trim();
         anyhow::ensure!(
             !path.is_empty(),
-            "usage: /approve-spec <repo-relative-path>"
+            "usage: /approve-spec <repo-relative-path> [covered paths]"
         );
+        let covers = validate_covers(covers)?;
         anyhow::ensure!(
             self.task.mode == Mode::Plan
                 && matches!(
@@ -106,6 +107,7 @@ impl Runner {
             source_sha256: source_sha256.clone(),
             knowledge_revision: knowledge_revision.clone(),
             drafts: extracted.records,
+            covers,
         };
         let preview: SpecPrepareResponse = self.post("spec/prepare", &request).await?;
         anyhow::ensure!(
@@ -139,8 +141,17 @@ impl Runner {
         self.task.phase = Phase::AwaitingSpecApproval;
         self.task.turn_finished = true;
         self.task.last_response = format!(
-            "Prepared {} source-grounded record(s) from {path}; review the spec approval gate.",
-            request.drafts.len()
+            "Prepared {} source-grounded record(s) from {path}{}; review the spec approval gate.",
+            request.drafts.len(),
+            match &self
+                .task
+                .pending_spec
+                .as_ref()
+                .and_then(|pending| pending.preview.component.as_ref())
+            {
+                Some(plan) => format!(", anchored to component {}", plan.name),
+                None => String::new(),
+            }
         );
         self.event(format!(
             "Prepared spec approval preview for {path} at source sha256 {source_sha256}; no project knowledge was written."
@@ -239,9 +250,48 @@ fn spec_prompt(path: &str, source: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "You are the extraction sensor for MOOSEDev's symbolic project memory. Extract only requirements and hard constraints explicitly stated by this specification. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Preserve each complete normative claim in its description. Use kind exactly Requirement or Constraint. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>; cite the narrowest lines that directly state the claim. Produce no more than {MAX_SPEC_RECORDS} non-duplicate records.\n\nSpecification path: {path}\nSpecification sha256: {}\nLine-addressed specification:\n{numbered}",
+        "You are the extraction sensor for MOOSEDev's symbolic project memory. Extract only requirements and hard constraints explicitly stated by this specification. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Preserve each complete normative claim in its description. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>; cite the narrowest lines that directly state the claim. Produce no more than {MAX_SPEC_RECORDS} non-duplicate records.\n\nSpecification path: {path}\nSpecification sha256: {}\nLine-addressed specification:\n{numbered}",
         sha256_hex(source)
     )
+}
+
+/// The paths a spec governs, as the human typed them: repo-relative, no
+/// traversal, `.` for the whole project. The daemon decides directory versus
+/// file against the working tree.
+fn validate_covers(covers: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for raw in covers {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let normalized = if raw == "." || raw == "./" {
+            ".".to_string()
+        } else {
+            let trimmed = raw.trim_start_matches("./");
+            let directory = trimmed.ends_with('/');
+            let body = trimmed.trim_end_matches('/');
+            anyhow::ensure!(
+                !body.is_empty()
+                    && !trimmed.contains('\\')
+                    && trimmed.matches('/').count()
+                        == body.matches('/').count() + usize::from(directory)
+                    && body
+                        .split('/')
+                        .all(|segment| !segment.is_empty() && segment != ".." && segment != "."),
+                "covered path must be repo-relative without traversal: {raw}"
+            );
+            if directory {
+                format!("{body}/")
+            } else {
+                body.to_string()
+            }
+        };
+        if !out.contains(&normalized) {
+            out.push(normalized);
+        }
+    }
+    Ok(out)
 }
 
 /// Specs rendered from an existing decision cluster are a view of the graph,
@@ -401,9 +451,23 @@ mod tests {
                 existing: None,
             }],
             retirements: vec![],
+            component: None,
             previous_approval_iri: None,
             already_approved: false,
         }
+    }
+
+    #[test]
+    fn covered_paths_are_repo_relative_and_deduplicated() {
+        let covers =
+            |raw: &[&str]| validate_covers(&raw.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            covers(&["badciv-map/", "./badciv-map/", "", ".", "spec.md"]).unwrap(),
+            vec!["badciv-map/".to_string(), ".".into(), "spec.md".into()]
+        );
+        assert!(covers(&["../other/"]).is_err());
+        assert!(covers(&["/abs/path"]).is_err());
+        assert!(covers(&["a//b"]).is_err());
     }
 
     #[test]

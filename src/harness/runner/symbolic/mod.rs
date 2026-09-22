@@ -15,8 +15,8 @@ use super::{Mode, PendingEdit, Phase, Progress, Runner};
 use crate::harness::protocol::CheckOutcome;
 use anyhow::Result;
 pub use state::{
-    CaptureNoteState, SymbolicAssociation, SymbolicState, FRUITLESS_SEARCH_LIMIT, MAX_RETYPES,
-    MAX_SCOPE_ESCAPES,
+    CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicState, FRUITLESS_SEARCH_LIMIT,
+    MAX_RETYPES, MAX_SCOPE_ESCAPES,
 };
 use state::{NoteAnswer, CAPTURE_NOTE_QUESTION};
 
@@ -201,19 +201,40 @@ impl Runner {
         note
     }
 
-    /// The first no-op edit of a task means the source already matches: run
-    /// the required checks instead of spending the repair budget.
+    /// The required check that failed against exactly the current source:
+    /// nothing has been edited since it ran, so running it again would only
+    /// repeat the result.
+    fn untested_failure(&self) -> Option<&FailedRun> {
+        let edits = self.task.edits.len();
+        self.task
+            .symbolic
+            .as_ref()?
+            .last_failure
+            .as_ref()
+            .filter(|failure| failure.edits == edits)
+    }
+
+    /// A no-op edit says the source is the way the model wants it, so the
+    /// required checks run instead of spending the repair budget -- unless
+    /// exactly this source already failed a required check, in which case
+    /// nothing has changed to test and the edit is repaired with that fact.
+    /// A model near the floor often ends a repair by restating the file
+    /// (Lesson c60cc811); the harness can tell whether that file is untested,
+    /// so it decides rather than asking (Constraint cd9f1a96).
     pub(in crate::harness::runner) fn symbolic_noop_continuation(
         &mut self,
-        error: &anyhow::Error,
-    ) -> Option<Step> {
+        error: anyhow::Error,
+    ) -> Result<Step> {
         if !error.is::<NoopEdit>() {
-            return None;
+            return Err(error);
+        }
+        if let Some(failure) = self.untested_failure() {
+            return Err(error.context(format!(
+                "the file already reads this way and `{}` failed against exactly this source; make an edit that changes the file to address that failure",
+                failure.command
+            )));
         }
         let state = self.symbolic_state_mut();
-        if state.noop_continuations >= 1 {
-            return None;
-        }
         state.noop_continuations += 1;
         self.intent_event(
             "noop_edit_continuation",
@@ -223,10 +244,44 @@ impl Runner {
             "No-op edit: the source already matches the proposal; running required checks instead of repairing."
                 .to_string(),
         );
-        Some(Step::Finish {
+        Ok(Step::Finish {
             summary: "The source already satisfies the requested change; running required checks."
                 .into(),
         })
+    }
+
+    /// A finish reruns the required checks, so a finish with nothing edited
+    /// since one of them failed would only repeat that failure: it is
+    /// repaired with the check named, and the sandbox case points at the
+    /// permission request. Three refusals park the task for the human, who
+    /// can change the plan's checks; nothing else bounded the loop
+    /// (badciv 301f7887: `cargo run` of a TUI, denied nine times in a row).
+    pub(in crate::harness::runner) fn symbolic_finish_guard(&mut self, step: Step) -> Result<Step> {
+        if !matches!(step, Step::Finish { .. }) {
+            return Ok(step);
+        }
+        let Some(failure) = self.untested_failure().cloned() else {
+            return Ok(step);
+        };
+        self.intent_event("finish_retest_refused", &failure.command);
+        let command = failure.command;
+        Err(if failure.denied {
+            anyhow::anyhow!(
+                "required check `{command}` was blocked by the sandbox against exactly this source and nothing has changed since; finishing would run it again unchanged. Request permission for it (request_permission with this exact command), make an edit, or ask the human with question to change the plan's checks if the check cannot run inside the sandbox"
+            )
+        } else {
+            anyhow::anyhow!(
+                "required check `{command}` already failed against exactly this source and nothing has changed since; finishing would run it again unchanged. Make an edit that addresses the failure"
+            )
+        })
+    }
+
+    /// A human answer or a new grant changes what a rerun would test, so it
+    /// re-arms one rerun of the required checks.
+    pub(in crate::harness::runner) fn forget_failure(&mut self) {
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.last_failure = None;
+        }
     }
 }
 
@@ -282,14 +337,26 @@ impl Runner {
         self.task.last_response = "Already planning; replan changes nothing here. Propose the plan with plan(summary, files, checks), or read, search or ask first.".into();
     }
 
+    /// Remember a failed required check against the edit count it ran at; a
+    /// pass clears it. Free commands are not recorded: the plan's checks are
+    /// the arbiter of completion, so a failed command the model chose to run
+    /// is no reason to refuse a finish.
     pub(in crate::harness::runner) fn record_symbolic_check(
         &mut self,
         command: &str,
         success: bool,
+        denied: bool,
     ) {
         self.end_unchanged_window();
-        let after_edit = !self.task.edits.is_empty();
-        self.symbolic_state_mut().check_history.push(CheckOutcome {
+        let edits = self.task.edits.len();
+        let after_edit = edits > 0;
+        let state = self.symbolic_state_mut();
+        state.last_failure = (!success).then(|| FailedRun {
+            command: command.to_string(),
+            edits,
+            denied,
+        });
+        state.check_history.push(CheckOutcome {
             command: command.to_string(),
             success,
             after_edit,
@@ -421,7 +488,7 @@ mod tests {
             .unwrap();
         for success in [true, false] {
             runner.symbolic_state_mut().unchanged_since_approval = true;
-            runner.record_symbolic_check("true", success);
+            runner.record_symbolic_check("true", success, false);
             assert!(
                 !runner
                     .task

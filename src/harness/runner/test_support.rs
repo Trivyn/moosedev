@@ -34,6 +34,7 @@ async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
         evidence_iris: vec![],
         delivery_receipt: None,
         governing_constraints: vec![],
+        approved_specs: vec![],
     })
 }
 

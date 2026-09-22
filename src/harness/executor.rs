@@ -55,7 +55,8 @@ impl CommandPermissions {
     /// Canonicalize and validate a requested permission set for one task.
     ///
     /// Permissions may only name existing files or directories outside both
-    /// the live workspace and task scratch. Rejecting ancestors as well as
+    /// the live workspace and task scratch, or, for a write, a file to create
+    /// in an existing directory there. Rejecting ancestors as well as
     /// descendants prevents a broad grant from exposing either protected tree.
     pub fn requested(
         root: &Path,
@@ -122,6 +123,51 @@ fn canonical_or_absolute(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// The toolchain's lockfile is the one file a command may write in its
+/// read-only source snapshot: Cargo refuses to build a project that has no
+/// `Cargo.lock` unless it can create one. A lockfile the toolchain generated
+/// in the previous snapshot is carried into the next, so a project that has
+/// not committed one is resolved once per task, not once per command. A
+/// project lockfile always wins; the empty file stands for "none yet", which
+/// Cargo treats as no lockfile.
+fn carry_generated_lockfile(scratch: &Path, previous: &Path, staged: &Path) -> Result<()> {
+    if !staged.join("Cargo.toml").is_file() || staged.join("Cargo.lock").exists() {
+        return Ok(());
+    }
+    let destination = staged.join("Cargo.lock");
+    // Linux binds a build-side copy over the snapshot, so the generated
+    // content lives there; macOS writes the snapshot file itself.
+    let carried = [
+        scratch.join("build/Cargo.lock"),
+        previous.join("Cargo.lock"),
+    ]
+    .into_iter()
+    .find(|path| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    });
+    match carried {
+        Some(path) => {
+            fs::copy(&path, &destination)?;
+        }
+        None => {
+            fs::File::create(&destination)?;
+        }
+    }
+    Ok(())
+}
+
+/// The snapshot files a confined command may write. Today that is only the
+/// Cargo lockfile of a Cargo project, and only when the snapshot carries one
+/// the toolchain may fill (see `carry_generated_lockfile`).
+pub(super) fn writable_snapshot_files(source: &Path) -> Vec<PathBuf> {
+    let lockfile = source.join("Cargo.lock");
+    if source.join("Cargo.toml").is_file() && lockfile.is_file() {
+        vec![lockfile]
+    } else {
+        Vec::new()
+    }
+}
+
 fn validated_permission_paths(
     requested: &[String],
     root: &Path,
@@ -135,21 +181,43 @@ fn validated_permission_paths(
             path.is_absolute(),
             "external {access} permission path must be absolute: {raw:?}"
         );
-        let path = path
-            .canonicalize()
-            .with_context(|| format!("canonicalize external {access} path {raw:?}"))?;
+        // A write may name a file that does not exist yet, inside a directory
+        // that does: the command creates it. Everything else must exist.
+        let (path, new_file) = match path.canonicalize() {
+            Ok(path) => (path, false),
+            Err(error)
+                if access == "write"
+                    && error.kind() == std::io::ErrorKind::NotFound
+                    && path.parent().is_some_and(Path::is_dir)
+                    && path
+                        .file_name()
+                        .is_some_and(|name| Path::new(name).components().count() == 1) =>
+            {
+                let parent = path
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .with_context(|| format!("canonicalize external {access} path {raw:?}"))?;
+                (parent.join(path.file_name().expect("file name")), true)
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("canonicalize external {access} path {raw:?}"));
+            }
+        };
         anyhow::ensure!(
             path.to_str().is_some(),
             "external {access} permission path must be UTF-8"
         );
-        let metadata = path
-            .metadata()
-            .with_context(|| format!("inspect external {access} path {}", path.display()))?;
-        anyhow::ensure!(
-            metadata.is_file() || metadata.is_dir() || is_socket(&metadata),
-            "external {access} path must be an existing file, directory, or Unix socket: {}",
-            path.display()
-        );
+        if !new_file {
+            let metadata = path
+                .metadata()
+                .with_context(|| format!("inspect external {access} path {}", path.display()))?;
+            anyhow::ensure!(
+                metadata.is_file() || metadata.is_dir() || is_socket(&metadata),
+                "external {access} path must be an existing file, directory, or Unix socket: {}",
+                path.display()
+            );
+        }
         anyhow::ensure!(
             path.parent().is_some(),
             "external {access} permission cannot grant the filesystem root"
@@ -161,7 +229,9 @@ fn validated_permission_paths(
                 path.display()
             );
         }
-        validate_permission_tree(&path, access)?;
+        if !new_file {
+            validate_permission_tree(&path, access)?;
+        }
         paths.push(path);
     }
     paths.sort();
@@ -342,6 +412,7 @@ async fn run_command(
     // so Cargo can reuse artifacts. Never copy from command-writable scratch.
     let staging = TemporaryDirectory::new(scratch, "snapshot")?;
     snapshot_source(&Workspace::new(&root)?, &staging.path.join("source"))?;
+    carry_generated_lockfile(scratch, &source, &staging.path.join("source"))?;
     remove_child(&task.directory, "source")?;
     fs::rename(staging.path.join("source"), &source)?;
     let _cargo_cleanup = FixedDirectoryCleanup {

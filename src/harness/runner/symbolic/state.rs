@@ -77,6 +77,22 @@ pub struct SymbolicState {
     /// The one final capture note and its typing; cleared by each applied edit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_note: Option<CaptureNoteState>,
+    /// The most recent failed required check; cleared by a passing one, a
+    /// human answer or a permission grant. A finish or no-op edit proposed
+    /// with the same edit count asks to rerun it against source that has
+    /// already failed, so it is repaired instead of run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<FailedRun>,
+}
+
+/// A required check that failed, how many edits the task had applied when
+/// it ran, and whether the sandbox blocked it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedRun {
+    pub command: String,
+    pub edits: usize,
+    #[serde(default)]
+    pub denied: bool,
 }
 
 /// `asked` (note journaled, typing not yet durable) -> `typed` (daemon typing

@@ -173,11 +173,13 @@ impl Runner {
         self.validate_permission(&action)?;
         let step = match self.validate_action(action) {
             Ok(step) => step,
-            Err(error) => match self.symbolic_noop_continuation(&error) {
-                Some(step) => step,
-                None => return Err(error.context(model::InvalidModelOutput)),
-            },
+            Err(error) => self
+                .symbolic_noop_continuation(error)
+                .map_err(|error| error.context(model::InvalidModelOutput))?,
         };
+        let step = self
+            .symbolic_finish_guard(step)
+            .map_err(|error| error.context(model::InvalidModelOutput))?;
         self.candidate_accepted();
         if !message.trim().is_empty() {
             self.task.last_response = message.clone();
@@ -427,6 +429,7 @@ impl Runner {
             }
             Step::Finish { summary } => {
                 self.task.last_response = summary;
+                self.refresh_code_index().await?;
                 if self.prepare_symbolic_associations().await? {
                     return Ok(());
                 }
@@ -453,6 +456,9 @@ impl Runner {
         self.clear_symbolic_batch_state(&edit);
         self.end_unchanged_window();
         self.intent_event("edit_applied", &edit.file);
+        if self.is_approved_spec(&edit.file) {
+            self.intent_event("spec_edited", &edit.file);
+        }
         self.event(format!(
             "Applied edit {}\nBefore:\n{}\nAfter:\n{}",
             edit.file,
@@ -560,8 +566,8 @@ impl Runner {
         let index = self.task.check_results.len();
         if let Some(command) = plan.checks.get(index).cloned() {
             let result = self.run_command(&command).await?;
-            self.record_symbolic_check(&command, result.success);
             let denied = self.note_sandbox_denial(&command, &result);
+            self.record_symbolic_check(&command, result.success, denied);
             let failure =
                 (!result.success).then(|| check_failure_response(&command, &result, denied));
             if let (false, Some(code)) = (result.success, unrunnable_exit(&result)) {

@@ -3148,11 +3148,12 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
         "Display labels keep their rendered form when the helper changes.",
     );
     let revision = daemon::accepted_revision(&state).unwrap();
-    // The plan restates an accepted decision: receipt only. A check that
-    // failed then passed after the edit is a distinct lesson.
+    // The plan restates an accepted decision: receipt only, whatever the note
+    // titles the proposal. A check that failed then passed after the edit is a
+    // distinct lesson.
     let request = typing_request(
         "type-1",
-        "",
+        "I decided that display labels keep their rendered form when the helper changes.",
         "Preserve display behavior",
         &["labels.py"],
         &[("pytest -q", false, false), ("pytest -q", true, true)],
@@ -3173,10 +3174,18 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     assert_eq!(decision.origin, ProposalOrigin::SymbolicDecision);
     assert_eq!(decision.proposal.kind, "ArchitecturalDecision");
     assert_eq!(decision.proposal.files, vec!["labels.py".to_string()]);
+    assert_eq!(
+        decision.proposal.title,
+        "Display labels keep their rendered form when the helper changes"
+    );
     assert!(decision
         .proposal
-        .evidence
-        .contains(&"plan approved: Preserve display behavior".to_string()));
+        .description
+        .contains("Approved plan: Preserve display behavior"));
+    assert_eq!(
+        decision.proposal.evidence,
+        vec!["event 12: capture note".to_string()]
+    );
     let TypedDisposition::Restates {
         candidate_iri,
         receipt_operation_id,
@@ -3344,6 +3353,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     // campaign v2 cell 7 retyped an identical capped title until the retype
     // budget parked a solved task.
     let long_summary = "Refactor the duplicated name normalization logic in render_name and render_names into a single private helper that trims and substitutes";
+    let long_note = format!("{long_summary}. The helper is private so callers cannot bypass it.");
     let capped = format!(
         "{}…",
         long_summary.chars().take(97).collect::<String>().trim_end()
@@ -3359,7 +3369,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
         &state,
         typing_request(
             "type-long",
-            "",
+            &long_note,
             long_summary,
             &["labels.py"],
             &[("pytest -q", true, true)],
@@ -3394,7 +3404,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
         &state,
         typing_request(
             "type-long-2",
-            "",
+            &long_note,
             long_summary,
             &["labels.py"],
             &[("pytest -q", true, true)],

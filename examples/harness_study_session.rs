@@ -70,6 +70,9 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
         action_contract: None,
         plan: None,
         implement: None,
+        // Studies index through the frozen producer only; a PATH producer
+        // would change the fixed simulation conditions.
+        index_refresh: moosedev::harness::config::IndexRefresh::FrozenPython,
     };
     provider.select(Some(endpoint), model)?;
     Ok(provider)

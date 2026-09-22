@@ -231,12 +231,26 @@ pub fn context_snapshot(
             }
         }
     }
+    // An approved spec whose file moved on governs with possibly stale
+    // records; say so where the model and the human both read.
+    let approved_specs = if request.evidence_only {
+        Vec::new()
+    } else {
+        super::spec::approved_spec_statuses(state)?
+    };
+    for spec in approved_specs.iter().filter(|spec| spec.stale) {
+        context.push_str(&format!(
+            "\nApproved spec {} changed since its approval ({} record(s) may be stale); run /approve-spec {} to reconcile them.\n",
+            spec.path, spec.record_count, spec.path
+        ));
+    }
     let revision = accepted_revision(state)?;
     anyhow::ensure!(
         generation == state.project_write_generation(),
         "project knowledge changed while assembling context; retry retrieval"
     );
     Ok(ContextResponse {
+        approved_specs,
         project_root: root.to_string_lossy().into_owned(),
         revision,
         context,

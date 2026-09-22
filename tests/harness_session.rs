@@ -65,6 +65,7 @@ async fn context(
         delivery_receipt,
         records: vec![],
         governing_constraints: vec![],
+        approved_specs: vec![],
         context,
         files: request
             .files

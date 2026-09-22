@@ -395,6 +395,21 @@ fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
     if preview.already_approved {
         text.push_str("\nUNCHANGED · this source and active record set are already approved\n");
     }
+    if let Some(plan) = &preview.component {
+        text.push_str(&format!(
+            "\nCOMPONENT · {} · {}\nCovers: {}\nIRI: {}\nEvery record below concerns this component; its Constraints govern the files it covers.\n",
+            plan.name,
+            if plan.new {
+                "NEW".to_string()
+            } else if plan.added.is_empty() {
+                "existing".to_string()
+            } else {
+                format!("existing, adding {}", plan.added.join(" "))
+            },
+            plan.covers.join(" "),
+            plan.iri
+        ));
+    }
     for entry in &preview.entries {
         let (effect, identity) = match &entry.disposition {
             SpecDisposition::New { iri } => ("NEW", iri.clone()),
@@ -2068,12 +2083,16 @@ mod tests {
                     {"iri": "https://moosedev.dev/kg/Requirement/old", "kind": "Requirement", "title": "Old behavior", "description": "The old claim.\n\nEvidence:\n- specs/labels.md:2", "disposition": "retract"},
                     {"iri": "https://moosedev.dev/kg/Constraint/shared", "kind": "Constraint", "title": "Shared behavior", "description": "The shared claim.\n\nEvidence:\n- specs/shared.md:8", "disposition": "retain_shared"}
                 ],
+                "component": {"iri": "https://moosedev.dev/kg/SystemComponent/labels", "name": "labels", "new": true, "covers": ["labels/"], "added": ["labels/"]},
                 "previous_approval_iri": "https://moosedev.dev/kg/ArchitecturalDecision/approval-v1",
                 "already_approved": false
             }
         })).unwrap());
         let text = gate(&task);
         assert!(text.contains("SPEC APPROVAL · human approval required"));
+        assert!(text.contains(
+            "COMPONENT · labels · NEW\nCovers: labels/\nIRI: https://moosedev.dev/kg/SystemComponent/labels\n"
+        ));
         assert!(text.contains(
             "NEW · Requirement · Preserve labels\nExtracted claim: Labels retain meaningful whitespace."
         ));

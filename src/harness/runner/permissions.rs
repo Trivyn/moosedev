@@ -160,6 +160,7 @@ impl Runner {
         };
         self.task.permission_grants.push(grant.clone());
         pending.approved_grant = Some(grant.id.clone());
+        self.forget_failure();
         self.task.phase = Phase::Working;
         self.intent_event(
             "permission_approved",
