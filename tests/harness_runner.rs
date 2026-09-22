@@ -87,6 +87,10 @@ async fn each_role_is_answered_by_its_own_model_and_journaled() {
         ]
     );
     assert_eq!(runner.task.model_requests[0]["timeouts_secs"]["idle"], 120);
+    assert_eq!(
+        runner.task.model_requests[0]["timeouts_secs"]["tool_arguments"],
+        600
+    );
     let journal = journal_value(&runner).to_string();
     assert!(
         !journal.contains("\"fixture\""),
@@ -2676,6 +2680,10 @@ async fn a_transport_timeout_retries_the_same_request_once_without_spending_a_re
         connect: std::time::Duration::from_secs(5),
         first_chunk: std::time::Duration::from_secs(1),
         idle: std::time::Duration::from_secs(1),
+        // The action request carries a tools contract, so this is the bound the
+        // held response runs out: a request that has produced no byte is still
+        // a transport failure and still earns its one retry.
+        tool_arguments: std::time::Duration::from_secs(1),
     };
     runner.configure(config, None);
     runner.enable_interactive().unwrap();

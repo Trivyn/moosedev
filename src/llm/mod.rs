@@ -52,6 +52,7 @@ impl StructuredOutputMode {
 const DEFAULT_LLM_CONNECT_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_LLM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_LLM_IDLE_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS: u64 = 600;
 const MAX_LLM_TIMEOUT_SECS: u64 = 86_400;
 
 /// Bounds on one provider request. A streaming completion has no total bound,
@@ -60,11 +61,19 @@ const MAX_LLM_TIMEOUT_SECS: u64 = 86_400;
 /// then keep producing data, with no gap longer than `idle`. A non-streaming
 /// request produces nothing until generation ends, so `first_chunk` bounds it
 /// whole. `connect` bounds establishing the connection.
+///
+/// A tool call is the exception, and `tool_arguments` covers it. A provider may
+/// send the call's header and then nothing at all until the whole argument
+/// payload is generated, so under a tools contract there is no progress to
+/// bound: every wait that has produced nothing yet is generation, not a stall,
+/// and must be sized for the longest edit the model may write rather than for a
+/// plausible gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LlmTimeouts {
     pub connect: std::time::Duration,
     pub first_chunk: std::time::Duration,
     pub idle: std::time::Duration,
+    pub tool_arguments: std::time::Duration,
 }
 
 impl Default for LlmTimeouts {
@@ -73,19 +82,22 @@ impl Default for LlmTimeouts {
             connect: std::time::Duration::from_secs(DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
             first_chunk: std::time::Duration::from_secs(DEFAULT_LLM_FIRST_CHUNK_TIMEOUT_SECS),
             idle: std::time::Duration::from_secs(DEFAULT_LLM_IDLE_TIMEOUT_SECS),
+            tool_arguments: std::time::Duration::from_secs(DEFAULT_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS),
         }
     }
 }
 
 impl LlmTimeouts {
-    /// `MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS`, `MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS`
-    /// and `MOOSEDEV_LLM_IDLE_TIMEOUT_SECS`: whole seconds in 1..=86400. An invalid
-    /// value is an error, never a silent default.
+    /// `MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS`, `MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS`,
+    /// `MOOSEDEV_LLM_IDLE_TIMEOUT_SECS` and
+    /// `MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS`: whole seconds in 1..=86400. An
+    /// invalid value is an error, never a silent default.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::from_values(
             std::env::var("MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS").ok(),
             std::env::var("MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS").ok(),
             std::env::var("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS").ok(),
+            std::env::var("MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS").ok(),
         )
     }
 
@@ -94,6 +106,7 @@ impl LlmTimeouts {
         connect: Option<String>,
         first_chunk: Option<String>,
         idle: Option<String>,
+        tool_arguments: Option<String>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             connect: timeout_seconds(
@@ -110,6 +123,11 @@ impl LlmTimeouts {
                 "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS",
                 idle,
                 DEFAULT_LLM_IDLE_TIMEOUT_SECS,
+            )?,
+            tool_arguments: timeout_seconds(
+                "MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS",
+                tool_arguments,
+                DEFAULT_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS,
             )?,
         })
     }
@@ -650,10 +668,26 @@ impl OpenAiCompatClient {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut observation =
             RequestObservation::start(self.usage_binding.as_ref(), &url, model, true);
-        let first_bound = self.timeouts.first_chunk;
+        // Under a tools contract the provider may send nothing at all until the
+        // whole call is generated, so the wait for the first byte is generation
+        // rather than prefill and takes the tool-argument bound. It stays a
+        // transport failure: with no byte received there is nothing to say
+        // whether the server is generating or dead, so the retry still earns
+        // its place.
+        let (first_bound, first_bound_name) = if shape.tools() {
+            (
+                self.timeouts.tool_arguments,
+                "MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS",
+            )
+        } else {
+            (
+                self.timeouts.first_chunk,
+                "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS",
+            )
+        };
         let silent = |url: &str| {
             CompletionError::transport(format!(
-                "LLM request to {url}: no model output within {}s (MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS)",
+                "LLM request to {url}: no model output within {}s ({first_bound_name})",
                 first_bound.as_secs()
             ))
         };
@@ -732,12 +766,27 @@ impl OpenAiCompatClient {
             let mut json_body = Vec::new();
             let mut started = false;
             loop {
-                let next = if started {
-                    tokio::time::timeout(self.timeouts.idle, response.chunk()).await
-                } else {
-                    tokio::time::timeout_at(first_deadline, response.chunk()).await
+                // The gap ahead is bounded by what the last chunk left behind:
+                // an announced tool call whose arguments have not arrived is
+                // generation the provider is withholding, not a stall.
+                let awaiting_arguments = started && stream.tool_arguments_pending();
+                let next = match (started, awaiting_arguments) {
+                    (false, _) => tokio::time::timeout_at(first_deadline, response.chunk()).await,
+                    (true, true) => {
+                        tokio::time::timeout(self.timeouts.tool_arguments, response.chunk()).await
+                    }
+                    (true, false) => {
+                        tokio::time::timeout(self.timeouts.idle, response.chunk()).await
+                    }
                 };
                 let chunk = match next {
+                    Err(_) if awaiting_arguments => {
+                        return Err(CompletionError::ToolArgumentsIncomplete(format!(
+                            "LLM tool call incomplete: the provider announced a tool call and delivered {} bytes of arguments in {}s, then stopped (MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS). A provider that buffers tool-call arguments needs this bound sized for the longest edit the model writes, not for a stall.",
+                            stream.tool_arguments_len(),
+                            self.timeouts.tool_arguments.as_secs()
+                        )))
+                    }
                     Err(_) if started => {
                         return Err(CompletionError::transport(format!(
                             "LLM stream stalled: no data for {}s (MOOSEDEV_LLM_IDLE_TIMEOUT_SECS)",
@@ -862,7 +911,20 @@ impl OpenAiCompatClient {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut observation =
             RequestObservation::start(self.usage_binding.as_ref(), &url, model, false);
-        let bound = self.timeouts.first_chunk;
+        // A non-streaming request yields nothing until generation ends, so this
+        // bound is a generation bound already; under a tools contract it has to
+        // cover writing a whole file's worth of arguments.
+        let (bound, bound_name) = if shape.tools() {
+            (
+                self.timeouts.tool_arguments,
+                "MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS",
+            )
+        } else {
+            (
+                self.timeouts.first_chunk,
+                "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS",
+            )
+        };
         let result = match tokio::time::timeout(
             bound,
             async {
@@ -934,7 +996,7 @@ impl OpenAiCompatClient {
         {
             Ok(result) => result,
             Err(_) => Err(CompletionError::transport(format!(
-                "LLM request to {url}: no complete response within {}s (MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS bounds non-streaming requests)",
+                "LLM request to {url}: no complete response within {}s ({bound_name} bounds non-streaming requests)",
                 bound.as_secs()
             ))),
         };
@@ -1069,6 +1131,9 @@ mod tests {
             connect: std::time::Duration::from_secs(5),
             first_chunk: std::time::Duration::from_secs(1),
             idle: std::time::Duration::from_secs(1),
+            // Deliberately the odd one out, so a test that waits this long
+            // proves the tool-argument bound and not another.
+            tool_arguments: std::time::Duration::from_secs(3),
         }
     }
 
@@ -1118,23 +1183,38 @@ mod tests {
 
     #[test]
     fn llm_timeouts_default_parse_and_reject_invalid_values() {
-        let defaults = LlmTimeouts::from_values(None, None, None).unwrap();
+        let defaults = LlmTimeouts::from_values(None, None, None, None).unwrap();
         assert_eq!(defaults, LlmTimeouts::default());
         assert_eq!(defaults.connect, std::time::Duration::from_secs(10));
         assert_eq!(defaults.first_chunk, std::time::Duration::from_secs(300));
         assert_eq!(defaults.idle, std::time::Duration::from_secs(120));
-        let chosen =
-            LlmTimeouts::from_values(Some("7".into()), Some(" 600 ".into()), Some("".into()))
-                .unwrap();
+        assert_eq!(defaults.tool_arguments, std::time::Duration::from_secs(600));
+        // Four adjacent `Option<String>` the compiler cannot order-check, so
+        // every position carries a value only it can produce.
+        let chosen = LlmTimeouts::from_values(
+            Some("7".into()),
+            Some(" 61 ".into()),
+            Some("".into()),
+            Some("62".into()),
+        )
+        .unwrap();
         assert_eq!(chosen.connect, std::time::Duration::from_secs(7));
-        assert_eq!(chosen.first_chunk, std::time::Duration::from_secs(600));
+        assert_eq!(chosen.first_chunk, std::time::Duration::from_secs(61));
         assert_eq!(chosen.idle, std::time::Duration::from_secs(120));
+        assert_eq!(chosen.tool_arguments, std::time::Duration::from_secs(62));
         for invalid in ["0", "-1", "abc", "86401"] {
-            let error = LlmTimeouts::from_values(None, None, Some(invalid.into()))
+            let error = LlmTimeouts::from_values(None, None, Some(invalid.into()), None)
                 .unwrap_err()
                 .to_string();
             assert!(
                 error.contains("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS"),
+                "{invalid}: {error}"
+            );
+            let error = LlmTimeouts::from_values(None, None, None, Some(invalid.into()))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS"),
                 "{invalid}: {error}"
             );
         }
@@ -1233,6 +1313,90 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    fn tool_piece(delta: serde_json::Value) -> String {
+        format!("data: {}\r\n\r\n", json!({"choices":[delta]}))
+    }
+
+    /// The header of a tool call whose arguments have not started.
+    fn tool_header() -> String {
+        tool_piece(json!({"index":0,"delta":{"role":"assistant","tool_calls":[
+            {"index":0,"id":"call-1","type":"function","function":{"name":"harness_edit","arguments":""}}
+        ]}}))
+    }
+
+    async fn tool_call_against(pieces: Vec<String>) -> (CompletionError, std::time::Duration) {
+        let (endpoint, server) = raw_stub(
+            SSE_HEADERS,
+            pieces,
+            std::time::Duration::from_millis(10),
+            None,
+        )
+        .await;
+        let client = OpenAiCompatClient::new(endpoint, "test").with_timeouts(short_timeouts());
+        let started = std::time::Instant::now();
+        let error = client
+            .chat_completion_tools_checked("model", "prompt", json!([]), true, |_| {})
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        server.abort();
+        (error, elapsed)
+    }
+
+    /// A provider that announces a tool call and then buffers every argument
+    /// byte is generating, not stalling: it gets the longer bound, and the
+    /// failure is not a transport error, so nothing resends the same generation.
+    #[tokio::test]
+    async fn an_announced_tool_call_whose_arguments_never_arrive_is_not_a_transport_failure() {
+        let (error, elapsed) = tool_call_against(vec![tool_header()]).await;
+        assert!(
+            !error.is_transport(),
+            "resending would spend the same generation again: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("0 bytes"), "{error}");
+        assert!(
+            elapsed > std::time::Duration::from_secs(2),
+            "the idle bound must not have cut it: {elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    /// Arguments that have started flowing restore the ordinary stall bound, so
+    /// the longer one never becomes a blanket widening of the tools path.
+    #[tokio::test]
+    async fn a_tools_stream_that_has_delivered_arguments_still_stalls_on_the_idle_bound() {
+        let arguments = tool_piece(json!({"index":0,"delta":{"tool_calls":[
+            {"index":0,"function":{"arguments":"{\"file\":"}}
+        ]}}));
+        let (error, elapsed) = tool_call_against(vec![tool_header(), arguments]).await;
+        assert!(error.is_transport(), "{error}");
+        assert!(
+            error.to_string().contains("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS"),
+            "{error}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+    }
+
+    /// After a finish reason no further arguments can arrive, so a call left
+    /// empty stops holding the rest of the stream at the longer bound.
+    #[tokio::test]
+    async fn a_finished_tool_call_stops_waiting_for_arguments() {
+        let finish = tool_piece(json!({"index":0,"delta":{},"finish_reason":"tool_calls"}));
+        let (error, elapsed) = tool_call_against(vec![tool_header(), finish]).await;
+        assert!(error.is_transport(), "{error}");
+        assert!(
+            error.to_string().contains("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS"),
+            "{error}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
     }
 
     #[test]

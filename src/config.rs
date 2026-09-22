@@ -27,6 +27,7 @@ pub struct ProviderKeys {
     pub connect_timeout_secs: Option<u64>,
     pub first_chunk_timeout_secs: Option<u64>,
     pub idle_timeout_secs: Option<u64>,
+    pub tool_arguments_timeout_secs: Option<u64>,
 }
 
 /// One table of provider settings, read by the environment variable it stands
@@ -57,6 +58,9 @@ impl ProviderLayer for ProviderKeys {
                 self.first_chunk_timeout_secs.map(|secs| secs.to_string())
             }
             "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS" => self.idle_timeout_secs.map(|secs| secs.to_string()),
+            "MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS" => self
+                .tool_arguments_timeout_secs
+                .map(|secs| secs.to_string()),
             _ => None,
         }
     }
@@ -312,6 +316,11 @@ impl DaemonSettings {
                 "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS",
             ),
             pick(environment, &layers, "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS"),
+            pick(
+                environment,
+                &layers,
+                "MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS",
+            ),
         )?;
         Ok(Self {
             http_addr,

@@ -223,7 +223,11 @@ pub async fn prepare_for_contract(
                 reasoning_off,
                 status: if result.is_ok() { "passed" } else { "failed" }.into(),
                 diagnostic: result.as_ref().err().map(|error| match error {
-                    CompletionError::Provider(_) | CompletionError::Transport(_) => {
+                    // Delivery failures are summarised rather than quoted: this
+                    // receipt is persisted, and their messages name the endpoint.
+                    CompletionError::Provider(_)
+                    | CompletionError::Transport(_)
+                    | CompletionError::ToolArgumentsIncomplete(_) => {
                         "Provider request failed during the neutral probe".into()
                     }
                     error => error.to_string().replace(&config.api_key, "[redacted]"),

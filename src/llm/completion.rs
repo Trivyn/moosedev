@@ -15,6 +15,11 @@ pub enum CompletionError {
     /// response arrived. Nothing executable was produced, so the same request
     /// may be sent again.
     Transport(String),
+    /// A tool call was announced but the provider never delivered its arguments
+    /// within the tool-argument bound. Unlike a transport failure this is not
+    /// worth resending: the provider buffers the arguments, so the same request
+    /// spends the same generation and meets the same bound.
+    ToolArgumentsIncomplete(String),
     Provider(EngineError),
 }
 
@@ -28,9 +33,10 @@ impl std::fmt::Display for CompletionError {
             Self::ToolChoiceUnsupported(message) => {
                 write!(f, "LLM provider rejected a required tool choice: {message}")
             }
-            Self::Incomplete(message) | Self::InvalidResponse(message) | Self::Transport(message) => {
-                f.write_str(message)
-            }
+            Self::Incomplete(message)
+            | Self::InvalidResponse(message)
+            | Self::Transport(message)
+            | Self::ToolArgumentsIncomplete(message) => f.write_str(message),
             Self::Provider(error) => std::fmt::Display::fmt(error, f),
         }
     }
@@ -47,7 +53,8 @@ impl CompletionError {
     }
 
     /// A connection, first-output or idle-read failure, as opposed to a provider
-    /// answer or an invalid response.
+    /// answer or an invalid response. A tool call whose arguments never arrived
+    /// is deliberately excluded: resending it repeats the same generation.
     pub fn is_transport(&self) -> bool {
         matches!(self, Self::Transport(_))
     }
@@ -305,6 +312,30 @@ impl CompletionStream {
             tool_calls: self.tool_calls.into_values().collect(),
             tool_choice_fallback: None,
         }
+    }
+
+    /// A tool call has been announced but its arguments have not arrived. A
+    /// provider may send the call's header and then stay silent for the whole
+    /// of argument generation, so this interval is bounded as generation rather
+    /// than as a stall. Openness is `id` or `name`, because either may come
+    /// first. Any pending call counts: calls interleave, and one already filled
+    /// says nothing about the one still being written. `stopped` ends the state
+    /// — after a finish reason no further arguments can legitimately arrive, so
+    /// the trailing usage chunk is a stall like any other.
+    pub(super) fn tool_arguments_pending(&self) -> bool {
+        self.tools
+            && !self.stopped
+            && self.tool_calls.values().any(|call| {
+                (call.id.is_some() || !call.name.is_empty()) && call.arguments.is_empty()
+            })
+    }
+
+    /// Argument bytes accumulated so far, for diagnosing a call that never finished.
+    pub(super) fn tool_arguments_len(&self) -> usize {
+        self.tool_calls
+            .values()
+            .map(|call| call.arguments.len())
+            .sum()
     }
 
     fn accumulate_tool_calls(&mut self, deltas: &serde_json::Value) {

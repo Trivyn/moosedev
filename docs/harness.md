@@ -63,6 +63,7 @@ structured_output = "auto"            # auto | required | disabled
 connect_timeout_secs = 10
 first_chunk_timeout_secs = 300
 idle_timeout_secs = 120
+tool_arguments_timeout_secs = 600     # a buffered tool call generates in silence
 
 [daemon]
 http_addr = "0.0.0.0:7480"            # web UI bind; default 127.0.0.1:0 (ephemeral)
@@ -254,6 +255,20 @@ chunks). A streamed completion has no total bound, so a slow model may keep
 generating a long action. A non-streaming request yields nothing until
 generation ends, so the first-chunk bound limits it as a whole. Invalid values
 are configuration errors. The episode deadline still bounds everything.
+
+A tool call is bounded differently, by `MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS`
+(default 600). A provider may send the call's header with empty `arguments` and
+then nothing at all until the whole payload is generated — LM Studio does — so
+under a tools contract there is no progress to measure and every wait that has
+produced nothing is generation. This bound therefore replaces the first-chunk
+bound for a tools request, streamed or not, and replaces the idle bound while an
+announced call's arguments have not arrived; it must cover the longest edit the
+model writes rather than a plausible stall. Once arguments start flowing, or a
+finish reason lands, the ordinary idle bound resumes. An announced call whose
+arguments never arrive is **not** a transport failure and is not retried: the
+provider buffers, so the same request would spend the same generation and meet
+the same bound. The error names the argument bytes received, because a buffered
+call leaves nothing in the journalled response.
 
 ## Request usage accounting
 

@@ -33,6 +33,11 @@ model = "your-model-id"
 # connect_timeout_secs = 10
 # first_chunk_timeout_secs = 300
 # idle_timeout_secs = 120
+# Many providers send a tool call's header and then nothing at all until every
+# argument byte is generated, so under a tools contract there is no progress to
+# measure. This bound replaces the two above while a call is outstanding, and
+# must cover the longest edit the model writes — not a plausible stall.
+# tool_arguments_timeout_secs = 600
 
 # --- [daemon]: moosedev --serve -------------------------------------------------
 [daemon]

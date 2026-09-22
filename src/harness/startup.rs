@@ -331,6 +331,7 @@ fn resolve(environment: &Environment, layers: &[&dyn ProviderLayer]) -> Result<R
         pick("MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS"),
         pick("MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS"),
         pick("MOOSEDEV_LLM_IDLE_TIMEOUT_SECS"),
+        pick("MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS"),
     )?;
     let response_policy =
         ResponsePolicy::parse(pick("MOOSEDEV_HARNESS_RESPONSE_POLICY").as_deref())?
@@ -691,7 +692,7 @@ mod tests {
         root
     }
 
-    const ROLES: &str = "[harness.model]\nendpoint = \"http://127.0.0.1:1234/v1\"\nmodel = \"base\"\ncontext_window_tokens = 65536\nidle_timeout_secs = 240\n\n[harness.model.implement]\nmodel = \"small\"\ncontext_window_tokens = 16384\naction_contract = \"json_schema\"\nresponse_policy = \"reasoning-off\"\n";
+    const ROLES: &str = "[harness.model]\nendpoint = \"http://127.0.0.1:1234/v1\"\nmodel = \"base\"\ncontext_window_tokens = 65536\nidle_timeout_secs = 240\ntool_arguments_timeout_secs = 900\n\n[harness.model.implement]\nmodel = \"small\"\ncontext_window_tokens = 16384\naction_contract = \"json_schema\"\nresponse_policy = \"reasoning-off\"\n";
 
     #[test]
     fn roles_inherit_the_default_and_override_only_their_own_keys() {
@@ -710,6 +711,10 @@ mod tests {
         assert_eq!(implement.config.context_window_tokens, 16384);
         assert_eq!(implement.config.base_url, "http://127.0.0.1:1234/v1");
         assert_eq!(implement.config.timeouts.idle, Duration::from_secs(240));
+        assert_eq!(
+            implement.config.timeouts.tool_arguments,
+            Duration::from_secs(900)
+        );
         assert_eq!(implement.action_contract, ActionContract::JsonSchema);
         assert_eq!(implement.response_policy, ResponsePolicy::ReasoningOff);
         assert_eq!(settings.describe(), "plan=base implement=small");

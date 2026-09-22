@@ -366,7 +366,7 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs()}}));
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model

@@ -50,6 +50,7 @@ pub struct ModelKeys {
     pub connect_timeout_secs: Option<u64>,
     pub first_chunk_timeout_secs: Option<u64>,
     pub idle_timeout_secs: Option<u64>,
+    pub tool_arguments_timeout_secs: Option<u64>,
 }
 
 impl ProviderLayer for ModelKeys {
@@ -74,6 +75,9 @@ impl ProviderLayer for ModelKeys {
                 self.first_chunk_timeout_secs.map(|secs| secs.to_string())
             }
             "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS" => self.idle_timeout_secs.map(|secs| secs.to_string()),
+            "MOOSEDEV_LLM_TOOL_ARGUMENTS_TIMEOUT_SECS" => self
+                .tool_arguments_timeout_secs
+                .map(|secs| secs.to_string()),
             _ => None,
         }
     }
