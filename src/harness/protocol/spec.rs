@@ -30,6 +30,28 @@ pub struct SpecPrepareRequest {
     pub covers: Vec<String>,
 }
 
+/// Ask for the current approval of a specification path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecCurrentRequest {
+    pub path: String,
+}
+
+/// The current approval of a specification path, with its active records
+/// rebuilt as drafts: a source whose digest is unchanged can be prepared
+/// again from these without extraction, and every entry then reuses its
+/// record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecCurrentResponse {
+    pub path: String,
+    /// The accepted approval marker, when the path has one.
+    pub approval_iri: Option<String>,
+    /// The source digest that approval recorded.
+    pub source_sha256: Option<String>,
+    pub drafts: Vec<SpecRecordDraft>,
+}
+
 /// The SystemComponent an approval anchors its records to, minted or reused
 /// at approval so the records govern every file under its paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

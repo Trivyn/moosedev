@@ -79,15 +79,32 @@ impl Runner {
         );
         let knowledge_revision = checkpoint.revision;
         self.update_knowledge_revision(knowledge_revision.clone());
-        let prompt = spec_prompt(path, &source);
-        let extracted: SpecExtraction = self
-            .model_json(&prompt, "harness_spec_extract", spec_schema(path))
-            .await?;
-        anyhow::ensure!(
-            extracted.action == "propose_spec_records",
-            "spec extraction returned the wrong action"
-        );
-        validate_spec_records(path, &source, &extracted.records)?;
+        // A source the graph already approved at exactly this digest is
+        // prepared from its own records: deterministic, and the model is not
+        // asked to re-extract claims it could only reword.
+        let reused = self.current_spec_records(path, &source_sha256).await?;
+        let records = match &reused {
+            Some((records, approval_iri)) => {
+                self.intent_event("spec_records_reused", approval_iri);
+                self.event(format!(
+                    "Reused {} record(s) of the current approval {approval_iri} for {path}: the source digest is unchanged, so nothing was extracted.",
+                    records.len()
+                ));
+                records.clone()
+            }
+            None => {
+                let prompt = spec_prompt(path, &source);
+                let extracted: SpecExtraction = self
+                    .model_json(&prompt, "harness_spec_extract", spec_schema(path))
+                    .await?;
+                anyhow::ensure!(
+                    extracted.action == "propose_spec_records",
+                    "spec extraction returned the wrong action"
+                );
+                extracted.records
+            }
+        };
+        validate_spec_records(path, &source, &records)?;
 
         // Bind the preview to exactly the bytes seen by the extraction sensor.
         let current = self
@@ -106,7 +123,7 @@ impl Runner {
             path: path.to_owned(),
             source_sha256: source_sha256.clone(),
             knowledge_revision: knowledge_revision.clone(),
-            drafts: extracted.records,
+            drafts: records,
             covers,
         };
         let preview: SpecPrepareResponse = self.post("spec/prepare", &request).await?;
@@ -141,8 +158,13 @@ impl Runner {
         self.task.phase = Phase::AwaitingSpecApproval;
         self.task.turn_finished = true;
         self.task.last_response = format!(
-            "Prepared {} source-grounded record(s) from {path}{}; review the spec approval gate.",
+            "Prepared {} source-grounded record(s) from {path}{}{}; review the spec approval gate.",
             request.drafts.len(),
+            if reused.is_some() {
+                " (reused from its current approval; the source is unchanged)"
+            } else {
+                ""
+            },
             match &self
                 .task
                 .pending_spec
@@ -157,6 +179,43 @@ impl Runner {
             "Prepared spec approval preview for {path} at source sha256 {source_sha256}; no project knowledge was written."
         ));
         self.persist()
+    }
+
+    /// The current approval's records when the source is byte-identical to
+    /// what it approved, with that approval's IRI. `None` when there is no
+    /// approval, the digest differs, or the daemon predates the route.
+    async fn current_spec_records(
+        &mut self,
+        path: &str,
+        source_sha256: &str,
+    ) -> Result<Option<(Vec<SpecRecordDraft>, String)>> {
+        let request = SpecCurrentRequest {
+            path: path.to_owned(),
+        };
+        let current: SpecCurrentResponse = match self.post("spec/current", &request).await {
+            Ok(current) => current,
+            Err(error)
+                if error
+                    .downcast_ref::<HttpFailure>()
+                    .is_some_and(|failure| failure.status == 404) =>
+            {
+                self.event(
+                    "The daemon has no spec/current route; extracting the specification instead.",
+                );
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        anyhow::ensure!(
+            current.path == path,
+            "daemon answered spec/current for a different path"
+        );
+        Ok(match (current.approval_iri, current.source_sha256) {
+            (Some(iri), Some(sha)) if sha == source_sha256 && !current.drafts.is_empty() => {
+                Some((current.drafts, iri))
+            }
+            _ => None,
+        })
     }
 
     /// Commit the exact frozen preview currently displayed to the human.

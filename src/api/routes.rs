@@ -93,6 +93,10 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
             post(crate::harness::daemon::spec::approve),
         )
         .route(
+            "/harness/spec/current",
+            post(crate::harness::daemon::spec::current),
+        )
+        .route(
             "/harness/intent/link",
             post(crate::harness::daemon::intent::link),
         )

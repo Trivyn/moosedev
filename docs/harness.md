@@ -311,7 +311,11 @@ a graph-backed spec approval. The harness reads the current file, validates sour
 evidence, and shows the exact Requirements and Constraints it would create, reuse,
 supersede, or retract. Preparation does not modify the project graph. Review the
 complete preview, then enter `/approve-spec` without a path to accept that exact
-batch.
+batch. A specification the graph already approved at exactly the current digest
+is prepared from that approval's own records rather than extracted again
+(`spec_records_reused`): the preview then shows every entry as `REUSE`, so
+re-running `/approve-spec <path> <covered paths>` to anchor an earlier floating
+batch never supersedes a record over the extraction sensor's rewording.
 
 The covered paths name what the spec governs: a directory (`badciv-map/`, which
 need not exist yet), an exact file, or `.` for the whole project. Approval then

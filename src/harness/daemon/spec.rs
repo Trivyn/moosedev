@@ -34,6 +34,75 @@ pub async fn prepare(
     Ok(Json(prepare_operation(&state, request)?))
 }
 
+pub async fn current(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SpecCurrentRequest>,
+) -> Result<Json<SpecCurrentResponse>, ApiError> {
+    Ok(Json(current_operation(&state, request)?))
+}
+
+/// The current approval of a spec path with its records as drafts. Read-only.
+/// Preparing an unchanged source from these drafts is deterministic: the
+/// claim text round-trips, so every entry reuses its record instead of the
+/// extraction sensor rewording it into a supersession.
+pub fn current_operation(
+    state: &AppState,
+    request: SpecCurrentRequest,
+) -> anyhow::Result<SpecCurrentResponse> {
+    let Some(marker) = current_approval_for_path(state, &request.path)? else {
+        return Ok(SpecCurrentResponse {
+            path: request.path,
+            approval_iri: None,
+            source_sha256: None,
+            drafts: vec![],
+        });
+    };
+    let mut drafts = marker_targets(state, &marker.iri)?
+        .into_iter()
+        .map(draft_of)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    drafts.sort_by(|a, b| (&a.kind, &a.title).cmp(&(&b.kind, &b.title)));
+    Ok(SpecCurrentResponse {
+        path: request.path,
+        approval_iri: Some(marker.iri),
+        source_sha256: marker.source_sha256,
+        drafts,
+    })
+}
+
+/// Invert `claim`: an approved record's description is the draft text
+/// followed by its evidence block. The round trip is checked, never assumed.
+fn draft_of(record: ExistingRecord) -> anyhow::Result<SpecRecordDraft> {
+    use anyhow::Context as _;
+    let (description, evidence) = record
+        .description
+        .rsplit_once("\n\nEvidence:\n")
+        .with_context(|| format!("approved record {} carries no evidence block", record.iri))?;
+    let evidence = evidence
+        .lines()
+        .map(|line| {
+            line.strip_prefix("- ").map(str::to_owned).with_context(|| {
+                format!(
+                    "approved record {} has a malformed evidence line",
+                    record.iri
+                )
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let draft = SpecRecordDraft {
+        kind: record.kind,
+        title: record.title,
+        description: description.to_owned(),
+        evidence,
+    };
+    anyhow::ensure!(
+        claim(&draft) == record.description,
+        "approved record {} does not round-trip through the draft shape",
+        record.iri
+    );
+    Ok(draft)
+}
+
 pub async fn approve(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SpecApproveRequest>,
@@ -1580,6 +1649,84 @@ mod tests {
             }),
             "The harness supports multiline input.\n\nEvidence:\n- docs/spec.md:8-9"
         );
+    }
+
+    #[test]
+    fn an_unchanged_approved_source_prepares_again_from_its_own_records() {
+        let fixture = Fixture::new();
+        let hash =
+            fixture.write_spec("# Map crate\nParse SCRATCHMAP 1 files.\nNo rusqlite dependency.\n");
+        let state = fixture.state();
+        let none = current_operation(
+            &state,
+            SpecCurrentRequest {
+                path: "docs/spec.md".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(none.approval_iri, None);
+        assert!(none.drafts.is_empty());
+
+        let revision = accepted_revision(&state).unwrap();
+        let drafts = vec![
+            draft(
+                "Requirement",
+                "Parse maps",
+                "The crate parses SCRATCHMAP 1 files.",
+                2,
+            ),
+            draft(
+                "Constraint",
+                "No SQLite",
+                "The crate has no rusqlite dependency.",
+                3,
+            ),
+        ];
+        prepare_operation(
+            &state,
+            prepare_request("spec-cur-1", hash.clone(), revision, drafts.clone()),
+        )
+        .unwrap();
+        let approved = approve_operation(
+            &state,
+            SpecApproveRequest {
+                operation_id: "spec-cur-1".into(),
+                owner_id: "spec-test".into(),
+            },
+        )
+        .unwrap();
+
+        let current = current_operation(
+            &state,
+            SpecCurrentRequest {
+                path: "docs/spec.md".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            current.approval_iri.as_deref(),
+            Some(approved.approval_iri.as_str())
+        );
+        assert_eq!(current.source_sha256.as_deref(), Some(hash.as_str()));
+        let mut expected = drafts.clone();
+        expected.sort_by(|a, b| (&a.kind, &a.title).cmp(&(&b.kind, &b.title)));
+        assert_eq!(
+            current.drafts, expected,
+            "drafts round-trip through the stored claim"
+        );
+
+        // Preparing the same source from those drafts, now with a covered
+        // path, reuses every record: no supersession from rewording.
+        let revision = accepted_revision(&state).unwrap();
+        let mut request = prepare_request("spec-cur-2", hash, revision, current.drafts);
+        request.covers = vec!["badciv-map/".into()];
+        let preview = prepare_operation(&state, request).unwrap();
+        assert!(!preview.already_approved, "the component is new");
+        assert!(preview
+            .entries
+            .iter()
+            .all(|entry| matches!(entry.disposition, SpecDisposition::Reuse { .. })));
+        assert!(preview.retirements.is_empty());
     }
 
     #[test]
