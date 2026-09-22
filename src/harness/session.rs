@@ -745,9 +745,8 @@ impl Controller {
             !self.provider.config.model.is_empty(),
             "Choose a model with /model before sending work."
         );
-        let daemon = self
-            .daemon
-            .clone()
+        self.daemon
+            .as_ref()
             .context("Daemon is unavailable. Use /connect.")?;
         if self
             .runner
@@ -758,11 +757,7 @@ impl Controller {
         }
         if self.runner.is_none() {
             let text = self.conversation.queued[0].text.clone();
-            let runner = Runner::create(self.conversation.root.clone(), daemon, text).await?;
-            self.conversation.active_task = Some(runner.task.id.clone());
-            self.conversation.tasks.push(runner.task.id.clone());
-            self.runner = Some(runner);
-            self.configure()?;
+            self.start_task(text).await?;
             self.link_message(&self.conversation.queued[0].id.clone());
             self.conversation.queued.remove(0);
             self.save_conversation()?;
@@ -777,6 +772,22 @@ impl Controller {
             self.save_conversation()?;
         }
         Ok(())
+    }
+    /// Create the conversation's active task from an objective.
+    async fn start_task(&mut self, objective: String) -> Result<()> {
+        anyhow::ensure!(
+            !self.provider.config.model.is_empty(),
+            "Choose a model with /model before sending work."
+        );
+        let daemon = self
+            .daemon
+            .clone()
+            .context("Daemon is unavailable. Use /connect.")?;
+        let runner = Runner::create(self.conversation.root.clone(), daemon, objective).await?;
+        self.conversation.active_task = Some(runner.task.id.clone());
+        self.conversation.tasks.push(runner.task.id.clone());
+        self.runner = Some(runner);
+        self.configure()
     }
     fn link_message(&mut self, id: &str) {
         if let Some(message) = self
@@ -1078,6 +1089,22 @@ impl Controller {
             }
             "/approve" | "/approve-spec" | "/deny" | "/permissions" | "/revoke-permission"
             | "/accept" | "/reject" | "/no-knowledge" | "/plan" | "/review" | "/continue" => {
+                // A spec approval is planning work in its own right: it needs
+                // no prior description of work, so the spec names the task.
+                if command == "/approve-spec" {
+                    if let Some(path) = parts.clone().next() {
+                        let finished = self
+                            .runner
+                            .as_ref()
+                            .is_some_and(|runner| runner.task.phase == Phase::Complete);
+                        if self.runner.is_none() || finished {
+                            self.acquire()?;
+                            self.start_task(format!("Approve specification {path}"))
+                                .await?;
+                            self.save_conversation()?;
+                        }
+                    }
+                }
                 let runner = self
                     .runner
                     .as_mut()

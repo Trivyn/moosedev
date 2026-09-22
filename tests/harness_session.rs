@@ -688,6 +688,42 @@ async fn interruption_preserves_failed_cleanup_and_escape_retries_it_after_recon
     handle.await.unwrap();
 }
 
+/// A spec approval needs no prior description of work: the spec names the task.
+#[tokio::test]
+async fn approve_spec_starts_a_task_when_none_is_active() {
+    let fixture = Fixture::new().await;
+    let (input, mut updates, handle) = fixture.controller(Conversation::new(fixture.root.clone()));
+    until(&mut updates, |state| !state.busy).await;
+    input
+        .send(Command::Input(
+            "/approve-spec missing.md crates/missing/".into(),
+        ))
+        .unwrap();
+    let state = until(&mut updates, |state| !state.busy && state.task.is_some()).await;
+    assert_eq!(
+        state.task.unwrap().objective,
+        "Approve specification missing.md"
+    );
+    assert!(
+        state.conversation.messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .text
+                    .contains("specification does not exist: missing.md")
+        }),
+        "{:?}",
+        state.conversation.messages
+    );
+    assert!(!state
+        .conversation
+        .messages
+        .iter()
+        .any(|message| message.text.contains("No active task")));
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 0);
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn a_spent_repair_budget_shows_its_request_and_continue_explains() {
     let fixture = Fixture::new().await;

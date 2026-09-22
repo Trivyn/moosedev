@@ -307,7 +307,9 @@ modifier: Fn-drag in Terminal.app, Option-drag in iTerm2.
 `/help` lists the controls.
 
 Use `/approve-spec <repo-relative-path> [covered paths]` while planning to prepare
-a graph-backed spec approval. The harness reads the current file, validates source
+a graph-backed spec approval; it can be the first thing typed in a conversation,
+since a spec approval needs no prior description of work — the task is started
+from the spec (`Approve specification <path>`). The harness reads the current file, validates source
 evidence, and shows the exact Requirements and Constraints it would create, reuse,
 supersede, or retract. Preparation does not modify the project graph. Review the
 complete preview, then enter `/approve-spec` without a path to accept that exact
