@@ -119,9 +119,7 @@ Each key is resolved separately, highest first, by the same rule in both process
    the harness loads `.env` into its own environment at launch and the daemon it
    spawns inherits that snapshot, so a `.env` edited afterwards looks explicit to
    the daemon until the harness restarts;
-4. (harness only) `.moosedev/harness/provider.json`, the earlier remembered
-   selection, read only while `moosedev.toml` does not exist and never written again;
-5. the built-in default.
+4. the built-in default.
 
 `index_refresh` says whether the harness rebuilds the code index itself when a
 task finishes with edits, before it derives associations and anchors the capture

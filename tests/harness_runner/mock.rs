@@ -21,39 +21,10 @@ use moosedev::harness::runner::{CheckResult, Phase, Runner};
 use moosedev::policy::{GateDisposition, PolicyDecision};
 use serde_json::{json, Value};
 
+/// Serializes the tests that mutate process-wide state (the environment,
+/// the working directory). A runner's model comes from `Fixture::config`,
+/// never from the environment.
 pub(super) static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-pub(super) struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
-impl Env {
-    pub(super) fn configure(url: &str) -> Self {
-        let vars = [
-            ("MOOSEDEV_LLM_BASE_URL", format!("{url}/v1")),
-            ("MOOSEDEV_LLM_MODEL", "scripted-local-model".into()),
-            ("MOOSEDEV_LLM_API_KEY", "fixture".into()),
-            ("MOOSEDEV_LLM_STRUCTURED_OUTPUT", "required".into()),
-            ("MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS", "32768".into()),
-        ];
-        let prior = vars
-            .iter()
-            .map(|(key, value)| {
-                let old = std::env::var_os(key);
-                std::env::set_var(key, value);
-                (*key, old)
-            })
-            .collect();
-        Self(prior)
-    }
-}
-impl Drop for Env {
-    fn drop(&mut self) {
-        for (key, value) in &self.0 {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
 
 #[derive(Default)]
 pub(super) struct Script {

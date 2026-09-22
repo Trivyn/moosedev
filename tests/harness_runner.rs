@@ -536,7 +536,6 @@ async fn task_permissions_expire_durably_at_completion() {
 async fn first_edit_guard_and_deny_gate_precede_any_write() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     let mut runner = Runner::create(
         fixture.root.clone(),
         fixture.url.clone(),
@@ -544,6 +543,7 @@ async fn first_edit_guard_and_deny_gate_precede_any_write() {
     )
     .await
     .unwrap();
+    runner.configure(fixture.config(), None);
     // The Plan-mode edit refusal serves providers that ignore the output schema.
     runner.set_action_contract(ActionContract::JsonSchema);
     assert_eq!(runner.task.mode, Mode::Plan);
@@ -623,7 +623,6 @@ async fn first_edit_guard_and_deny_gate_precede_any_write() {
 async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     fixture.shared.lock().unwrap().governing_constraints = vec![GoverningConstraint {
         iri: "urn:rule:retry".into(),
         label: "Retries stop at the configured limit".into(),
@@ -637,6 +636,7 @@ async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     )
     .await
     .unwrap();
+    runner.configure(fixture.config(), None);
     fixture.reply("harness_action", json!({"action":"read","file":"code.txt"}));
     runner.advance().await.unwrap();
     let prompt = fixture.last_model_prompt("harness_action");
@@ -704,7 +704,6 @@ fn coverage_events(runner: &Runner, kind: &str) -> Vec<String> {
 async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     fixture.shared.lock().unwrap().governing_constraints = coverage_rules();
     let mut runner = Runner::create(
         fixture.root.clone(),
@@ -713,6 +712,7 @@ async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan(
     )
     .await
     .unwrap();
+    runner.configure(fixture.config(), None);
     // A file read outside the plan shows that nothing is narrowed on return.
     std::fs::write(fixture.root.join("notes.txt"), "context\n").unwrap();
     fixture.reply(
@@ -759,6 +759,7 @@ async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan(
     let id = runner.task.id.clone();
     drop(runner);
     let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
     assert_eq!(runner.task.symbolic.as_ref().unwrap().coverage_returns, 1);
 
     // The limit (1) is used: the same plan is kept and the gap journaled.
@@ -776,7 +777,6 @@ async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan(
 async fn a_plan_that_addresses_each_rule_is_stored_at_once() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     fixture.shared.lock().unwrap().governing_constraints = coverage_rules();
     let mut runner = Runner::create(
         fixture.root.clone(),
@@ -785,6 +785,7 @@ async fn a_plan_that_addresses_each_rule_is_stored_at_once() {
     )
     .await
     .unwrap();
+    runner.configure(fixture.config(), None);
     fixture.reply("harness_action", json!({"action":"plan","summary":"Repair code.txt. Interrupted uploads resume from the acknowledged chunk; the audit entry rule does not apply to this change.","files":["code.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert!(runner.task.plan.is_some());
@@ -984,7 +985,6 @@ async fn a_definition_changed_since_it_was_read_still_holds_the_edit() {
 async fn standing_guidance_is_snapshotted_capped_and_replayed() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     let create = |objective: &str| {
         Runner::create(fixture.root.clone(), fixture.url.clone(), objective.into())
     };
@@ -1165,7 +1165,6 @@ async fn interrupted_command_intent_asks_a_human_never_replays() {
 async fn completed_verification_requires_human_confirmation_and_durable_checkpoint() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     let mut runner = Runner::create(
         fixture.root.clone(),
         fixture.url.clone(),
@@ -1173,6 +1172,7 @@ async fn completed_verification_requires_human_confirmation_and_durable_checkpoi
     )
     .await
     .unwrap();
+    runner.configure(fixture.config(), None);
     fixture.reply("harness_action", json!({"action":"plan","summary":"Inspect code without changes","files":["code.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
@@ -1877,12 +1877,18 @@ async fn capture_ack_outages_retry_the_frozen_operation_without_model_repairs() 
 async fn live_local_model_reaches_enforced_plan_capture_without_editing() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
-    std::env::set_var("MOOSEDEV_LLM_BASE_URL", "http://127.0.0.1:1234/v1");
-    std::env::set_var("MOOSEDEV_LLM_MODEL", "google/gemma-4-26b-a4b-qat");
-    std::env::set_var("MOOSEDEV_LLM_STRUCTURED_OUTPUT", "auto");
     let mut runner = Runner::create(fixture.root.clone(), fixture.url.clone(),
         "Prepare a plan to replace the word original with changed in code.txt. Read the file first. The only permitted file is code.txt. Use a shell check that verifies its eventual contents. Stay in Plan mode; do not execute the change.".into()).await.unwrap();
+    // The one test that speaks to a real server: the local model answers here.
+    runner.configure(
+        moosedev::llm::LlmConfig {
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            model: "google/gemma-4-26b-a4b-qat".into(),
+            structured_output: moosedev::llm::StructuredOutputMode::Auto,
+            ..fixture.config()
+        },
+        None,
+    );
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         for _ in 0..8 {
             if matches!(
@@ -1932,7 +1938,6 @@ async fn live_local_model_reaches_enforced_plan_capture_without_editing() {
 async fn confined_successful_check_reaches_human_review_before_completion() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let _env = Env::configure(&fixture.url);
     let mut runner = Runner::create(
         fixture.root.clone(),
         fixture.url.clone(),
@@ -1940,6 +1945,7 @@ async fn confined_successful_check_reaches_human_review_before_completion() {
     )
     .await
     .unwrap();
+    runner.configure(fixture.config(), None);
     fixture.reply("harness_action", json!({"action":"plan","summary":"Verify the existing file without editing it","files":["code.txt"],"checks":["test -f code.txt"]}));
     runner.advance().await.unwrap();
     runner.confirm_no_knowledge().await.unwrap();

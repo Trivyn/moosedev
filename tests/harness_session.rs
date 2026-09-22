@@ -291,10 +291,6 @@ async fn startup_selects_a_single_model_and_offers_numbered_multiple_models() {
         saved.contains("[harness.model.implement]\nmodel = \"model-a\""),
         "{saved}"
     );
-    assert!(!fixture
-        .root
-        .join(".moosedev/harness/provider.json")
-        .exists());
     input.send(Command::Quit).unwrap();
     handle.await.unwrap();
 }

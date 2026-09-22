@@ -7,8 +7,7 @@
 #   1. a variable set in the real environment (MOOSEDEV_LLM_MODEL=x …);
 #   2. the most specific table, then its parents (see each table below);
 #   3. a value only the project .env supplies;
-#   4. (harness only) .moosedev/harness/provider.json, while this file is absent;
-#   5. the built-in default.
+#   4. the built-in default.
 # A daemon reads the file once at startup; restart it after editing.
 # API keys never go here: `api_key_env` names the variable that holds one.
 

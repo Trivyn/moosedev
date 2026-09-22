@@ -32,7 +32,7 @@ pub async fn chat(
     }
     if !state.llm_configured {
         return Err(ApiError::unavailable(
-            "MOOSE chat requires an explicit LLM provider; set MOOSEDEV_LLM_BASE_URL to enable chat",
+            "MOOSE chat requires an explicit LLM provider; set endpoint under [model] (or [daemon.model]) in moosedev.toml, or MOOSEDEV_LLM_BASE_URL, to enable chat",
         ));
     }
     let session_db = chat_session_db(&state)?;

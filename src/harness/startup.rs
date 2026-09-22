@@ -1,6 +1,5 @@
 //! Interactive client startup. Discovery never opens the graph's writer store.
 use anyhow::{bail, ensure, Context, Result};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -131,7 +130,7 @@ async fn started_backend_http(
         return Ok(None);
     }
     let hint = || {
-        format!("the daemon started but its harness HTTP API failed to start; check MOOSEDEV_HTTP_ADDR and {} for a bind failure, then restart the daemon", runtime::serve_log_path_for(data_dir).display())
+        format!("the daemon started but its harness HTTP API failed to start; check [daemon].http_addr in {} (or MOOSEDEV_HTTP_ADDR) and {} for a bind failure, then restart the daemon", config::FILE_NAME, runtime::serve_log_path_for(data_dir).display())
     };
     // Re-read after observing the socket: publication may have occurred between
     // the outer HTTP probe and this liveness check.
@@ -306,38 +305,17 @@ pub struct ProviderSettings {
     pub index_refresh: config::IndexRefresh,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct RememberedProvider {
-    #[serde(default)]
-    response_policy: ResponsePolicy,
-    base_url: String,
-    model: String,
-}
-
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1234/v1";
-
-fn nonblank(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
-}
 
 /// Resolve one table. Per key: a variable set in the real environment, then
 /// `layers` in order (a role's keys, the harness default, the project-wide
-/// `[model]`), then a value only the project `.env` supplied, then the legacy
-/// remembered provider, then the built-in default. Values pass through the
-/// validators the environment uses.
-fn resolve(
-    environment: &Environment,
-    layers: &[&dyn ProviderLayer],
-    remembered: &RememberedProvider,
-) -> Result<RoleSettings> {
+/// `[model]`), then a value only the project `.env` supplied, then the built-in
+/// default. Values pass through the validators the environment uses.
+fn resolve(environment: &Environment, layers: &[&dyn ProviderLayer]) -> Result<RoleSettings> {
     let pick = |name: &str| crate::config::pick(environment, layers, name);
-    let endpoint = pick("MOOSEDEV_LLM_BASE_URL")
-        .or_else(|| nonblank(remembered.base_url.clone()))
-        .unwrap_or_else(|| DEFAULT_ENDPOINT.into());
+    let endpoint = pick("MOOSEDEV_LLM_BASE_URL").unwrap_or_else(|| DEFAULT_ENDPOINT.into());
     validate_provider_url(&endpoint)?;
-    let model = pick("MOOSEDEV_LLM_MODEL")
-        .or_else(|| nonblank(remembered.model.clone()))
-        .unwrap_or_default();
+    let model = pick("MOOSEDEV_LLM_MODEL").unwrap_or_default();
     let (_, api_key) = crate::config::api_key(environment, layers)?;
     let mut config = LlmConfig::from_values(
         Some(endpoint.trim_end_matches('/').to_owned()),
@@ -356,7 +334,7 @@ fn resolve(
     )?;
     let response_policy =
         ResponsePolicy::parse(pick("MOOSEDEV_HARNESS_RESPONSE_POLICY").as_deref())?
-            .unwrap_or(remembered.response_policy);
+            .unwrap_or_default();
     let action_contract =
         ActionContract::parse(pick("MOOSEDEV_HARNESS_ACTION_CONTRACT").as_deref())?;
     Ok(RoleSettings {
@@ -395,29 +373,12 @@ impl ProviderSettings {
 
     fn load_with(root: &Path, environment: &Environment) -> Result<Self> {
         let file = ModelFile::load(root)?;
-        // The remembered provider predates moosedev.toml and yields to it.
-        let path = root.join(".moosedev/harness/provider.json");
-        let remembered: RememberedProvider = match std::fs::read(&path) {
-            Ok(_) if file.present => RememberedProvider::default(),
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).context("invalid remembered provider settings")?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                RememberedProvider::default()
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let default = resolve(environment, &[&file.default, &file.shared], &remembered)
+        let default = resolve(environment, &[&file.default, &file.shared])
             .with_context(|| format!("[harness.model] in {}", config::FILE_NAME))?;
         let role = |role: ModelRole| {
             file.role(role)
                 .map(|keys| {
-                    resolve(
-                        environment,
-                        &[keys, &file.default, &file.shared],
-                        &remembered,
-                    )
-                    .with_context(|| {
+                    resolve(environment, &[keys, &file.default, &file.shared]).with_context(|| {
                         format!("[harness.model.{}] in {}", role.as_str(), config::FILE_NAME)
                     })
                 })
@@ -468,7 +429,7 @@ impl ProviderSettings {
     ) -> Result<()> {
         ensure!(!model.trim().is_empty(), "select a model ID");
         // The default table is self-contained: it records the endpoint in use
-        // with the model, as the remembered provider did. A role inherits it.
+        // beside the model, and a role inherits both.
         let current = self.config.base_url.clone();
         let endpoint = base_url
             .or_else(|| role.is_none().then_some(current.as_str()))
@@ -828,18 +789,12 @@ mod tests {
     }
 
     #[test]
-    fn the_remembered_provider_is_read_only_until_the_file_exists() {
-        let remembered = r#"{"response_policy":"reasoning-off","base_url":"http://127.0.0.1:9/v1","model":"old"}"#;
-        let root = project(&[(".moosedev/harness/provider.json", remembered)]);
-        let none = Environment::of(&[], &[]);
-        let settings = ProviderSettings::load_with(&root, &none).unwrap();
-        assert_eq!(settings.config.model, "old");
-        assert_eq!(settings.config.base_url, "http://127.0.0.1:9/v1");
-        assert_eq!(settings.response_policy, ResponsePolicy::ReasoningOff);
-        std::fs::write(root.join("moosedev.toml"), "").unwrap();
-        let settings = ProviderSettings::load_with(&root, &none).unwrap();
+    fn without_a_file_or_environment_no_model_is_chosen() {
+        let root = project(&[]);
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap();
         assert!(settings.config.model.is_empty() && !settings.config.configured);
         assert_eq!(settings.config.base_url, DEFAULT_ENDPOINT);
+        assert_eq!(settings.response_policy, ResponsePolicy::default());
         std::fs::remove_dir_all(root).unwrap();
     }
 

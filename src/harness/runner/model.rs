@@ -5,7 +5,7 @@ use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::config::ModelRole;
 use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningConstraint;
-use crate::harness::response::{self, ActionContract, ResponsePolicy};
+use crate::harness::response::{self, ActionContract};
 use crate::harness::startup::RoleSettings;
 use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion, UsageContext};
 use anyhow::{Context, Result};
@@ -196,33 +196,31 @@ impl Runner {
         }
     }
 
-    /// The active role's model: its own settings, else the runner's
-    /// configuration, else the environment.
+    /// The active role's model, else the runner's configuration. A runner that
+    /// nobody configured has no model: reading the environment here would go
+    /// behind the `moosedev.toml` every frontend resolves before it runs.
     pub(super) fn active_config(&self) -> Result<LlmConfig> {
         match (self.role_settings(), &self.config) {
             (Some(settings), _) => Ok(settings.config.clone()),
             (None, Some(config)) => Ok(config.clone()),
-            (None, None) => LlmConfig::from_env(),
+            (None, None) => anyhow::bail!("this task runner has no model configuration"),
         }
     }
 
-    /// The action contract: the active role's, else the runner's explicit
-    /// choice, else `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
-    pub(super) fn action_contract(&self) -> Result<ActionContract> {
+    /// The action contract: the active role's, else the runner's explicit choice.
+    pub(super) fn action_contract(&self) -> ActionContract {
         match (self.role_settings(), self.action_contract) {
-            (Some(settings), _) => Ok(settings.action_contract),
-            (None, Some(contract)) => Ok(contract),
-            (None, None) => ActionContract::from_env(),
+            (Some(settings), _) => settings.action_contract,
+            (None, contract) => contract.unwrap_or_default(),
         }
     }
 
     async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
         let policy = match (self.role_settings(), self.response_policy) {
             (Some(settings), _) => settings.response_policy,
-            (None, Some(policy)) => policy,
-            (None, None) => ResponsePolicy::from_env()?.unwrap_or_default(),
+            (None, policy) => policy.unwrap_or_default(),
         };
-        let contract = self.action_contract()?;
+        let contract = self.action_contract();
         let key = response::cache_key(config, policy, contract);
         if let Some((_, client)) = self.model_clients.iter().find(|(cached, _)| *cached == key) {
             return Ok(client.clone());
@@ -289,7 +287,7 @@ impl Runner {
         let config = self.active_config()?;
         anyhow::ensure!(
             config.configured,
-            "no {} model is configured: choose one with /model, set [harness.model] in moosedev.toml, or set MOOSEDEV_LLM_BASE_URL and MOOSEDEV_LLM_MODEL",
+            "no {} model is configured: choose one with /model, set [harness.model] or [model] in moosedev.toml, or set MOOSEDEV_LLM_BASE_URL and MOOSEDEV_LLM_MODEL",
             self.active_role().as_str()
         );
         // Never silently truncate governing knowledge to fit the model.
@@ -303,7 +301,7 @@ impl Runner {
         // Only the step action uses the configured contract; the capture note
         // stays schema-constrained.
         let contract = if name == "harness_action" {
-            self.action_contract()?
+            self.action_contract()
         } else {
             ActionContract::JsonSchema
         };
@@ -589,7 +587,7 @@ impl Runner {
         }
         prompt.push_str(ROLE_BOUNDARY);
         prompt.push_str(&project_rules(&context.governing_constraints));
-        let contract = self.action_contract()?;
+        let contract = self.action_contract();
         prompt.push_str(match (contract, self.task.batch_capture) {
             (ActionContract::Tools, true) => TOOLS_CONVERSATIONAL_OUTPUT,
             (ActionContract::Tools, false) => TOOLS_SINGLE_ACTION_OUTPUT,
@@ -985,7 +983,7 @@ pub(super) fn action_schema(mode: Mode) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::runner::test_support::{context_router, serve, Project};
+    use crate::harness::runner::test_support::{context_router, serve, test_config, Project};
 
     #[test]
     fn optional_context_respects_byte_budgets_and_unicode() {
@@ -1073,6 +1071,8 @@ mod tests {
         let mut runner = Runner::create(project.0.clone(), daemon, "Recall the decision".into())
             .await
             .unwrap();
+        // The budget follows the configured capacity, as it does in a session.
+        runner.configure(test_config(), None);
         let context = runner.context.clone().unwrap();
         let budget = runner.next_last_result_budget(&context).unwrap();
         assert!(

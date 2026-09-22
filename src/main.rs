@@ -143,20 +143,24 @@ USAGE:
     moosedev --help           Show this help
 
 SOCKET defaults to MOOSEDEV_SOCKET, else <MOOSEDEV_DATA_DIR>/moosedev.sock.
+Configuration: moosedev.toml in the project root, read at startup. [model] is
+every process's default provider (endpoint, model, api_key_env, capacity,
+structured output, timeouts); [daemon] holds http_addr and allowed_origins, and
+[daemon.model] overrides [model] for this daemon. `moosedev init` drops a
+commented moosedev.toml.example; keep moosedev.toml out of version control.
 The web UI binds an ephemeral loopback port by default (discoverable via
---status / ui); set MOOSEDEV_HTTP_ADDR for a stable port or network exposure,
-or MOOSEDEV_NO_HTTP=1 to disable it.
-Configuration: project-root .env plus environment variables. Explicit environment
-values win. The .env is looked up from the current directory upward, stopping at
-the first project root (a dir holding .git, Cargo.toml, package.json,
-pyproject.toml, setup.py, setup.cfg, or requirements.txt).
-Keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
-MOOSEDEV_HTTP_ADDR, MOOSEDEV_NO_HTTP, MOOSEDEV_NO_LSP,
-MOOSEDEV_NO_AUTOSPAWN.
-LLM assistance is disabled unless MOOSEDEV_LLM_BASE_URL is explicitly set;
-then MOOSEDEV_LLM_API_KEY, MOOSEDEV_LLM_MODEL, MOOSEDEV_LLM_ASSIST_LEVEL,
-MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS, and MOOSEDEV_LLM_STRUCTURED_OUTPUT configure
-the provider, capacity, structured-output mode, and assist level.
+--status / ui); set [daemon].http_addr for a stable port or network exposure,
+or MOOSEDEV_NO_HTTP=1 to disable it. LLM assistance stays off until an endpoint
+is configured ([model] or [daemon.model]).
+Environment variables override the file per key, and the project .env supplies
+what neither does. The .env is looked up from the current directory upward,
+stopping at the first project root (a dir holding .git, Cargo.toml, package.json,
+pyproject.toml, setup.py, setup.cfg, or requirements.txt); it is the right place
+for MOOSEDEV_LLM_API_KEY, which never goes in moosedev.toml.
+Environment-only keys: MOOSEDEV_DATA_DIR, MOOSEDEV_ONTOLOGY_DIR, MOOSEDEV_SOCKET,
+MOOSEDEV_NO_HTTP, MOOSEDEV_NO_LSP, MOOSEDEV_NO_AUTOSPAWN,
+MOOSEDEV_LLM_ASSIST_LEVEL. MOOSEDEV_HTTP_ADDR, MOOSEDEV_ALLOWED_ORIGINS and
+MOOSEDEV_LLM_* override their moosedev.toml equivalents.
 
 EXPORT OPTIONS:
     --format nq|nt|ttl        Output format (default: nq)

@@ -125,8 +125,9 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
 
 /// Start the local human-facing HTTP API/UI unless explicitly disabled.
 ///
-/// Infallible by design: a UI bind failure (port in use, bad `MOOSEDEV_HTTP_ADDR`,
-/// headless box) must never take down the MCP backend, which is the actual reason
+/// Infallible by design: a UI bind failure (port in use, an unbindable
+/// `[daemon].http_addr`, headless box) must never take down the MCP backend,
+/// which is the actual reason
 /// the process exists. On failure this logs a warning and returns `None`; on
 /// success it returns the bound address (used by `--serve --open` to launch a
 /// browser, and published to `http.addr` for `--status`/`ui`).

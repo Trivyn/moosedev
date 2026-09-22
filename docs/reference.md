@@ -235,11 +235,19 @@ workbench so the request uses the live store.
 
 ## Environment variables
 
-MOOSEDev looks for a `.env` from the current directory upward and stops after
-the first project root. The nearest `.env` wins, and explicit process
-environment values take precedence. A project root contains `.git`,
-`Cargo.toml`, `package.json`, `pyproject.toml`, `setup.py`, `setup.cfg`, or
-`requirements.txt`.
+Models, the workbench bind address, and the trusted browser origins belong in
+`moosedev.toml` in the project root, the one file the daemon and the harness
+share (`[model]`, `[daemon]`, `[harness]`; see
+[the harness guide](harness.md#configuration-moosedevtoml) and the commented
+`moosedev.toml.example` that `moosedev init` installs). The variables below
+override that file per key; the rest of them have no file equivalent.
+
+MOOSEDev also looks for a `.env` from the current directory upward and stops
+after the first project root. The nearest `.env` wins, explicit process
+environment values take precedence over it, and `moosedev.toml` ranks between
+the two. A project root contains `.git`, `Cargo.toml`, `package.json`,
+`pyproject.toml`, `setup.py`, `setup.cfg`, or `requirements.txt`. An API key
+belongs in `.env` or the environment, never in `moosedev.toml`.
 
 | Variable | Purpose |
 | --- | --- |

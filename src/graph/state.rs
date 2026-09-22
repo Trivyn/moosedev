@@ -122,7 +122,8 @@ pub struct AppState {
     pub vector_store: Option<Arc<VecStore>>,
     pub engine_config: EngineConfig,
     pub llm: OpenAiCompatClient,
-    /// True only when `MOOSEDEV_LLM_BASE_URL` explicitly opts into an LLM provider.
+    /// True only when an endpoint explicitly opts into an LLM provider, from
+    /// `[model]` / `[daemon.model]` in `moosedev.toml` or `MOOSEDEV_LLM_BASE_URL`.
     pub llm_configured: bool,
     /// Loaded provider/model context capacity. Story uses a conservative
     /// fraction as its complete request budget rather than trying to fill it.

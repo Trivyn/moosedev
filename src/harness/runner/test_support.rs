@@ -5,6 +5,20 @@ use axum::{extract::State, routing::post, Json, Router};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The provider a test runner is configured with, standing in for the one a
+/// session resolves from `moosedev.toml`.
+pub(crate) fn test_config() -> crate::llm::LlmConfig {
+    crate::llm::LlmConfig {
+        base_url: "http://127.0.0.1:1234/v1".into(),
+        api_key: "fixture".into(),
+        model: "fixture-model".into(),
+        configured: true,
+        context_window_tokens: crate::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
+        structured_output: crate::llm::StructuredOutputMode::Auto,
+        timeouts: Default::default(),
+    }
+}
+
 /// A temporary project root removed on drop.
 pub(crate) struct Project(pub(crate) PathBuf);
 
