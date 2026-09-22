@@ -1,8 +1,8 @@
 //! Daemon-backed coding workflow with mandatory reading and capture.
 
-/// The harness's local model configuration, in the project root. Named here,
-/// outside the `harness` feature, because `moosedev init` must ignore it.
-pub const CONFIG_FILE_NAME: &str = "moosedev.toml";
+/// The project's local configuration file (see [`crate::config`]); `moosedev
+/// init` ignores it in git.
+pub const CONFIG_FILE_NAME: &str = crate::config::FILE_NAME;
 
 #[cfg(feature = "harness")]
 mod clipboard;

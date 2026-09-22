@@ -22,6 +22,10 @@ pub struct HealthResponse {
     pub project_root: String,
     pub llm_configured: bool,
     pub llm_assist_level: String,
+    /// The resolved provider, so `--status` and a human can see which model a
+    /// running daemon answers with; absent when assistance is off. Never the key.
+    pub llm_endpoint: Option<String>,
+    pub llm_model: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -44,36 +44,55 @@ list. `/model` refreshes that list; `/model NUMBER` or `/model MODEL_ID` selects
 `/model http://HOST:PORT/v1 MODEL_ID` selects an endpoint and model. Model selection
 affects the harness's coding session; it does not reconfigure a shared daemon.
 
-### Model configuration: `moosedev.toml`
+### Configuration: `moosedev.toml`
 
-The harness reads its models from `moosedev.toml` in the project root. The file is
-local to this machine (`moosedev init` adds `/moosedev.toml` to `.gitignore`): it
-names endpoints and model IDs, holds no project knowledge, and never an API key.
-`/model` edits it in place and keeps your comments.
+The daemon and the harness read one file, `moosedev.toml` in the project root.
+The file is local to this machine (`moosedev init` adds `/moosedev.toml` to
+`.gitignore`): it names endpoints and model IDs, holds no project knowledge, and
+never an API key. `/model` edits it in place and keeps your comments.
 
 ```toml
-[harness]
-index_refresh = "auto"                # auto | frozen-python | off
-
-[harness.model]                       # the default for every role
+[model]                               # every process's default model
 endpoint = "http://127.0.0.1:1234/v1"
 model = "qwen/qwen3.8-27b"
 api_key_env = "MOOSEDEV_LLM_API_KEY"  # the variable holding the key, never the key
 context_window_tokens = 32768
 structured_output = "auto"            # auto | required | disabled
-response_policy = "auto"              # auto | provider-default | reasoning-off
-action_contract = "tools"             # tools | json_schema
 connect_timeout_secs = 10
 first_chunk_timeout_secs = 300
 idle_timeout_secs = 120
 
-[harness.model.plan]                  # unset keys inherit from [harness.model]
+[daemon]
+http_addr = "0.0.0.0:7480"            # web UI bind; default 127.0.0.1:0 (ephemeral)
+allowed_origins = ["http://mbp.local:7480"]  # browser origins to trust, see below
+
+[daemon.model]                        # the daemon's own model; unset keys inherit [model]
+model = "google/gemma-4-26b-a4b"
+
+[harness]
+index_refresh = "auto"                # auto | frozen-python | off
+
+[harness.model]                       # the harness default; unset keys inherit [model]
+response_policy = "auto"              # auto | provider-default | reasoning-off
+action_contract = "tools"             # tools | json_schema
+
+[harness.model.plan]                  # unset keys inherit [harness.model], then [model]
 model = "qwen/qwen3.8-27b"
 
 [harness.model.implement]
 model = "google/gemma-4-26b-a4b"
 context_window_tokens = 16384
 ```
+
+`[model]` is the project-wide default: one local model needs only that table.
+`[daemon.model]` is what `moosedev --serve` uses for assisted query, chat and
+Story narration (`moosedev --status` shows the model it resolved); `[harness.*]`
+is what the harness uses, per role. `[daemon].http_addr` replaces
+`MOOSEDEV_HTTP_ADDR`. When the UI is bound to a network interface and opened by
+hostname, the daemon's DNS-rebinding defence would refuse the `Host`; listing
+that origin in `allowed_origins` (or `MOOSEDEV_ALLOWED_ORIGINS`) makes its
+authority a trusted host as well. A daemon reads the file once at startup, so a
+change needs a daemon restart; the harness reads it at launch and on `/model`.
 
 There are two roles, and the role follows the task's mode. `plan` answers while the
 task is in Plan: planning actions, replies, and `/approve-spec` extraction.
@@ -87,16 +106,19 @@ reports the resulting `plan=… implement=…` mapping. The TUI header shows the
 answering now. A local server may need to swap models between roles; the
 first-chunk timeout covers a load.
 
-Each key is resolved separately, highest first:
+Each key is resolved separately, highest first, by the same rule in both processes:
 
 1. a variable set in the real environment (`MOOSEDEV_LLM_MODEL=x moosedev-harness`),
    which overrides every role for that invocation;
-2. the role's table, then `[harness.model]`;
-3. a value that only the project `.env` supplies. The daemon reads the same `.env`
-   for its own model, so it is the shared project default and does not flatten the
-   roles;
-4. `.moosedev/harness/provider.json`, the earlier remembered selection, read only
-   while `moosedev.toml` does not exist and never written again;
+2. the most specific table, then its parents: the role's table, `[harness.model]`,
+   `[model]` (for the daemon: `[daemon.model]`, `[model]`);
+3. a value that only the project `.env` supplies. It ranks below the file so a
+   `.env` written for one process does not flatten the other's roles; note that
+   the harness loads `.env` into its own environment at launch and the daemon it
+   spawns inherits that snapshot, so a `.env` edited afterwards looks explicit to
+   the daemon until the harness restarts;
+4. (harness only) `.moosedev/harness/provider.json`, the earlier remembered
+   selection, read only while `moosedev.toml` does not exist and never written again;
 5. the built-in default.
 
 `index_refresh` says whether the harness rebuilds the code index itself when a

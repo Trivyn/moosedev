@@ -1,21 +1,16 @@
 //! Browser boundary for the local daemon, including mutation and checkpoint routes.
-use axum::extract::Request;
+use std::sync::Arc;
+
+use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-fn configured_origins() -> Vec<String> {
-    std::env::var("MOOSEDEV_ALLOWED_ORIGINS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|origin| origin_authority(origin).is_some())
-        .map(str::to_owned)
-        .collect()
-}
+use crate::graph::AppState;
 
-fn origin_authority(origin: &str) -> Option<&str> {
+/// The authority of an `http(s)://host[:port]` origin with nothing after it.
+pub(crate) fn origin_authority(origin: &str) -> Option<&str> {
     let authority = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))?;
@@ -56,8 +51,12 @@ fn trusted(headers: &HeaderMap, uri: &Uri, allowed: &[String]) -> bool {
         .and_then(|v| v.to_str().ok())
         .or_else(|| uri.authority().map(|a| a.as_str()));
     // Same-origin equality alone permits DNS rebinding. Enforce this even
-    // when Origin is absent, as on a browser's same-origin GET.
-    if host.is_some_and(|host| !address_authority(host)) {
+    // when Origin is absent, as on a browser's same-origin GET. A hostname
+    // the operator listed as an allowed origin is theirs to trust: that is how
+    // a daemon exposed on a network interface is reached by name.
+    if host.is_some_and(|host| {
+        !address_authority(host) && !allowed.iter().any(|o| origin_authority(o) == Some(host))
+    }) {
         return false;
     }
     match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
@@ -74,8 +73,12 @@ fn trusted(headers: &HeaderMap, uri: &Uri, allowed: &[String]) -> bool {
     }
 }
 
-pub(super) async fn guard_request(request: Request, next: Next) -> Response {
-    if !trusted(request.headers(), request.uri(), &configured_origins()) {
+pub(super) async fn guard_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !trusted(request.headers(), request.uri(), &state.allowed_origins) {
         return (
             StatusCode::FORBIDDEN,
             "untrusted browser origin or daemon host",
@@ -85,8 +88,7 @@ pub(super) async fn guard_request(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-pub(super) fn cors_layer() -> CorsLayer {
-    let allowed = configured_origins();
+pub(super) fn cors_layer(allowed: Vec<String>) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |_, parts| {
             trusted(&parts.headers, &parts.uri, &allowed)
@@ -171,6 +173,24 @@ mod tests {
                 &[]
             ));
         }
+        // A daemon exposed on the network, reached by the name its operator
+        // listed: the page load (no Origin) and its same-origin fetches.
+        let named = ["http://mbp.local:7480".to_string()];
+        assert!(check(Some("mbp.local:7480"), None, None, &named));
+        assert!(check(
+            Some("mbp.local:7480"),
+            Some("http://mbp.local:7480"),
+            Some("same-origin"),
+            &named
+        ));
+        assert!(!check(Some("mbp.local:7480"), None, None, &[]));
+        assert!(!check(Some("rebind.example:7480"), None, None, &named));
+        assert!(!check(
+            Some("mbp.local:7480"),
+            Some("http://rebind.example:7480"),
+            None,
+            &named
+        ));
         assert!(check(
             Some("127.0.0.1:7474"),
             Some("http://localhost:5173"),

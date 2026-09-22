@@ -245,7 +245,8 @@ environment values take precedence. A project root contains `.git`,
 | --- | --- |
 | `MOOSEDEV_DATA_DIR` | Durable store and runtime directory. Keep this identical across a daemon and its clients. |
 | `MOOSEDEV_SOCKET` | Override the Unix socket used by `--serve` and `--connect`. |
-| `MOOSEDEV_HTTP_ADDR` | Set the workbench bind address. The default is `127.0.0.1:0`. |
+| `MOOSEDEV_HTTP_ADDR` | Set the workbench bind address. The default is `127.0.0.1:0`. Or `http_addr` under `[daemon]` in `moosedev.toml`. |
+| `MOOSEDEV_ALLOWED_ORIGINS` | Comma-separated browser origins the daemon trusts besides its own address; each is also accepted as the request `Host`, which is how a network-exposed UI is reached by hostname. Or `allowed_origins` under `[daemon]`. |
 | `MOOSEDEV_NO_HTTP` | Disable the web workbench when truthy. |
 | `MOOSEDEV_NO_LSP` | Disable the daemon's Knowledge-LSP endpoint when truthy. |
 | `MOOSEDEV_NO_AUTOSPAWN` | Prevent `--connect` and `ui` from starting a daemon automatically. |
@@ -254,7 +255,7 @@ environment values take precedence. A project root contains `.git`,
 | `MOOSEDEV_SCIP_PRODUCER` | Override the Rust SCIP command. The default is `rust-analyzer`. |
 | `MOOSEDEV_SCIP_TYPESCRIPT` | Override the TypeScript SCIP command. The default invokes `npx --yes @sourcegraph/scip-typescript`. |
 | `MOOSEDEV_SCIP_PYTHON` | Override the Python SCIP command. The default invokes `npx --yes @sourcegraph/scip-python` and requires Python 3.10 or newer on `PATH`. |
-| `MOOSEDEV_LLM_BASE_URL` | Opt into an OpenAI-compatible endpoint for assisted query, chat, and Story narration. Without it, assistance remains symbolic. |
+| `MOOSEDEV_LLM_BASE_URL` | Opt into an OpenAI-compatible endpoint for assisted query, chat, and Story narration. Without it, assistance remains symbolic. The `MOOSEDEV_LLM_*` settings can instead be written once as `[model]` (or `[daemon.model]`) in `moosedev.toml`; see `docs/harness.md`. A real environment variable outranks the file, which outranks `.env`. |
 | `MOOSEDEV_LLM_API_KEY` | API key for the configured LLM endpoint. |
 | `MOOSEDEV_LLM_MODEL` | Model name sent to the configured endpoint. |
 | `MOOSEDEV_LLM_ASSIST_LEVEL` | Select the configured assistance level. |

@@ -35,7 +35,6 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 
 use crate::api;
 use crate::graph::AppState;
-use crate::llm::LlmConfig;
 use crate::mcp::MooseDevServer;
 
 /// Filename of the per-project rendezvous socket, co-located in the data dir.
@@ -75,16 +74,21 @@ pub async fn build_state(data_dir: &Path, ontology_dir: &Path) -> anyhow::Result
         "MOOSEDev: bootstrapping state (data dir: {})…",
         data_dir.display()
     );
-    let llm_cfg = LlmConfig::from_env()?;
-    let llm_base_url = llm_cfg.base_url.clone();
-    let llm_configured = llm_cfg.configured;
-    let mut state = AppState::bootstrap_with_llm_config(data_dir, ontology_dir, llm_cfg)?;
     // The project root, not the cwd: a daemon started from a subdirectory must
-    // still load the substrate covering the whole project it serves.
-    state.load_substrate(&crate::project::project_root());
+    // still read the project's moosedev.toml and load the substrate covering the
+    // whole project it serves.
+    let root = crate::project::project_root();
+    let settings = crate::config::DaemonSettings::load(&root)?;
+    let llm_base_url = settings.llm.base_url.clone();
+    let llm_model = settings.llm.model.clone();
+    let llm_configured = settings.llm.configured;
+    let mut state = AppState::bootstrap_with_llm_config(data_dir, ontology_dir, settings.llm)?;
+    state.http_bind_addr = settings.http_addr;
+    state.allowed_origins = settings.allowed_origins;
+    state.load_substrate(&root);
     if llm_configured {
         tracing::info!(
-            "MOOSEDev: LLM assistance enabled at {llm_base_url} / level {:?} / context {} tokens / Story prompt budget {} tokens",
+            "MOOSEDev: LLM assistance enabled: {llm_model} at {llm_base_url} / level {:?} / context {} tokens / Story prompt budget {} tokens",
             state.engine_config.llm_assist_level,
             state.llm_context_window_tokens,
             crate::stories::narration_prompt_token_budget(state.llm_context_window_tokens),
@@ -137,10 +141,7 @@ pub async fn spawn_http_if_enabled(state: Arc<AppState>, data_dir: &Path) -> Opt
         tracing::info!("MOOSEDev HTTP UI disabled by MOOSEDEV_NO_HTTP");
         return None;
     }
-    let addr = http_addr()
-        .map_err(|e| tracing::warn!("HTTP UI unavailable: {e}; MCP backend continues"))
-        .ok()?;
-    let (listener, local_addr) = bind_http_listener(addr, data_dir).await?;
+    let (listener, local_addr) = bind_http_listener(state.http_bind_addr, data_dir).await?;
     // Publish in-process too: workbench-URL rendering trusts only the address
     // THIS run bound, never the on-disk file (which lingers after a crash).
     state.publish_http_addr(local_addr);
@@ -180,6 +181,11 @@ pub fn invalidate_http_addr(data_dir: &Path) {
 /// alone is untrustworthy: it survives crashes, and an ephemeral port can be
 /// reclaimed by an unrelated local process.
 pub async fn verify_http_addr(data_dir: &Path) -> Option<SocketAddr> {
+    verified_health(data_dir).await.map(|(addr, _)| addr)
+}
+
+/// [`verify_http_addr`] plus the health document it verified, for `--status`.
+pub async fn verified_health(data_dir: &Path) -> Option<(SocketAddr, serde_json::Value)> {
     let addr = read_http_addr(data_dir)?;
     let expected = std::fs::canonicalize(data_dir).ok()?;
     let client = reqwest::Client::builder()
@@ -205,7 +211,7 @@ pub async fn verify_http_addr(data_dir: &Path) -> Option<SocketAddr> {
         return None;
     }
     let served = health.get("data_dir").and_then(serde_json::Value::as_str)?;
-    (Path::new(served) == expected).then_some(addr)
+    (Path::new(served) == expected).then_some((addr, health))
 }
 
 /// Bind the HTTP UI's TCP listener at `addr` and publish the resolved address to
@@ -255,17 +261,6 @@ fn http_disabled() -> bool {
     std::env::var_os("MOOSEDEV_NO_HTTP")
         .and_then(|value| value.into_string().ok())
         .is_some_and(|value| !value.is_empty() && value != "0")
-}
-
-fn http_addr() -> anyhow::Result<SocketAddr> {
-    // Default to an ephemeral loopback port (`:0`): a fixed port would collide
-    // across the per-data-dir backends this design runs in parallel. The OS picks
-    // a free port; the resolved address is published to `http.addr` and surfaced
-    // by `--status`/`ui`. Set MOOSEDEV_HTTP_ADDR for a stable port or to expose
-    // the UI on a network interface.
-    let raw = std::env::var("MOOSEDEV_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:0".to_string());
-    raw.parse()
-        .map_err(|e| anyhow::anyhow!("parse MOOSEDEV_HTTP_ADDR={raw:?}: {e}"))
 }
 
 /// Derive the rendezvous socket path for a data dir. Both `--serve` and
@@ -651,12 +646,6 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
     }
 
     impl Drop for EnvRestore {
@@ -666,28 +655,6 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
-    }
-
-    #[test]
-    fn http_addr_defaults_to_ephemeral_loopback() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _restore = EnvRestore::remove("MOOSEDEV_HTTP_ADDR");
-
-        let addr = http_addr().unwrap();
-        assert!(addr.ip().is_loopback(), "default must stay on loopback");
-        assert_eq!(
-            addr.port(),
-            0,
-            "default must be an OS-assigned ephemeral port"
-        );
-    }
-
-    #[test]
-    fn http_addr_accepts_configured_socket_addr() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _restore = EnvRestore::set("MOOSEDEV_HTTP_ADDR", "0.0.0.0:7475");
-
-        assert_eq!(http_addr().unwrap().to_string(), "0.0.0.0:7475");
     }
 
     #[test]

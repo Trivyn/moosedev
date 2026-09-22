@@ -1,13 +1,14 @@
-//! `moosedev.toml`: the local, human-authored model configuration for the
-//! harness. It names the model for each role and that model's settings; it holds
-//! no project knowledge and never a credential.
-use anyhow::{bail, ensure, Context, Result};
+//! The `[harness]` table of `moosedev.toml` (see [`crate::config`]): the model
+//! for each role and that model's settings, inheriting the project-wide
+//! `[model]` table.
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
-pub const FILE_NAME: &str = super::CONFIG_FILE_NAME;
-const MAX_FILE_BYTES: u64 = 64 * 1024;
-const HEADER: &str = "# Local MOOSEDev harness configuration. Keep this file out of version control:\n# model IDs and endpoints belong to this machine. A variable set in the real\n# environment overrides this file; this file overrides the project .env.\n# API keys are never stored here; api_key_env names the variable that holds one.\n";
+use crate::config::ProviderLayer;
+pub use crate::config::{read_regular, Environment, ProjectFile, ProviderKeys, FILE_NAME};
+
+const HEADER: &str = "# Local MOOSEDev configuration. Keep this file out of version control: model IDs\n# and endpoints belong to this machine. [model] is every process's default;\n# [daemon] and [harness] override it. A variable set in the real environment\n# overrides this file; this file overrides the project .env.\n# API keys are never stored here; api_key_env names the variable that holds one.\n";
 
 /// Which configured model answers a request. The role follows the task mode:
 /// planning work uses `Plan`; approved work, and the capture note written by
@@ -51,6 +52,33 @@ pub struct ModelKeys {
     pub idle_timeout_secs: Option<u64>,
 }
 
+impl ProviderLayer for ModelKeys {
+    fn api_key_env(&self) -> Option<String> {
+        self.api_key_env.clone()
+    }
+
+    fn get(&self, variable: &str) -> Option<String> {
+        match variable {
+            "MOOSEDEV_LLM_BASE_URL" => self.endpoint.clone(),
+            "MOOSEDEV_LLM_MODEL" => self.model.clone(),
+            "MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS" => {
+                self.context_window_tokens.map(|tokens| tokens.to_string())
+            }
+            "MOOSEDEV_LLM_STRUCTURED_OUTPUT" => self.structured_output.clone(),
+            "MOOSEDEV_HARNESS_RESPONSE_POLICY" => self.response_policy.clone(),
+            "MOOSEDEV_HARNESS_ACTION_CONTRACT" => self.action_contract.clone(),
+            "MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS" => {
+                self.connect_timeout_secs.map(|secs| secs.to_string())
+            }
+            "MOOSEDEV_LLM_FIRST_CHUNK_TIMEOUT_SECS" => {
+                self.first_chunk_timeout_secs.map(|secs| secs.to_string())
+            }
+            "MOOSEDEV_LLM_IDLE_TIMEOUT_SECS" => self.idle_timeout_secs.map(|secs| secs.to_string()),
+            _ => None,
+        }
+    }
+}
+
 /// When the harness rebuilds the code index itself, so that associations and
 /// capture anchors are proven against the source the task produced.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +106,8 @@ impl IndexRefresh {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub present: bool,
+    /// The project-wide `[model]` table, beneath every harness table.
+    pub shared: ProviderKeys,
     pub default: ModelKeys,
     pub plan: Option<ModelKeys>,
     pub implement: Option<ModelKeys>,
@@ -93,24 +123,23 @@ impl ModelFile {
     }
 
     pub fn load(root: &Path) -> Result<Self> {
-        match read_regular(&root.join(FILE_NAME))? {
-            Some(text) => Self::parse(&text).with_context(|| format!("invalid {FILE_NAME}")),
-            None => Ok(Self::default()),
-        }
+        Self::of(ProjectFile::load(root)?)
     }
 
     fn parse(text: &str) -> Result<Self> {
+        Self::of(ProjectFile::parse(text)?)
+    }
+
+    fn of(project: ProjectFile) -> Result<Self> {
         let mut file = Self {
-            present: true,
+            present: project.present,
+            shared: project.model,
             ..Self::default()
         };
-        let document: toml::Table = text.parse()?;
-        // Other top-level tables may come to belong to other MOOSEDev surfaces;
-        // inside [harness] every key is ours, so a typo there is an error.
-        let Some(harness) = document.get("harness") else {
+        // Inside [harness] every key is ours, so a typo there is an error.
+        let Some(harness) = project.harness else {
             return Ok(file);
         };
-        let harness = harness.as_table().context("[harness] must be a table")?;
         if let Some(unknown) = harness
             .keys()
             .find(|key| !matches!(key.as_str(), "model" | "index_refresh"))
@@ -147,107 +176,6 @@ impl ModelFile {
             .context("[harness.model]")?;
         Ok(file)
     }
-}
-
-/// Distinguishes a variable set in the real process environment from one that
-/// only the project `.env` supplied. The first is a per-invocation override and
-/// outranks `moosedev.toml`; the second is the shared project default (the
-/// daemon reads the same file) and ranks below it.
-///
-/// It is a snapshot taken once, after the binary has loaded `.env` into the
-/// process, so every key of one load is judged against the same state.
-#[derive(Debug, Default)]
-pub struct Environment {
-    process: HashMap<String, String>,
-    dotenv: HashMap<String, String>,
-}
-
-impl Environment {
-    pub fn load(root: &Path) -> Result<Self> {
-        let process: HashMap<String, String> = std::env::vars_os()
-            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-            .collect();
-        let path = root.join(".env");
-        let entries = match dotenvy::from_path_iter(&path) {
-            Ok(entries) => entries,
-            Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    process,
-                    ..Self::default()
-                });
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("load dotenv {}", path.display()))
-            }
-        };
-        let mut dotenv = HashMap::new();
-        for entry in entries {
-            let (key, value) = entry.with_context(|| format!("load dotenv {}", path.display()))?;
-            dotenv.insert(key, value);
-        }
-        Ok(Self { process, dotenv })
-    }
-
-    /// A process and `.env` state for tests; `.env` entries are also loaded
-    /// into the process, as the binary does before anything reads them.
-    #[cfg(test)]
-    pub fn of(process: &[(&str, &str)], dotenv: &[(&str, &str)]) -> Self {
-        let owned = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
-            pairs
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect()
-        };
-        let mut all = owned(dotenv);
-        all.extend(owned(process));
-        Self {
-            process: all,
-            dotenv: owned(dotenv),
-        }
-    }
-
-    /// The variable's value, from either source; blank counts as unset.
-    pub fn value(&self, name: &str) -> Option<String> {
-        self.process
-            .get(name)
-            .filter(|value| !value.trim().is_empty())
-            .cloned()
-    }
-
-    /// Set outside the project `.env`. A value identical to the `.env` entry is
-    /// indistinguishable from one it supplied and is treated as such.
-    pub fn explicit(&self, name: &str) -> Option<String> {
-        self.value(name)
-            .filter(|value| self.dotenv.get(name) != Some(value))
-    }
-
-    pub fn project(&self, name: &str) -> Option<String> {
-        self.value(name)
-            .filter(|value| self.dotenv.get(name) == Some(value))
-    }
-}
-
-/// A regular, bounded UTF-8 file, or `None` when absent. A symlink is refused
-/// so the harness never reads or rewrites a file outside the project.
-fn read_regular(path: &Path) -> Result<Option<String>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
-    };
-    ensure!(
-        metadata.is_file(),
-        "{} must be a regular file, not a symlink or directory",
-        path.display()
-    );
-    ensure!(
-        metadata.len() <= MAX_FILE_BYTES,
-        "{} exceeds {MAX_FILE_BYTES} bytes",
-        path.display()
-    );
-    std::fs::read_to_string(path)
-        .map(Some)
-        .with_context(|| format!("read {}", path.display()))
 }
 
 fn child<'a>(
@@ -420,46 +348,16 @@ mod tests {
     }
 
     #[test]
-    fn a_real_dotenv_separates_project_defaults_from_explicit_variables() {
-        let fixture = Fixture::new();
-        // Unique names: the process environment is shared by parallel tests.
-        let tag = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
-        let [shared, overridden, absent] =
-            ["SHARED", "OVERRIDDEN", "ABSENT"].map(|name| format!("MD_TEST_{tag}_{name}"));
-        std::fs::write(
-            fixture.0.join(".env"),
-            format!("{shared}=\"daemon model\"\n{overridden}=from-dotenv\n"),
+    fn the_shared_model_table_is_read_beside_the_harness_tables() {
+        let file = ModelFile::parse(
+            "[model]\nendpoint = \"http://127.0.0.1:1234/v1\"\nmodel = \"shared\"\n\n[harness.model.plan]\nmodel = \"planner\"\n",
         )
         .unwrap();
-        // The binary loads .env into the process before anything reads it.
-        dotenvy::from_path(fixture.0.join(".env")).unwrap();
-        std::env::set_var(&overridden, "from-the-shell");
-        let environment = Environment::load(&fixture.0).unwrap();
-        assert_eq!(
-            environment.project(&shared).as_deref(),
-            Some("daemon model")
-        );
-        assert_eq!(environment.explicit(&shared), None);
-        assert_eq!(
-            environment.explicit(&overridden).as_deref(),
-            Some("from-the-shell")
-        );
-        assert_eq!(environment.project(&overridden), None);
-        assert_eq!(environment.value(&absent), None);
-        for name in [&shared, &overridden] {
-            std::env::remove_var(name);
-        }
-        // No .env at all: everything set is explicit.
-        std::fs::remove_file(fixture.0.join(".env")).unwrap();
-        std::env::set_var(&absent, "x");
-        assert_eq!(
-            Environment::load(&fixture.0)
-                .unwrap()
-                .explicit(&absent)
-                .as_deref(),
-            Some("x")
-        );
-        std::env::remove_var(&absent);
+        assert_eq!(file.shared.model.as_deref(), Some("shared"));
+        assert_eq!(file.default, ModelKeys::default());
+        assert_eq!(file.plan.unwrap().model.as_deref(), Some("planner"));
+        // A typo in [model] is an error for the harness too: same file.
+        assert!(ModelFile::parse("[model]\nmodle = \"x\"\n").is_err());
     }
 
     #[test]
@@ -480,7 +378,7 @@ mod tests {
         let fixture = Fixture::new();
         set_model(&fixture.0, None, Some("http://127.0.0.1:1234/v1"), "base").unwrap();
         let created = std::fs::read_to_string(fixture.0.join(FILE_NAME)).unwrap();
-        assert!(created.starts_with("# Local MOOSEDev harness configuration"));
+        assert!(created.starts_with("# Local MOOSEDev configuration"));
         assert!(created.contains("[harness.model]\n"), "{created}");
         assert!(!created.contains("[harness]\n"), "{created}");
 

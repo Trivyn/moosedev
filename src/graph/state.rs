@@ -129,6 +129,10 @@ pub struct AppState {
     pub llm_context_window_tokens: usize,
     pub ontology_resolver: MooseDevOntologyResolver,
     pub model: String,
+    /// Where the web UI binds and which browser origins it trusts, from
+    /// [`crate::config::DaemonSettings`]; set by the daemon before serving.
+    pub http_bind_addr: std::net::SocketAddr,
+    pub allowed_origins: Vec<String>,
     /// Durable multi-turn MOOSE chat sessions, enabled by the shared backend for
     /// the human web UI.
     pub session_db: Option<Arc<SessionDb>>,
@@ -284,6 +288,8 @@ impl AppState {
             llm_context_window_tokens,
             ontology_resolver,
             model: llm_cfg.model,
+            http_bind_addr: ([127, 0, 0, 1], 0).into(),
+            allowed_origins: Vec::new(),
             session_db: None,
             vector_store: None,
             data_dir: data_dir.to_path_buf(),

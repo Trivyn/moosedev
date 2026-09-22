@@ -1440,8 +1440,18 @@ async fn status_mode(data_dir: &Path, socket: &Path) -> anyhow::Result<()> {
 
     // Identity-verified: the file alone can be crash-stale, so only report an
     // address a MOOSEDev backend for THIS data dir actually answers on.
-    match runtime::verify_http_addr(data_dir).await {
-        Some(addr) => println!("web UI:  http://{addr}"),
+    match runtime::verified_health(data_dir).await {
+        Some((addr, health)) => {
+            println!("web UI:  http://{addr}");
+            let field = |name: &str| health.get(name).and_then(serde_json::Value::as_str);
+            match (field("llm_model"), field("llm_endpoint")) {
+                (Some(model), Some(endpoint)) => println!(
+                    "LLM:     {model} @ {endpoint} (level {})",
+                    field("llm_assist_level").unwrap_or("?")
+                ),
+                _ => println!("LLM:     not configured (pure symbolic)"),
+            }
+        }
         None => println!("web UI:  not running (disabled or failed to bind)"),
     }
     Ok(())

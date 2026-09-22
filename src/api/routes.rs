@@ -125,7 +125,10 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
     Router::new()
         .nest("/api/v1", api)
         .fallback(handlers::static_files::serve_static)
-        .with_state(state)
-        .layer(super::security::cors_layer())
-        .layer(axum::middleware::from_fn(super::security::guard_request))
+        .with_state(state.clone())
+        .layer(super::security::cors_layer(state.allowed_origins.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            super::security::guard_request,
+        ))
 }

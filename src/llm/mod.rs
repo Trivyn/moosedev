@@ -293,6 +293,11 @@ fn http_client(timeouts: LlmTimeouts) -> reqwest::Client {
 }
 
 impl OpenAiCompatClient {
+    /// The endpoint this client posts to (never the key).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self::new_with_structured_output(base_url, api_key, StructuredOutputMode::Auto)
     }
