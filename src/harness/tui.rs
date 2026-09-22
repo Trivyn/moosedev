@@ -403,8 +403,8 @@ fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
     if preview.already_approved {
         text.push_str("\nUNCHANGED · this source and active record set are already approved\n");
     }
-    if let Some(plan) = &preview.component {
-        text.push_str(&format!(
+    match &preview.component {
+        Some(plan) => text.push_str(&format!(
             "\nCOMPONENT · {} · {}\nCovers: {}\nIRI: {}\nEvery record below concerns this component; its Constraints govern the files it covers.\n",
             plan.name,
             if plan.new {
@@ -416,7 +416,13 @@ fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
             },
             plan.covers.join(" "),
             plan.iri
-        ));
+        )),
+        // Floating records are findable only by lexical luck: say so before
+        // the human accepts, and name the command that anchors them.
+        None => text.push_str(&format!(
+            "\nCOMPONENT · none · the records below will not be linked to any component or code, so their Constraints will not govern implementation. To anchor them, run /approve-spec {} <dir/ | file | .> instead (an unchanged batch is re-approved with the link).\n",
+            preview.path
+        )),
     }
     for entry in &preview.entries {
         let (effect, identity) = match &entry.disposition {
@@ -2107,6 +2113,38 @@ mod tests {
         assert!(text.contains("Network: enabled"));
         assert!(text.contains("/approve grants this access for the current task"));
         assert!(text.contains("/deny refuses it"));
+    }
+    #[test]
+    fn spec_gate_warns_when_no_component_will_anchor_the_records() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingSpecApproval;
+        task.pending_spec = Some(serde_json::from_value(serde_json::json!({
+            "preview": {
+                "operation_id": "spec-2",
+                "owner_id": "task-1",
+                "path": "badciv-map.md",
+                "source_sha256": "0123456789abcdef",
+                "knowledge_revision": "accepted-v3",
+                "entries": [{
+                    "draft": {"kind": "Constraint", "title": "No SQLite", "description": "The map crate never opens SQLite.", "evidence": ["badciv-map.md:5"]},
+                    "disposition": {"kind": "new", "iri": "https://moosedev.dev/kg/Constraint/no-sqlite"}
+                }],
+                "retirements": [],
+                "component": null,
+                "previous_approval_iri": null,
+                "already_approved": false
+            }
+        })).unwrap());
+        let text = gate(&task);
+        assert!(
+            text.contains("COMPONENT · none · the records below will not be linked"),
+            "{text}"
+        );
+        assert!(
+            text.contains("run /approve-spec badciv-map.md <dir/ | file | .> instead"),
+            "{text}"
+        );
+        assert!(text.contains("NEW · Constraint · No SQLite"), "{text}");
     }
     #[test]
     fn spec_gate_renders_exact_records_and_separate_execution_approval() {
