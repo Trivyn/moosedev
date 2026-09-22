@@ -23,7 +23,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -230,13 +230,25 @@ async fn bind_http_listener(
     // Publish where the (possibly ephemeral) UI actually bound so `--status`/`ui`
     // can find it. A write failure only costs discoverability, not the UI itself.
     let addr_file = http_addr_file_path_for(data_dir);
-    if let Err(e) = std::fs::write(&addr_file, format!("{local_addr}\n")) {
+    if let Err(e) = std::fs::write(&addr_file, format!("{}\n", connectable(local_addr))) {
         tracing::warn!(
             "could not publish HTTP address to {}: {e}; --status/ui will not see the web UI",
             addr_file.display()
         );
     }
     Some((listener, local_addr))
+}
+
+/// The address same-host consumers connect to. `http.addr` is read by clients on
+/// this machine (`--status`/`ui`, the hooks, the harness), so it must hold a
+/// destination: a wildcard bind (`0.0.0.0`, `[::]`) listens on loopback too but
+/// is not one, and loopback-only clients rightly refuse it.
+fn connectable(addr: SocketAddr) -> SocketAddr {
+    match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => (Ipv4Addr::LOCALHOST, addr.port()).into(),
+        IpAddr::V6(ip) if ip.is_unspecified() => (Ipv6Addr::LOCALHOST, addr.port()).into(),
+        _ => addr,
+    }
 }
 
 fn http_disabled() -> bool {
@@ -298,11 +310,13 @@ pub(crate) fn http_addr_file_path_for(data_dir: &Path) -> PathBuf {
 /// the port can be reclaimed — so callers must verify backend identity before
 /// trusting it; [`verify_http_addr`] is the sanctioned consumer.
 pub(crate) fn read_http_addr(data_dir: &Path) -> Option<SocketAddr> {
-    std::fs::read_to_string(http_addr_file_path_for(data_dir))
+    let addr = std::fs::read_to_string(http_addr_file_path_for(data_dir))
         .ok()?
         .trim()
         .parse()
-        .ok()
+        .ok()?;
+    // Daemons older than the publish-side mapping wrote their bind address.
+    Some(connectable(addr))
 }
 
 /// Run the MCP server over stdio (the default mode; unchanged single-client
@@ -807,6 +821,31 @@ mod tests {
         assert_eq!(
             parsed, addr,
             "published address must match the bound listener"
+        );
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_bind_publishes_the_loopback_address_it_also_serves() {
+        let dir = scratch_dir("http-publish-wildcard");
+
+        let (listener, addr) = bind_http_listener("0.0.0.0:0".parse().unwrap(), &dir)
+            .await
+            .expect("ephemeral wildcard bind should succeed");
+        assert!(addr.ip().is_unspecified());
+
+        assert_eq!(
+            read_http_addr(&dir),
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, addr.port()))),
+            "consumers connect to loopback, never to the wildcard"
+        );
+        // A daemon from before the publish-side mapping wrote its bind address.
+        std::fs::write(http_addr_file_path_for(&dir), "[::]:7480\n").unwrap();
+        assert_eq!(
+            read_http_addr(&dir),
+            Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 7480)))
         );
 
         drop(listener);
