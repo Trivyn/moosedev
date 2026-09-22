@@ -265,7 +265,11 @@ impl Runner {
         };
         self.intent_event("finish_retest_refused", &failure.command);
         let command = failure.command;
-        Err(if failure.denied {
+        Err(if failure.ungrantable {
+            anyhow::anyhow!(
+                "required check `{command}` was blocked by the sandbox without naming a path or network need, and nothing has changed since; no permission request can help. Ask the human with question to change the plan's checks, or replan with a check that runs without a terminal"
+            )
+        } else if failure.denied {
             anyhow::anyhow!(
                 "required check `{command}` was blocked by the sandbox against exactly this source and nothing has changed since; finishing would run it again unchanged. Request permission for it (request_permission with this exact command), make an edit, or ask the human with question to change the plan's checks if the check cannot run inside the sandbox"
             )
@@ -346,6 +350,7 @@ impl Runner {
         command: &str,
         success: bool,
         denied: bool,
+        ungrantable: bool,
     ) {
         self.end_unchanged_window();
         let edits = self.task.edits.len();
@@ -355,6 +360,7 @@ impl Runner {
             command: command.to_string(),
             edits,
             denied,
+            ungrantable,
         });
         state.check_history.push(CheckOutcome {
             command: command.to_string(),
@@ -488,7 +494,7 @@ mod tests {
             .unwrap();
         for success in [true, false] {
             runner.symbolic_state_mut().unchanged_since_approval = true;
-            runner.record_symbolic_check("true", success, false);
+            runner.record_symbolic_check("true", success, false, false);
             assert!(
                 !runner
                     .task

@@ -8,8 +8,9 @@ Harness rows (backend "harness" or absent): infrastructure, evidence_limit
 typed last_error kinds (the runner's step cap is named by its detail,
 runner_error/step_cap), reviewer terminals (reviewer_scope_rejection,
 clarification_cap, reviewer_reject_loop), purpose exhaustion, symbolic parks
-(scope_escape_exhausted, capture_retype_exhausted: the runner parked itself in
-AwaitingInput after its autonomous bound), deadlines, unknown. Native rows (any
+(scope_escape_exhausted, capture_retype_exhausted, check_ungrantable: the runner
+parked itself in AwaitingInput after its autonomous bound, or because a required
+check's sandbox denial named nothing a grant could cover), deadlines, unknown. Native rows (any
 other backend) are decided before the harness rows: infrastructure ->
 evidence_limit -> success (completion stop reason and success status) ->
 deadline_native -> native_no_completion (exited without a stop reason) ->
@@ -34,10 +35,12 @@ NATIVE_TERMINAL_CAUSES = frozenset({"native_no_completion", "deadline_native"})
 GUARD_TERMINAL_CAUSES = frozenset({"reviewer_reject_loop", "evidence_limit"})
 TERMINAL_CAUSES = HARNESS_TERMINAL_CAUSES | NATIVE_TERMINAL_CAUSES | GUARD_TERMINAL_CAUSES
 # The symbolic harness parks itself after its autonomous bounds (three plan-scope
-# escapes, three capture retypes). Both are journaled intent events; neither sets
+# escapes, three capture retypes) and when a required check's sandbox denial
+# names nothing a grant could cover. All are journaled intent events; none sets
 # recovery or last_error. They join a superset for the symbolic identity; the
 # sealed recovery and baseline identities hash the sets above unchanged.
-SYMBOLIC_HALT_CAUSES = frozenset({"scope_escape_exhausted", "capture_retype_exhausted"})
+SYMBOLIC_HALT_CAUSES = frozenset({"scope_escape_exhausted", "capture_retype_exhausted",
+                                  "check_ungrantable"})
 # A run that ended because the harness needed a human and none was there. The
 # frozen clarification cap is reported separately: it is a reviewer budget.
 UNATTENDED_HALT_CLASS = SYMBOLIC_HALT_CAUSES | {"model_repair_exhausted", "reviewer_idle_deadline"}

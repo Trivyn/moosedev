@@ -93,6 +93,9 @@ pub struct FailedRun {
     pub edits: usize,
     #[serde(default)]
     pub denied: bool,
+    /// The denial named no path or network need, so no grant can help.
+    #[serde(default)]
+    pub ungrantable: bool,
 }
 
 /// `asked` (note journaled, typing not yet durable) -> `typed` (daemon typing

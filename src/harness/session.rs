@@ -2,7 +2,7 @@
 use super::{
     config::ModelRole,
     progress::{Progress as ProgressEvent, ProgressSender},
-    runner::{Mode, PermissionGrant, Phase, Runner, Task},
+    runner::{Mode, PermissionGrant, Phase, RecoveryStatus, Runner, Task},
     startup::{ProviderSettings, StartupOptions},
 };
 use anyhow::{bail, Context, Result};
@@ -45,6 +45,84 @@ pub struct Conversation {
     schema: u32,
 }
 
+/// The journal fields that say whether a task can be reopened; every other
+/// field is ignored so a listing never needs the full task type or a daemon.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskHeader {
+    pub schema: u32,
+    pub phase: Phase,
+    pub objective: String,
+}
+
+/// One saved conversation as the resume listing and the launch choice see it.
+#[derive(Debug, Clone)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub modified: std::time::SystemTime,
+    /// The first human message.
+    pub objective: Option<String>,
+    /// `None`: no task; `Some(None)`: a journal this build cannot read.
+    pub task: Option<Option<TaskHeader>>,
+}
+
+impl ConversationSummary {
+    /// An active task at this build's journal schema that has not completed.
+    pub fn unfinished(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| {
+            task.as_ref().is_some_and(|task| {
+                task.schema == super::runner::SCHEMA && task.phase != Phase::Complete
+            })
+        })
+    }
+    /// The task's standing, as one phrase.
+    pub fn task_status(&self) -> String {
+        match &self.task {
+            None => "no task".into(),
+            Some(None) => "task journal unreadable by this build".into(),
+            Some(Some(task)) if task.schema != super::runner::SCHEMA => {
+                format!(
+                    "task journal schema {} is not resumable by this build",
+                    task.schema
+                )
+            }
+            Some(Some(task)) => format!("{:?}", task.phase),
+        }
+    }
+    /// One line for a listing: id, age, objective, task standing.
+    pub fn describe(&self) -> String {
+        let objective = self
+            .task
+            .as_ref()
+            .and_then(|task| task.as_ref().map(|task| task.objective.as_str()))
+            .or(self.objective.as_deref())
+            .unwrap_or("(empty)");
+        let objective: String = objective
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        format!(
+            "{} · {} · {objective} · {}",
+            self.id,
+            age(self.modified),
+            self.task_status()
+        )
+    }
+}
+
+/// "12m ago", "3h ago", "2d ago": enough to tell sessions apart.
+fn age(modified: std::time::SystemTime) -> String {
+    let seconds = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    match seconds {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
 impl Conversation {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -71,6 +149,48 @@ impl Conversation {
             "conversation identity mismatch"
         );
         Ok(value)
+    }
+    /// Every saved conversation, newest first, with what a human needs to
+    /// choose one: when it was last written, what was asked, and where its
+    /// task stands. Reads only the journal's header fields, no daemon.
+    pub fn summaries(root: &Path) -> Result<Vec<ConversationSummary>> {
+        let mut summaries = Vec::new();
+        for id in Self::list(root)? {
+            // A conversation from another project root or a damaged file is
+            // not one this session can reopen; leave it out of the choice.
+            let Ok(conversation) = Self::load(root, &id) else {
+                continue;
+            };
+            let modified =
+                std::fs::metadata(Self::directory(root).join(format!("{id}.json")))?.modified()?;
+            let objective = conversation
+                .messages
+                .iter()
+                .find(|message| message.role == "user")
+                .map(|message| message.text.clone());
+            let task = conversation.active_task.as_deref().map(|task| {
+                std::fs::read(
+                    root.join(".moosedev/harness/tasks")
+                        .join(format!("{task}.json")),
+                )
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<TaskHeader>(&bytes).ok())
+            });
+            summaries.push(ConversationSummary {
+                id,
+                modified,
+                objective,
+                task,
+            });
+        }
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
+        Ok(summaries)
+    }
+    /// The newest conversation whose task this build can pick up.
+    pub fn last_unfinished(root: &Path) -> Result<Option<ConversationSummary>> {
+        Ok(Self::summaries(root)?
+            .into_iter()
+            .find(ConversationSummary::unfinished))
     }
     pub fn list(root: &Path) -> Result<Vec<String>> {
         let directory = Self::directory(root);
@@ -208,6 +328,16 @@ impl Conversation {
 
 fn transcript_role(index: usize, knowledge_events: &[usize]) -> Option<&'static str> {
     (!knowledge_events.contains(&index)).then_some("activity")
+}
+
+/// The task stopped because its model repair budget is spent; `last_response`
+/// holds the request for human guidance.
+fn parked_for_guidance(task: &Task) -> bool {
+    task.phase == Phase::AwaitingInput
+        && task
+            .recovery
+            .as_ref()
+            .is_some_and(|repair| repair.status == RecoveryStatus::AwaitingGuidance)
 }
 
 fn should_append_last_response(
@@ -760,9 +890,19 @@ impl Controller {
             self.conversation
                 .push("assistant", runner.task.last_response.clone());
         }
+        // A spent repair budget parks the task for guidance. The runner keeps
+        // the rejection in its journal; the transcript needs the request the
+        // human is being asked to answer, which the error alone does not carry.
+        let parked = outcome.is_err() && parked_for_guidance(&runner.task);
+        if parked {
+            self.conversation
+                .push("assistant", runner.task.last_response.clone());
+        }
         *self.live.lock().unwrap() = LiveOutput::default();
         self.status = if interrupted {
             "Interrupted. /continue resumes; follow-up text replans.".into()
+        } else if parked {
+            "Guidance needed".into()
         } else {
             format!("{:?}", runner.task.phase)
         };
@@ -773,7 +913,9 @@ impl Controller {
             self.auto = false;
         }
         self.publish(false);
-        outcome?;
+        if !parked {
+            outcome?;
+        }
         Ok(!quit)
     }
     fn progress_event(&mut self, event: ProgressEvent) {
@@ -845,7 +987,16 @@ impl Controller {
                 self.status = "Ready".into();
             }
             "/resume" => {
-                if let Some(id) = parts.next() {
+                let target = match parts.next() {
+                    Some("last") => Some(
+                        Conversation::last_unfinished(&self.conversation.root)?
+                            .map(|summary| summary.id)
+                            .context("No saved conversation has unfinished work.")?,
+                    ),
+                    Some(id) => Some(id.to_owned()),
+                    None => None,
+                };
+                if let Some(id) = target {
                     anyhow::ensure!(
                         !self.startup.needs_initialization(),
                         "This project has no initialized conversation storage."
@@ -854,8 +1005,8 @@ impl Controller {
                         id != self.conversation.id,
                         "This conversation is already open."
                     );
-                    let lease = Conversation::lease(&self.conversation.root, id)?;
-                    let conversation = Conversation::load(&self.conversation.root, id)?;
+                    let lease = Conversation::lease(&self.conversation.root, &id)?;
+                    let conversation = Conversation::load(&self.conversation.root, &id)?;
                     self.save_conversation()?;
                     self.runner = None;
                     self.lease = Some(lease);
@@ -863,11 +1014,22 @@ impl Controller {
                     self.connect().await?;
                     self.auto = false; // Resumption never implies fresh approval or command replay.
                 } else {
+                    let listing: Vec<String> = Conversation::summaries(&self.conversation.root)?
+                        .iter()
+                        .map(|summary| {
+                            let marker = if summary.id == self.conversation.id {
+                                " (open)"
+                            } else {
+                                ""
+                            };
+                            format!("{}{marker}", summary.describe())
+                        })
+                        .collect();
                     self.conversation.push(
                         "system",
                         format!(
-                            "Saved conversations:\n{}\nUse /resume <id>.",
-                            Conversation::list(&self.conversation.root)?.join("\n")
+                            "Saved conversations, newest first:\n{}\nUse /resume <id>, or /resume last for the newest with unfinished work.",
+                            listing.join("\n")
                         ),
                     );
                 }
@@ -1000,11 +1162,21 @@ impl Controller {
                     "/no-knowledge" => runner.confirm_no_knowledge().await?,
                     "/plan" => runner.mode_plan().await?,
                     "/review" => runner.request_review()?,
-                    "/continue" => {
-                        if runner.task.phase == Phase::Cancelled {
-                            runner.resume().await?;
-                        }
-                    }
+                    "/continue" => match runner.task.phase {
+                        Phase::Cancelled => runner.resume().await?,
+                        Phase::Planning | Phase::Working | Phase::Verifying => {}
+                        // The repair budget is not re-armed here: only new
+                        // guidance permits a fresh cycle. Say what is waited on.
+                        Phase::AwaitingInput => bail!(
+                            "Guidance is needed before the task can continue: {}",
+                            runner.task.last_response
+                        ),
+                        Phase::AwaitingPlan => bail!("Nothing is interrupted; /approve the displayed plan or send feedback."),
+                        Phase::AwaitingSpecApproval => bail!("Nothing is interrupted; /approve-spec accepts the displayed spec preview, or send feedback."),
+                        Phase::AwaitingPolicy | Phase::AwaitingPermission => bail!("Nothing is interrupted; /approve or /deny the displayed request."),
+                        Phase::AwaitingReview => bail!("Nothing is interrupted; /accept, /reject or /no-knowledge resolves the displayed review."),
+                        Phase::Complete => bail!("Task complete. Describe the next request to continue this conversation."),
+                    },
                     _ => unreachable!(),
                 }
                 self.conversation.sync_task(&runner.task);
@@ -1100,7 +1272,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID] · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
 
 #[cfg(test)]
 mod tests {
@@ -1161,6 +1333,81 @@ mod tests {
         assert!(!restored.queued[0].id.is_empty());
         assert_eq!(restored.messages[0].task.as_deref(), Some("task-one"));
         assert_eq!(Conversation::list(&root).unwrap(), [conversation.id]);
+    }
+    #[test]
+    fn summaries_rank_newest_first_and_pick_resumable_work() {
+        let temporary = Fixture::new();
+        let root = temporary.path().canonicalize().unwrap();
+        let tasks = root.join(".moosedev/harness/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let journal = |phase: &str, schema: u32| serde_json::json!({"schema": schema, "phase": phase, "objective": "Finish the skeleton\nsecond line", "other": {"ignored": true}});
+        // Oldest: complete work.
+        let mut done = Conversation::new(root.clone());
+        done.push("user", "Explain the layout");
+        done.active_task = Some("11111111-1111-4111-8111-111111111111".into());
+        std::fs::write(
+            tasks.join("11111111-1111-4111-8111-111111111111.json"),
+            journal("Complete", super::super::runner::SCHEMA).to_string(),
+        )
+        .unwrap();
+        done.save().unwrap();
+        // A cancelled task from this build: resumable.
+        let mut cancelled = Conversation::new(root.clone());
+        cancelled.push("user", "Finish the skeleton");
+        cancelled.active_task = Some("22222222-2222-4222-8222-222222222222".into());
+        std::fs::write(
+            tasks.join("22222222-2222-4222-8222-222222222222.json"),
+            journal("Cancelled", super::super::runner::SCHEMA).to_string(),
+        )
+        .unwrap();
+        cancelled.save().unwrap();
+        // Newest: an old-schema journal this build refuses.
+        let mut stale = Conversation::new(root.clone());
+        stale.push("user", "Old work");
+        stale.active_task = Some("33333333-3333-4333-8333-333333333333".into());
+        std::fs::write(
+            tasks.join("33333333-3333-4333-8333-333333333333.json"),
+            journal("Working", 1).to_string(),
+        )
+        .unwrap();
+        stale.save().unwrap();
+        // Stamp the three in the past, oldest first, so ordering does not
+        // depend on save timing.
+        let base = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        for (id, offset) in [(&done.id, 20u64), (&cancelled.id, 10), (&stale.id, 0)] {
+            let path = root
+                .join(".moosedev/harness/conversations")
+                .join(format!("{id}.json"));
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_modified(base - std::time::Duration::from_secs(offset))
+                .unwrap();
+        }
+
+        let summaries = Conversation::summaries(&root).unwrap();
+        let ids: Vec<_> = summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [stale.id.as_str(), cancelled.id.as_str(), done.id.as_str()]
+        );
+        assert!(summaries[0]
+            .describe()
+            .contains("schema 1 is not resumable by this build"));
+        assert!(summaries[1]
+            .describe()
+            .contains("Finish the skeleton · Cancelled"));
+        assert!(!summaries[1].describe().contains("second line"));
+        assert!(summaries[2].describe().contains("Complete"));
+        assert_eq!(
+            Conversation::last_unfinished(&root).unwrap().map(|s| s.id),
+            Some(cancelled.id.clone())
+        );
+
+        let empty = Conversation::new(root.clone());
+        empty.save().unwrap();
+        let summaries = Conversation::summaries(&root).unwrap();
+        assert!(summaries[0].describe().ends_with("(empty) · no task"));
+        assert!(!summaries[0].unfinished());
     }
     #[test]
     fn prompt_is_bounded_without_truncating_durable_transcript() {

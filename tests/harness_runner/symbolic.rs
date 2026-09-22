@@ -513,6 +513,7 @@ async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
         command: "cargo check".into(),
         edits: 0,
         denied: false,
+        ungrantable: false,
     });
     for _ in 0..3 {
         fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
@@ -542,6 +543,7 @@ async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
             command: "cargo check".into(),
             edits: 0,
             denied: false,
+            ungrantable: false,
         });
     }
     add_helper(&fixture);
@@ -581,7 +583,7 @@ async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
     // A check the sandbox appears to block, naming no path the model could
     // request.
     runner.task.plan.as_mut().unwrap().checks =
-        vec!["sh -c 'echo Operation not permitted; exit 1'".into()];
+        vec!["sh -c 'echo /etc/hosts: Operation not permitted; exit 1'".into()];
     runner.approve_plan().await.unwrap();
     add_helper(&fixture);
     runner.advance().await.unwrap();
@@ -610,9 +612,10 @@ async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
     assert_eq!(
         runner.task.symbolic.as_ref().unwrap().last_failure,
         Some(FailedRun {
-            command: "sh -c 'echo Operation not permitted; exit 1'".into(),
+            command: "sh -c 'echo /etc/hosts: Operation not permitted; exit 1'".into(),
             edits: 1,
             denied: true,
+            ungrantable: false,
         })
     );
 
@@ -626,7 +629,7 @@ async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
     let rendered = format!("{error:#}");
     assert!(
         rendered.contains(
-            "required check `sh -c 'echo Operation not permitted; exit 1'` was blocked by the sandbox against exactly this source"
+            "required check `sh -c 'echo /etc/hosts: Operation not permitted; exit 1'` was blocked by the sandbox against exactly this source"
         ),
         "{rendered}"
     );
@@ -670,6 +673,79 @@ async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
 
 /// A failed command the model chose to run is not a required check; the
 /// plan's checks decide completion, so the finish runs them.
+#[tokio::test]
+async fn a_check_denied_without_anything_grantable_parks_for_the_human_without_a_model_call() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    // The badciv shape: a denial signature with no path outside the project
+    // and no network need (a TUI dying on the terminal).
+    let check = "sh -c 'echo Operation not permitted; exit 1'";
+    runner.task.plan.as_mut().unwrap().checks = vec![check.into()];
+    runner.approve_plan().await.unwrap();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
+    runner.review(true).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls, "the park asks no model");
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner.task.recovery.is_none());
+    assert!(runner.task.last_error.is_none());
+    assert_eq!(
+        intent_details(&runner, "check_ungrantable"),
+        vec![check.to_string()]
+    );
+    assert_eq!(
+        intent_details(&runner, "sandbox_denial_ungrantable"),
+        vec![check.to_string()]
+    );
+    assert!(intent_details(&runner, "sandbox_denial").is_empty());
+    assert!(
+        runner.task.last_response.starts_with(&format!(
+            "Required check `{check}` was blocked by the sandbox, and its output names no path"
+        )),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner
+        .task
+        .last_response
+        .contains("/plan to change the plan's checks"));
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().last_failure,
+        Some(FailedRun {
+            command: check.into(),
+            edits: 1,
+            denied: true,
+            ungrantable: true,
+        })
+    );
+
+    // The human's guidance returns the task to planning and forgets the old
+    // plan's failed check, so the next plan's finish is not refused for it.
+    runner
+        .submit_message("Use `true` as the check; the TUI cannot run here.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .last_failure
+        .is_none());
+}
+
 #[tokio::test]
 async fn a_failed_free_command_does_not_refuse_the_finish() {
     let _env_lock = ENVIRONMENT.lock().await;

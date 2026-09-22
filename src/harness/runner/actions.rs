@@ -161,7 +161,7 @@ impl Runner {
                 );
                 ensure!(
                     !read_paths.is_empty() || !write_paths.is_empty() || *network,
-                    "permission request must name at least one capability"
+                    "permission request must name at least one capability (read_paths, write_paths or network). When the sandbox denial named no path outside the project and no network need, no grant can help: ask the human with question, or choose a command that runs without a terminal"
                 );
                 ensure!(
                     read_paths.len() <= 32 && write_paths.len() <= 32,
@@ -232,30 +232,57 @@ impl Runner {
                     .context("replace requires an existing file; use write to create one")?;
                 ensure!(!old_text.is_empty(), "replace old_text must not be empty");
                 let count = occurrences(source, &old_text);
-                let (old_text, new_text) = match (count, repair_literal_span(source, &old_text)) {
-                    (0, Some(repair)) => {
-                        let trimmed_new = strip_same_junk(&new_text, &repair);
-                        let detail = super::bounded(
-                            &format!(
-                                "{file}: trimmed old_text prefix {:?} suffix {:?}; new_text {}",
-                                repair.prefix,
-                                repair.suffix,
-                                if trimmed_new == new_text {
-                                    "unchanged"
-                                } else {
-                                    "lost the same junk"
-                                }
-                            ),
-                            2000,
-                        );
-                        self.intent_event("replace_text_repair", &detail);
-                        self.event(format!("Replace text repair: {detail}. The trimmed old_text matches the supplied source exactly once."));
-                        (repair.span, trimmed_new)
-                    }
-                    _ => {
-                        ensure!(count == 1, "replace old_text must match exactly once; found {count}{}; use the supplied source to select a unique literal span", if count == 2 { " or more" } else { "" });
-                        (old_text, new_text)
-                    }
+                let decoded = (count == 0)
+                    .then(|| decode_json_escapes(&old_text))
+                    .flatten();
+                let (old_text, new_text) = if count == 1 {
+                    (old_text, new_text)
+                } else if let (0, Some(repair)) = (count, repair_literal_span(source, &old_text)) {
+                    let trimmed_new = strip_same_junk(&new_text, &repair);
+                    let detail = super::bounded(
+                        &format!(
+                            "{file}: trimmed old_text prefix {:?} suffix {:?}; new_text {}",
+                            repair.prefix,
+                            repair.suffix,
+                            if trimmed_new == new_text {
+                                "unchanged"
+                            } else {
+                                "lost the same junk"
+                            }
+                        ),
+                        2000,
+                    );
+                    self.intent_event("replace_text_repair", &detail);
+                    self.event(format!("Replace text repair: {detail}. The trimmed old_text matches the supplied source exactly once."));
+                    (repair.span, trimmed_new)
+                } else if let Some(span) = decoded
+                    .as_deref()
+                    .filter(|span| occurrences(source, span) == 1)
+                {
+                    // The prompt shows source JSON-encoded; a model that copies that
+                    // rendering sends `\"` for every `"`. Decode new_text only when
+                    // it is escaped the same way throughout, so authored text with a
+                    // real `\"` inside a string literal is never altered.
+                    let (new_text, decoded_new) = match consistently_escaped(&new_text)
+                        .then(|| decode_json_escapes(&new_text))
+                        .flatten()
+                    {
+                        Some(decoded) => (decoded, ", new_text"),
+                        None => (new_text, ""),
+                    };
+                    let detail =
+                        format!("{file}: decoded JSON string escapes in old_text{decoded_new}");
+                    self.intent_event("replace_text_repair", &detail);
+                    self.event(format!("Replace text repair: {detail}. The decoded old_text matches the supplied source exactly once."));
+                    (span.to_owned(), new_text)
+                } else {
+                    let hint = match decoded {
+                        Some(span) if occurrences(source, &span) > 1 => "; old_text matches only after decoding JSON escapes, and then more than once; widen it".to_owned(),
+                        _ => first_absent_line(source, &old_text)
+                            .map(|line| format!("; first old_text line absent from the file: {line:?}"))
+                            .unwrap_or_default(),
+                    };
+                    anyhow::bail!("replace old_text must match exactly once; found {count}{}; use the supplied source to select a unique literal span{hint}", if count == 2 { " or more" } else { "" });
                 };
                 (file, Some(source.replacen(&old_text, &new_text, 1)))
             }
@@ -414,6 +441,58 @@ pub(super) fn repair_literal_span(source: &str, literal: &str) -> Option<SpanRep
     found.map(|(_, repair)| repair)
 }
 
+/// Decode JSON string escapes (`\"`, `\\`, `\/`, `\n`, `\t`, `\r`, `\b`, `\f`,
+/// `\uXXXX`) that a model copied from the JSON-encoded source in its prompt.
+/// `None` when nothing was escaped or any escape is not JSON's, so an ordinary
+/// backslash in code is never reinterpreted.
+fn decode_json_escapes(text: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            decoded.push(c);
+            continue;
+        }
+        escaped = true;
+        decoded.push(match chars.next()? {
+            '"' => '"',
+            '\\' => '\\',
+            '/' => '/',
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                let code = (hex.len() == 4)
+                    .then(|| u32::from_str_radix(&hex, 16).ok())
+                    .flatten()?;
+                char::from_u32(code)?
+            }
+            _ => return None,
+        });
+    }
+    escaped.then_some(decoded)
+}
+
+/// True when every double quote in `text` is written as `\"`: the whole value
+/// was copied from a JSON rendering rather than authored.
+fn consistently_escaped(text: &str) -> bool {
+    text.contains("\\\"") && !text.replace("\\\"", "").contains('"')
+}
+
+/// The first non-blank line of `literal` that occurs nowhere in `source`,
+/// bounded for a diagnostic.
+fn first_absent_line(source: &str, literal: &str) -> Option<String> {
+    literal
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .find(|line| !source.contains(line))
+        .map(|line| super::bounded(line, 160))
+}
+
 /// Remove from replacement text only the junk a repair removed from the old
 /// span, and only where it carries that exact junk at the same end.
 pub(super) fn strip_same_junk(text: &str, repair: &SpanRepair) -> String {
@@ -473,6 +552,40 @@ mod tests {
         assert!(repair_literal_span("ok ok", "ok}}").is_none());
         // Junk runs are bounded.
         assert!(repair_literal_span("ok\n", &format!("ok{}", "}".repeat(20))).is_none());
+    }
+
+    #[test]
+    fn json_string_escapes_copied_from_the_prompt_are_decoded() {
+        assert_eq!(
+            decode_json_escapes("let s = Some(\\\"a\\\".to_string());\\n\\tx\\\\y \\u0041")
+                .unwrap(),
+            "let s = Some(\"a\".to_string());\n\tx\\y A"
+        );
+        // Nothing escaped: not a repair.
+        assert!(decode_json_escapes("plain \"quoted\" text").is_none());
+        // Escapes that are not JSON's belong to the code itself.
+        assert!(decode_json_escapes("regex \\d+ here").is_none());
+        assert!(decode_json_escapes("trailing \\").is_none());
+        assert!(decode_json_escapes("\\u12").is_none());
+        assert!(decode_json_escapes("\\ud800").is_none());
+    }
+
+    #[test]
+    fn only_a_wholly_escaped_value_counts_as_copied() {
+        assert!(consistently_escaped("a = \\\"x\\\";"));
+        assert!(!consistently_escaped("a = \"x\"; b = \\\"y\\\";"));
+        assert!(!consistently_escaped("no quotes"));
+        assert!(!consistently_escaped("a = \"x\";"));
+    }
+
+    #[test]
+    fn the_first_absent_line_names_where_old_text_diverges() {
+        let source = "fn a() {}\nfn b() {\n    1\n}\n";
+        assert_eq!(
+            first_absent_line(source, "fn a() {}\n\nfn b() {\n    2\n}\n").as_deref(),
+            Some("    2")
+        );
+        assert!(first_absent_line(source, "fn a() {}\n").is_none());
     }
 
     #[test]

@@ -294,6 +294,14 @@ async fn a_sandbox_denial_tells_the_model_to_request_permission() {
         .intent_events
         .iter()
         .any(|event| event.kind == "sandbox_denial" && event.detail == command));
+    assert!(
+        runner.task.last_response.contains(&format!(
+            "Paths named in the output: {}\n",
+            outside.join("note.txt").display()
+        )),
+        "{}",
+        runner.task.last_response
+    );
 
     fixture.conversational(json!({
         "action":"request_permission",
@@ -320,6 +328,78 @@ async fn a_sandbox_denial_tells_the_model_to_request_permission() {
     std::fs::remove_dir_all(outside).unwrap();
 }
 
+/// A denial that names nothing a grant could cover must not send the model to
+/// a permission request that validation would refuse.
+#[tokio::test]
+async fn a_denial_naming_nothing_grantable_steers_away_from_request_permission() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let command = "sh -c 'echo Operation not permitted; exit 1'";
+    fixture.conversational(json!({"action":"command","command":command}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(
+        runner
+            .task
+            .last_response
+            .contains("a permission request has nothing to grant")
+            && !runner
+                .task
+                .last_response
+                .contains("your next action is request_permission"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "sandbox_denial_ungrantable" && event.detail == command));
+    assert!(!runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "sandbox_denial"));
+
+    // A capability-less request is corrected with the way out named.
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":command,
+        "justification":"The program needs the terminal",
+        "read_paths":[],
+        "write_paths":[],
+        "network":false
+    }));
+    fixture.conversational(json!({"action":"question","question":"The check needs a terminal; which check should replace it?"}));
+    let calls = fixture.model_calls();
+    for _ in 0..3 {
+        if fixture.model_calls() == calls {
+            runner.advance().await.unwrap();
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(
+        runner.task.events.iter().any(|event| {
+            event
+                .message
+                .starts_with("Correcting action, attempt 2 of 3")
+                && event
+                    .message
+                    .contains("no grant can help: ask the human with question")
+        }),
+        "{:?}",
+        runner
+            .task
+            .events
+            .iter()
+            .rev()
+            .take(4)
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn approval_grants_then_the_next_step_runs_the_exact_command() {
     let _env_lock = ENVIRONMENT.lock().await;
@@ -334,6 +414,7 @@ async fn approval_grants_then_the_next_step_runs_the_exact_command() {
         command: "cargo test".into(),
         edits: 0,
         denied: true,
+        ungrantable: false,
     });
 
     runner.approve_permission().await.unwrap();
@@ -2650,6 +2731,62 @@ async fn a_replace_with_stray_trailing_junk_is_trimmed_applied_and_journaled() {
         .any(|event| event.message.starts_with("Replace text repair: ")
             && event.message.contains("\"}}\"")));
     assert!(runner.task.recovery.is_none());
+}
+
+#[tokio::test]
+async fn a_replace_copied_from_the_json_rendering_is_decoded_applied_and_journaled() {
+    let fixture = Fixture::new().await;
+    std::fs::write(
+        fixture.root.join("code.txt"),
+        "let s = Some(\"a\".to_string());\n",
+    )
+    .unwrap();
+    let mut runner = fixture.approved_interactive().await;
+    // old_text copied from the prompt's JSON-encoded source; new_text authored.
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"let s = Some(\\\"a\\\".to_string());\\n","new_text":"let s = Some(\"b\".to_string());\n"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "let s = Some(\"b\".to_string());\n"
+    );
+    let repairs = intent_details(&runner, "replace_text_repair");
+    assert_eq!(
+        repairs,
+        vec!["code.txt: decoded JSON string escapes in old_text".to_string()]
+    );
+    assert!(runner.task.recovery.is_none());
+
+    // A wholly escaped new_text was copied the same way and is decoded too.
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"Some(\\\"b\\\".to_string())","new_text":"Some(\\\"c\\\".to_string())"}));
+    // The intermediate capture checkpoint journals first, without a model call.
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "let s = Some(\"c\".to_string());\n"
+    );
+    let repairs = intent_details(&runner, "replace_text_repair");
+    assert_eq!(
+        repairs[1],
+        "code.txt: decoded JSON string escapes in old_text, new_text"
+    );
+}
+
+#[tokio::test]
+async fn a_replace_that_matches_nowhere_names_the_first_absent_line() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"original\nnot in the file\n","new_text":"changed\n"}));
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"original\n","new_text":"changed\n"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert!(runner.task.events.iter().any(|event| {
+        event.message.starts_with("Correcting action, attempt 2 of 3")
+            && event.message.contains("use the supplied source to select a unique literal span; first old_text line absent from the file: \"not in the file\"")
+    }), "{:?}", runner.task.events.iter().map(|e| &e.message).collect::<Vec<_>>());
+    assert!(intent_details(&runner, "replace_text_repair").is_empty());
 }
 
 #[tokio::test]

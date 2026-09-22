@@ -350,7 +350,15 @@ fn gate(task: &Task) -> String {
                 "PERMISSION REQUEST · details unavailable; deny it and retry the task.".into()
             }),
         Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
-        Phase::AwaitingInput => if task.turn_finished { "Your turn. Ask a follow-up or describe the next change.".into() } else { "Your input is needed. Reply below.".into() },
+        Phase::AwaitingInput => if task.turn_finished {
+            "Your turn. Ask a follow-up or describe the next change.".into()
+        } else if task.last_response.is_empty() {
+            "Your input is needed. Reply below.".into()
+        } else {
+            // A question, an exhausted repair, or an interrupted action: show
+            // what is being waited on, not only that something is.
+            format!("INPUT NEEDED\n{}\nReply with guidance (the task returns to Plan for re-approval), or /plan.", task.last_response)
+        },
         Phase::Cancelled => "Interrupted; obligations are saved. /continue resumes, or send follow-up guidance.".into(),
         Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
         _ => String::new(),
@@ -1833,17 +1841,45 @@ async fn finish_controller(controller: &mut tokio::task::JoinHandle<()>) {
     }
 }
 
+/// Which conversation an interactive start opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    /// A fresh conversation.
+    New,
+    /// The newest saved conversation with unfinished work, else a fresh one.
+    Last,
+    /// A specific saved conversation.
+    Conversation(String),
+}
+
 pub async fn interactive(
     root: PathBuf,
     daemon: Option<String>,
     daemon_exe: Option<PathBuf>,
-    resume: Option<String>,
+    launch: Launch,
 ) -> Result<()> {
     let root = root.canonicalize()?;
     let (provider,config_error)=match ProviderSettings::load(&root) {Ok(provider)=>(provider,None),Err(error)=>(ProviderSettings::fallback(),Some(format!("Model configuration failed: {error:#}. Use /model <endpoint> <model> to configure this session.")))};
-    let mut conversation = match resume {
-        Some(id) => Conversation::load(&root, &id)?,
-        None => Conversation::new(root.clone()),
+    let mut conversation = match launch {
+        Launch::New => Conversation::new(root.clone()),
+        Launch::Conversation(id) => Conversation::load(&root, &id)?,
+        Launch::Last => match Conversation::last_unfinished(&root)? {
+            Some(summary) => {
+                let mut conversation = Conversation::load(&root, &summary.id)?;
+                // Say what was reopened: the transcript alone does not show
+                // that this is a resumption rather than a continuation.
+                conversation.push(
+                    "system",
+                    format!(
+                        "Resumed conversation {} ({}). /new starts a fresh conversation; /resume lists the others.",
+                        summary.id,
+                        summary.task_status()
+                    ),
+                );
+                conversation
+            }
+            None => Conversation::new(root.clone()),
+        },
     };
     if conversation.messages.is_empty() {
         conversation.push("system","Welcome to MOOSEDev. Ask about this project or describe a change.\nThe harness supplies project knowledge and asks for approval before edits.\nUse /model to discover local models, /help for commands.");
@@ -2025,6 +2061,26 @@ mod tests {
         let text = gate(&task);
         assert!(text.contains("Active sandbox grants: 1 · /permissions lists them"));
         assert!(text.ends_with("/approve to execute · send feedback to revise"));
+    }
+    #[test]
+    fn input_gate_shows_the_request_it_waits_on() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingInput;
+        task.last_response = "action failed validation after three attempts. Provide human guidance before retrying; pending work is preserved. replace old_text must match exactly once; found 0".into();
+        let text = gate(&task);
+        assert!(text.starts_with("INPUT NEEDED\naction failed validation after three attempts."));
+        assert!(text.ends_with(
+            "Reply with guidance (the task returns to Plan for re-approval), or /plan."
+        ));
+
+        task.last_response = "Which database should the skeleton use?".into();
+        assert!(gate(&task).contains("Which database should the skeleton use?"));
+
+        task.last_response.clear();
+        assert_eq!(gate(&task), "Your input is needed. Reply below.");
+
+        task.turn_finished = true;
+        assert!(gate(&task).starts_with("Your turn."));
     }
     #[test]
     fn permission_gate_displays_exact_capabilities_and_decision_commands() {

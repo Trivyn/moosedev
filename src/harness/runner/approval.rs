@@ -174,6 +174,9 @@ impl Runner {
         self.task.last_response = text;
         self.task.turn_finished = false;
         self.task.steps = 0;
+        // Guidance leads to a new plan, so the old plan's failed check no
+        // longer says anything about what a rerun would test.
+        self.forget_failure();
         self.end_intent_cycle("new human guidance");
         self.task.approved_revision = None;
         self.discard_pending_edit("new human guidance invalidated the proposed edit")?;
@@ -238,6 +241,7 @@ impl Runner {
             state.read_snapshots.clear();
         }
         self.task.steps = 0;
+        self.forget_failure();
         self.end_intent_cycle("human replan");
         self.event("Human returned the task to Plan.");
         self.persist()

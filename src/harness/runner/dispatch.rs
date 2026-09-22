@@ -528,10 +528,22 @@ impl Runner {
         command: &str,
         result: executor::CommandResult,
     ) -> Result<()> {
-        let denied = self.note_sandbox_denial(command, &result);
+        let denial = self.note_sandbox_denial(command, &result);
         self.task.last_response = result.output;
-        if denied {
-            self.task.last_response.push_str(SANDBOX_DENIAL_HINT);
+        match denial {
+            Some(SandboxDenial::Grantable { paths, .. }) => {
+                self.task.last_response.push_str(SANDBOX_DENIAL_HINT);
+                if !paths.is_empty() {
+                    self.task.last_response.push_str(&format!(
+                        "Paths named in the output: {}\n",
+                        paths.join(", ")
+                    ));
+                }
+            }
+            Some(SandboxDenial::Ungrantable) => {
+                self.task.last_response.push_str(UNGRANTABLE_DENIAL_HINT)
+            }
+            None => {}
         }
         self.task.capture_due = true;
         self.task.after_review = Phase::Working;
@@ -541,17 +553,25 @@ impl Runner {
 
     /// Journal a command the OS sandbox appears to have blocked. The caller
     /// appends the hint; nothing is granted here (Constraint 3a829c5c).
-    fn note_sandbox_denial(&mut self, command: &str, result: &executor::CommandResult) -> bool {
+    fn note_sandbox_denial(
+        &mut self,
+        command: &str,
+        result: &executor::CommandResult,
+    ) -> Option<SandboxDenial> {
         let network_granted = self
             .task
             .permission_grants
             .iter()
             .any(|grant| grant.network);
-        let denied = sandbox_denial(result, network_granted);
-        if denied {
-            self.intent_event("sandbox_denial", command);
+        let denial = classify_denial(result, network_granted, &self.task.root);
+        match &denial {
+            Some(SandboxDenial::Grantable { .. }) => self.intent_event("sandbox_denial", command),
+            Some(SandboxDenial::Ungrantable) => {
+                self.intent_event("sandbox_denial_ungrantable", command)
+            }
+            None => {}
         }
-        denied
+        denial
     }
 
     pub(super) fn scratch_path(&self) -> PathBuf {
@@ -566,20 +586,32 @@ impl Runner {
         let index = self.task.check_results.len();
         if let Some(command) = plan.checks.get(index).cloned() {
             let result = self.run_command(&command).await?;
-            let denied = self.note_sandbox_denial(&command, &result);
-            self.record_symbolic_check(&command, result.success, denied);
-            let failure =
-                (!result.success).then(|| check_failure_response(&command, &result, denied));
+            let denial = self.note_sandbox_denial(&command, &result);
+            let ungrantable = denial == Some(SandboxDenial::Ungrantable);
+            self.record_symbolic_check(&command, result.success, denial.is_some(), ungrantable);
+            let failure = (!result.success)
+                .then(|| check_failure_response(&command, &result, denial.as_ref()));
             if let (false, Some(code)) = (result.success, unrunnable_exit(&result)) {
                 self.intent_event("check_unrunnable", &format!("exit {code}: {command}"));
             }
             self.task.check_results.push(CheckResult {
-                command,
+                command: command.clone(),
                 success: result.success,
                 output: result.output.clone(),
             });
             if let Some(response) = failure {
-                self.task.phase = Phase::Working;
+                // A denial that names nothing grantable is not a decision the
+                // model can make: no request_permission can be valid, and only
+                // the human can change the plan's checks. Park without a call.
+                if ungrantable {
+                    self.intent_event("check_ungrantable", &command);
+                    self.event(format!(
+                        "Required check `{command}` cannot run inside the sandbox and names nothing to grant; waiting for the human to change the plan's checks."
+                    ));
+                    self.task.phase = Phase::AwaitingInput;
+                } else {
+                    self.task.phase = Phase::Working;
+                }
                 self.task.last_response = response;
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
@@ -656,35 +688,129 @@ const NETWORK_DENIALS: [&str; 4] = [
 /// requests or grants anything itself.
 const SANDBOX_DENIAL_HINT: &str = "\nThe harness sandbox blocked this command; this is not a defect in the project and not something to work around. If the command needs a path outside the project or network access, your next action is request_permission with this exact command, the blocked absolute path in read_paths or write_paths (or network true), and a short justification; the human then approves or denies it. Do not reply that it cannot be done, replan, or substitute a weaker check.\n";
 
-/// Whether a failed command's output carries an OS denial signature. This
-/// only selects what the model is told; permission is still requested by the
+/// Appended instead when the denial names nothing a grant could cover: a
+/// request_permission would be refused by validation, so the model is told
+/// not to make one.
+const UNGRANTABLE_DENIAL_HINT: &str = "\nThe harness sandbox blocked this command, and its output names no path outside the project and no network need, so a permission request has nothing to grant: the program probably needs a terminal, a device or a process right the sandbox never provides. Do not request permission for it. Choose a command that runs without one, or ask the human with question.\n";
+
+/// Paths a denial can never be about: devices and process pseudo-files are not
+/// grantable, and the trusted-PATH binaries are already readable inside the
+/// sandbox (they appear as the reporting program, `/bin/sh: x: Permission denied`).
+const NEVER_GRANTABLE: [&str; 7] = [
+    "/dev/",
+    "/proc/",
+    "/sys/",
+    "/bin/",
+    "/sbin/",
+    "/usr/bin/",
+    "/usr/sbin/",
+];
+
+/// What a sandbox denial can be turned into: a typed permission request for
+/// the resources the output names, or nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SandboxDenial {
+    Grantable { paths: Vec<String>, network: bool },
+    Ungrantable,
+}
+
+/// Classify a failed command's OS denial signature by what a grant could
+/// cover. This only selects what the model is told (or, for a required check,
+/// that the human is asked instead); permission is still requested by the
 /// model and granted by the human.
-fn sandbox_denial(result: &executor::CommandResult, network_granted: bool) -> bool {
-    !result.success
-        && (PATH_DENIALS
+fn classify_denial(
+    result: &executor::CommandResult,
+    network_granted: bool,
+    root: &std::path::Path,
+) -> Option<SandboxDenial> {
+    if result.success {
+        return None;
+    }
+    let path_denied = PATH_DENIALS
+        .iter()
+        .any(|signature| result.output.contains(signature));
+    let network = !network_granted
+        && NETWORK_DENIALS
             .iter()
-            .any(|signature| result.output.contains(signature))
-            || (!network_granted
-                && NETWORK_DENIALS
-                    .iter()
-                    .any(|signature| result.output.contains(signature))))
+            .any(|signature| result.output.contains(signature));
+    if !path_denied && !network {
+        return None;
+    }
+    let paths = if path_denied {
+        grantable_paths(&result.output, root)
+    } else {
+        Vec::new()
+    };
+    Some(if paths.is_empty() && !network {
+        SandboxDenial::Ungrantable
+    } else {
+        SandboxDenial::Grantable { paths, network }
+    })
+}
+
+/// Absolute (or `~/`) paths named in a command's output that a grant could
+/// cover: outside the project root (which includes the task scratch) and not
+/// in `NEVER_GRANTABLE`. Deterministic text scanning; no guessing beyond it.
+fn grantable_paths(output: &str, root: &std::path::Path) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let separators = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';'
+            )
+    };
+    for token in output.split(separators) {
+        let token = token.trim_end_matches([':', '.', ',']);
+        if token.len() < 2 || !(token.starts_with('/') || token.starts_with("~/")) {
+            continue;
+        }
+        if NEVER_GRANTABLE
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+            || std::path::Path::new(token).starts_with(root)
+        {
+            continue;
+        }
+        if !paths.iter().any(|known| known == token) {
+            paths.push(token.to_owned());
+        }
+    }
+    paths
 }
 
 /// What the model is told about a failed required check. A check the shell
 /// could not start tested nothing, so it is named as an invalid check rather
 /// than a failure to repair in the code; a check the sandbox blocked is named
-/// as a permission need rather than either.
-fn check_failure_response(command: &str, result: &executor::CommandResult, denied: bool) -> String {
-    match unrunnable_exit(result) {
-        Some(code) => format!(
+/// as a permission need rather than either; a check the sandbox blocked with
+/// nothing to grant is written for the human, who is the only one who can
+/// change the plan's checks.
+fn check_failure_response(
+    command: &str,
+    result: &executor::CommandResult,
+    denial: Option<&SandboxDenial>,
+) -> String {
+    match (unrunnable_exit(result), denial) {
+        (Some(code), _) => format!(
             "Required check could not run: the shell exited {code} (command not found or not executable), so the change was not tested. The check itself is invalid, not the environment: replan with checks that are shell command lines, such as the task's verification commands.\nCheck: {command}\n{}",
             result.output
         ),
-        None if denied => format!(
-            "Required check was blocked by the sandbox, so the change was not tested.\nCheck: {command}\n{}{SANDBOX_DENIAL_HINT}",
-            result.output
+        (None, Some(SandboxDenial::Ungrantable)) => format!(
+            "Required check `{command}` was blocked by the sandbox, and its output names no path outside the project and no network need, so no permission grant can make it run — it likely needs a terminal or device the sandbox never provides.\n{}\nReply with a check that can run without one (the plan returns for approval), or /plan to change the plan's checks.",
+            result.output.trim_end()
         ),
-        None => format!(
+        (None, Some(SandboxDenial::Grantable { paths, .. })) => {
+            let named = if paths.is_empty() {
+                String::new()
+            } else {
+                format!("Paths named in the output: {}\n", paths.join(", "))
+            };
+            format!(
+                "Required check was blocked by the sandbox, so the change was not tested.\nCheck: {command}\n{}{SANDBOX_DENIAL_HINT}{named}",
+                result.output
+            )
+        }
+        (None, None) => format!(
             "Required verification failed. Repair before completion.\n{}",
             result.output
         ),
@@ -707,7 +833,7 @@ mod check_failure_tests {
     fn a_check_the_shell_cannot_start_is_named_invalid_not_a_code_failure() {
         let missing = result(Some(127), "/bin/sh: The: command not found");
         let response =
-            check_failure_response("The implementation must be idempotent.", &missing, false);
+            check_failure_response("The implementation must be idempotent.", &missing, None);
         assert!(
             response.starts_with("Required check could not run"),
             "{response}"
@@ -721,12 +847,16 @@ mod check_failure_tests {
             result(None, "killed"),
         ] {
             assert_eq!(unrunnable_exit(&ordinary), None);
-            assert!(!sandbox_denial(&ordinary, false));
+            assert_eq!(classify_denial(&ordinary, false, root()), None);
             assert!(
-                check_failure_response("python3 -m unittest", &ordinary, false)
+                check_failure_response("python3 -m unittest", &ordinary, None)
                     .starts_with("Required verification failed. Repair before completion.")
             );
         }
+    }
+
+    fn root() -> &'static std::path::Path {
+        std::path::Path::new("/Users/dev/project")
     }
 
     #[test]
@@ -735,22 +865,90 @@ mod check_failure_tests {
             Some(101),
             "failed to read configuration file `/outside/config.toml`\nOperation not permitted (os error 1)",
         );
-        assert!(sandbox_denial(&blocked, false));
-        let response = check_failure_response("cargo check", &blocked, true);
+        let denial = classify_denial(&blocked, false, root());
+        assert_eq!(
+            denial,
+            Some(SandboxDenial::Grantable {
+                paths: vec!["/outside/config.toml".into()],
+                network: false
+            })
+        );
+        let response = check_failure_response("cargo check", &blocked, denial.as_ref());
         assert!(response.starts_with("Required check was blocked by the sandbox"));
         assert!(response.contains("request_permission"), "{response}");
+        assert!(
+            response.ends_with("Paths named in the output: /outside/config.toml\n"),
+            "{response}"
+        );
         assert!(!response.contains("Repair before completion"), "{response}");
 
         let offline = result(Some(6), "curl: (6) Could not resolve host: example.org");
-        assert!(sandbox_denial(&offline, false));
+        assert_eq!(
+            classify_denial(&offline, false, root()),
+            Some(SandboxDenial::Grantable {
+                paths: vec![],
+                network: true
+            })
+        );
         // With network already granted, a lookup failure is a real failure.
-        assert!(!sandbox_denial(&offline, true));
+        assert_eq!(classify_denial(&offline, true, root()), None);
         let passed = executor::CommandResult {
             success: true,
             output: "Permission denied".into(),
             exit_code: Some(0),
         };
-        assert!(!sandbox_denial(&passed, false));
+        assert_eq!(classify_denial(&passed, false, root()), None);
+    }
+
+    #[test]
+    fn a_denial_naming_nothing_grantable_is_written_for_the_human() {
+        // The badciv shape: a TUI dying on the terminal; the only path is the
+        // task's own scratch build inside the project root.
+        let tui = result(
+            Some(1),
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s\n     Running `/Users/dev/project/.moosedev/harness/scratch/301f7887/build/debug/badciv-tui`\nError: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\n",
+        );
+        let denial = classify_denial(&tui, false, root());
+        assert_eq!(denial, Some(SandboxDenial::Ungrantable));
+        let response = check_failure_response("cargo run -p badciv-tui", &tui, denial.as_ref());
+        assert!(
+            response.starts_with("Required check `cargo run -p badciv-tui` was blocked by the sandbox, and its output names no path"),
+            "{response}"
+        );
+        assert!(
+            response.contains("Reply with a check that can run without one"),
+            "{response}"
+        );
+        assert!(!response.contains("request_permission"), "{response}");
+
+        // Devices and the reporting shell are never grantable; a home path is.
+        assert_eq!(
+            classify_denial(
+                &result(Some(1), "open /dev/tty: Operation not permitted"),
+                false,
+                root()
+            ),
+            Some(SandboxDenial::Ungrantable)
+        );
+        assert_eq!(
+            classify_denial(
+                &result(Some(126), "/bin/sh: ./run.sh: Permission denied"),
+                false,
+                root()
+            ),
+            Some(SandboxDenial::Ungrantable)
+        );
+        assert_eq!(
+            grantable_paths(
+                "failed to read `~/.cargo/config.toml`: Permission denied (os error 13)",
+                root()
+            ),
+            vec!["~/.cargo/config.toml".to_string()]
+        );
+        assert_eq!(
+            grantable_paths("cat: /private/tmp/note.txt: Operation not permitted\ncat: /private/tmp/note.txt: again", root()),
+            vec!["/private/tmp/note.txt".to_string()]
+        );
     }
 }
 

@@ -170,8 +170,14 @@ contract.
 Invalid JSON and repairable action/capture arguments share **three candidate
 outputs total** per action decision or capture note. The runner automatically
 supplies bounded validation feedback for attempts two and three, then pauses for
-human guidance. Retry progress is visible, and the attempt count survives restart,
-interruption, and `/continue`. New human guidance permits a fresh repair cycle.
+human guidance: the request is shown in the gate and the transcript. Retry
+progress is visible, and the attempt count survives restart, interruption, and
+`/continue`. New human guidance permits a fresh repair cycle. When the span of a
+`replace` matches nowhere, the runner first tries the two deterministic repairs
+it journals as `replace_text_repair` — trimming stray envelope junk from the
+ends, or decoding JSON string escapes a model copied from the JSON-encoded
+source in its prompt (`\"` for `"`) — and otherwise names the first line of
+`old_text` that the file does not contain.
 Permission denials and source/knowledge changes still require the applicable
 human review; correction never grants approval.
 
@@ -183,8 +189,14 @@ task and runs that exact command as the next step, where it streams progress and
 can be interrupted like any other command; revoking the grant first voids it.
 `/deny` refuses the request and returns the denial to the model. The harness never
 infers a permission need itself: when a failed command's output shows the sandbox
-blocked a path or the network, it tells the model so and names `request_permission`
-as the next action, and records a `sandbox_denial` event. Existing files
+blocked a path or the network, it tells the model so, names `request_permission`
+as the next action and the paths the output named, and records a `sandbox_denial`
+event. A denial whose output names no path outside the project and no network
+need is not a permission need — the program wants a terminal, a device or a
+process right no grant provides — so a free command gets the opposite hint
+(`sandbox_denial_ungrantable`), and a required check parks the task for the
+human with the check named (`check_ungrantable`), without spending the model's
+repair budget on a request that validation would refuse. Existing files
 and Unix sockets are granted exactly and directories recursively. Write
 access includes create, modify, and delete. Grants never expose the live project
 workspace or task scratch space, and they do not restore ambient environment
@@ -321,9 +333,16 @@ separately. If the source file or graph revision changes before acceptance, the
 harness rejects the stale preview and requires `/approve-spec <path>` again.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`
-begins a conversation. `/resume` lists saved conversations; `/resume ID` opens one.
-`/connect` retries a failed daemon connection. `/quit` exits while preserving
-unfinished work. The CLI can reopen one with `moosedev-harness resume-session ID`.
+begins a conversation. When the task is waiting on the human instead — a
+question, a spent repair budget, or an interrupted action with an unknown
+outcome — the gate shows the request itself, and `/continue` repeats it rather
+than retrying: only new guidance re-arms a repair. `/resume` lists saved
+conversations newest first with their objective and task standing; `/resume ID`
+opens one and `/resume last` opens the newest with unfinished work. `/connect`
+retries a failed daemon connection. `/quit` exits while preserving unfinished
+work. A bare `moosedev-harness` reopens the newest conversation whose task this
+build can continue (`--new` skips that); `moosedev-harness resume-session ID`
+reopens a specific one.
 
 The runner retrieves project knowledge before planning and affected-file dossiers
 before edits. The model can request one unique literal replacement or supply

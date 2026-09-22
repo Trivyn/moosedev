@@ -689,6 +689,76 @@ async fn interruption_preserves_failed_cleanup_and_escape_retries_it_after_recon
 }
 
 #[tokio::test]
+async fn a_spent_repair_budget_shows_its_request_and_continue_explains() {
+    let fixture = Fixture::new().await;
+    fixture.state.release.add_permits(1);
+    let invalid = json!({"message":"Working.","action":{"action":"invented_action"}});
+    *fixture.state.replies.lock().unwrap() = VecDeque::from([
+        invalid.clone(),
+        invalid.clone(),
+        invalid,
+        json!({"message":"Recovered.","action":{"action":"reply","message":"Recovered answer."}}),
+    ]);
+    let (input, mut updates, handle) = fixture.controller(Conversation::new(fixture.root.clone()));
+    until(&mut updates, |state| !state.busy).await;
+    input
+        .send(Command::Input("Explain the project.".into()))
+        .unwrap();
+    let parked = until(&mut updates, |state| {
+        !state.busy
+            && state
+                .task
+                .as_ref()
+                .is_some_and(|task| task.phase == Phase::AwaitingInput)
+    })
+    .await;
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(parked.status, "Guidance needed");
+    let last = parked.conversation.messages.last().unwrap();
+    assert_eq!(last.role, "assistant", "{:?}", parked.conversation.messages);
+    assert!(last
+        .text
+        .starts_with("action failed validation after three attempts. Provide human guidance"));
+    assert!(last.text.contains("invented_action") || last.text.contains("unknown variant"));
+
+    // /continue does not re-arm the budget; it repeats what is waited on.
+    input.send(Command::Input("/continue".into())).unwrap();
+    let explained = until(&mut updates, |state| {
+        !state.busy
+            && state.conversation.messages.iter().any(|message| {
+                message.role == "system"
+                    && message
+                        .text
+                        .starts_with("Guidance is needed before the task can continue: action failed validation after three attempts")
+            })
+    })
+    .await;
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        explained.task.unwrap().phase,
+        Phase::AwaitingInput,
+        "the parked task stays parked"
+    );
+
+    // New guidance permits a fresh repair cycle.
+    input
+        .send(Command::Input("Answer plainly.".into()))
+        .unwrap();
+    let finished =
+        until(&mut updates, |state| {
+            !state.busy
+                && state.conversation.messages.iter().any(|message| {
+                    message.role == "assistant" && message.text == "Recovered answer."
+                })
+        })
+        .await;
+    assert!(finished.task.unwrap().recovery.is_none());
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 4);
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_action_is_repaired_without_another_human_message_or_reprobe() {
     let fixture = Fixture::new().await;
     fixture.state.release.add_permits(1);

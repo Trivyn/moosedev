@@ -8,9 +8,10 @@ use moosedev::harness::{
 use std::path::{Path, PathBuf};
 
 const HELP: &str = "MOOSEDev harness
-Usage: moosedev-harness [--project DIR] [--daemon URL] [--daemon-exe PATH] [COMMAND]
+Usage: moosedev-harness [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] [COMMAND]
 
-  interactive              Open a new coding conversation (the default)
+  interactive              Reopen the newest conversation with unfinished work,
+                            or open a new one (the default); --new always opens a new one
   resume-session ID        Resume a saved conversation
 
   new OBJECTIVE            Create a task in Plan mode
@@ -40,6 +41,8 @@ struct Args {
     root: PathBuf,
     daemon: Option<String>,
     daemon_exe: Option<PathBuf>,
+    /// `--new`: open a fresh conversation instead of the last unfinished one.
+    fresh: bool,
     command: String,
     arguments: Vec<String>,
 }
@@ -49,6 +52,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut root = moosedev::project::project_root();
     let mut daemon = None;
     let mut daemon_exe = None;
+    let mut fresh = false;
     loop {
         match args.next().as_deref() {
             None => {
@@ -56,6 +60,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                     root,
                     daemon,
                     daemon_exe,
+                    fresh,
                     command: "interactive".into(),
                     arguments: vec![],
                 }))
@@ -71,12 +76,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             Some("--daemon-exe") => {
                 daemon_exe = Some(args.next().context("--daemon-exe requires a path")?.into())
             }
+            Some("--new") => fresh = true,
             Some(command) if command.starts_with('-') => bail!("unknown option {command}"),
             Some(command) => {
                 return Ok(Some(Args {
                     root,
                     daemon,
                     daemon_exe,
+                    fresh,
                     command: command.into(),
                     arguments: args.collect(),
                 }))
@@ -146,17 +153,21 @@ async fn run() -> Result<()> {
     // Match the daemon's explicit environment configuration without changing cwd.
     load_dotenv_file(&root.join(".env"))?;
     if matches!(args.command.as_str(), "interactive" | "resume-session") {
-        let resume = if args.command == "resume-session" {
+        let launch = if args.command == "resume-session" {
             anyhow::ensure!(
                 args.arguments.len() == 1,
                 "resume-session requires one conversation ID"
             );
-            Some(args.arguments[0].clone())
+            tui::Launch::Conversation(args.arguments[0].clone())
         } else {
             anyhow::ensure!(args.arguments.is_empty(), "interactive takes no arguments");
-            None
+            if args.fresh {
+                tui::Launch::New
+            } else {
+                tui::Launch::Last
+            }
         };
-        return tui::interactive(root, args.daemon, args.daemon_exe, resume).await;
+        return tui::interactive(root, args.daemon, args.daemon_exe, launch).await;
     }
     let daemon = args
         .daemon
@@ -282,7 +293,10 @@ mod tests {
 
     #[test]
     fn default_is_conversation_and_help_remains_explicit() {
-        assert_eq!(parse_args([]).unwrap().unwrap().command, "interactive");
+        let default = parse_args([]).unwrap().unwrap();
+        assert_eq!(default.command, "interactive");
+        assert!(!default.fresh, "a bare start reopens unfinished work");
+        assert!(parse_args(["--new".into()]).unwrap().unwrap().fresh);
         assert!(parse_args(["--help".into()]).unwrap().is_none());
         let args = parse_args(
             ["--daemon-exe", "/tmp/moosedev", "resume-session", "session"].map(String::from),
