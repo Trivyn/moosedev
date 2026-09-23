@@ -36,6 +36,11 @@ pub struct CaptureTypeRequest {
     /// edge can be tied back to the approval it came from.
     #[serde(default)]
     pub obligations_digest: String,
+    /// Labels of the Constraints and Requirements that governed the task.
+    /// A proposal whose claim names one is marked for the reviewer, since
+    /// accepting it records a decision about a governing rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub governing_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +98,12 @@ pub struct TypedProposal {
     /// was tried" — the two were indistinguishable before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub derived: Vec<DerivedRelation>,
+    /// Governing rules the proposal's own claim names (not its approved-plan
+    /// paragraph). Shown at review: a record such as "defer the database
+    /// constraint" is exactly what a later task could cite to excuse ignoring
+    /// that rule, so the human should see which rules it speaks about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names_rules: Vec<String>,
 }
 
 /// One obligation-derived relation decision.

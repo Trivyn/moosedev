@@ -1275,6 +1275,12 @@ fn final_review(task: &Task, review: &ReviewItem) -> String {
                 TypedDisposition::Distinct { .. } => "new record".into(),
             }
         ));
+        if !proposal.names_rules.is_empty() {
+            text.push_str(&format!(
+                "  Names governing rule(s): {} — accepting records a decision about them.\n",
+                proposal.names_rules.join(", ")
+            ));
+        }
     }
     text
 }
@@ -2555,7 +2561,8 @@ mod tests {
                      "disposition": {"kind": "refines", "candidate_iri": PRESERVE, "score": 0.6, "containment": 0.7, "confidence": 0.6333, "receipt_operation_id": "r2"}},
                     {"proposal": {"kind": "Pattern", "title": "Normalize then compare", "description": "d", "evidence": []},
                      "origin": "llm_sensor", "resolved_by": "symbolic",
-                     "disposition": {"kind": "distinct", "receipt_operation_id": "r3"}}
+                     "disposition": {"kind": "distinct", "receipt_operation_id": "r3"},
+                     "names_rules": ["Preserve names", "Label intent"]}
                 ]
             }
         }))
@@ -2564,7 +2571,7 @@ mod tests {
         assert!(text.contains("REVIEW 1\nFinal checkpoint\n\nCapture note\nNames are stripped before comparison.\nTyping: symbolic with sensor · sensor added one proposal\n"));
         assert!(text.contains("SymbolicDecision · ArchitecturalDecision · Trim label whitespace — restates https://moosedev.dev/kg/Requirement/label-intent; no record proposed\n"));
         assert!(text.contains("SymbolicLesson · Lesson · Strip before comparing — refines https://moosedev.dev/kg/Constraint/preserve-names (0.63)\n"));
-        assert!(text.contains("LlmSensor · Pattern · Normalize then compare — new record\n"));
+        assert!(text.contains("LlmSensor · Pattern · Normalize then compare — new record\n  Names governing rule(s): Preserve names, Label intent — accepting records a decision about them.\n"));
         assert!(text.contains("/accept 1 · /reject 1"));
     }
     #[test]

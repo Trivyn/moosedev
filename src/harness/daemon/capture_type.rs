@@ -336,17 +336,43 @@ async fn type_note(
     if evidence.is_empty() {
         evidence.push(format!("approved plan: {}", request.plan_summary));
     }
+    // A check that failed, then passed after an edit, is how the change was
+    // verified. That is evidence for the decision, not a Lesson of its own: a
+    // record saying "the check failed before and passed after" teaches nobody
+    // anything about the project.
+    let mut verified_by: Vec<String> = Vec::new();
+    for (index, outcome) in request.check_history.iter().enumerate() {
+        if outcome.success || verified_by.contains(&outcome.command) {
+            continue;
+        }
+        let recovered = request.check_history[index + 1..]
+            .iter()
+            .any(|later| later.command == outcome.command && later.success && later.after_edit);
+        if recovered {
+            verified_by.push(outcome.command.clone());
+        }
+    }
     // A change carries a decision only when the note states one: a note that
     // declares nothing durable is the model's answer, not a record (no forced
     // records). The title names the note's claim; the approved plan stays in
     // the description, where reconciliation reads it as the record's key.
     let nothing_declared = declares_nothing(note);
     if !request.changed_files.is_empty() && !nothing_declared {
-        let description = format!(
+        let mut description = format!(
             "{note}\n\n{}\n\nFiles changed: {}.",
             approved_plan_line(&request.plan_summary),
             request.changed_files.join(", ")
         );
+        if !verified_by.is_empty() {
+            description.push_str(&format!(
+                "\n\nVerified by: {} failed before the change and passed after it.",
+                verified_by
+                    .iter()
+                    .map(|command| format!("`{command}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         raw.push((
             base_proposal(
                 "ArchitecturalDecision",
@@ -356,43 +382,6 @@ async fn type_note(
                 request.changed_files.clone(),
             ),
             ProposalOrigin::SymbolicDecision,
-        ));
-    }
-    // A check that failed, then passed after an edit, is a deterministic lesson.
-    let mut lesson_commands: Vec<String> = Vec::new();
-    for (index, outcome) in request.check_history.iter().enumerate() {
-        if outcome.success || lesson_commands.contains(&outcome.command) {
-            continue;
-        }
-        let recovered = request.check_history[index + 1..]
-            .iter()
-            .any(|later| later.command == outcome.command && later.success && later.after_edit);
-        if recovered {
-            lesson_commands.push(outcome.command.clone());
-        }
-    }
-    for command in &lesson_commands {
-        let mut description =
-            format!("The required check `{command}` failed before the change and passed after it.");
-        if !note.is_empty() {
-            description.push_str(&format!("\n\nModel note: {note}"));
-        }
-        let mut lesson_evidence = vec![
-            format!("check failed: {command}"),
-            format!("check passed after edit: {command}"),
-        ];
-        lesson_evidence.extend(evidence.iter().cloned());
-        raw.push((
-            base_proposal(
-                "Lesson",
-                cap_title(&format!(
-                    "Check {command} failed before the edit and passed after it"
-                )),
-                description,
-                lesson_evidence,
-                request.changed_files.clone(),
-            ),
-            ProposalOrigin::SymbolicLesson,
         ));
     }
     let sensor_enabled = state.llm_configured
@@ -420,6 +409,7 @@ async fn type_note(
                 let mut known: Vec<String> =
                     raw.iter().map(|(p, _)| normalized(&p.title)).collect();
                 known.push(normalized(&request.plan_summary));
+                let mut folded = false;
                 for proposal in typed.proposals.into_iter().take(MAX_SENSOR_PROPOSALS) {
                     if !is_record_kind(&proposal.kind)
                         || proposal.title.trim().is_empty()
@@ -427,6 +417,38 @@ async fn type_note(
                         || known.contains(&normalized(&proposal.title))
                     {
                         continue;
+                    }
+                    // The sensor reads the same note the symbolic decision
+                    // was made from, so its first decision is that decision
+                    // under a better name (badciv 14ad550e: "Baseline-First
+                    // Development" beside "The decision to defer all…"). Fold
+                    // it: its name and claim lead, the note, approved plan and
+                    // files follow, and the plan stays its own paragraph, so
+                    // reconciliation keys on the same text (Lesson 04d8c3f7).
+                    // A score cannot tell these apart (Lesson bfdd2dea); where
+                    // the claim came from can.
+                    if proposal.kind == "ArchitecturalDecision" && !folded {
+                        if let Some((decision, _)) = raw
+                            .iter_mut()
+                            .find(|(_, origin)| *origin == ProposalOrigin::SymbolicDecision)
+                            .filter(|_| {
+                                super::reconcile_score::reconcile_key(
+                                    "",
+                                    proposal.description.trim(),
+                                )
+                                .is_empty()
+                            })
+                        {
+                            decision.title = cap_title(&proposal.title);
+                            decision.description = format!(
+                                "{}\n\n{}",
+                                proposal.description.trim(),
+                                decision.description
+                            );
+                            known.push(normalized(&decision.title));
+                            folded = true;
+                            continue;
+                        }
                     }
                     raw.push((
                         base_proposal(
@@ -470,6 +492,7 @@ async fn type_note(
             })
         });
         let scored = score_proposal(state, &request.owner_id, &proposal, thresholds)?;
+        let names_rules = rules_named(&proposal, &request.governing_labels);
         let receipt_id = format!("{}-r{index}", request.operation_id);
         let mut resolved_by = "symbolic".to_string();
         let disposition = match scored.disposition.clone() {
@@ -638,6 +661,7 @@ async fn type_note(
             disposition: typed,
             resolved_by,
             derived,
+            names_rules,
         });
     }
     ensure_unchanged(
@@ -654,6 +678,39 @@ async fn type_note(
     })
 }
 
+/// The governing rules a proposal's own claim names, matched as whole words
+/// without regard to case. The approved-plan, files and verification
+/// paragraphs are the harness's text, not the claim: a plan that listed
+/// every rule it satisfies would otherwise flag every decision.
+fn rules_named(proposal: &KnowledgeProposal, labels: &[String]) -> Vec<String> {
+    let claim: String = std::iter::once(proposal.title.as_str())
+        .chain(proposal.description.split("\n\n").filter(|paragraph| {
+            let paragraph = paragraph.trim_start();
+            !["Approved plan: ", "Files changed: ", "Verified by: "]
+                .iter()
+                .any(|marker| paragraph.starts_with(marker))
+        }))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    let mut named: Vec<String> = Vec::new();
+    for label in labels {
+        let needle = label.trim().to_lowercase();
+        if needle.is_empty() || named.contains(label) {
+            continue;
+        }
+        let found = claim.match_indices(&needle).any(|(at, _)| {
+            let before = claim[..at].chars().next_back();
+            let after = claim[at + needle.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        });
+        if found {
+            named.push(label.clone());
+        }
+    }
+    named
+}
+
 #[derive(serde::Serialize, Deserialize)]
 struct StoredTyping {
     request: CaptureTypeRequest,
@@ -665,7 +722,7 @@ async fn sensor_typing(
     request: &CaptureTypeRequest,
 ) -> anyhow::Result<SensorTyping> {
     let prompt = format!(
-        "You type one engineer's note into durable software-project knowledge. Use only what the note and the listed facts state; do not invent.\n\nObjective of the approved plan: {}\nFiles changed: {}\nChecks: {}\n\nNote:\n{}\n\nReturn up to {MAX_SENSOR_PROPOSALS} proposals. Kinds: ArchitecturalDecision (a choice and why), Lesson (a non-obvious gotcha), Constraint (a hard rule), Requirement (a need), Pattern (a deliberate recurring approach), AntiPattern (something to avoid). Titles are short names under 100 characters; descriptions state the claim in one or two sentences. Return an empty list when the note carries no durable claim.",
+        "You type one engineer's note into durable software-project knowledge. Use only what the note and the listed facts state; do not invent.\n\nObjective of the approved plan: {}\nFiles changed: {}\nChecks: {}\n\nNote:\n{}\n\nReturn up to {MAX_SENSOR_PROPOSALS} proposals. Kinds: ArchitecturalDecision (a choice and why), Lesson (a non-obvious gotcha), Constraint (a hard rule), Requirement (a need), Pattern (a deliberate recurring approach), AntiPattern (something to avoid). Titles are short names under 100 characters; descriptions state the claim in one or two sentences.\n\nNot knowledge, so never propose it: a plan to do something later, or a choice to postpone a requirement or constraint; and general programming, language or tool knowledge any competent engineer already has (how a compiler, build tool or type system behaves, calling a function with the right types). A Lesson is something about this project that someone new to it would get wrong. Return an empty list rather than a generic claim, and when the note carries no durable claim.",
         request.plan_summary.trim(),
         if request.changed_files.is_empty() { "none".to_string() } else { request.changed_files.join(", ") },
         request

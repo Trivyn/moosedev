@@ -3149,6 +3149,7 @@ fn typing_request(
         knowledge_revision: revision.into(),
         obligation_iris: vec![],
         obligations_digest: String::new(),
+        governing_labels: vec![],
     }
 }
 
@@ -3166,8 +3167,8 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     );
     let revision = daemon::accepted_revision(&state).unwrap();
     // The plan restates an accepted decision: receipt only, whatever the note
-    // titles the proposal. A check that failed then passed after the edit is a
-    // distinct lesson.
+    // titles the proposal. A check that failed then passed after the edit is
+    // how the change was verified: evidence on the decision, not a Lesson.
     let request = typing_request(
         "type-1",
         "I decided that display labels keep their rendered form when the helper changes.",
@@ -3186,7 +3187,7 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
         .unwrap()
         .contains("symbolic typing only"));
     assert_eq!(response.thresholds, ReconcileThresholds::default());
-    assert_eq!(response.proposals.len(), 2, "{:#?}", response.proposals);
+    assert_eq!(response.proposals.len(), 1, "{:#?}", response.proposals);
     let decision = &response.proposals[0];
     assert_eq!(decision.origin, ProposalOrigin::SymbolicDecision);
     assert_eq!(decision.proposal.kind, "ArchitecturalDecision");
@@ -3199,6 +3200,10 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
         .proposal
         .description
         .contains("Approved plan: Preserve display behavior"));
+    assert!(decision
+        .proposal
+        .description
+        .ends_with("\n\nVerified by: `pytest -q` failed before the change and passed after it."));
     assert_eq!(
         decision.proposal.evidence,
         vec!["event 12: capture note".to_string()]
@@ -3219,19 +3224,6 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     assert_eq!(receipt.thresholds, ReconcileThresholds::default());
     assert_eq!(receipt.candidate_iri.as_deref(), Some(existing.as_str()));
     assert_eq!(receipt.resolved_by, "symbolic");
-    let lesson = &response.proposals[1];
-    assert_eq!(lesson.origin, ProposalOrigin::SymbolicLesson);
-    assert_eq!(lesson.proposal.kind, "Lesson");
-    assert!(lesson.proposal.title.contains("pytest -q"));
-    assert!(lesson
-        .proposal
-        .evidence
-        .contains(&"check passed after edit: pytest -q".to_string()));
-    assert!(matches!(
-        lesson.disposition,
-        TypedDisposition::Distinct { .. }
-    ));
-    assert!(lesson.proposal.reconciled.is_empty());
     // Idempotent by operation id; a different request under the same id is refused.
     assert_eq!(
         capture_type_operation(&state, request.clone())
@@ -3242,24 +3234,6 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     let mut changed = request.clone();
     changed.note = "different".into();
     assert!(capture_type_operation(&state, changed).await.is_err());
-    // The distinct lesson captures through the ordinary path.
-    let captured = daemon::capture_operation(
-        &state,
-        CaptureV2Request {
-            operation_id: "cap-1".into(),
-            owner_id: "task-a".into(),
-            proposals: vec![lesson.proposal.clone()],
-            changed: vec![],
-            restated: vec![],
-        },
-    )
-    .unwrap();
-    assert_eq!(captured.proposals.len(), 1);
-    assert_eq!(
-        status_literal(&state, &captured.proposals[0].iri, &state.capture.status).as_deref(),
-        Some("proposed")
-    );
-
     // A narrower plan refines the accepted decision: proposal plus a
     // receipt-backed edge, annotated with confidence at capture.
     let revision = daemon::accepted_revision(&state).unwrap();
@@ -3330,40 +3304,50 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     record_described(
         &state,
         "Requirement",
-        "Check pytest -q failed before the edit and passed after it",
-        "A requirement that happens to share the lesson's title.",
+        "Tenant labels are cached per request",
+        "A requirement that happens to share the decision's title.",
     );
     let revision = daemon::accepted_revision(&state).unwrap();
     let request = typing_request(
         "type-3",
-        "",
-        "Preserve display behavior",
+        "Tenant labels are cached per request. A cache that outlived the request served one tenant's label to another.",
+        "Cache tenant labels for one request",
         &["labels.py"],
         &[("pytest -q", false, false), ("pytest -q", true, true)],
         &revision,
     );
     let response = capture_type_operation(&state, request).await.unwrap();
-    let lesson = response
-        .proposals
-        .iter()
-        .find(|p| p.origin == ProposalOrigin::SymbolicLesson)
-        .unwrap();
     assert!(
-        matches!(
-            lesson.disposition,
-            TypedDisposition::Distinct {
-                nearest_iri: None,
-                ..
-            }
-        ),
+        response
+            .proposals
+            .iter()
+            .all(|p| p.origin != ProposalOrigin::SymbolicLesson),
+        "a recovered check is never a Lesson of its own"
+    );
+    let decision = &response.proposals[0];
+    assert!(
+        matches!(decision.disposition, TypedDisposition::Distinct { .. }),
         "{:#?}",
-        lesson.disposition
+        decision.disposition
     );
     assert!(
-        lesson.proposal.title.ends_with("(labels.py)"),
+        decision.proposal.title.ends_with("(labels.py)"),
         "{}",
-        lesson.proposal.title
+        decision.proposal.title
     );
+    // Without a note there is no decision, and the recovered check alone
+    // proposes nothing: the journal keeps it.
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let request = typing_request(
+        "type-3-empty",
+        "",
+        "Cache tenant labels for one request",
+        &["labels.py"],
+        &[("pytest -q", false, false), ("pytest -q", true, true)],
+        &revision,
+    );
+    let response = capture_type_operation(&state, request).await.unwrap();
+    assert!(response.proposals.is_empty(), "{:#?}", response.proposals);
 
     // A symbolic decision whose title is already at the cap keeps its
     // qualifier: the base is shortened, never the qualifier. Symbolic
@@ -3459,6 +3443,7 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     struct Script {
         fail: Arc<AtomicBool>,
         requests: Arc<Mutex<Vec<serde_json::Value>>>,
+        content: Arc<Mutex<Option<serde_json::Value>>>,
     }
     async fn completions(
         AxumState(script): AxumState<Script>,
@@ -3471,14 +3456,15 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
                 AxumJson(json!({"error":"scripted outage"})),
             );
         }
-        let content = json!({
+        let scripted = script.content.lock().unwrap().clone();
+        let content = scripted.unwrap_or_else(|| json!({
             "proposals": [
                 {"kind":"Lesson","title":"Renderer trims labels before display","description":"Trimming happens in the renderer, not the model layer."},
                 {"kind":"ArchitecturalDecision","title":"Preserve display behavior","description":"Duplicate of the symbolic decision; dropped."},
                 {"kind":"Bogus","title":"Not a kind","description":"Dropped."}
             ],
             "reason": "The note states one gotcha."
-        });
+        }));
         (
             axum::http::StatusCode::OK,
             AxumJson(
@@ -3489,6 +3475,7 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     let script = Script {
         fail: Arc::new(AtomicBool::new(false)),
         requests: Arc::new(Mutex::new(Vec::new())),
+        content: Arc::new(Mutex::new(None)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -3553,6 +3540,66 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
         "harness_capture_typing"
     );
     assert_eq!(recorded[0]["model"], "scripted-daemon-model");
+    let prompt = recorded[0]["messages"].to_string();
+    assert!(prompt.contains("a plan to do something later"), "{prompt}");
+    assert!(prompt.contains("general programming, language or tool knowledge"));
+
+    // The sensor's first decision is the symbolic decision under a better
+    // name: it folds in, its claim leading and the approved plan kept as its
+    // own paragraph. A second decision stands on its own. The claim names one
+    // governing rule; the plan paragraph's mention of another does not count.
+    *script.content.lock().unwrap() = Some(json!({
+        "proposals": [
+            {"kind":"ArchitecturalDecision","title":"Renderer owns label trimming","description":"Labels are trimmed in the renderer so every view shows the same text."},
+            {"kind":"ArchitecturalDecision","title":"Views show labels as given","description":"Views display the label they are given."}
+        ],
+        "reason": "Two decisions."
+    }));
+    let revision = daemon::accepted_revision(&state).unwrap();
+    let mut request = typing_request(
+        "type-sensor-fold",
+        "The renderer trims labels; the model layer must not.",
+        "Preserve display behavior",
+        &["labels.py"],
+        &[],
+        &revision,
+    );
+    request.governing_labels = vec![
+        "Model layer".into(),
+        "Preserve display behavior".into(),
+        "Trim".into(),
+    ];
+    let response = capture_type_operation(&state, request).await.unwrap();
+    let summary: Vec<_> = response
+        .proposals
+        .iter()
+        .map(|p| (p.origin, p.proposal.title.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                ProposalOrigin::SymbolicDecision,
+                "Renderer owns label trimming"
+            ),
+            (ProposalOrigin::LlmSensor, "Views show labels as given"),
+        ]
+    );
+    let decision = &response.proposals[0].proposal;
+    assert!(decision.description.starts_with(
+        "Labels are trimmed in the renderer so every view shows the same text.\n\nThe renderer trims labels; the model layer must not.\n\nApproved plan: Preserve display behavior\n\n"
+    ), "{}", decision.description);
+    assert_eq!(
+        daemon::reconcile_score::reconcile_key(&decision.title, &decision.description),
+        "Preserve display behavior",
+        "the fold keeps what reconciliation keys on"
+    );
+    assert_eq!(
+        response.proposals[0].names_rules,
+        vec!["Model layer".to_string()]
+    );
+    assert!(response.proposals[1].names_rules.is_empty());
+    *script.content.lock().unwrap() = None;
 
     script.fail.store(true, Ordering::Release);
     let revision = daemon::accepted_revision(&state).unwrap();

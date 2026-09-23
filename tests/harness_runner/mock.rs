@@ -652,6 +652,7 @@ pub(super) fn distinct_proposal(kind: &str, title: &str) -> TypedProposal {
         },
         resolved_by: "symbolic".into(),
         derived: vec![],
+        names_rules: vec![],
     }
 }
 
@@ -1092,6 +1093,7 @@ pub(super) async fn capture_type(
             },
             resolved_by: "symbolic".into(),
             derived: vec![],
+            names_rules: vec![],
         }],
     };
     (

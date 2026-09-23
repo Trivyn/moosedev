@@ -112,6 +112,18 @@ impl Runner {
                         .as_ref()
                         .map(|state| state.obligations_digest.clone())
                         .unwrap_or_default(),
+                    governing_labels: self
+                        .task
+                        .knowledge_context
+                        .as_ref()
+                        .map(|context| {
+                            context
+                                .governing_rules
+                                .iter()
+                                .map(|rule| rule.label.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 };
                 let response: CaptureTypeResponse = self.post("capture/type", &request).await?;
                 anyhow::ensure!(

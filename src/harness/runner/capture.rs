@@ -270,6 +270,7 @@ mod tests {
                 },
                 resolved_by: "symbolic".into(),
                 derived: vec![],
+                names_rules: vec![],
             }],
         })
     }

@@ -796,8 +796,19 @@ contract 3 and intent contract 2.
 - Capture. Intermediate checkpoints only journal (`capture_deferred`). At the
   final checkpoint the note is journaled (`capture_note`) and
   `POST /api/v1/harness/capture/type` types it: a symbolic decision for the
-  change, a symbolic lesson for a check that failed then passed, and, when the
-  daemon has an LLM sensor, bounded sensor proposals. A note that opens with
+  change and, when the daemon has an LLM sensor, bounded sensor proposals. A
+  required check that failed and then passed after an edit is how the change
+  was verified, so it becomes a `Verified by:` paragraph on the decision rather
+  than a Lesson of its own. The sensor is told that a postponement ("defer the
+  database constraint") and general programming or tool knowledge ("a crate
+  needs a `lib.rs`") are not project knowledge. The sensor's first
+  `ArchitecturalDecision` restates the symbolic decision from the same note, so
+  it is folded in: its title names the decision and its claim leads the
+  description, ahead of the note and the approved plan. A proposal whose own
+  claim names a rule that governed the task (a Constraint or Requirement label,
+  whole words, the approved-plan paragraph excluded) carries `names_rules`, and
+  the review card says `Names governing rule(s): … — accepting records a
+  decision about them`. A note that opens with
   "nothing beyond the diff" (or is empty) is the model's answer that nothing
   durable happened: no decision is proposed, the journal says so
   (`capture_typed … note declares nothing durable`), and `/no-knowledge`

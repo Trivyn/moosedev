@@ -956,6 +956,14 @@ async fn only_action_and_capture_note_schemas_are_ever_requested() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
     let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
+    // The rules governing the task's files at capture travel to typing.
+    fixture.shared.lock().unwrap().governing_rules = vec![GoverningRule {
+        iri: "urn:rule:names".into(),
+        label: "Display names stay stable".into(),
+        kind: "Requirement".into(),
+        claim: "hasDescription: A rendered name never changes between views.\n".into(),
+        via: "via: component Labels".into(),
+    }];
     fixture.note(
         "The helper strips whitespace so labels compare equal; keep normalization in one place.",
     );
@@ -984,6 +992,11 @@ async fn only_action_and_capture_note_schemas_are_ever_requested() {
         "Preserve display behavior while adding a helper"
     );
     assert_eq!(typing[0].knowledge_revision, "accepted-links");
+    assert_eq!(
+        typing[0].governing_labels,
+        vec!["Display names stay stable".to_string()],
+        "the daemon is told which rules governed the task, to flag a claim that names one"
+    );
     assert_eq!(typing[0].check_history.len(), 1);
     assert!(typing[0].check_history[0].after_edit);
     assert!(typing[0].note.starts_with("The helper strips whitespace"));
@@ -1135,6 +1148,7 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
         },
         resolved_by: "symbolic".into(),
         derived: vec![],
+        names_rules: vec![],
     }]);
     fixture.note("Labels keep their display form.");
     runner.advance().await.unwrap();
@@ -1218,6 +1232,7 @@ async fn symbolic_restated_note_links_the_existing_record_through_one_capture() 
         },
         resolved_by: "symbolic".into(),
         derived: vec![],
+        names_rules: vec![],
     }]);
     fixture.note("Labels keep their display form.");
     runner.advance().await.unwrap();
