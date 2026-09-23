@@ -3,7 +3,7 @@ use super::protocol::{
     AssociatePage, DerivedBasis, SpecDisposition, SpecPrepareResponse, SpecRetirementDisposition,
     TypedDisposition, TypingMode,
 };
-use super::runner::{Phase, ReviewItem, Runner, Task};
+use super::runner::{Phase, ReviewItem, Runner, SpecUncited, Task};
 use super::{
     clipboard, markdown,
     selection::{self, Pos, Selection},
@@ -344,7 +344,7 @@ fn gate(task: &Task, standing: &[String]) -> String {
         Phase::AwaitingSpecApproval => task
             .pending_spec
             .as_ref()
-            .map(|pending| spec_approval_gate(&pending.preview))
+            .map(|pending| spec_approval_gate(&pending.preview, &pending.uncited))
             .unwrap_or_else(|| "SPEC APPROVAL · preview unavailable; run /approve-spec <path> again.".into()),
         Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Review (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
         Phase::AwaitingPermission => task
@@ -431,7 +431,7 @@ fn permission_gate(request: &super::runner::PendingPermission, standing: &[Strin
     text
 }
 
-fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
+fn spec_approval_gate(preview: &SpecPrepareResponse, uncited: &[SpecUncited]) -> String {
     let mut text = format!(
         "SPEC APPROVAL · human approval required\nSource: {}\nSHA-256: {}\nKnowledge revision: {}\n",
         preview.path, preview.source_sha256, preview.knowledge_revision
@@ -500,6 +500,18 @@ fn spec_approval_gate(preview: &SpecPrepareResponse) -> String {
             "SUPERSEDE PRIOR APPROVAL"
         };
         text.push_str(&format!("\n{effect}\nIRI: {previous}\n"));
+    }
+    // What the batch leaves out is as much a part of the judgment as what it
+    // holds: a section no record cites will never govern anything.
+    if !uncited.is_empty() {
+        text.push_str(&format!(
+            "\nUNCITED · {} range(s) of {} no record above cites; they will not become project knowledge:\n",
+            uncited.len(),
+            preview.path
+        ));
+        for range in uncited {
+            text.push_str(&format!("  {}\n", range.describe()));
+        }
     }
     text.push_str(&format!(
         "\nApproval marker: spec-approval: {}\n/approve-spec or ‘I approve the spec’ records this exact batch.\nA separate /approve is still required before code execution.",
@@ -2181,11 +2193,19 @@ mod tests {
                 "component": null,
                 "previous_approval_iri": null,
                 "already_approved": false
-            }
+            },
+            "uncited": [
+                {"start": 20, "end": 50, "heading": "## Faction Rules"},
+                {"start": 61, "end": 61, "heading": ""}
+            ]
         })).unwrap());
         let text = gate(&task, &[]);
         assert!(
             text.contains("COMPONENT · none · the records below will not be linked"),
+            "{text}"
+        );
+        assert!(
+            text.contains("UNCITED · 2 range(s) of badciv-map.md no record above cites; they will not become project knowledge:\n  lines 20-50 (## Faction Rules)\n  line 61\n"),
             "{text}"
         );
         assert!(

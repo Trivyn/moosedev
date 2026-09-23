@@ -52,7 +52,7 @@ use task::{bounded, fingerprint, Intent};
 pub use task::{
     CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier, KnowledgeSearchResult,
     KnowledgeTurn, Mode, PendingEdit, PendingPermission, PendingSpecApproval, PermissionGrant,
-    Phase, Plan, ReviewItem, StandingGuidance, Task,
+    Phase, Plan, ReviewItem, SpecUncited, StandingGuidance, Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;

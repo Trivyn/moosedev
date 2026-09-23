@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use super::CheckpointResponse;
 
+/// Bounds on one approval's batch, shared by the runner that validates the
+/// extraction sensor's output and the daemon that validates the request, so
+/// the two cannot drift apart.
+pub const MAX_SPEC_RECORDS: usize = 96;
+pub const MAX_SPEC_TITLE_BYTES: usize = 240;
+pub const MAX_SPEC_DESCRIPTION_BYTES: usize = 4_000;
+pub const MAX_SPEC_EVIDENCE: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpecRecordDraft {

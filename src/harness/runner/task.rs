@@ -196,6 +196,34 @@ pub struct ReviewItem {
 #[serde(deny_unknown_fields)]
 pub struct PendingSpecApproval {
     pub preview: SpecPrepareResponse,
+    /// Specification lines no extracted record cites, shown at the gate so
+    /// the human sees what the batch leaves out, not only what it holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncited: Vec<SpecUncited>,
+}
+
+/// A run of specification lines no record cites, under its nearest heading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecUncited {
+    pub start: usize,
+    pub end: usize,
+    pub heading: String,
+}
+
+impl SpecUncited {
+    pub fn describe(&self) -> String {
+        let lines = if self.start == self.end {
+            format!("line {}", self.start)
+        } else {
+            format!("lines {}-{}", self.start, self.end)
+        };
+        if self.heading.is_empty() {
+            lines
+        } else {
+            format!("{lines} ({})", self.heading)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1038,7 +1038,9 @@ fn rationale_quads(
 /// human named: an existing component with that name gains any new paths,
 /// otherwise one is minted. A directory keeps or gains its trailing `/` and
 /// need not exist yet (a spec may describe a crate still to be created); a
-/// file path is exact and must exist; `.` covers the whole project.
+/// file path is exact; a path that does not exist yet and has no trailing
+/// slash is a directory unless its last segment has an extension; `.` covers
+/// the whole project.
 fn plan_component(
     state: &AppState,
     request: &SpecPrepareRequest,
@@ -1081,10 +1083,17 @@ fn plan_component(
                         trimmed.to_string()
                     }
                 }
-                Err(_) if directory => format!("{trimmed}/"),
-                Err(_) => anyhow::bail!(
-                    "covered path {raw} does not exist; name a directory with a trailing slash to cover one not created yet"
-                ),
+                // A spec often describes a crate or file still to be created.
+                // Without a trailing slash, a last segment with no extension
+                // is a directory (`crates/map`) and one with an extension an
+                // exact file (`docs/map.md`); the preview shows which.
+                Err(_)
+                    if directory
+                        || !trimmed.rsplit('/').next().unwrap_or(trimmed).contains('.') =>
+                {
+                    format!("{trimmed}/")
+                }
+                Err(_) => trimmed.to_string(),
             }
         };
         if !covers.contains(&path) {
@@ -1477,8 +1486,8 @@ fn validate_source(state: &AppState, path: &str, expected: &str) -> anyhow::Resu
 
 fn validate_drafts(path: &str, drafts: &[SpecRecordDraft], state: &AppState) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !drafts.is_empty() && drafts.len() <= 32,
-        "spec approval needs 1..=32 records"
+        !drafts.is_empty() && drafts.len() <= MAX_SPEC_RECORDS,
+        "spec approval needs 1..={MAX_SPEC_RECORDS} records"
     );
     let source = std::fs::read_to_string(state.project_root().join(path))?;
     let line_count = source.lines().count().max(1);
@@ -1490,22 +1499,22 @@ fn validate_drafts(path: &str, drafts: &[SpecRecordDraft], state: &AppState) -> 
         );
         anyhow::ensure!(
             !draft.title.trim().is_empty()
-                && draft.title.len() <= 240
+                && draft.title.len() <= MAX_SPEC_TITLE_BYTES
                 && !draft.title.chars().any(char::is_control),
-            "spec record title must contain 1..=240 bytes and no control characters"
+            "spec record title must contain 1..={MAX_SPEC_TITLE_BYTES} bytes and no control characters"
         );
         anyhow::ensure!(
             !draft.description.trim().is_empty()
-                && draft.description.len() <= 4_000
+                && draft.description.len() <= MAX_SPEC_DESCRIPTION_BYTES
                 && !draft
                     .description
                     .chars()
                     .any(|character| character.is_control() && !matches!(character, '\n' | '\t')),
-            "spec record description must contain 1..=4000 bytes and no unsupported control characters"
+            "spec record description must contain 1..={MAX_SPEC_DESCRIPTION_BYTES} bytes and no unsupported control characters"
         );
         anyhow::ensure!(
-            (1..=8).contains(&draft.evidence.len()),
-            "spec record needs 1..=8 source line ranges"
+            (1..=MAX_SPEC_EVIDENCE).contains(&draft.evidence.len()),
+            "spec record needs 1..={MAX_SPEC_EVIDENCE} source line ranges"
         );
         anyhow::ensure!(
             titles.insert((draft.kind.clone(), normalize(&draft.title))),
@@ -1727,6 +1736,31 @@ mod tests {
             .iter()
             .all(|entry| matches!(entry.disposition, SpecDisposition::Reuse { .. })));
         assert!(preview.retirements.is_empty());
+    }
+
+    #[test]
+    fn a_covered_path_not_created_yet_is_read_by_its_shape() {
+        let fixture = Fixture::new();
+        let hash = fixture.write_spec("# Map crate\nParse SCRATCHMAP 1 files.\n");
+        let state = fixture.state();
+        let revision = accepted_revision(&state).unwrap();
+        let drafts = vec![draft(
+            "Requirement",
+            "Parse SCRATCHMAP 1",
+            "The crate parses SCRATCHMAP 1 files.",
+            2,
+        )];
+        let mut request = prepare_request("spec-shape", hash, revision, drafts);
+        request.covers = vec!["crates/badciv-map".into(), "docs/map-format.md".into()];
+        let plan = plan_component(&state, &request).unwrap().unwrap();
+        assert_eq!(
+            plan.covers,
+            vec![
+                "crates/badciv-map/".to_string(),
+                "docs/map-format.md".into()
+            ]
+        );
+        assert_eq!(plan.name, "badciv-map");
     }
 
     #[test]

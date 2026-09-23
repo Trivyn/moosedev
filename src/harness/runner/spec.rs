@@ -7,10 +7,13 @@ use super::*;
 use serde::Deserialize;
 use serde_json::json;
 
-const MAX_SPEC_RECORDS: usize = 32;
-const MAX_SPEC_TITLE_BYTES: usize = 240;
-const MAX_SPEC_DESCRIPTION_BYTES: usize = 4_000;
-const MAX_SPEC_EVIDENCE: usize = 8;
+/// Records one section extraction may propose; the batch as a whole is bounded
+/// by `MAX_SPEC_RECORDS`.
+const MAX_SECTION_RECORDS: usize = 16;
+/// Adjacent sections are extracted together while their text stays under
+/// this size, so a one-paragraph section does not cost a model call of its
+/// own and a long one is never diluted by the rest of the file.
+const SECTION_TARGET_BYTES: usize = 2_048;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +32,16 @@ impl Runner {
             "usage: /approve-spec <repo-relative-path> [covered paths]"
         );
         let covers = validate_covers(covers)?;
+        // A new /approve-spec is the human asking again: an earlier extraction
+        // that exhausted its repairs does not count against this one.
+        if self
+            .task
+            .recovery
+            .as_ref()
+            .is_some_and(|repair| repair.purpose == SPEC_EXTRACT_PURPOSE)
+        {
+            self.candidate_accepted();
+        }
         anyhow::ensure!(
             self.task.mode == Mode::Plan
                 && matches!(
@@ -92,19 +105,20 @@ impl Runner {
                 ));
                 records.clone()
             }
-            None => {
-                let prompt = spec_prompt(path, &source);
-                let extracted: SpecExtraction = self
-                    .model_json(&prompt, "harness_spec_extract", spec_schema(path))
-                    .await?;
-                anyhow::ensure!(
-                    extracted.action == "propose_spec_records",
-                    "spec extraction returned the wrong action"
-                );
-                extracted.records
-            }
+            None => self.extract_spec(path, &source).await?,
         };
         validate_spec_records(path, &source, &records)?;
+        let uncited = uncited_lines(path, &source, &records);
+        if !uncited.is_empty() {
+            self.intent_event(
+                "spec_uncited",
+                &uncited
+                    .iter()
+                    .map(SpecUncited::describe)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+        }
 
         // Bind the preview to exactly the bytes seen by the extraction sensor.
         let current = self
@@ -153,7 +167,7 @@ impl Runner {
         self.task.approved_revision = None;
         self.task.snapshots.clear();
         self.task.check_results.clear();
-        self.task.pending_spec = Some(PendingSpecApproval { preview });
+        self.task.pending_spec = Some(PendingSpecApproval { preview, uncited });
         self.task.mode = Mode::Plan;
         self.task.phase = Phase::AwaitingSpecApproval;
         self.task.turn_finished = true;
@@ -216,6 +230,95 @@ impl Runner {
             }
             _ => None,
         })
+    }
+
+    /// Extract a specification one section at a time. A single call over a
+    /// whole file let a small model settle for a few one-line summaries and
+    /// skip whole sections (badciv, 2026-09-23: 95 lines became 8 records,
+    /// every table and per-item rule gone); a section at a time keeps its
+    /// tables, lists and grammars in view. Each section's output is validated
+    /// on its own and repaired with the diagnostic like any sensor output.
+    async fn extract_spec(&mut self, path: &str, source: &str) -> Result<Vec<SpecRecordDraft>> {
+        let lines: Vec<&str> = source.lines().collect();
+        let headings = line_headings(&lines);
+        let title = document_title(&lines);
+        let sections = spec_sections(&lines, &headings);
+        let mut records: Vec<SpecRecordDraft> = Vec::new();
+        for (index, section) in sections.iter().enumerate() {
+            let prompt = spec_prompt(
+                path,
+                source,
+                &lines,
+                &title,
+                section,
+                index + 1,
+                sections.len(),
+            );
+            let proposed = loop {
+                match self.extract_section(path, &prompt, section).await {
+                    Ok(proposed) => {
+                        self.candidate_accepted();
+                        break proposed;
+                    }
+                    Err(error) => {
+                        if !self.repair_candidate(&error)? {
+                            return Err(error);
+                        }
+                    }
+                }
+            };
+            for mut record in proposed {
+                distinguish_title(&mut record, &records, &headings);
+                records.push(record);
+            }
+        }
+        anyhow::ensure!(
+            !records.is_empty(),
+            "no section of {path} states a requirement or constraint the extraction could find"
+        );
+        self.event(format!(
+            "Extracted {} record(s) from {path} in {} section(s).",
+            records.len(),
+            sections.len()
+        ));
+        Ok(records)
+    }
+
+    /// One section's records, each checked against the lines the model saw.
+    async fn extract_section(
+        &mut self,
+        path: &str,
+        prompt: &str,
+        section: &SpecSection,
+    ) -> Result<Vec<SpecRecordDraft>> {
+        let extracted: SpecExtraction = self
+            .model_json(prompt, SPEC_EXTRACT_PURPOSE, spec_schema(path))
+            .await?;
+        let checked = (|| {
+            anyhow::ensure!(
+                extracted.action == "propose_spec_records",
+                "spec extraction returned the wrong action"
+            );
+            anyhow::ensure!(
+                extracted.records.len() <= MAX_SECTION_RECORDS,
+                "a section may propose at most {MAX_SECTION_RECORDS} records"
+            );
+            for record in &extracted.records {
+                validate_spec_record(path, section.end, record)?;
+                for evidence in &record.evidence {
+                    let (start, _) = evidence_lines(path, evidence)?;
+                    anyhow::ensure!(
+                        start >= section.start,
+                        "evidence {evidence} is outside the lines shown ({}-{})",
+                        section.start,
+                        section.end
+                    );
+                }
+            }
+            Ok(())
+        })();
+        checked.map_err(|error| error.context(super::model::InvalidModelOutput))?;
+        Ok(extracted.records)
     }
 
     /// Commit the exact frozen preview currently displayed to the human.
@@ -301,17 +404,226 @@ impl Runner {
     }
 }
 
-fn spec_prompt(path: &str, source: &str) -> String {
-    let numbered = source
-        .lines()
-        .enumerate()
-        .map(|(index, line)| format!("{}: {line}", index + 1))
+pub(super) const SPEC_EXTRACT_PURPOSE: &str = "harness_spec_extract";
+
+/// A run of the specification's lines extracted by one model call, with its
+/// original 1-based, inclusive line numbers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpecSection {
+    start: usize,
+    end: usize,
+    heading: String,
+}
+
+fn spec_prompt(
+    path: &str,
+    source: &str,
+    lines: &[&str],
+    title: &str,
+    section: &SpecSection,
+    number: usize,
+    total: usize,
+) -> String {
+    let numbered = (section.start..=section.end)
+        .map(|line| format!("{line}: {}", lines[line - 1]))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "You are the extraction sensor for MOOSEDev's symbolic project memory. Extract only requirements and hard constraints explicitly stated by this specification. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Preserve each complete normative claim in its description. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>; cite the narrowest lines that directly state the claim. Produce no more than {MAX_SPEC_RECORDS} non-duplicate records.\n\nSpecification path: {path}\nSpecification sha256: {}\nLine-addressed specification:\n{numbered}",
-        sha256_hex(source)
+        "You are the extraction sensor for MOOSEDev's symbolic project memory. You are reading part {number} of {total} of a specification, lines {start}-{end} of {count}. Extract only the requirements and hard constraints this part explicitly states. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide.\n\nEach description states its claim completely, in the specification's own terms: every value, name, table row, list item, grammar production and exception the cited lines give. A table, grammar or list of per-item rules is one record whose description restates all of it; never reduce it to a one-sentence summary. Separate claims are separate records. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>, citing exactly the lines that state the claim, every row of a table or list included. If this part states no requirement or constraint, return an empty records list. Produce no more than {MAX_SECTION_RECORDS} non-duplicate records.\n\nDocument title: {title}\nSpecification path: {path}\nSpecification sha256: {sha}\nLine-addressed part ({heading}):\n{numbered}",
+        start = section.start,
+        end = section.end,
+        count = lines.len(),
+        heading = if section.heading.is_empty() { "untitled" } else { &section.heading },
+        sha = sha256_hex(source),
     )
+}
+
+/// The heading level of a markdown ATX heading line.
+fn heading_level(line: &str) -> Option<usize> {
+    let trimmed = line
+        .strip_prefix("   ")
+        .or_else(|| line.strip_prefix("  "))
+        .or_else(|| line.strip_prefix(' '))
+        .unwrap_or(line);
+    let level = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    ((1..=6).contains(&level)
+        && trimmed[level..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace))
+    .then_some(level)
+}
+
+fn is_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// For every line, the text of the nearest heading at or above it, ignoring
+/// `#` lines inside code fences.
+fn line_headings(lines: &[&str]) -> Vec<String> {
+    let mut current = String::new();
+    let mut fenced = false;
+    lines
+        .iter()
+        .map(|line| {
+            if is_fence(line) {
+                fenced = !fenced;
+            } else if !fenced && heading_level(line).is_some() {
+                current = line.trim().to_string();
+            }
+            current.clone()
+        })
+        .collect()
+}
+
+fn heading_name(heading: &str) -> &str {
+    heading.trim_start_matches('#').trim()
+}
+
+fn document_title(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .find(|line| heading_level(line) == Some(1))
+        .map(|line| heading_name(line).to_string())
+        .unwrap_or_default()
+}
+
+/// Split at level-2 headings, then merge adjacent sections while the merged
+/// text stays under `SECTION_TARGET_BYTES`. A section holding nothing but
+/// headings is not worth a model call.
+fn spec_sections(lines: &[&str], headings: &[String]) -> Vec<SpecSection> {
+    let mut starts = vec![0];
+    let mut fenced = false;
+    for (index, line) in lines.iter().enumerate() {
+        if is_fence(line) {
+            fenced = !fenced;
+        } else if !fenced && index > 0 && heading_level(line) == Some(2) {
+            starts.push(index);
+        }
+    }
+    let bytes = |from: usize, to: usize| {
+        lines[from..to]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+    };
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (position, &from) in starts.iter().enumerate() {
+        let to = starts.get(position + 1).copied().unwrap_or(lines.len());
+        match merged.last_mut() {
+            Some(last) if bytes(last.0, to) <= SECTION_TARGET_BYTES => last.1 = to,
+            _ => merged.push((from, to)),
+        }
+    }
+    merged
+        .into_iter()
+        .filter(|&(from, to)| {
+            lines[from..to]
+                .iter()
+                .any(|line| !line.trim().is_empty() && heading_level(line).is_none())
+        })
+        .map(|(from, to)| SpecSection {
+            start: from + 1,
+            end: to,
+            heading: headings[from].clone(),
+        })
+        .collect()
+}
+
+fn normalized_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// Two sections may each name a record the same way ("Error format"). The
+/// later one takes its section's heading rather than failing the batch.
+fn distinguish_title(
+    record: &mut SpecRecordDraft,
+    earlier: &[SpecRecordDraft],
+    headings: &[String],
+) {
+    let taken = |title: &str| {
+        earlier.iter().any(|other| {
+            other.kind == record.kind && normalized_title(&other.title) == normalized_title(title)
+        })
+    };
+    if !taken(&record.title) {
+        return;
+    }
+    let section = record
+        .evidence
+        .first()
+        .and_then(|evidence| evidence.rsplit_once(':'))
+        .and_then(|(_, range)| range.split('-').next()?.parse::<usize>().ok())
+        .and_then(|line| headings.get(line.checked_sub(1)?))
+        .map(|heading| heading_name(heading).to_string())
+        .unwrap_or_default();
+    let candidates = (!section.is_empty())
+        .then(|| format!("{} — {section}", record.title))
+        .into_iter()
+        .chain((2..).map(|number| format!("{} ({number})", record.title)));
+    for candidate in candidates {
+        if candidate.len() <= MAX_SPEC_TITLE_BYTES && !taken(&candidate) {
+            record.title = candidate;
+            return;
+        }
+        if candidate.len() > MAX_SPEC_TITLE_BYTES + 8 {
+            return;
+        }
+    }
+}
+
+/// Lines no record cites, grouped into ranges under their nearest heading.
+/// Blank lines, fences and rules neither open nor close a range; a heading
+/// closes one, so each range belongs to one section.
+fn uncited_lines(path: &str, source: &str, records: &[SpecRecordDraft]) -> Vec<SpecUncited> {
+    let lines: Vec<&str> = source.lines().collect();
+    let headings = line_headings(&lines);
+    let mut cited = vec![false; lines.len()];
+    for evidence in records.iter().flat_map(|record| &record.evidence) {
+        if let Ok((start, end)) = evidence_lines(path, evidence) {
+            for line in start..=end.min(lines.len()) {
+                cited[line - 1] = true;
+            }
+        }
+    }
+    let mut ranges: Vec<SpecUncited> = Vec::new();
+    let mut open = false;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if heading_level(line).is_some() {
+            open = false;
+            continue;
+        }
+        if trimmed.is_empty()
+            || is_fence(line)
+            || trimmed
+                .chars()
+                .all(|character| matches!(character, '-' | '=' | '*' | '_' | '|' | ':' | ' '))
+        {
+            continue;
+        }
+        if cited[index] {
+            open = false;
+        } else if open {
+            ranges.last_mut().unwrap().end = index + 1;
+        } else {
+            ranges.push(SpecUncited {
+                start: index + 1,
+                end: index + 1,
+                heading: headings[index].clone(),
+            });
+            open = true;
+        }
+    }
+    ranges
 }
 
 /// The paths a spec governs, as the human typed them: repo-relative, no
@@ -371,8 +683,8 @@ fn spec_schema(path: &str) -> Value {
             "action": {"type": "string", "const": "propose_spec_records"},
             "records": {
                 "type": "array",
-                "minItems": 1,
-                "maxItems": MAX_SPEC_RECORDS,
+                "minItems": 0,
+                "maxItems": MAX_SECTION_RECORDS,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -416,57 +728,60 @@ fn validate_spec_records(path: &str, source: &str, records: &[SpecRecordDraft]) 
     let line_count = source.lines().count().max(1);
     let mut titles = std::collections::BTreeSet::new();
     for record in records {
+        validate_spec_record(path, line_count, record)?;
         anyhow::ensure!(
-            matches!(record.kind.as_str(), "Requirement" | "Constraint"),
-            "spec extraction may only propose Requirement or Constraint records"
-        );
-        anyhow::ensure!(
-            !record.title.trim().is_empty() && record.title.len() <= MAX_SPEC_TITLE_BYTES,
-            "spec record title must contain 1..{MAX_SPEC_TITLE_BYTES} bytes"
-        );
-        anyhow::ensure!(
-            !record.description.trim().is_empty()
-                && record.description.len() <= MAX_SPEC_DESCRIPTION_BYTES,
-            "spec record description must contain 1..{MAX_SPEC_DESCRIPTION_BYTES} bytes"
-        );
-        let normalized_title = record
-            .title
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_ascii_lowercase();
-        anyhow::ensure!(
-            titles.insert((record.kind.clone(), normalized_title)),
+            titles.insert((record.kind.clone(), normalized_title(&record.title))),
             "spec extraction contains a duplicate kind and title"
         );
-        anyhow::ensure!(
-            !record.evidence.is_empty() && record.evidence.len() <= MAX_SPEC_EVIDENCE,
-            "spec record evidence requires 1..{MAX_SPEC_EVIDENCE} source line ranges"
-        );
-        for evidence in &record.evidence {
-            validate_evidence(path, line_count, evidence)?;
-        }
     }
     Ok(())
 }
 
-fn validate_evidence(path: &str, line_count: usize, evidence: &str) -> Result<()> {
+/// One record's shape, with every evidence range inside lines `1..=line_count`.
+fn validate_spec_record(path: &str, line_count: usize, record: &SpecRecordDraft) -> Result<()> {
+    anyhow::ensure!(
+        matches!(record.kind.as_str(), "Requirement" | "Constraint"),
+        "spec extraction may only propose Requirement or Constraint records"
+    );
+    anyhow::ensure!(
+        !record.title.trim().is_empty() && record.title.len() <= MAX_SPEC_TITLE_BYTES,
+        "spec record title must contain 1..{MAX_SPEC_TITLE_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        !record.description.trim().is_empty()
+            && record.description.len() <= MAX_SPEC_DESCRIPTION_BYTES,
+        "spec record description must contain 1..{MAX_SPEC_DESCRIPTION_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        !record.evidence.is_empty() && record.evidence.len() <= MAX_SPEC_EVIDENCE,
+        "spec record evidence requires 1..{MAX_SPEC_EVIDENCE} source line ranges"
+    );
+    for evidence in &record.evidence {
+        validate_evidence(path, line_count, evidence)?;
+    }
+    Ok(())
+}
+
+/// The 1-based inclusive range a canonical evidence entry names.
+fn evidence_lines(path: &str, evidence: &str) -> Result<(usize, usize)> {
     let range = evidence
         .strip_prefix(path)
         .and_then(|rest| rest.strip_prefix(':'))
         .with_context(|| {
             format!("spec evidence must reference the exact path {path}: {evidence}")
         })?;
-    let (start, end) = match range.split_once('-') {
-        Some((start, end)) => (start, end),
-        None => (range, range),
-    };
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
     let start: usize = start
         .parse()
         .with_context(|| format!("invalid spec evidence line: {evidence}"))?;
     let end: usize = end
         .parse()
         .with_context(|| format!("invalid spec evidence line: {evidence}"))?;
+    Ok((start, end))
+}
+
+fn validate_evidence(path: &str, line_count: usize, evidence: &str) -> Result<()> {
+    let (start, end) = evidence_lines(path, evidence)?;
     let canonical = if start == end {
         format!("{path}:{start}")
     } else {
@@ -483,7 +798,8 @@ fn validate_evidence(path: &str, line_count: usize, evidence: &str) -> Result<()
 mod tests {
     use super::*;
     use crate::harness::runner::test_support::{context_router, serve, Project};
-    use axum::{routing::post, Json};
+    use axum::{extract::State, routing::post, Json};
+    use std::{path::PathBuf, sync::Arc};
 
     fn draft(evidence: &str) -> SpecRecordDraft {
         SpecRecordDraft {
@@ -588,6 +904,210 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn sections_split_at_level_two_keep_line_numbers_and_merge_small_ones() {
+        let long = "x".repeat(2_100);
+        let source = format!(
+            "# Title\nIntro.\n## A\na\n## B\n{long}\n```\n## not a heading\n```\n## C\nc\n## D\n### only a sub-heading\n"
+        );
+        let lines: Vec<&str> = source.lines().collect();
+        let headings = line_headings(&lines);
+        let sections = spec_sections(&lines, &headings);
+        assert_eq!(
+            sections,
+            vec![
+                SpecSection { start: 1, end: 4, heading: "# Title".into() },
+                SpecSection { start: 5, end: 9, heading: "## B".into() },
+                SpecSection { start: 10, end: 13, heading: "## C".into() },
+            ],
+            "the preamble merges with A; B is too large to take C; D holds only headings and is merged into C"
+        );
+        assert_eq!(document_title(&lines), "Title");
+        assert_eq!(
+            headings[7], "## B",
+            "a # line inside a fence is not a heading"
+        );
+    }
+
+    #[test]
+    fn uncited_ranges_name_their_section_and_skip_headings_blanks_and_rules() {
+        let source = "# T\nintro\n\n## Cited\none\ntwo\n\n## Left out\n| a | b |\n|---|---|\n| 1 | 2 |\n\nmore\n## Tail\nlast\n";
+        let records = vec![SpecRecordDraft {
+            kind: "Constraint".into(),
+            title: "Cited".into(),
+            description: "one two".into(),
+            evidence: vec!["spec.md:5-6".into()],
+        }];
+        let uncited = uncited_lines("spec.md", source, &records);
+        assert_eq!(
+            uncited
+                .iter()
+                .map(SpecUncited::describe)
+                .collect::<Vec<_>>(),
+            vec![
+                "line 2 (# T)".to_string(),
+                "lines 9-13 (## Left out)".into(),
+                "line 15 (## Tail)".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeated_title_takes_its_section_heading() {
+        let lines = [
+            "# T",
+            "## Maps",
+            "Error text names the line.",
+            "## Units",
+            "Error text names the unit.",
+        ];
+        let headings = line_headings(&lines);
+        let record = |line: usize| SpecRecordDraft {
+            kind: "Constraint".into(),
+            title: "Error format".into(),
+            description: lines[line - 1].into(),
+            evidence: vec![format!("spec.md:{line}")],
+        };
+        let first = record(3);
+        let mut second = record(5);
+        distinguish_title(&mut second, std::slice::from_ref(&first), &headings);
+        assert_eq!(second.title, "Error format — Units");
+        let mut third = record(5);
+        distinguish_title(&mut third, &[first.clone(), second.clone()], &headings);
+        assert_eq!(third.title, "Error format (2)");
+        let mut requirement = record(5);
+        requirement.kind = "Requirement".into();
+        distinguish_title(&mut requirement, &[first], &headings);
+        assert_eq!(
+            requirement.title, "Error format",
+            "only the same kind collides"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_runs_per_section_and_repeated_approvals_never_exhaust_repairs() {
+        async fn model(State(_): State<Arc<PathBuf>>, Json(body): Json<Value>) -> Json<Value> {
+            let tools = body["tools"].as_array().is_some();
+            let name = body["response_format"]["json_schema"]["name"]
+                .as_str()
+                .unwrap_or("");
+            if tools || name == "harness_response_probe" {
+                return Json(if tools {
+                    json!({"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]})
+                } else {
+                    json!({"choices":[{"message":{"role":"assistant","content":"{\"status\":\"ok\"}"},"finish_reason":"stop"}]})
+                });
+            }
+            assert_eq!(name, SPEC_EXTRACT_PURPOSE);
+            let prompt = body["messages"].to_string();
+            let records = if prompt.contains("| small | 3 |") {
+                assert!(prompt.contains("5: | small | 3 |"), "original line numbers");
+                json!([{"kind":"Constraint","title":"Size limits","description":"| size | max |: small 3, large 9.","evidence":["spec.md:3-6"]}])
+            } else if prompt.contains("Widgets must be blue.") {
+                assert!(prompt.contains("9: Widgets must be blue."), "{prompt}");
+                json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be blue.","evidence":["spec.md:9"]}])
+            } else {
+                json!([])
+            };
+            let content = json!({"action":"propose_spec_records","records":records}).to_string();
+            Json(
+                json!({"choices":[{"message":{"role":"assistant","content":content},"finish_reason":"stop"}]}),
+            )
+        }
+        async fn prepare(Json(request): Json<SpecPrepareRequest>) -> Json<SpecPrepareResponse> {
+            Json(SpecPrepareResponse {
+                operation_id: request.operation_id,
+                owner_id: request.owner_id,
+                path: request.path,
+                source_sha256: request.source_sha256,
+                knowledge_revision: request.knowledge_revision,
+                entries: request
+                    .drafts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, draft)| SpecPreviewEntry {
+                        draft,
+                        disposition: SpecDisposition::New {
+                            iri: format!("https://moosedev.dev/kg/Constraint/{index}"),
+                        },
+                        existing: None,
+                    })
+                    .collect(),
+                retirements: vec![],
+                component: None,
+                previous_approval_iri: None,
+                already_approved: false,
+            })
+        }
+        async fn checkpoint() -> Json<CheckpointResponse> {
+            Json(CheckpointResponse {
+                conforms: true,
+                durable: true,
+                revision: "fixture".into(),
+                pending: vec![],
+            })
+        }
+
+        let long = "p".repeat(2_000);
+        let source = format!(
+            "# Widgets\n## Sizes\n| size | max |\n|---|---|\n| small | 3 |\n| large | 9 |\n{long}\n## Colors\nWidgets must be blue.\n## Notes\nCommentary nobody cites.\n"
+        );
+        let project = Project::new("spec-sections");
+        std::fs::write(project.0.join("spec.md"), &source).unwrap();
+        let router = context_router()
+            .route("/v1/chat/completions", post(model))
+            .route("/api/v1/harness/spec/prepare", post(prepare))
+            .route("/api/v1/harness/checkpoint", axum::routing::get(checkpoint));
+        let (daemon, server) = serve(router, &project).await;
+        let mut runner = Runner::create(
+            project.0.clone(),
+            daemon.clone(),
+            "Approve specification spec.md".into(),
+        )
+        .await
+        .unwrap();
+        runner.configure(
+            crate::llm::LlmConfig {
+                base_url: format!("{daemon}/v1"),
+                ..crate::harness::runner::test_support::test_config()
+            },
+            None,
+        );
+        // Four approvals of one task: each is a fresh human request, and a
+        // successful section must not leave its attempt charged.
+        for _ in 0..4 {
+            runner.begin_spec_approval("spec.md", &[]).await.unwrap();
+        }
+        let pending = runner.task.pending_spec.as_ref().unwrap();
+        let titles: Vec<_> = pending
+            .preview
+            .entries
+            .iter()
+            .map(|entry| entry.draft.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["Size limits", "Size limits — Colors"]);
+        assert_eq!(
+            pending
+                .uncited
+                .iter()
+                .map(SpecUncited::describe)
+                .collect::<Vec<_>>(),
+            vec!["line 7 (## Sizes)".to_string(), "line 11 (## Notes)".into()]
+        );
+        assert!(runner.task.recovery.is_none());
+        let extractions = runner
+            .task
+            .model_requests
+            .iter()
+            .filter(|request| request["purpose"] == SPEC_EXTRACT_PURPOSE)
+            .count();
+        assert_eq!(
+            extractions, 8,
+            "two sections (Sizes alone, Notes joined to Colors; the title line holds nothing to extract), four approvals"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn pending_preview_survives_restart_and_approval_returns_to_planning() {
         async fn approve(Json(request): Json<SpecApproveRequest>) -> Json<SpecApproveResponse> {
@@ -631,7 +1151,10 @@ mod tests {
         .unwrap();
         let mut pending = preview(source);
         pending.owner_id = runner.task.id.clone();
-        runner.task.pending_spec = Some(PendingSpecApproval { preview: pending });
+        runner.task.pending_spec = Some(PendingSpecApproval {
+            preview: pending,
+            uncited: Vec::new(),
+        });
         runner.task.phase = Phase::AwaitingSpecApproval;
         runner.task.plan = Some(Plan {
             summary: "stale pre-approval plan".into(),

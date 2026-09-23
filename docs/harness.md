@@ -356,8 +356,23 @@ is prepared from that approval's own records rather than extracted again
 re-running `/approve-spec <path> <covered paths>` to anchor an earlier floating
 batch never supersedes a record over the extraction sensor's rewording.
 
+Extraction runs one section at a time: the file is split at its level-2
+(`##`) headings, adjacent sections are joined while they stay under about
+2 KB, and each part is one model call that sees its original line numbers. The
+sensor is told to state each claim completely: a table, grammar or list of
+per-item rules becomes one record whose description restates all of it, not a
+one-line summary. A part's output is validated on its own and repaired with the
+diagnostic like any sensor output; a batch holds at most 96 records. Two parts
+that name a record the same way keep both, the later one titled with its
+section. The gate ends with an `UNCITED` block listing the line ranges no
+record cites, under their headings (journaled as `spec_uncited`): whatever is
+listed there will not become project knowledge, so read it before approving.
+
 The covered paths name what the spec governs: a directory (`badciv-map/`, which
-need not exist yet), an exact file, or `.` for the whole project. Approval then
+need not exist yet), an exact file, or `.` for the whole project. A path that
+does not exist yet is a directory when its last segment has no extension
+(`crates/badciv-map`) and an exact file when it has one (`docs/map.md`); the
+preview's `Covers:` line shows which. Approval then
 mints a `SystemComponent` named after the first path (an existing component with
 that name is reused and gains the new paths) and links every record in the batch
 to it with `concerns`. That link is what makes the records govern code: the
