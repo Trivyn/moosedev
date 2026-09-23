@@ -33,6 +33,8 @@ pub(super) struct Script {
     pub(super) context: Option<String>,
     /// Governing rules the full context returns.
     pub(super) governing_rules: Vec<GoverningRule>,
+    /// Rules the full context adds only when its request names the file.
+    pub(super) file_rules: Vec<(String, GoverningRule)>,
     /// Approved specs the full context reports.
     pub(super) approved_specs: Vec<ApprovedSpecStatus>,
     /// What `ground` answers (default: nothing to ground), and what it was asked.
@@ -293,7 +295,18 @@ pub(super) async fn context(
             evidence_iris: vec![],
             delivery_receipt: None,
             records: vec![],
-            governing_rules: script.governing_rules.clone(),
+            governing_rules: script
+                .governing_rules
+                .iter()
+                .cloned()
+                .chain(
+                    script
+                        .file_rules
+                        .iter()
+                        .filter(|(file, _)| request.files.contains(file))
+                        .map(|(_, rule)| rule.clone()),
+                )
+                .collect(),
             approved_specs: script.approved_specs.clone(),
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."

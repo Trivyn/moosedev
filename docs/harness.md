@@ -694,6 +694,14 @@ contract 3 and intent contract 2.
   use only the remaining last-result capacity and are admitted as complete
   lines, so the generic observation preview no longer cuts graph evidence
   through the middle of a record.
+- New files and the first-edit guard. An edit to a file the task has not
+  read is turned into a read, so its author sees the source and the knowledge
+  governing it before anything is written. A file that does not exist yet has
+  no source: the harness reads it in the same step, and when that read brings
+  no governing rule or linked record the proposal's prompt did not already
+  carry, the edit proceeds (`first_edit_satisfied_absent`) instead of costing
+  a turn. When it brings something new, the write is held and the model
+  proposes again with it in view.
 - Whole-file rewrites. A `replace` whose `old_text` covers at least 90% of a
   file of 1 KB or more, while the text it actually changes is at most a quarter
   of that span, is journaled as `edit_whole_file` and named in the

@@ -641,6 +641,100 @@ async fn task_permissions_expire_durably_at_completion() {
     assert!(runner.task.permission_grants.is_empty());
 }
 
+/// A file that does not exist yet has no source for the first-edit guard to
+/// show; when reading it brings nothing the proposal had not seen, the write
+/// applies in the same step. When it brings a rule, the guard holds.
+#[tokio::test]
+async fn a_new_file_is_written_at_once_unless_its_read_brings_new_rules() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().file_rules = vec![(
+        "governed.txt".into(),
+        GoverningRule {
+            iri: "urn:rule:governed".into(),
+            label: "Governed files carry a header".into(),
+            kind: "Constraint".into(),
+            claim: "hasDescription: Every governed file starts with a header line.\n".into(),
+            via: "via: component Governed".into(),
+        },
+    )];
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Add two new files".into(),
+    )
+    .await
+    .unwrap();
+    runner.configure(fixture.config(), None);
+    runner.set_action_contract(ActionContract::JsonSchema);
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Add fresh.txt and governed.txt; governed files carry a header","files":["fresh.txt","governed.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    if runner.task.phase == Phase::AwaitingReview {
+        runner.confirm_no_knowledge().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+
+    let calls = fixture.model_calls();
+    fixture.reply(
+        "harness_action",
+        json!({"action":"write","file":"fresh.txt","content":"fresh\n"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls + 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("fresh.txt")).unwrap(),
+        "fresh\n",
+        "written in the step that proposed it"
+    );
+    assert_eq!(
+        intent_details(&runner, "first_edit_satisfied_absent"),
+        vec!["fresh.txt".to_string()]
+    );
+
+    // Steps between edits (checkpoints) run without the model; advance until
+    // the scripted proposal has been used.
+    async fn consume(fixture: &Fixture, runner: &mut Runner) {
+        for _ in 0..4 {
+            if fixture.shared.lock().unwrap().replies.is_empty() {
+                return;
+            }
+            match runner.task.phase {
+                Phase::AwaitingReview => runner.confirm_no_knowledge().await.unwrap(),
+                phase @ (Phase::AwaitingInput | Phase::AwaitingPlan | Phase::AwaitingPolicy) => {
+                    panic!("parked at {phase:?}: {}", runner.task.last_response)
+                }
+                _ => runner.advance().await.unwrap(),
+            }
+        }
+        panic!("the scripted action was never requested");
+    }
+    fixture.reply(
+        "harness_action",
+        json!({"action":"write","file":"governed.txt","content":"body\n"}),
+    );
+    consume(&fixture, &mut runner).await;
+    assert!(
+        !fixture.root.join("governed.txt").exists(),
+        "a rule the proposal never saw holds the write"
+    );
+    assert!(runner.task.read_files.contains(&"governed.txt".into()));
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .contains("governed by 1 record(s) the proposal had not seen")));
+    fixture.reply(
+        "harness_action",
+        json!({"action":"write","file":"governed.txt","content":"HEADER\nbody\n"}),
+    );
+    consume(&fixture, &mut runner).await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("governed.txt")).unwrap(),
+        "HEADER\nbody\n"
+    );
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("Governed files carry a header"));
+}
+
 #[tokio::test]
 async fn first_edit_guard_and_deny_gate_precede_any_write() {
     let _env_lock = ENVIRONMENT.lock().await;

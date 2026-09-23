@@ -71,9 +71,9 @@ impl Runner {
 
     /// Read a file into the working set: refresh its governing knowledge, record
     /// its source and journal the read. Leaves `last_response` to the caller.
-    pub(super) async fn read_into_working_set(&mut self, file: &str) -> Result<()> {
+    pub(super) async fn read_into_working_set(&mut self, file: &str) -> Result<ContextResponse> {
         let file = file.to_string();
-        self.refresh(std::slice::from_ref(&file)).await?;
+        let context = self.refresh(std::slice::from_ref(&file)).await?;
         let source = self.workspace.read(&file)?;
         if !self.task.read_files.contains(&file) {
             anyhow::ensure!(
@@ -90,7 +90,61 @@ impl Runner {
             source.as_deref().unwrap_or("[file does not exist]")
         ));
         self.task.source.insert(file, source);
-        Ok(())
+        Ok(context)
+    }
+
+    /// The first-edit guard exists so an edit's author has seen its target's
+    /// source and the knowledge governing it. A file that does not exist yet
+    /// has no source to see, so when reading it brings no governing rule or
+    /// linked record the proposal's prompt did not already carry, the author
+    /// saw everything the read shows and the edit proceeds in this step
+    /// (`Some(true)`). When the read does bring something new, the file is now
+    /// read and the model proposes again with it in view (`Some(false)`).
+    /// `None`: not the first edit of a new file. badciv 14ad550e spent one
+    /// turn per new file on a read that answered "[file does not exist]".
+    async fn read_new_edit_target(
+        &mut self,
+        action: &model::Action,
+        delivered: &ContextResponse,
+    ) -> Result<Option<bool>> {
+        let file = match action {
+            model::Action::Replace { file, .. }
+            | model::Action::Write { file, .. }
+            | model::Action::Edit { file, .. } => file.clone(),
+            _ => return Ok(None),
+        };
+        if self.task.read_files.contains(&file) || self.workspace.read(&file)?.is_some() {
+            return Ok(None);
+        }
+        let read = self.read_into_working_set(&file).await?;
+        let seen: std::collections::BTreeSet<&str> = delivered
+            .governing_rules
+            .iter()
+            .map(|rule| rule.iri.as_str())
+            .chain(delivered.evidence_iris.iter().map(String::as_str))
+            .collect();
+        let unseen: Vec<&str> = read
+            .governing_rules
+            .iter()
+            .map(|rule| rule.iri.as_str())
+            .chain(read.evidence_iris.iter().map(String::as_str))
+            .filter(|iri| !seen.contains(iri))
+            .collect();
+        if unseen.is_empty() {
+            self.intent_event("first_edit_satisfied_absent", &file);
+            self.event(format!(
+                "First edit of new file {file}: reading it brought no governing knowledge the proposal had not seen, so the edit proceeds."
+            ));
+            return Ok(Some(true));
+        }
+        self.event(format!(
+            "First-edit guard: {file} does not exist yet, but it is governed by {} record(s) the proposal had not seen; the edit will not execute. Propose it again with them in view.",
+            unseen.len()
+        ));
+        self.task.last_response = format!(
+            "Read {file} with its governing knowledge; propose the edit again with it in view."
+        );
+        Ok(Some(false))
     }
 
     pub async fn advance(&mut self) -> Result<()> {
@@ -175,6 +229,14 @@ impl Runner {
             return self.persist();
         };
         self.validate_permission(&action)?;
+        if self.read_new_edit_target(&action, &context).await? == Some(false) {
+            self.candidate_accepted();
+            if !message.trim().is_empty() {
+                self.event(format!("Assistant: {message}"));
+            }
+            self.task.steps += 1;
+            return self.persist();
+        }
         let step = match self.validate_action(action) {
             Ok(step) => step,
             Err(error) => self
