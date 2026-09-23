@@ -12,6 +12,53 @@ pub const MAX_SPEC_TITLE_BYTES: usize = 240;
 pub const MAX_SPEC_DESCRIPTION_BYTES: usize = 4_000;
 pub const MAX_SPEC_EVIDENCE: usize = 8;
 
+/// The shape of one draft that both the runner and the daemon require: a
+/// governing kind, a bounded title and description free of control
+/// characters (a description may use newlines and tabs), and
+/// 1..=MAX_SPEC_EVIDENCE evidence entries. The runner applies it to the
+/// extraction sensor's output, where a failure is repaired with this
+/// message; the daemon applies it again to the request. One definition, so
+/// the runner can never pass what the daemon refuses.
+pub fn check_spec_draft(draft: &SpecRecordDraft) -> Result<(), String> {
+    if !matches!(draft.kind.as_str(), "Requirement" | "Constraint") {
+        return Err("a spec record's kind must be Requirement or Constraint".into());
+    }
+    if draft.title.trim().is_empty() || draft.title.len() > MAX_SPEC_TITLE_BYTES {
+        return Err(format!(
+            "spec record title must contain 1..={MAX_SPEC_TITLE_BYTES} bytes"
+        ));
+    }
+    if let Some(character) = draft.title.chars().find(|c| c.is_control()) {
+        return Err(format!(
+            "spec record title {:?} contains the control character U+{:04X}; copy the specification's text exactly",
+            draft.title,
+            character as u32
+        ));
+    }
+    if draft.description.trim().is_empty() || draft.description.len() > MAX_SPEC_DESCRIPTION_BYTES {
+        return Err(format!(
+            "spec record description must contain 1..={MAX_SPEC_DESCRIPTION_BYTES} bytes"
+        ));
+    }
+    if let Some(character) = draft
+        .description
+        .chars()
+        .find(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err(format!(
+            "description of spec record {:?} contains the control character U+{:04X}; copy the specification's text exactly, quotation marks included",
+            draft.title,
+            character as u32
+        ));
+    }
+    if draft.evidence.is_empty() || draft.evidence.len() > MAX_SPEC_EVIDENCE {
+        return Err(format!(
+            "spec record needs 1..={MAX_SPEC_EVIDENCE} source line ranges"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpecRecordDraft {

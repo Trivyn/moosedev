@@ -1493,29 +1493,7 @@ fn validate_drafts(path: &str, drafts: &[SpecRecordDraft], state: &AppState) -> 
     let line_count = source.lines().count().max(1);
     let mut titles = HashSet::new();
     for draft in drafts {
-        anyhow::ensure!(
-            matches!(draft.kind.as_str(), "Requirement" | "Constraint"),
-            "spec approval only accepts Requirement and Constraint records"
-        );
-        anyhow::ensure!(
-            !draft.title.trim().is_empty()
-                && draft.title.len() <= MAX_SPEC_TITLE_BYTES
-                && !draft.title.chars().any(char::is_control),
-            "spec record title must contain 1..={MAX_SPEC_TITLE_BYTES} bytes and no control characters"
-        );
-        anyhow::ensure!(
-            !draft.description.trim().is_empty()
-                && draft.description.len() <= MAX_SPEC_DESCRIPTION_BYTES
-                && !draft
-                    .description
-                    .chars()
-                    .any(|character| character.is_control() && !matches!(character, '\n' | '\t')),
-            "spec record description must contain 1..={MAX_SPEC_DESCRIPTION_BYTES} bytes and no unsupported control characters"
-        );
-        anyhow::ensure!(
-            (1..=MAX_SPEC_EVIDENCE).contains(&draft.evidence.len()),
-            "spec record needs 1..={MAX_SPEC_EVIDENCE} source line ranges"
-        );
+        check_spec_draft(draft).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
             titles.insert((draft.kind.clone(), normalize(&draft.title))),
             "duplicate spec record title and kind"

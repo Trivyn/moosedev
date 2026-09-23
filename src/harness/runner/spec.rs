@@ -758,23 +758,7 @@ fn validate_spec_records(path: &str, source: &str, records: &[SpecRecordDraft]) 
 
 /// One record's shape, with every evidence range inside lines `1..=line_count`.
 fn validate_spec_record(path: &str, line_count: usize, record: &SpecRecordDraft) -> Result<()> {
-    anyhow::ensure!(
-        matches!(record.kind.as_str(), "Requirement" | "Constraint"),
-        "spec extraction may only propose Requirement or Constraint records"
-    );
-    anyhow::ensure!(
-        !record.title.trim().is_empty() && record.title.len() <= MAX_SPEC_TITLE_BYTES,
-        "spec record title must contain 1..{MAX_SPEC_TITLE_BYTES} bytes"
-    );
-    anyhow::ensure!(
-        !record.description.trim().is_empty()
-            && record.description.len() <= MAX_SPEC_DESCRIPTION_BYTES,
-        "spec record description must contain 1..{MAX_SPEC_DESCRIPTION_BYTES} bytes"
-    );
-    anyhow::ensure!(
-        !record.evidence.is_empty() && record.evidence.len() <= MAX_SPEC_EVIDENCE,
-        "spec record evidence requires 1..{MAX_SPEC_EVIDENCE} source line ranges"
-    );
+    check_spec_draft(record).map_err(anyhow::Error::msg)?;
     for evidence in &record.evidence {
         validate_evidence(path, line_count, evidence)?;
     }
@@ -1024,7 +1008,22 @@ mod tests {
                 json!([{"kind":"Constraint","title":"Size limits","description":"| size | max |: small 3, large 9.","evidence":["spec.md:3-6"]}])
             } else if prompt.contains("Widgets must be blue.") {
                 assert!(prompt.contains("9: Widgets must be blue."), "{prompt}");
-                json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be blue.","evidence":["spec.md:9"]}])
+                // The first answer carries a control character where a
+                // quotation mark belonged (Gemma, badciv 2026-09-23): the
+                // runner must repair it, never pass it to the daemon.
+                static CALLS: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be \u{2}blue\u{2}.","evidence":["spec.md:9"]}])
+                } else {
+                    assert_eq!(
+                        prompt.contains("control character U+0002"),
+                        call == 1,
+                        "only the repair names the character"
+                    );
+                    json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be blue.","evidence":["spec.md:9"]}])
+                }
             } else {
                 json!([])
             };
@@ -1121,8 +1120,8 @@ mod tests {
             .filter(|request| request["purpose"] == SPEC_EXTRACT_PURPOSE)
             .count();
         assert_eq!(
-            extractions, 8,
-            "two sections (Sizes alone, Notes joined to Colors; the title line holds nothing to extract), four approvals"
+            extractions, 9,
+            "two sections (Sizes alone, Notes joined to Colors; the title line holds nothing to extract), four approvals, one repair"
         );
         server.abort();
     }
