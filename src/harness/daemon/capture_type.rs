@@ -51,8 +51,21 @@ fn cap_title(text: &str) -> String {
     if text.chars().count() <= MAX_TITLE_CHARS {
         return text;
     }
-    let capped: String = text.chars().take(MAX_TITLE_CHARS - 3).collect();
-    format!("{}…", capped.trim_end())
+    // Cut where a phrase ends, not mid-word. A title is a name, and a record
+    // named "…is a deliberate design choice to bridge the gap be…" names
+    // nothing: the badciv-map capture produced exactly that. Prefer the last
+    // clause boundary inside the cap, else the last word boundary.
+    //
+    // Only the cut point changes. Where the title comes from is AD dec341e4's
+    // decision, and Lesson 04d8c3f7 records that retitling naively disabled
+    // dedup, because the title is half the reconciliation score.
+    let capped: String = text.chars().take(MAX_TITLE_CHARS - 1).collect();
+    let clause = capped
+        .rfind([',', ';', ':'])
+        .filter(|at| *at * 2 >= capped.len());
+    let cut = clause.or_else(|| capped.rfind(' ')).unwrap_or(capped.len());
+    let kept = capped[..cut].trim_end().trim_end_matches([',', ';', ':']);
+    format!("{kept}…")
 }
 
 /// The answer the capture question invites when nothing durable happened.
@@ -774,6 +787,48 @@ mod tests {
             Some("V1.0 keeps the parser strict")
         );
         assert_eq!(claim_title("   "), None);
+    }
+
+    /// A title is a name, so an over-long one is cut where a phrase ends.
+    /// badciv-map captured "…to bridge the gap be…", which names nothing.
+    #[test]
+    fn an_over_long_title_is_cut_at_a_phrase_not_mid_word() {
+        let long = claim_title(
+            "The `From<String> for MapError` implementation is a deliberate design choice to \
+             bridge the gap between internal parsing helpers and the public API.",
+        )
+        .unwrap();
+        assert_eq!(
+            long,
+            "The `From<String> for MapError` implementation is a deliberate design choice to \
+             bridge the gap…"
+        );
+        assert!(long.chars().count() <= super::MAX_TITLE_CHARS);
+
+        // A clause boundary past the halfway point wins over the word boundary,
+        // and its punctuation is not left dangling before the ellipsis.
+        let clause = super::cap_title(
+            "The parser accepts unknown header keys and ignores them, so a typo in an optional \
+             key never fails an otherwise valid load",
+        );
+        assert_eq!(
+            clause,
+            "The parser accepts unknown header keys and ignores them…"
+        );
+
+        // An early comma does not halve the title; the word boundary wins.
+        let early = super::cap_title(
+            "Parsing, validation and writing stay in one crate, because the consumer ingests \
+             files the same way it ingests handmade ones",
+        );
+        assert_eq!(
+            early,
+            "Parsing, validation and writing stay in one crate, because the consumer ingests \
+             files the same way…"
+        );
+
+        // A title already within the cap is untouched.
+        assert_eq!(super::cap_title("A short title"), "A short title");
     }
 
     const REQ: &str = "https://moosedev.dev/kg/Requirement/r1";

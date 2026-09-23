@@ -3371,10 +3371,13 @@ async fn symbolic_capture_typing_reconciles_without_a_sensor() {
     // budget parked a solved task.
     let long_summary = "Refactor the duplicated name normalization logic in render_name and render_names into a single private helper that trims and substitutes";
     let long_note = format!("{long_summary}. The helper is private so callers cannot bypass it.");
-    let capped = format!(
-        "{}…",
-        long_summary.chars().take(97).collect::<String>().trim_end()
-    );
+    // The title as `cap_title` now produces it: cut at the last word boundary
+    // inside the cap rather than mid-word, so the collision this test needs
+    // still happens. Hard-coded rather than recomputed, so a change to the cut
+    // rule shows up here as a diff instead of silently agreeing with itself.
+    let capped =
+        "Refactor the duplicated name normalization logic in render_name and render_names into a single…"
+            .to_string();
     record_described(
         &state,
         "Requirement",
