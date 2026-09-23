@@ -94,51 +94,157 @@ pub struct Runner {
     last_saved: Mutex<Option<[u8; 32]>>,
 }
 
-/// Compiled standing guidance used when a project has no `.moosedev/GUIDANCE.md`.
-pub const DEFAULT_GUIDANCE: &str = include_str!("../../templates/harness/GUIDANCE.md");
-/// Standing guidance is short by design; a larger file fails task creation.
+pub use crate::harness::{DEFAULT_GUIDANCE, GUIDANCE_FILE};
+
+/// What one mode's resolved guidance (the shared text plus that mode's section)
+/// may occupy. Standing guidance sits in the never-truncated mandatory prompt,
+/// so this is the bound that matters: it is taken from the observation budget.
 pub const MAX_GUIDANCE_BYTES: usize = 4096;
+/// What the file may occupy. The per-mode bound above is the real limit; this
+/// one is a cheap outer guard, set high enough that it can never be the first
+/// to reject a file both modes would accept.
+pub const MAX_GUIDANCE_FILE_BYTES: usize = 3 * MAX_GUIDANCE_BYTES;
 
 fn guidance(source: &str, text: &str) -> StandingGuidance {
     StandingGuidance {
         source: source.into(),
         sha256: sha256_hex(text),
         text: text.into(),
+        plan: None,
+        implement: None,
     }
 }
 
-/// Read the project's standing guidance: `.moosedev/GUIDANCE.md` (not a symlink,
-/// UTF-8, at most [`MAX_GUIDANCE_BYTES`]), empty when it holds only whitespace,
-/// or the compiled default when it does not exist.
+/// Drop HTML comments, so a project can annotate its guidance without paying
+/// for the annotation in every prompt. An unterminated comment runs to the end
+/// of the file, as it does in HTML.
+fn strip_comments(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        stripped.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("-->") else {
+            return stripped;
+        };
+        rest = &rest[start + end + "-->".len()..];
+    }
+    stripped.push_str(rest);
+    stripped
+}
+
+/// The heading that opens a mode's section: an ATX heading whose title is
+/// exactly `plan` or `implement`, ignoring case. Every other heading is
+/// ordinary content belonging to the section it sits in.
+fn section_heading(line: &str) -> Option<ModelRole> {
+    let title = line.trim_start_matches('#');
+    let level = line.len() - title.len();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    ModelRole::parse(&title.trim().to_ascii_lowercase())
+}
+
+/// Split the file into the shared text and each mode's section. Text before the
+/// first section heading is shared; a heading inside a fenced code block is
+/// content, so guidance may show markdown; a repeated heading is refused,
+/// because there is no honest way to guess which one the writer meant.
+fn split_guidance(text: &str) -> Result<(String, Option<String>, Option<String>)> {
+    let (mut shared, mut plan, mut implement) = (String::new(), None, None);
+    let mut current: Option<ModelRole> = None;
+    let mut fence: Option<&str> = None;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let marker = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| trimmed.starts_with(marker));
+        let fenced = fence.is_some();
+        match (fence, marker) {
+            (None, Some(marker)) => fence = Some(marker),
+            (Some(open), Some(marker)) if open == marker => fence = None,
+            _ => {}
+        }
+        if !fenced && marker.is_none() {
+            if let Some(role) = section_heading(trimmed) {
+                let section = match role {
+                    ModelRole::Plan => &mut plan,
+                    ModelRole::Implement => &mut implement,
+                };
+                anyhow::ensure!(
+                    section.is_none(),
+                    "{GUIDANCE_FILE} line {}: a second `{}` section; each mode has one",
+                    index + 1,
+                    role.as_str()
+                );
+                *section = Some(String::new());
+                current = Some(role);
+                continue;
+            }
+        }
+        let target = match current {
+            None => &mut shared,
+            Some(ModelRole::Plan) => plan.as_mut().expect("its heading opened the section"),
+            Some(ModelRole::Implement) => {
+                implement.as_mut().expect("its heading opened the section")
+            }
+        };
+        target.push_str(line);
+        target.push('\n');
+    }
+    let trim = |text: String| text.trim().to_string();
+    Ok((trim(shared), plan.map(trim), implement.map(trim)))
+}
+
+/// Read the project's standing guidance: [`GUIDANCE_FILE`] (not a symlink,
+/// UTF-8, at most [`MAX_GUIDANCE_FILE_BYTES`]), empty when it holds only
+/// whitespace, or the compiled default when it does not exist. A file replaces
+/// the default rather than adding to it, which is what lets a project reword it.
 pub fn load_standing_guidance(root: &Path) -> Result<StandingGuidance> {
-    let path = root.join(".moosedev/GUIDANCE.md");
+    let path = root.join(GUIDANCE_FILE);
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(guidance("default", DEFAULT_GUIDANCE.trim()));
         }
-        Err(error) => return Err(error).context("read .moosedev/GUIDANCE.md"),
+        Err(error) => return Err(error).context(format!("read {GUIDANCE_FILE}")),
     };
     anyhow::ensure!(
         meta.is_file() && !meta.file_type().is_symlink(),
-        ".moosedev/GUIDANCE.md must be a regular file"
+        "{GUIDANCE_FILE} must be a regular file"
     );
     anyhow::ensure!(
-        meta.len() as usize <= MAX_GUIDANCE_BYTES,
-        ".moosedev/GUIDANCE.md is {} bytes; standing guidance must fit {MAX_GUIDANCE_BYTES} bytes",
+        meta.len() as usize <= MAX_GUIDANCE_FILE_BYTES,
+        "{GUIDANCE_FILE} is {} bytes; standing guidance must fit {MAX_GUIDANCE_FILE_BYTES} bytes",
         meta.len()
     );
-    let text =
-        String::from_utf8(std::fs::read(&path)?).context(".moosedev/GUIDANCE.md must be UTF-8")?;
+    let text = String::from_utf8(std::fs::read(&path)?)
+        .context(format!("{GUIDANCE_FILE} must be UTF-8"))?;
     anyhow::ensure!(
-        text.len() <= MAX_GUIDANCE_BYTES,
-        ".moosedev/GUIDANCE.md must fit {MAX_GUIDANCE_BYTES} bytes"
+        text.len() <= MAX_GUIDANCE_FILE_BYTES,
+        "{GUIDANCE_FILE} must fit {MAX_GUIDANCE_FILE_BYTES} bytes"
     );
-    Ok(if text.trim().is_empty() {
-        guidance("empty", "")
-    } else {
-        guidance("file", text.trim())
-    })
+    let body = strip_comments(&text);
+    if body.trim().is_empty() {
+        return Ok(guidance("empty", ""));
+    }
+    let (shared, plan, implement) = split_guidance(&body)?;
+    let standing = StandingGuidance {
+        source: "file".into(),
+        sha256: sha256_hex(text.trim()),
+        text: shared,
+        plan,
+        implement,
+    };
+    for role in ModelRole::ALL {
+        let resolved = standing.for_role(role).len();
+        anyhow::ensure!(
+            resolved <= MAX_GUIDANCE_BYTES,
+            "{GUIDANCE_FILE}: the guidance {} mode receives is {resolved} bytes; \
+             each mode's share (the text before the first section, plus its own section) \
+             must fit {MAX_GUIDANCE_BYTES} bytes",
+            role.as_str()
+        );
+    }
+    Ok(standing)
 }
 
 pub fn default_daemon_url(root: &Path) -> Result<String> {
@@ -305,13 +411,18 @@ impl Runner {
         Ok(runner)
     }
 
-    /// Journal which standing guidance the task carries.
+    /// Journal which standing guidance the task carries, per mode, so a replay
+    /// can tell which text reached which request.
     fn guidance_loaded(&mut self) {
         if let Some(standing) = self.task.standing_guidance.clone() {
+            let sections: String = ModelRole::ALL
+                .iter()
+                .map(|role| format!(", {} {}", standing.for_role(*role).len(), role.as_str()))
+                .collect();
             self.intent_event(
                 "guidance_loaded",
                 &format!(
-                    "{}, {} bytes, sha256 {}",
+                    "{}, {} bytes shared{sections}, sha256 {}",
                     standing.source,
                     standing.text.len(),
                     standing.sha256
@@ -401,5 +512,189 @@ impl Runner {
 
     pub fn set_conversation_context(&mut self, context: String) {
         self.task.conversation_context = bounded(&context, 16_000);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        /// A project root holding `text` as its standing guidance.
+        fn with(text: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("moosedev-guidance-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(path.join(".moosedev")).unwrap();
+            std::fs::write(path.join(GUIDANCE_FILE), text).unwrap();
+            Self(path)
+        }
+        fn load(&self) -> Result<StandingGuidance> {
+            load_standing_guidance(&self.0)
+        }
+        /// What each mode would receive, in `ModelRole::ALL` order.
+        fn per_mode(&self) -> [String; 2] {
+            let standing = self.load().unwrap();
+            ModelRole::ALL.map(|role| standing.for_role(role))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_file_without_sections_reaches_both_modes_whole() {
+        let fixture = Fixture::with("Prefer small functions.\n");
+        let standing = fixture.load().unwrap();
+        assert_eq!(standing.source, "file");
+        assert_eq!(standing.text, "Prefer small functions.");
+        assert_eq!(standing.plan, None);
+        assert_eq!(standing.implement, None);
+        assert_eq!(
+            fixture.per_mode(),
+            [
+                "Prefer small functions.".to_string(),
+                "Prefer small functions.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_reaches_only_its_own_mode_after_the_shared_text() {
+        let fixture = Fixture::with(
+            "Build offline.\n\n## Plan\nName the check.\n\n## Implement\nOne file per action.\n",
+        );
+        let standing = fixture.load().unwrap();
+        assert_eq!(standing.text, "Build offline.");
+        assert_eq!(standing.plan.as_deref(), Some("Name the check."));
+        assert_eq!(standing.implement.as_deref(), Some("One file per action."));
+        assert_eq!(
+            fixture.per_mode(),
+            [
+                "Build offline.\n\nName the check.".to_string(),
+                "Build offline.\n\nOne file per action.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_may_stand_alone_and_leave_the_other_mode_the_shared_text() {
+        let fixture = Fixture::with("## implement\nOne file per action.\n");
+        let [plan, implement] = fixture.per_mode();
+        assert_eq!(plan, "");
+        assert_eq!(implement, "One file per action.");
+    }
+
+    #[test]
+    fn only_plan_and_implement_head_a_section_and_case_does_not_matter() {
+        let fixture = Fixture::with(
+            "Shared.\n\n### IMPLEMENT\nMine.\n\n## Style notes\nOrdinary text.\n\n# plan\nPlanning.\n",
+        );
+        let standing = fixture.load().unwrap();
+        assert_eq!(standing.text, "Shared.");
+        assert_eq!(standing.plan.as_deref(), Some("Planning."));
+        // An unrecognised heading belongs to the section it sits in.
+        assert_eq!(
+            standing.implement.as_deref(),
+            Some("Mine.\n\n## Style notes\nOrdinary text.")
+        );
+    }
+
+    #[test]
+    fn a_heading_inside_a_fenced_block_is_content_so_guidance_may_show_markdown() {
+        let fixture =
+            Fixture::with("Shared.\n\n```md\n## Plan\nnot a section\n```\n\nStill shared.\n");
+        let standing = fixture.load().unwrap();
+        assert_eq!(standing.plan, None);
+        assert!(standing.text.contains("## Plan"));
+        assert!(standing.text.ends_with("Still shared."));
+    }
+
+    #[test]
+    fn a_repeated_section_is_refused_by_line_rather_than_guessed_at() {
+        let error = Fixture::with("## Plan\nOne.\n\n## Plan\nTwo.\n")
+            .load()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("line 4"), "{error}");
+        assert!(error.contains("second `plan` section"), "{error}");
+    }
+
+    #[test]
+    fn comments_annotate_the_file_without_reaching_the_model() {
+        let fixture =
+            Fixture::with("<!-- why: -->Shared.\n\n<!--\n## Plan\nhidden\n-->\nStill shared.\n");
+        let standing = fixture.load().unwrap();
+        assert_eq!(standing.plan, None);
+        assert_eq!(standing.text, "Shared.\n\n\nStill shared.");
+        // A file that is nothing but commentary says nothing.
+        assert_eq!(
+            Fixture::with("<!-- todo -->\n").load().unwrap().source,
+            "empty"
+        );
+    }
+
+    #[test]
+    fn each_mode_is_capped_on_its_own_share_while_the_file_holds_all_three() {
+        let filler = |bytes: usize| "x".repeat(bytes);
+        // Both modes may be nearly full at once: the file bound is not the
+        // first to bite, and one mode's section does not eat the other's room.
+        let fixture = Fixture::with(&format!(
+            "{}\n\n## Plan\n{}\n\n## Implement\n{}\n",
+            filler(1000),
+            filler(MAX_GUIDANCE_BYTES - 1002),
+            filler(MAX_GUIDANCE_BYTES - 1002)
+        ));
+        let [plan, implement] = fixture.per_mode();
+        assert_eq!(plan.len(), MAX_GUIDANCE_BYTES);
+        assert_eq!(implement.len(), MAX_GUIDANCE_BYTES);
+        // One mode's share over the cap is refused, and named.
+        let error = Fixture::with(&format!(
+            "{}\n\n## Implement\n{}\n",
+            filler(2048),
+            filler(2048)
+        ))
+        .load()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("guidance implement mode receives"),
+            "{error}"
+        );
+        assert!(error.contains(&MAX_GUIDANCE_BYTES.to_string()), "{error}");
+        // And the file has its own, larger, bound.
+        let error = Fixture::with(&filler(MAX_GUIDANCE_FILE_BYTES + 1))
+            .load()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&MAX_GUIDANCE_FILE_BYTES.to_string()),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_example_loads_with_both_sections_inside_every_bound() {
+        let fixture = Fixture::with(&crate::harness::guidance_example());
+        let standing = fixture.load().unwrap();
+        assert_eq!(standing.source, "file");
+        // The example carries the compiled default, which a real file replaces.
+        assert!(standing.text.starts_with(DEFAULT_GUIDANCE.trim()));
+        assert!(standing.plan.is_some() && standing.implement.is_some());
+        // Its commentary explains the file; it must not reach the model.
+        for text in fixture.per_mode() {
+            assert!(!text.contains("Copy it to"), "{text}");
+            assert!(text.len() <= MAX_GUIDANCE_BYTES);
+        }
+    }
+
+    #[test]
+    fn a_journal_written_before_sections_serves_both_modes_its_whole_text() {
+        let standing: StandingGuidance =
+            serde_json::from_str(r#"{"source":"file","sha256":"abc","text":"Old."}"#).unwrap();
+        assert_eq!(standing.for_role(ModelRole::Plan), "Old.");
+        assert_eq!(standing.for_role(ModelRole::Implement), "Old.");
     }
 }

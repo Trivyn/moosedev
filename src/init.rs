@@ -193,6 +193,7 @@ pub fn init_project(opts: &InitOptions) -> anyhow::Result<InitReport> {
     let created_env = write_env(opts, &mut report)?;
     write_gitignore(opts, &mut report, created_env)?;
     write_config_example(opts, &mut report)?;
+    write_guidance_example(opts, &mut report)?;
     write_claude_md(opts, &mut report)?;
     write_skills(opts, &mut report)?;
     if opts.codex {
@@ -1016,7 +1017,7 @@ fn set_executable(_path: &Path) -> anyhow::Result<()> {
 /// while committing the canonical project-graph text and the harness's
 /// user-editable standing guidance, derived from the data dir. `None` for an
 /// absolute data dir (no single repo-relative rule applies).
-fn gitignore_lines(data_dir: &str) -> Option<[String; 3]> {
+fn gitignore_lines(data_dir: &str) -> Option<[String; 4]> {
     if Path::new(data_dir).is_absolute() {
         return None;
     }
@@ -1028,6 +1029,7 @@ fn gitignore_lines(data_dir: &str) -> Option<[String; 3]> {
         format!("/{dir}/*"),
         format!("!/{dir}/kg.nq"),
         format!("!/{dir}/GUIDANCE.md"),
+        format!("!/{dir}/GUIDANCE.md.example"),
     ])
 }
 
@@ -1137,6 +1139,35 @@ fn write_config_example(opts: &InitOptions, report: &mut InitReport) -> anyhow::
         return Ok(());
     }
     std::fs::write(&path, CONFIG_EXAMPLE).with_context(|| format!("write {}", path.display()))?;
+    report.entries.push(Entry::new(
+        path,
+        if existed {
+            Outcome::Merged
+        } else {
+            Outcome::Created
+        },
+    ));
+    Ok(())
+}
+
+/// The starting point for the harness's standing guidance, installed beside
+/// the real (and equally trackable) file rather than as it: a present
+/// `GUIDANCE.md` replaces the compiled default, so seeding one would freeze
+/// today's default into the project and cut it off from every later one.
+fn write_guidance_example(opts: &InitOptions, report: &mut InitReport) -> anyhow::Result<()> {
+    let path = opts
+        .target_dir
+        .join(format!("{}.example", crate::harness::GUIDANCE_FILE));
+    let existed = path.exists();
+    if existed && !opts.force {
+        report.entries.push(Entry::new(path, Outcome::Skipped));
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(&path, crate::harness::guidance_example())
+        .with_context(|| format!("write {}", path.display()))?;
     report.entries.push(Entry::new(
         path,
         if existed {
@@ -1469,6 +1500,47 @@ mod tests {
             Some(&Outcome::Merged)
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), CONFIG_EXAMPLE);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn installs_the_guidance_example_and_keeps_an_edited_one() {
+        let target = temp_project("guidance-example");
+        let path = target.join(".moosedev/GUIDANCE.md.example");
+
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(
+            outcome_for(&report, "GUIDANCE.md.example"),
+            Some(&Outcome::Created)
+        );
+        let example = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(example, crate::harness::guidance_example());
+        // The example carries the compiled default, because a real GUIDANCE.md
+        // replaces the default rather than adding to it.
+        assert!(example.starts_with(crate::harness::DEFAULT_GUIDANCE.trim()));
+        assert!(example.contains("## Plan") && example.contains("## Implement"));
+        // The real file is the user's to write; init never seeds it.
+        assert!(!target.join(".moosedev/GUIDANCE.md").exists());
+
+        std::fs::write(&path, "# mine\n").unwrap();
+        let report = init_project(&opts(&target)).unwrap();
+        assert_eq!(
+            outcome_for(&report, "GUIDANCE.md.example"),
+            Some(&Outcome::Skipped)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+
+        let mut forced = opts(&target);
+        forced.force = true;
+        let report = init_project(&forced).unwrap();
+        assert_eq!(
+            outcome_for(&report, "GUIDANCE.md.example"),
+            Some(&Outcome::Merged)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            crate::harness::guidance_example()
+        );
         let _ = std::fs::remove_dir_all(&target);
     }
 
@@ -2598,6 +2670,7 @@ env = { MOOSEDEV_DATA_DIR = \"real-store\" }
                 "/.moosedev/*".to_string(),
                 "!/.moosedev/kg.nq".to_string(),
                 "!/.moosedev/GUIDANCE.md".to_string(),
+                "!/.moosedev/GUIDANCE.md.example".to_string(),
             ])
         );
         assert_eq!(gitignore_lines("/abs/store"), None);
@@ -2615,7 +2688,9 @@ env = { MOOSEDEV_DATA_DIR = \"real-store\" }
         // Idempotent: a second run adds nothing.
         init_project(&opts(&target)).unwrap();
         let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
-        assert_eq!(gitignore.matches("!/.moosedev/GUIDANCE.md").count(), 1);
+        let line_count = |line: &str| gitignore.lines().filter(|text| *text == line).count();
+        assert_eq!(line_count("!/.moosedev/GUIDANCE.md"), 1);
+        assert_eq!(line_count("!/.moosedev/GUIDANCE.md.example"), 1);
         let ignored = |path: &str| {
             std::process::Command::new("git")
                 .args(["check-ignore", "-q", path])
@@ -2625,6 +2700,7 @@ env = { MOOSEDEV_DATA_DIR = \"real-store\" }
                 .success()
         };
         assert!(!ignored(".moosedev/GUIDANCE.md"));
+        assert!(!ignored(".moosedev/GUIDANCE.md.example"));
         assert!(!ignored(".moosedev/kg.nq"));
         assert!(ignored(".moosedev/instance-vectors.db"));
         // The harness's local model configuration is per-machine: ignored at

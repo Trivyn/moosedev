@@ -1157,12 +1157,26 @@ async fn standing_guidance_is_snapshotted_capped_and_replayed() {
         .is_empty());
 
     drop(empty);
-    std::fs::write(&guidance, "x".repeat(4097)).unwrap();
+    // A mode's share — the shared text plus its own section — is what reaches a
+    // prompt, so that is what is capped; the file has its own, larger, bound.
+    std::fs::write(
+        &guidance,
+        format!("{}\n\n## Plan\n{}\n", "x".repeat(2048), "x".repeat(2048)),
+    )
+    .unwrap();
+    let Err(error) = create("Repair code.txt").await else {
+        panic!("an over-cap mode share fails task creation");
+    };
+    let error = error.to_string();
+    assert!(error.contains("plan mode receives"), "{error}");
+    assert!(error.contains("4096 bytes"), "{error}");
+
+    std::fs::write(&guidance, "x".repeat(12289)).unwrap();
     let Err(error) = create("Repair code.txt").await else {
         panic!("an over-cap guidance file fails task creation");
     };
     let error = error.to_string();
-    assert!(error.contains("4096 bytes"), "{error}");
+    assert!(error.contains("12288 bytes"), "{error}");
 
     // A journal written before the guidance file resumes with the default.
     std::fs::remove_file(&guidance).unwrap();

@@ -576,13 +576,12 @@ impl Runner {
     fn mandatory_prompt(&self, context: &ContextResponse) -> Result<(String, usize)> {
         let config = self.active_config()?;
         let mut prompt = String::from(ROLE_OPENING);
-        let standing = self
-            .task
-            .standing_guidance
-            .as_ref()
-            .map_or(DEFAULT_GUIDANCE.trim(), |guidance| guidance.text.as_str());
+        let standing = self.task.standing_guidance.as_ref().map_or_else(
+            || DEFAULT_GUIDANCE.trim().to_string(),
+            |guidance| guidance.for_role(self.active_role()),
+        );
         if !standing.is_empty() {
-            prompt.push_str(standing);
+            prompt.push_str(&standing);
             prompt.push('\n');
         }
         prompt.push_str(ROLE_BOUNDARY);

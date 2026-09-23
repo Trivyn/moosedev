@@ -313,8 +313,33 @@ pub struct Task {
 pub struct StandingGuidance {
     /// `file`, `empty` (the file exists but says nothing) or `default`.
     pub source: String,
+    /// Of the file as read, before it is split into sections.
     pub sha256: String,
+    /// What both modes receive: everything before the first section heading.
     pub text: String,
+    /// The `## Plan` section, added to [`Self::text`] in Plan mode. Absent in
+    /// every journal written before sections existed, which is why both are
+    /// `#[serde(default)]`: such a task keeps sending `text` to both modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// The `## Implement` section, added to [`Self::text`] in Auto mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implement: Option<String>,
+}
+
+impl StandingGuidance {
+    /// The guidance one role sees: the shared text, then that role's section.
+    pub fn for_role(&self, role: ModelRole) -> String {
+        let section = match role {
+            ModelRole::Plan => self.plan.as_deref(),
+            ModelRole::Implement => self.implement.as_deref(),
+        };
+        match section.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(section) if self.text.is_empty() => section.to_string(),
+            Some(section) => format!("{}\n\n{section}", self.text),
+            None => self.text.clone(),
+        }
+    }
 }
 
 pub(super) fn fingerprint(value: &Option<String>) -> Option<String> {

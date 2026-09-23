@@ -322,6 +322,55 @@ fn offered_actions(request: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn standing_guidance_sections_reach_only_their_own_mode() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    // Written before the runner exists: guidance is snapshotted at creation.
+    std::fs::create_dir_all(fixture.root.join(".moosedev")).unwrap();
+    std::fs::write(
+        fixture.root.join(".moosedev/GUIDANCE.md"),
+        "Shared everywhere.\n\n## Plan\nOnly while planning.\n\n## Implement\nOnly once approved.\n",
+    )
+    .unwrap();
+
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    let prompts = |fixture: &Fixture, from: usize| {
+        requests_of_kind(fixture, "model")[from..]
+            .iter()
+            .map(|request| {
+                request["body"]["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    let planning = prompts(&fixture, 0);
+    assert!(!planning.is_empty());
+    for prompt in &planning {
+        assert!(
+            prompt.contains("Shared everywhere.\n\nOnly while planning."),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Only once approved."), "{prompt}");
+    }
+
+    let before = requests_of_kind(&fixture, "model").len();
+    runner.approve_plan().await.unwrap();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    let working = prompts(&fixture, before);
+    assert!(!working.is_empty());
+    for prompt in &working {
+        assert!(
+            prompt.contains("Shared everywhere.\n\nOnly once approved."),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Only while planning."), "{prompt}");
+    }
+}
+
+#[tokio::test]
 async fn model_requests_carry_the_action_schema_for_the_current_mode() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
