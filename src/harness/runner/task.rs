@@ -230,6 +230,11 @@ impl SpecUncited {
 pub struct Task {
     pub id: String,
     pub objective: String,
+    /// The objective was a spec approval that has now been granted. The task
+    /// waits in Planning without a model call, and the human's next message
+    /// becomes the objective instead of guidance under a finished one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub objective_pending: bool,
     pub mode: Mode,
     pub phase: Phase,
     pub plan: Option<Plan>,

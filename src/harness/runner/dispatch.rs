@@ -147,6 +147,10 @@ impl Runner {
             return self.verify_next().await;
         }
         anyhow::ensure!(
+            !self.task.objective_pending,
+            "the specification is approved; describe what to do next before planning"
+        );
+        anyhow::ensure!(
             self.task.steps < MAX_STEPS,
             "task reached {MAX_STEPS} model steps; inspect and provide new guidance"
         );

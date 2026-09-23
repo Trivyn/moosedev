@@ -169,7 +169,16 @@ impl Runner {
             self.task.delivered_messages.push(id.to_owned());
         }
         self.task.knowledge_turn_sequence = self.task.knowledge_turn_sequence.saturating_add(1);
-        self.task.guidance = text.clone();
+        if std::mem::take(&mut self.task.objective_pending) {
+            // The approval this task was started for is done; the human's
+            // next request is what the task is now for.
+            self.intent_event("objective_set", &bounded(&text, 400));
+            self.event(format!("Objective set: {text}"));
+            self.task.objective = text.clone();
+            self.task.guidance.clear();
+        } else {
+            self.task.guidance = text.clone();
+        }
         self.task.recovery = None;
         self.task.last_response = text;
         self.task.turn_finished = false;

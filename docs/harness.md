@@ -386,8 +386,12 @@ trailing `.` or `!`). Those phrases remain ordinary steering everywhere else.
 
 Spec approval records the accepted batch and its approval marker, refreshes
 project knowledge, and returns the task to Planning. It does not authorize code
-execution: review the refreshed implementation plan and use `/approve`
-separately. If the source file or graph revision changes before acceptance, the
+execution: review the implementation plan and use `/approve` separately. A task
+started by `/approve-spec` has met its objective at approval, so it waits
+without asking the model anything: your next message ("Implement the map
+crate") becomes the task's objective (`objective_set`) instead of guidance
+under "Approve specification …", and planning starts from it. A spec approved
+inside other work leaves that work's objective alone. If the source file or graph revision changes before acceptance, the
 harness rejects the stale preview and requires `/approve-spec <path>` again.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`

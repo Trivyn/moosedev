@@ -392,10 +392,23 @@ impl Runner {
         self.task.phase = Phase::Planning;
         self.task.steps = 0;
         self.task.turn_finished = false;
-        self.task.last_response = format!(
-            "Approved {} spec record(s) from {}. Returned to Planning; execution still requires /approve.",
-            response.records.len(), response.path
-        );
+        // A task that existed only to approve this spec has met its
+        // objective; planning under it would ask the model to plan an
+        // approval that already happened. A spec approved inside other work
+        // leaves that work's objective alone.
+        self.task.objective_pending |=
+            self.task.objective == spec_approval_objective(&response.path);
+        self.task.last_response = if self.task.objective_pending {
+            format!(
+                "Approved {} spec record(s) from {}. Describe what to do next; your message becomes this task's objective, and execution still requires /approve.",
+                response.records.len(), response.path
+            )
+        } else {
+            format!(
+                "Approved {} spec record(s) from {}. Returned to Planning; execution still requires /approve.",
+                response.records.len(), response.path
+            )
+        };
         self.event(format!(
             "Human approved specification {} as {}; accepted revision {}. Returned to Planning; execution was not approved.",
             response.path, response.approval_iri, response.result_revision
@@ -405,6 +418,12 @@ impl Runner {
 }
 
 pub(super) const SPEC_EXTRACT_PURPOSE: &str = "harness_spec_extract";
+
+/// The objective of a task started by `/approve-spec <path>`. Approval
+/// fulfils it, so the task then waits for the human to name the next one.
+pub fn spec_approval_objective(path: &str) -> String {
+    format!("Approve specification {path}")
+}
 
 /// A run of the specification's lines extracted by one model call, with its
 /// original 1-based, inclusive line numbers.
@@ -1169,6 +1188,10 @@ mod tests {
         assert_eq!(resumed.task.phase, Phase::AwaitingSpecApproval);
         assert!(resumed.task.pending_spec.is_some());
         resumed.approve_spec().await.unwrap();
+        assert!(
+            !resumed.task.objective_pending,
+            "a spec approved inside other work keeps that work's objective"
+        );
         assert_eq!(resumed.task.phase, Phase::Planning);
         assert_eq!(resumed.task.mode, Mode::Plan);
         assert!(resumed.task.pending_spec.is_none());
@@ -1177,6 +1200,85 @@ mod tests {
             .task
             .last_response
             .contains("execution still requires /approve"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_approval_task_waits_for_its_next_objective_without_a_model_call() {
+        async fn approve(Json(request): Json<SpecApproveRequest>) -> Json<SpecApproveResponse> {
+            let source = "The user must explicitly approve extracted records.\n";
+            Json(SpecApproveResponse {
+                operation_id: request.operation_id,
+                path: "spec.md".into(),
+                source_sha256: sha256_hex(source),
+                base_revision: "fixture".into(),
+                result_revision: "fixture".into(),
+                records: vec![],
+                retirements: vec![],
+                approval_iri: "https://moosedev.dev/kg/ArchitecturalDecision/spec-test".into(),
+                checkpoint: CheckpointResponse {
+                    conforms: true,
+                    durable: true,
+                    revision: "fixture".into(),
+                    pending: vec![],
+                },
+            })
+        }
+        let project = Project::new("spec-objective");
+        let source = "The user must explicitly approve extracted records.\n";
+        std::fs::write(project.0.join("spec.md"), source).unwrap();
+        let router = context_router().route("/api/v1/harness/spec/approve", post(approve));
+        let (daemon, server) = serve(router, &project).await;
+        let mut runner = Runner::create(
+            project.0.clone(),
+            daemon,
+            spec_approval_objective("spec.md"),
+        )
+        .await
+        .unwrap();
+        let mut pending = preview(source);
+        pending.owner_id = runner.task.id.clone();
+        runner.task.pending_spec = Some(PendingSpecApproval {
+            preview: pending,
+            uncited: Vec::new(),
+        });
+        runner.task.phase = Phase::AwaitingSpecApproval;
+        runner.approve_spec().await.unwrap();
+        assert!(runner.task.objective_pending);
+        assert_eq!(runner.task.phase, Phase::Planning, "Constraint a971fcb1");
+        assert!(runner
+            .task
+            .last_response
+            .contains("your message becomes this task's objective"));
+
+        let error = runner.advance().await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("describe what to do next"),
+            "{error:#}"
+        );
+        assert!(
+            runner.task.model_requests.is_empty(),
+            "no model was asked to plan"
+        );
+
+        runner
+            .submit_message("Implement the main spec".into())
+            .await
+            .unwrap();
+        assert_eq!(runner.task.objective, "Implement the main spec");
+        assert!(runner.task.guidance.is_empty());
+        assert!(!runner.task.objective_pending);
+        assert!(runner.task.intent_events.iter().any(
+            |event| event.kind == "objective_set" && event.detail == "Implement the main spec"
+        ));
+
+        // A later message is guidance under that objective, as before.
+        runner
+            .submit_message("Start with the map crate".into())
+            .await
+            .unwrap();
+        assert_eq!(runner.task.objective, "Implement the main spec");
+        assert_eq!(runner.task.guidance, "Start with the map crate");
         server.abort();
     }
 }

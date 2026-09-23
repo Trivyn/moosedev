@@ -2,7 +2,7 @@
 use super::{
     config::ModelRole,
     progress::{Progress as ProgressEvent, ProgressSender},
-    runner::{Mode, PermissionGrant, Phase, RecoveryStatus, Runner, Task},
+    runner::{spec_approval_objective, Mode, PermissionGrant, Phase, RecoveryStatus, Runner, Task},
     startup::{ProviderSettings, StartupOptions},
 };
 use anyhow::{bail, Context, Result};
@@ -699,12 +699,15 @@ impl Controller {
                 if let Err(error) = self.deliver().await {
                     self.fail(error);
                 }
+                // A task whose spec approval just met its objective waits for
+                // the human to name the next one; planning would ask the model
+                // to plan an approval that already happened.
                 if self.auto
                     && self.runner.as_ref().is_some_and(|r| {
                         matches!(
                             r.task.phase,
                             Phase::Planning | Phase::Working | Phase::Verifying
-                        )
+                        ) && !r.task.objective_pending
                     })
                 {
                     match self.advance().await {
@@ -1107,8 +1110,7 @@ impl Controller {
                             .is_some_and(|runner| runner.task.phase == Phase::Complete);
                         if self.runner.is_none() || finished {
                             self.acquire()?;
-                            self.start_task(format!("Approve specification {path}"))
-                                .await?;
+                            self.start_task(spec_approval_objective(path)).await?;
                             self.save_conversation()?;
                         }
                     }

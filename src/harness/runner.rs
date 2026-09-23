@@ -35,6 +35,7 @@ mod recovery;
 mod review;
 mod scope;
 mod spec;
+pub use spec::spec_approval_objective;
 mod symbolic;
 mod task;
 #[cfg(test)]
@@ -292,6 +293,7 @@ impl Runner {
         let task = Task {
             id,
             objective,
+            objective_pending: false,
             mode: Mode::Plan,
             phase: Phase::Planning,
             plan: None,
