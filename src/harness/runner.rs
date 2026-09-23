@@ -115,6 +115,26 @@ fn guidance(source: &str, text: &str) -> StandingGuidance {
     }
 }
 
+/// The compiled default, split into its per-mode sections by the same parser a
+/// project's own file goes through. The default carries sections of its own, so
+/// it has to resolve per mode exactly as a file does; parsing it here rather
+/// than assigning the whole text is what keeps one meaning of `## Plan`.
+///
+/// The default is compiled in and covered by a test, so a parse error here is a
+/// build-time mistake in this repository, not a user's.
+fn default_guidance() -> StandingGuidance {
+    let text = DEFAULT_GUIDANCE.trim();
+    let (shared, plan, implement) =
+        split_guidance(text).expect("the compiled default guidance parses");
+    StandingGuidance {
+        source: "default".into(),
+        sha256: sha256_hex(text),
+        text: shared,
+        plan,
+        implement,
+    }
+}
+
 /// Drop HTML comments, so a project can annotate its guidance without paying
 /// for the annotation in every prompt. An unterminated comment runs to the end
 /// of the file, as it does in HTML.
@@ -203,7 +223,7 @@ pub fn load_standing_guidance(root: &Path) -> Result<StandingGuidance> {
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(guidance("default", DEFAULT_GUIDANCE.trim()));
+            return Ok(default_guidance());
         }
         Err(error) => return Err(error).context(format!("read {GUIDANCE_FILE}")),
     };
@@ -404,7 +424,7 @@ impl Runner {
         };
         if missing_guidance {
             // A journal from before the guidance file gets the compiled default.
-            runner.task.standing_guidance = Some(guidance("default", DEFAULT_GUIDANCE.trim()));
+            runner.task.standing_guidance = Some(default_guidance());
             runner.guidance_loaded();
             runner.persist()?;
         }
@@ -680,9 +700,14 @@ mod tests {
         let fixture = Fixture::with(&crate::harness::guidance_example());
         let standing = fixture.load().unwrap();
         assert_eq!(standing.source, "file");
-        // The example carries the compiled default, which a real file replaces.
-        assert!(standing.text.starts_with(DEFAULT_GUIDANCE.trim()));
         assert!(standing.plan.is_some() && standing.implement.is_some());
+        // The example carries the compiled default, which a real file replaces.
+        // Copying it unchanged must therefore deliver exactly the default, or
+        // adopting the example would quietly change what the model is told.
+        let default = default_guidance();
+        for role in ModelRole::ALL {
+            assert_eq!(standing.for_role(role), default.for_role(role));
+        }
         // Its commentary explains the file; it must not reach the model.
         for text in fixture.per_mode() {
             assert!(!text.contains("Copy it to"), "{text}");

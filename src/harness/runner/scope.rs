@@ -348,7 +348,7 @@ mod tests {
             delivery_receipt: None,
             capture_contracts,
             intent_contracts: vec![2],
-            governing_constraints: vec![],
+            governing_rules: vec![],
             approved_specs: vec![],
         };
         let error = Runner::validate_daemon_contracts(&context(vec![2]))

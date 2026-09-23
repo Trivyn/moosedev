@@ -174,10 +174,35 @@ impl Runner {
                     dossier: file.dossier.clone(),
                 })
                 .collect(),
-            governing_constraints: response.governing_constraints.clone(),
+            governing_rules: response.governing_rules.clone(),
             records: response.records.clone(),
             delivery_receipt: response.delivery_receipt.clone(),
         });
+        // What the Project rules block actually delivered. A rule reduced to
+        // its name is not delivered (Lesson f07aacbb), so the split between
+        // rules carrying claims and rules carrying only a title belongs in the
+        // journal, where an outcome can be attributed to it, rather than being
+        // reconstructed from an archived prompt.
+        let delivered: Vec<(String, bool)> = response
+            .governing_rules
+            .iter()
+            .map(|rule| (rule.kind.clone(), !rule.claim.is_empty()))
+            .collect();
+        if !delivered.is_empty() {
+            let detail = crate::graph::rules_delivery(&delivered);
+            // Refresh runs every step; journal a line only when the delivery
+            // changed, so the receipt marks transitions rather than repeating.
+            let unchanged = self
+                .task
+                .intent_events
+                .iter()
+                .rev()
+                .find(|event| event.kind == "rules_delivered")
+                .is_some_and(|last| last.detail == detail);
+            if !unchanged {
+                self.intent_event("rules_delivered", &detail);
+            }
+        }
         let turn = self.ensure_knowledge_turn(&topic, &response.revision);
         turn.retrieval_topic = topic;
         turn.revision = response.revision.clone();

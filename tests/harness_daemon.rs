@@ -486,7 +486,7 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
         "{}",
         full.context
     );
-    assert!(full.governing_constraints.is_empty());
+    assert!(full.governing_rules.is_empty());
     assert!(!full
         .context
         .contains("retrieve more context when scope expands"));
@@ -849,7 +849,7 @@ async fn linked_evidence_delivers_unlinked_component_constraint() {
         "{evidence}"
     );
     let rule = response
-        .governing_constraints
+        .governing_rules
         .iter()
         .find(|rule| rule.iri == np7)
         .expect("governing rule");
@@ -966,7 +966,7 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
     let evidence = evidence_section(&response.context);
     assert!(
         evidence.contains(&format!(
-            "({need})\nvia: motivates Harness current decision\nhasDescription: The harness needs fees.\n"
+            "({need})\nvia: motivates Harness current decision\nclaim under Project rules\n"
         )),
         "{evidence}"
     );
@@ -974,18 +974,27 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
         "({driver})\nvia: motivates Harness current decision\nclaim under Project rules\n"
     )));
     let governing: Vec<_> = response
-        .governing_constraints
+        .governing_rules
         .iter()
         .map(|rule| (rule.iri.as_str(), rule.via.as_str()))
         .collect();
     assert_eq!(
         governing,
-        vec![(driver.as_str(), "via: motivates Harness current decision")],
-        "proposed and rejected Constraints are never governing"
+        vec![
+            (driver.as_str(), "via: motivates Harness current decision"),
+            (need.as_str(), "via: motivates Harness current decision"),
+        ],
+        "accepted Constraints and Requirements govern; proposed and rejected never do"
     );
-    assert!(response.governing_constraints[0]
+    // Constraints lead, so a Requirement can never take a Constraint's claim.
+    assert_eq!(response.governing_rules[0].kind, "Constraint");
+    assert_eq!(response.governing_rules[1].kind, "Requirement");
+    assert!(response.governing_rules[0]
         .claim
         .starts_with("hasDescription: A driving constraint.\nmotivates: "));
+    assert!(response.governing_rules[1]
+        .claim
+        .starts_with("hasDescription: The harness needs fees.\n"));
     assert!(evidence.contains(&format!(
         "({lesson})\nvia: learned from Harness current decision\nhasDescription: Learned from the decision.\n"
     )));
@@ -1055,10 +1064,10 @@ async fn linked_evidence_never_drops_accepted_constraints() {
         0
     );
     assert_eq!(evidence.matches("claim under Project rules\n").count(), 24);
-    assert_eq!(response.governing_constraints.len(), 30);
+    assert_eq!(response.governing_rules.len(), 30);
     assert_eq!(
         response
-            .governing_constraints
+            .governing_rules
             .iter()
             .filter(|rule| rule
                 .claim
@@ -1066,7 +1075,7 @@ async fn linked_evidence_never_drops_accepted_constraints() {
             .count(),
         24
     );
-    assert!(response.governing_constraints[24..]
+    assert!(response.governing_rules[24..]
         .iter()
         .all(|rule| rule.claim.is_empty()));
     assert_eq!(
@@ -1114,9 +1123,9 @@ async fn linked_evidence_walks_unindexed_file_by_component_path() {
         )),
         "{evidence}"
     );
-    assert_eq!(response.governing_constraints.len(), 1);
+    assert_eq!(response.governing_rules.len(), 1);
     assert_eq!(
-        response.governing_constraints[0].claim,
+        response.governing_rules[0].claim,
         format!("hasDescription: Fees round half up.\nconcerns: {billing}\n")
     );
 }
@@ -1154,7 +1163,7 @@ async fn fallback_topic_evidence_excludes_dossier_claims() {
         .dossier
         .contains("hasDescription: Established Harness fallback constraint\n"));
     let governing: Vec<_> = response
-        .governing_constraints
+        .governing_rules
         .iter()
         .map(|rule| (rule.iri.as_str(), rule.via.as_str()))
         .collect();
@@ -1186,7 +1195,7 @@ async fn inventory_is_omitted_once_linked_evidence_is_supplied() {
         .context
         .contains("the inventory lists current record names only"));
     let dossier_only = linked_context(&state, "harness inventory", &["src/harness.rs"]);
-    assert!(dossier_only.governing_constraints.is_empty());
+    assert!(dossier_only.governing_rules.is_empty());
     assert!(
         dossier_only.context.contains(INVENTORY),
         "{}",
@@ -1203,7 +1212,15 @@ async fn inventory_is_omitted_once_linked_evidence_is_supplied() {
     );
     graph::relate(&state, &decision, "isMotivatedBy", &need).unwrap();
     let linked = linked_context(&state, "harness inventory", &["src/harness.rs"]);
-    assert!(linked.governing_constraints.is_empty());
+    assert_eq!(
+        linked
+            .governing_rules
+            .iter()
+            .map(|rule| (rule.kind.as_str(), rule.iri.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("Requirement", need.as_str())],
+        "a motivating Requirement governs the files it was reached from"
+    );
     assert!(
         linked.context.contains("\nLinked evidence ("),
         "{}",
@@ -1332,7 +1349,7 @@ async fn governing_rules_alone_omit_the_inventory() {
     )
     .unwrap();
     let response = linked_context(&state, "harness inventory", &["src/harness.rs"]);
-    assert_eq!(response.governing_constraints.len(), 1);
+    assert_eq!(response.governing_rules.len(), 1);
     assert!(!response.context.contains("\nLinked evidence ("));
     assert!(
         !response.context.contains("Current knowledge inventory:"),
@@ -2268,7 +2285,7 @@ fn context_response_without_contract_fields_deserializes_with_empty_vectors() {
     let context: ContextResponse = serde_json::from_value(legacy).unwrap();
     assert!(context.capture_contracts.is_empty());
     assert!(context.intent_contracts.is_empty());
-    assert!(context.governing_constraints.is_empty());
+    assert!(context.governing_rules.is_empty());
 }
 
 #[tokio::test]

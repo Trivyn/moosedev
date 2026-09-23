@@ -597,6 +597,26 @@ impl Runner {
             .join(&self.task.id)
     }
 
+    /// Vacuous-check returns already spent on this task.
+    fn vacuous_returns(&self) -> usize {
+        self.task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "check_vacuous_returned")
+            .count()
+    }
+
+    /// Whether any required check passed without verifying anything. The
+    /// completion line reports this rather than claiming the checks passed.
+    pub(super) fn vacuous_checks(&self) -> Vec<String> {
+        self.task
+            .intent_events
+            .iter()
+            .filter(|event| event.kind == "check_vacuous_unmet")
+            .map(|event| event.detail.clone())
+            .collect()
+    }
+
     async fn verify_next(&mut self) -> Result<()> {
         let plan = self.task.plan.as_ref().context("no plan")?;
         let index = self.task.check_results.len();
@@ -631,6 +651,25 @@ impl Runner {
                 self.task.last_response = response;
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
+            } else if let Some(reason) = vacuous_reason(&result) {
+                // The check passed without running anything, so it has not
+                // verified the change. Return it to the model once, the way an
+                // unaddressed rule returns a plan: it can add a test, and if it
+                // does not, the task still finishes — with the journal and the
+                // completion line saying what actually happened. A project with
+                // no tests yet is never wedged.
+                self.intent_event("check_vacuous", &format!("{reason}: {command}"));
+                if self.vacuous_returns() < VACUOUS_RETURN_LIMIT {
+                    self.intent_event("check_vacuous_returned", &command);
+                    self.task.phase = Phase::Working;
+                    self.task.last_response = format!(
+                        "Required check `{command}` succeeded but ran no tests ({reason}), so it has not verified this change. Add a test that exercises what you changed and fails without it, then finish again."
+                    );
+                    self.task.capture_due = true;
+                    self.task.after_review = Phase::Working;
+                } else {
+                    self.intent_event("check_vacuous_unmet", &command);
+                }
             }
             self.task.intent = None;
             return Ok(());
@@ -684,6 +723,41 @@ fn repository_omission_notice(omitted: usize) -> String {
 /// The shell's statuses for a command that could not start at all.
 fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
     result.exit_code.filter(|code| matches!(code, 126 | 127))
+}
+
+/// Output signatures of a test runner that executed nothing. A check that exits
+/// 0 having run no test proves only that the code builds, so the harness must
+/// not accept it as the verification its completion line claims.
+///
+/// Deterministic substring matching, like the sandbox denials below: the
+/// symbolic layer reads the runner's own report rather than asking a model
+/// whether a check meant anything.
+/// Vacuous-check returns per task before the task is allowed to finish anyway.
+/// One, matching the plan-coverage return limit: the nudge is worth sending
+/// once, and a project that genuinely has no tests must not be trapped.
+const VACUOUS_RETURN_LIMIT: usize = 1;
+
+const VACUOUS_CHECKS: [&str; 6] = [
+    "running 0 tests",
+    "no tests ran",
+    "No tests found",
+    "collected 0 items",
+    "0 passing",
+    "Tests:       0 total",
+];
+
+/// Why a check that succeeded nonetheless verified nothing, or `None`.
+///
+/// A failed check is never vacuous: its failure is the signal, and
+/// [`classify_denial`] already owns reading that output.
+fn vacuous_reason(result: &executor::CommandResult) -> Option<&'static str> {
+    if !result.success {
+        return None;
+    }
+    VACUOUS_CHECKS
+        .iter()
+        .find(|signature| result.output.contains(**signature))
+        .copied()
 }
 
 const PATH_DENIALS: [&str; 5] = [
@@ -843,6 +917,47 @@ mod check_failure_tests {
             output: output.into(),
             exit_code,
         }
+    }
+
+    /// A check that exits 0 without running a test proves only that the code
+    /// builds. This is the badciv-map case: `cargo test -p badciv-map` reported
+    /// "running 0 tests ... ok" on a crate with no tests, and the task
+    /// completed claiming required checks passed.
+    #[test]
+    fn a_passing_check_that_ran_no_tests_is_vacuous_and_a_failing_one_never_is() {
+        let passed = |output: &str| executor::CommandResult {
+            success: true,
+            output: output.into(),
+            exit_code: Some(0),
+        };
+        assert_eq!(
+            vacuous_reason(&passed(
+                "   Compiling badciv-map v0.1.0\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed\n"
+            )),
+            Some("running 0 tests")
+        );
+        for (output, signature) in [
+            ("no tests ran in 0.01s", "no tests ran"),
+            ("No tests found, exiting with code 0", "No tests found"),
+            ("collected 0 items", "collected 0 items"),
+            ("  0 passing (2ms)", "0 passing"),
+            ("Tests:       0 total", "Tests:       0 total"),
+        ] {
+            assert_eq!(vacuous_reason(&passed(output)), Some(signature), "{output}");
+        }
+        // A check that ran something is not vacuous, whatever else it printed.
+        assert_eq!(
+            vacuous_reason(&passed(
+                "running 12 tests\ntest result: ok. 12 passed; 0 failed\n"
+            )),
+            None
+        );
+        // A failed check is never vacuous: the failure is the signal, and
+        // classify_denial owns reading that output.
+        assert_eq!(
+            vacuous_reason(&result(Some(101), "running 0 tests\nerror: build failed")),
+            None
+        );
     }
 
     #[test]

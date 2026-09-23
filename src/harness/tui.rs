@@ -1031,10 +1031,10 @@ fn legacy_knowledge_text(task: &Task) -> String {
             text.push('\n');
         }
         text.push_str("\nPROJECT RULES\n");
-        if context.governing_constraints.is_empty() {
+        if context.governing_rules.is_empty() {
             text.push_str("No governing constraints for the current working set.\n");
         }
-        for rule in &context.governing_constraints {
+        for rule in &context.governing_rules {
             text.push_str(&format!(
                 "{}\n{}\nvia: {}\n",
                 rule.label, rule.iri, rule.via
@@ -2274,9 +2274,10 @@ mod tests {
                 file: "src/parser.rs".into(),
                 dossier: "Parser dossier".into(),
             }],
-            governing_constraints: vec![super::super::protocol::GoverningConstraint {
+            governing_rules: vec![super::super::protocol::GoverningRule {
                 iri: "https://moosedev.dev/kg/Constraint/deterministic".into(),
                 label: "Deterministic parser".into(),
+                kind: "Constraint".into(),
                 claim: "Parsing must not depend on iteration order.".into(),
                 via: "src/parser.rs".into(),
             }],

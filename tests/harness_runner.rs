@@ -6,6 +6,7 @@
 //! completion gates.
 use std::sync::Arc;
 
+use moosedev::harness::config::ModelRole;
 use moosedev::harness::protocol::*;
 use moosedev::harness::response::ActionContract;
 use moosedev::harness::runner::{CheckResult, FailedRun, Mode, PermissionGrant, Phase, Runner};
@@ -731,9 +732,10 @@ async fn first_edit_guard_and_deny_gate_precede_any_write() {
 async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    fixture.shared.lock().unwrap().governing_constraints = vec![GoverningConstraint {
+    fixture.shared.lock().unwrap().governing_rules = vec![GoverningRule {
         iri: "urn:rule:retry".into(),
         label: "Retries stop at the configured limit".into(),
+        kind: "Constraint".into(),
         claim: "hasDescription: A retry loop stops after the configured attempt limit.\n".into(),
         via: "via: component Transfers".into(),
     }];
@@ -773,7 +775,7 @@ async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     assert!(prompt.contains("matched as LITERAL text"));
     assert!(prompt.contains("the knowledge is not recorded: say so with reply"));
 
-    fixture.shared.lock().unwrap().governing_constraints.clear();
+    fixture.shared.lock().unwrap().governing_rules.clear();
     fixture.reply("harness_action", json!({"action":"read","file":"code.txt"}));
     runner.advance().await.unwrap();
     let prompt = fixture.last_model_prompt("harness_action");
@@ -781,17 +783,19 @@ async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
     assert!(!prompt.contains("each project rule:"));
 }
 
-fn coverage_rules() -> Vec<GoverningConstraint> {
+fn coverage_rules() -> Vec<GoverningRule> {
     vec![
-        GoverningConstraint {
+        GoverningRule {
             iri: "urn:rule:resume".into(),
             label: "Uploads resume from the last acknowledged chunk".into(),
+            kind: "Constraint".into(),
             claim: "hasDescription: An interrupted upload resumes from the chunk the server acknowledged.\n".into(),
             via: "via: component Transfers".into(),
         },
-        GoverningConstraint {
+        GoverningRule {
             iri: "urn:rule:audit".into(),
             label: "Every transfer writes an audit entry".into(),
+            kind: "Requirement".into(),
             claim: "hasDescription: Each transfer attempt appends one audit entry with its outcome.\n".into(),
             via: "via: linked to code.txt".into(),
         },
@@ -812,7 +816,7 @@ fn coverage_events(runner: &Runner, kind: &str) -> Vec<String> {
 async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    fixture.shared.lock().unwrap().governing_constraints = coverage_rules();
+    fixture.shared.lock().unwrap().governing_rules = coverage_rules();
     let mut runner = Runner::create(
         fixture.root.clone(),
         fixture.url.clone(),
@@ -885,7 +889,7 @@ async fn plan_coverage_returns_once_naming_every_unmet_rule_then_keeps_the_plan(
 async fn a_plan_that_addresses_each_rule_is_stored_at_once() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    fixture.shared.lock().unwrap().governing_constraints = coverage_rules();
+    fixture.shared.lock().unwrap().governing_rules = coverage_rules();
     let mut runner = Runner::create(
         fixture.root.clone(),
         fixture.url.clone(),
@@ -1109,9 +1113,21 @@ async fn standing_guidance_is_snapshotted_capped_and_replayed() {
     let absent = create("Repair code.txt").await.unwrap();
     let standing = absent.task.standing_guidance.clone().unwrap();
     assert_eq!(standing.source, "default");
-    assert_eq!(
-        standing.text,
-        moosedev::harness::runner::DEFAULT_GUIDANCE.trim()
+    // The compiled default carries sections of its own, so it is split like any
+    // file: `text` is the shared part and each mode adds its own section. What
+    // the two modes receive together is the whole default.
+    assert!(standing.plan.is_some() && standing.implement.is_some());
+    let default = moosedev::harness::runner::DEFAULT_GUIDANCE.trim();
+    assert!(default.starts_with(&standing.text));
+    for role in [ModelRole::Plan, ModelRole::Implement] {
+        let resolved = standing.for_role(role);
+        assert!(resolved.starts_with(&standing.text));
+        assert!(resolved.len() <= moosedev::harness::runner::MAX_GUIDANCE_BYTES);
+    }
+    assert_ne!(
+        standing.for_role(ModelRole::Plan),
+        standing.for_role(ModelRole::Implement),
+        "each mode gets its own section of the default"
     );
     assert!(
         loaded(&absent)[0].starts_with("default, "),

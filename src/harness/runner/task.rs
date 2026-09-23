@@ -46,7 +46,7 @@ pub struct KnowledgeContextSnapshot {
     pub revision: String,
     pub context: String,
     pub files: Vec<KnowledgeFileDossier>,
-    pub governing_constraints: Vec<GoverningConstraint>,
+    pub governing_rules: Vec<GoverningRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<ContextRecord>,
     /// Exact record-delivery accounting supplied by the daemon, when supported.

@@ -69,7 +69,22 @@ impl Runner {
             .iter()
             .map(|path| format!(" Approved spec {path} changed in this task; /approve-spec {path} reconciles its records."))
             .collect::<String>();
-        self.event(format!("Complete: required checks passed, human knowledge review resolved, graph validated and durably checkpointed.{specs}"));
+        // "Required checks passed" is a claim about verification, so it must not
+        // be made for a check that ran no tests: the badciv-map task completed
+        // on a `cargo test` reporting "running 0 tests". The checks did pass —
+        // say so — but say what they proved.
+        let vacuous = self.vacuous_checks();
+        let verified =
+            if vacuous.is_empty() {
+                "required checks passed".to_string()
+            } else {
+                format!(
+                "required checks passed, but {} verified nothing ({}), so the change is unproven",
+                if vacuous.len() == 1 { "one ran no tests and" } else { "some ran no tests and" },
+                vacuous.join("; ")
+            )
+            };
+        self.event(format!("Complete: {verified}, human knowledge review resolved, graph validated and durably checkpointed.{specs}"));
         self.persist()
     }
 

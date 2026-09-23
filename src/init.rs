@@ -1516,8 +1516,10 @@ mod tests {
         let example = std::fs::read_to_string(&path).unwrap();
         assert_eq!(example, crate::harness::guidance_example());
         // The example carries the compiled default, because a real GUIDANCE.md
-        // replaces the default rather than adding to it.
-        assert!(example.starts_with(crate::harness::DEFAULT_GUIDANCE.trim()));
+        // replaces the default rather than adding to it. The explanation leads,
+        // so the file opens at what it is; the default follows verbatim.
+        assert!(example.starts_with("<!--"));
+        assert!(example.ends_with(&format!("{}\n", crate::harness::DEFAULT_GUIDANCE.trim())));
         assert!(example.contains("## Plan") && example.contains("## Implement"));
         // The real file is the user's to write; init never seeds it.
         assert!(!target.join(".moosedev/GUIDANCE.md").exists());

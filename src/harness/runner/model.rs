@@ -4,7 +4,7 @@ use super::tools;
 use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::config::ModelRole;
 use crate::harness::progress::Progress;
-use crate::harness::protocol::GoverningConstraint;
+use crate::harness::protocol::GoverningRule;
 use crate::harness::response::{self, ActionContract};
 use crate::harness::startup::RoleSettings;
 use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion, UsageContext};
@@ -54,22 +54,22 @@ const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, q
 const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
 
 /// The governing rules the daemon delivered, each with its `via:` line and claim.
-fn project_rules(rules: &[GoverningConstraint]) -> String {
+fn project_rules(rules: &[GoverningRule]) -> String {
     if rules.is_empty() {
         return String::new();
     }
     let mut out = String::from(RULES_HEADER);
     for rule in rules {
         out.push_str(&format!(
-            "\n[Constraint] {} ({})\n{}\n{}",
-            rule.label, rule.iri, rule.via, rule.claim
+            "\n[{}] {} ({})\n{}\n{}",
+            rule.kind, rule.label, rule.iri, rule.via, rule.claim
         ));
     }
     out
 }
 
 /// A recency echo of the rule titles for the planning step.
-fn plan_rule_echo(rules: &[GoverningConstraint]) -> String {
+fn plan_rule_echo(rules: &[GoverningRule]) -> String {
     if rules.is_empty() {
         return String::new();
     }
@@ -585,7 +585,7 @@ impl Runner {
             prompt.push('\n');
         }
         prompt.push_str(ROLE_BOUNDARY);
-        prompt.push_str(&project_rules(&context.governing_constraints));
+        prompt.push_str(&project_rules(&context.governing_rules));
         let contract = self.action_contract();
         prompt.push_str(match (contract, self.task.batch_capture) {
             (ActionContract::Tools, true) => TOOLS_CONVERSATIONAL_OUTPUT,
@@ -619,7 +619,7 @@ impl Runner {
             Mode::Auto => AUTO_MODE_ACTIONS,
         });
         if self.task.mode == Mode::Plan {
-            prompt.push_str(&plan_rule_echo(&context.governing_constraints));
+            prompt.push_str(&plan_rule_echo(&context.governing_rules));
         }
         // Count the complete mandatory prompt and output schema first. Discovery
         // and historical prose spend only the remainder; governing claims and
@@ -1019,7 +1019,17 @@ mod tests {
         ] {
             assert!(DEFAULT_GUIDANCE.contains(sentence), "{sentence}");
         }
-        assert!(DEFAULT_GUIDANCE.len() <= super::super::MAX_GUIDANCE_BYTES);
+        // The default carries sections, so the bound that matters is what one
+        // mode actually receives, not the length of the file.
+        let default = super::super::load_standing_guidance(std::path::Path::new(
+            "/nonexistent-so-the-compiled-default-is-used",
+        ))
+        .unwrap();
+        assert_eq!(default.source, "default");
+        assert!(default.plan.is_some() && default.implement.is_some());
+        for role in ModelRole::ALL {
+            assert!(default.for_role(role).len() <= super::super::MAX_GUIDANCE_BYTES);
+        }
         assert!(ACTION_MEANINGS.contains(
             "search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question."
         ));
@@ -1156,22 +1166,24 @@ mod tests {
         assert_eq!(project_rules(&[]), "");
         assert_eq!(plan_rule_echo(&[]), "");
         let rules = vec![
-            GoverningConstraint {
+            GoverningRule {
                 iri: "urn:rule:a".into(),
                 label: "Retries stop at the limit".into(),
+                kind: "Constraint".into(),
                 claim: "hasDescription: A retry loop stops after the configured limit.\n".into(),
                 via: "via: component Transfers".into(),
             },
-            GoverningConstraint {
+            GoverningRule {
                 iri: "urn:rule:b".into(),
                 label: "Titles only past the cap".into(),
+                kind: "Requirement".into(),
                 claim: String::new(),
                 via: "via: linked to src/send.rs".into(),
             },
         ];
         assert_eq!(
             project_rules(&rules),
-            "\nProject rules (hard requirements; your plan must satisfy each or say why it does not apply):\n\n[Constraint] Retries stop at the limit (urn:rule:a)\nvia: component Transfers\nhasDescription: A retry loop stops after the configured limit.\n\n[Constraint] Titles only past the cap (urn:rule:b)\nvia: linked to src/send.rs\n"
+            "\nProject rules (hard requirements; your plan must satisfy each or say why it does not apply):\n\n[Constraint] Retries stop at the limit (urn:rule:a)\nvia: component Transfers\nhasDescription: A retry loop stops after the configured limit.\n\n[Requirement] Titles only past the cap (urn:rule:b)\nvia: linked to src/send.rs\n"
         );
         assert_eq!(
             plan_rule_echo(&rules),

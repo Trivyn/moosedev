@@ -12,14 +12,15 @@ pub const GUIDANCE_FILE: &str = ".moosedev/GUIDANCE.md";
 /// Compiled standing guidance used when a project has no [`GUIDANCE_FILE`].
 pub const DEFAULT_GUIDANCE: &str = include_str!("../../templates/harness/GUIDANCE.md");
 
-/// The example `init` installs: the compiled default, then the section shape.
-/// A real file *replaces* the default, so the example carries it — composed
-/// rather than copied, so the two cannot drift apart.
+/// The example `init` installs: an explanatory comment, then the compiled
+/// default verbatim. A real file *replaces* the default, so the example has to
+/// carry it — composed rather than copied, so the two cannot drift apart, and
+/// the comment leads so a project opens the file at the explanation.
 pub fn guidance_example() -> String {
     format!(
-        "{}\n{}",
-        DEFAULT_GUIDANCE.trim(),
-        include_str!("../../templates/harness/GUIDANCE.example.md")
+        "{}\n{}\n",
+        include_str!("../../templates/harness/GUIDANCE.example.md").trim(),
+        DEFAULT_GUIDANCE.trim()
     )
 }
 

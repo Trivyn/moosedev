@@ -38,7 +38,7 @@ pub fn context_snapshot(
     );
     state.try_ensure_enriched()?;
     let mut context = String::new();
-    let mut governing_constraints = Vec::new();
+    let mut governing_rules = Vec::new();
     let mut context_records = Vec::new();
     let mut record_indexes = std::collections::BTreeMap::new();
     let mut file_record_iris = Vec::new();
@@ -67,12 +67,13 @@ pub fn context_snapshot(
         // fallback when nothing is linked beyond what the dossiers print.
         let linked = graph::linked_evidence(state, &request.files)?;
         file_record_iris.extend(linked.excluded.iter().cloned());
-        governing_constraints = graph::governing_constraints(&linked)
+        governing_rules = graph::governing_rules(&linked)
             .into_iter()
-            .map(|rule| GoverningConstraint {
+            .map(|rule| GoverningRule {
                 via: rule.hop.via(&rule.source),
                 iri: rule.iri,
                 label: rule.label,
+                kind: rule.kind,
                 claim: rule.claim,
             })
             .collect();
@@ -89,13 +90,13 @@ pub fn context_snapshot(
                 },
             );
         }
-        for rule in &governing_constraints {
+        for rule in &governing_rules {
             merge_context_record(
                 &mut context_records,
                 &mut record_indexes,
                 ContextRecord {
                     iri: rule.iri.clone(),
-                    kind: "Constraint".into(),
+                    kind: rule.kind.clone(),
                     title: rule.label.clone(),
                     claim: rule.claim.clone(),
                     provenance: vec![rule.via.clone()],
@@ -104,7 +105,7 @@ pub fn context_snapshot(
         }
         // The record-name inventory stays only while the walk supplies no
         // rules and no linked evidence, as on the first request with no files.
-        if linked.records.is_empty() && governing_constraints.is_empty() {
+        if linked.records.is_empty() && governing_rules.is_empty() {
             context.push_str(&format!("Recall: the inventory lists current record names only; {RECALL}\n\nCurrent knowledge inventory:\n"));
             for record in graph::relevant_context_snapshot(state, None, 100, false)? {
                 context.push_str(&format!(
@@ -260,7 +261,7 @@ pub fn context_snapshot(
         delivery_receipt,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
-        governing_constraints,
+        governing_rules,
     })
 }
 

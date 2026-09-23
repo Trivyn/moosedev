@@ -28,17 +28,27 @@ pub struct FileContext {
     pub policy: PolicyDecision,
 }
 
-/// One governing rule of the requested files: an accepted Constraint linked to
-/// their code or reached by the linked-evidence walk. Past the claim limit a
-/// rule is named with an empty claim; it is never dropped.
+/// One governing rule of the requested files: an accepted Constraint or
+/// Requirement linked to their code or reached by the linked-evidence walk.
+/// Past the claim budget a rule is named with an empty claim; it is never
+/// dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GoverningConstraint {
+pub struct GoverningRule {
     pub iri: String,
     pub label: String,
-    /// The claim body as the shared claim renderer prints it; empty past the limit.
+    /// The record kind, as the Project rules block tags it. Tasks journaled
+    /// before Requirements became rules carry Constraints only, so a missing
+    /// value replays as one.
+    #[serde(default = "constraint_kind")]
+    pub kind: String,
+    /// The claim body as the shared claim renderer prints it; empty past the budget.
     pub claim: String,
     /// The `via:` line naming what reached the rule.
     pub via: String,
+}
+
+fn constraint_kind() -> String {
+    "Constraint".to_string()
 }
 
 /// A typed graph record selected for one harness context response. This is the
@@ -124,10 +134,15 @@ pub struct ContextResponse {
     /// Supported deterministic intent-discovery contracts.
     #[serde(default)]
     pub intent_contracts: Vec<u32>,
-    /// The governing rules of the requested files, direct rules first. The
-    /// runner renders them as Project rules; linked evidence points there.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub governing_constraints: Vec<GoverningConstraint>,
+    /// The governing rules of the requested files, direct rules first and
+    /// Constraints ahead of Requirements. The runner renders them as Project
+    /// rules; linked evidence points there.
+    #[serde(
+        default,
+        alias = "governing_constraints",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub governing_rules: Vec<GoverningRule>,
     /// Every specification with a current approval marker, and whether its
     /// file still matches the approved digest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

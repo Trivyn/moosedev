@@ -32,7 +32,7 @@ pub(super) struct Script {
     pub(super) usage: Option<Value>,
     pub(super) context: Option<String>,
     /// Governing rules the full context returns.
-    pub(super) governing_constraints: Vec<GoverningConstraint>,
+    pub(super) governing_rules: Vec<GoverningRule>,
     /// Approved specs the full context reports.
     pub(super) approved_specs: Vec<ApprovedSpecStatus>,
     /// What `ground` answers (default: nothing to ground), and what it was asked.
@@ -270,7 +270,7 @@ pub(super) async fn context(
                 context: knowledge.unwrap_or_default(),
                 files: vec![],
                 records: vec![],
-                governing_constraints: vec![],
+                governing_rules: vec![],
                 approved_specs: vec![],
             }),
         );
@@ -293,7 +293,7 @@ pub(super) async fn context(
             evidence_iris: vec![],
             delivery_receipt: None,
             records: vec![],
-            governing_constraints: script.governing_constraints.clone(),
+            governing_rules: script.governing_rules.clone(),
             approved_specs: script.approved_specs.clone(),
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."

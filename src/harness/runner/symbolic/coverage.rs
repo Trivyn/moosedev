@@ -14,7 +14,7 @@ impl Runner {
         summary: &str,
         context: &ContextResponse,
     ) -> bool {
-        let rules = &context.governing_constraints;
+        let rules = &context.governing_rules;
         if rules.is_empty() {
             self.symbolic_state_mut().coverage_returns = 0;
             return false;
