@@ -675,6 +675,15 @@ contract 3 and intent contract 2.
   use only the remaining last-result capacity and are admitted as complete
   lines, so the generic observation preview no longer cuts graph evidence
   through the middle of a record.
+- Whole-file rewrites. A `replace` whose `old_text` covers at least 90% of a
+  file of 1 KB or more, while the text it actually changes is at most a quarter
+  of that span, is journaled as `edit_whole_file` and named in the
+  conversation. The edit still applies: the shape is wasteful, not wrong. Both
+  conditions are required, because restructuring a file genuinely does rewrite
+  it and must not be reported as a mistake. `ACTION_MEANINGS` already tells the
+  model not to reproduce the whole source as a precondition; this is what
+  notices when it does, since resending a file is what spends the context
+  window (Lesson af16b95e) and what an edit loop looks like from outside.
 - Vacuous checks. A required check is passed on its exit status, so a test
   command that runs no test passes it while proving only that the code builds.
   When a check succeeds and its output carries a runner's own "ran nothing"

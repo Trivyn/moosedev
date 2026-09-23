@@ -284,6 +284,13 @@ impl Runner {
                     };
                     anyhow::bail!("replace old_text must match exactly once; found {count}{}; use the supplied source to select a unique literal span{hint}", if count == 2 { " or more" } else { "" });
                 };
+                if let Some(detail) = whole_file_rewrite(source, &old_text, &new_text) {
+                    let detail = format!("{file}: {detail}");
+                    self.intent_event("edit_whole_file", &detail);
+                    self.event(format!(
+                        "Whole-file rewrite: {detail}. The edit was applied. Select the span you are changing: a replace that resends the file costs the window it needs for the rest of the task, and repeating it is how an edit loop starts."
+                    ));
+                }
                 (file, Some(source.replacen(&old_text, &new_text, 1)))
             }
             Action::Write { file, content } => (file, content),
@@ -306,6 +313,52 @@ impl Runner {
             after,
         })
     }
+}
+
+/// Files below this are small enough that resending one costs nothing worth
+/// naming, and a genuine small-file rewrite is ordinary work.
+const WHOLE_FILE_MIN_BYTES: usize = 1024;
+
+/// A `replace` that resent the file to change a fraction of it, described for
+/// the journal; `None` when the span is targeted or the rewrite is real.
+///
+/// `ACTION_MEANINGS` already tells the model not to reproduce the whole source
+/// merely as a precondition. badciv-map ignored it nine times: each `old_text`
+/// was the entire file, and the last six changed 12 to 308 bytes of about
+/// 16 KB. That is what spends the context window (Lesson af16b95e) and what an
+/// edit loop looks like from the outside, so the harness names it rather than
+/// leaving it to be reconstructed from archived prompts.
+///
+/// Both conditions are needed. A span covering the file is only waste when
+/// little of it actually changed: restructuring a file really does rewrite it,
+/// and that must not be reported as a mistake.
+fn whole_file_rewrite(source: &str, old_text: &str, new_text: &str) -> Option<String> {
+    if source.len() < WHOLE_FILE_MIN_BYTES || old_text.len() * 10 < source.len() * 9 {
+        return None;
+    }
+    // Bytes throughout: a common prefix can end mid-character, so slicing the
+    // &str at it would panic on any source that is not ASCII.
+    let (old, new) = (old_text.as_bytes(), new_text.as_bytes());
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(old.len().min(new.len()));
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let changed = (old.len() - prefix - suffix).max(new.len() - prefix - suffix);
+    (changed * 4 <= old_text.len()).then(|| {
+        format!(
+            "old_text spans {} of {} bytes to change {changed}",
+            old_text.len(),
+            source.len()
+        )
+    })
 }
 
 /// Occurrences of `literal` in `source`, counting overlaps, capped at two:
@@ -509,6 +562,41 @@ pub(super) fn strip_same_junk(text: &str, repair: &SpanRepair) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// badciv-map's shape: nine replaces whose old_text was the whole file,
+    /// the last six changing 12 to 308 bytes of about 16 KB.
+    #[test]
+    fn a_replace_that_resends_the_file_to_change_little_is_named() {
+        let body = "fn item() -> u32 { 0 }\n".repeat(200);
+        let source = format!("//! A module.\n{body}");
+        let changed = source.replace("fn item() -> u32 { 0 }\n", "fn item() -> u32 { 1 }\n");
+
+        // The whole file resent for a small change: both conditions hold.
+        let detail = whole_file_rewrite(&source, &source, &format!("{source}\nfn extra() {{}}\n"))
+            .expect("whole file resent for a 16-byte addition");
+        assert!(detail.contains("old_text spans"), "{detail}");
+
+        // A genuine rewrite spans the file and changes it: not a mistake.
+        assert_eq!(whole_file_rewrite(&source, &source, &changed), None);
+
+        // A targeted span is never reported, however small the file's change.
+        assert_eq!(
+            whole_file_rewrite(
+                &source,
+                "fn item() -> u32 { 0 }\n",
+                "fn item() -> u32 { 1 }\n"
+            ),
+            None
+        );
+
+        // A small file is ordinary work either way.
+        let small = "fn main() {}\n";
+        assert_eq!(whole_file_rewrite(small, small, "fn main() { }\n"), None);
+
+        // A common prefix ending mid-character must not slice a &str.
+        let utf8 = format!("//! Ωmega διαμόρφωση\n{body}");
+        assert!(whole_file_rewrite(&utf8, &utf8, &format!("{utf8}ω")).is_some());
+    }
 
     #[test]
     fn trailing_envelope_braces_are_trimmed_to_the_unique_source_span() {
