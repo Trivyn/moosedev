@@ -303,6 +303,9 @@ pub struct ProviderSettings {
     pub plan: Option<RoleSettings>,
     pub implement: Option<RoleSettings>,
     pub index_refresh: config::IndexRefresh,
+    /// `[harness.sandbox].read_paths`: capabilities this project grants every
+    /// task without a gate.
+    pub standing_read_paths: Vec<String>,
 }
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1234/v1";
@@ -356,6 +359,7 @@ impl ProviderSettings {
             plan: None,
             implement: None,
             index_refresh: config::IndexRefresh::default(),
+            standing_read_paths: Vec::new(),
             config: LlmConfig {
                 base_url: DEFAULT_ENDPOINT.into(),
                 api_key: std::env::var(DEFAULT_API_KEY_ENV).unwrap_or_else(|_| "lm-studio".into()),
@@ -392,6 +396,7 @@ impl ProviderSettings {
             response_policy: default.response_policy,
             action_contract: Some(default.action_contract),
             index_refresh: file.index_refresh,
+            standing_read_paths: file.sandbox.read_paths.clone(),
         })
     }
 

@@ -127,10 +127,29 @@ pub struct PendingPermission {
     pub write_paths: Vec<String>,
     pub network: bool,
     pub revision: String,
+    /// Why the request cannot be granted as asked, when it cannot. A refused
+    /// request still reaches the human: they see what was asked and why it was
+    /// turned down, and the model is told so it can ask for something narrower.
+    /// Refusing without asking is how a gate becomes an unattended halt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    /// What surveying the requested scopes noticed, for the human to weigh.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::harness::executor::PermissionFindings::is_empty"
+    )]
+    pub findings: crate::harness::executor::PermissionFindings,
     /// Set once the human approves: the grant that authorizes this exact
     /// command, which the next step then runs inside the interruptible loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_grant: Option<String>,
+}
+
+impl PendingPermission {
+    /// A refused request authorizes nothing and cannot be approved.
+    pub fn is_refused(&self) -> bool {
+        self.refusal.is_some()
+    }
 }
 
 /// A durable capability approved for the remainder of this task.
@@ -143,6 +162,12 @@ pub struct PermissionGrant {
     pub write_paths: Vec<String>,
     pub network: bool,
     pub approved_at: String,
+    /// What the human was shown about these scopes when they approved.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::harness::executor::PermissionFindings::is_empty"
+    )]
+    pub findings: crate::harness::executor::PermissionFindings,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) enum Intent {

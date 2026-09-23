@@ -73,6 +73,9 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
         // Studies index through the frozen producer only; a PATH producer
         // would change the fixed simulation conditions.
         index_refresh: moosedev::harness::config::IndexRefresh::FrozenPython,
+        // A study cell grants nothing standing: its capabilities are part of
+        // the fixed conditions, not of the machine it happens to run on.
+        standing_read_paths: Vec::new(),
     };
     provider.select(Some(endpoint), model)?;
     Ok(provider)
@@ -402,6 +405,7 @@ mod tests {
                 assistant: "Partial answer".into(),
                 command: "Partial output".into(),
             })),
+            standing_read_paths: Vec::new(),
         };
         let state = update_json(Update::State(Box::new(snapshot))).unwrap();
         assert_eq!(state["conversation"], expected);

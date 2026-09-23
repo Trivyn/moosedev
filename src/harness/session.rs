@@ -371,6 +371,9 @@ pub struct Snapshot {
     pub endpoint: String,
     pub model: String,
     pub live: Arc<Mutex<LiveOutput>>,
+    /// `[harness.sandbox].read_paths`: ambient capability a human judging any
+    /// gate needs to see, because it is already in force.
+    pub standing_read_paths: Vec<String>,
 }
 
 /// The controller owns streaming buffers; views share a read-only handle instead
@@ -454,6 +457,11 @@ impl Controller {
             endpoint: active.base_url,
             model: active.model,
             live: self.live.clone(),
+            standing_read_paths: self
+                .runner
+                .as_ref()
+                .map(|r| r.standing_read_paths().to_vec())
+                .unwrap_or_default(),
         })));
     }
     fn save_conversation(&self) -> Result<()> {
@@ -1126,7 +1134,10 @@ impl Controller {
                     "/permissions" => {
                         self.conversation.push(
                             "system",
-                            format_permission_grants(&runner.task.permission_grants),
+                            format_permission_grants(
+                                &runner.task.permission_grants,
+                                runner.standing_read_paths(),
+                            ),
                         );
                     }
                     "/revoke-permission" => {
@@ -1235,11 +1246,23 @@ fn is_spec_approval_alias(phase: &Phase, value: &str) -> bool {
     )
 }
 
-fn format_permission_grants(grants: &[PermissionGrant]) -> String {
-    if grants.is_empty() {
-        return "No active task-scoped permission grants.".into();
+fn format_permission_grants(grants: &[PermissionGrant], standing: &[String]) -> String {
+    // Standing paths are listed first and always: they are permanent, granted
+    // without a gate, and saying "no grants" while they are in force would be
+    // the most misleading thing this view could do.
+    let mut text = String::new();
+    if !standing.is_empty() {
+        text.push_str(&format!(
+            "Standing read access from [harness.sandbox] in {} (every task, no approval):\n  {}\n\n",
+            crate::config::FILE_NAME,
+            standing.join("\n  ")
+        ));
     }
-    let mut text = String::from("Active task-scoped permission grants:\n");
+    if grants.is_empty() {
+        text.push_str("No active task-scoped permission grants.");
+        return text;
+    }
+    text.push_str("Active task-scoped permission grants:\n");
     for grant in grants {
         text.push_str(&format!(
             "\n{} · {}\n  approved: {}\n",
@@ -1333,7 +1356,7 @@ mod tests {
             "approved_at": "2026-09-21T00:00:00Z"
         }))
         .unwrap()];
-        let text = format_permission_grants(&grants);
+        let text = format_permission_grants(&grants, &[]);
         assert!(text.contains("grant-1 · Use the system toolchain"));
         assert!(text.contains("approved: 2026-09-21T00:00:00Z"));
         assert!(text.contains("read: /opt/toolchain"));
@@ -1341,7 +1364,7 @@ mod tests {
         assert!(text.contains("network: enabled"));
         assert!(text.contains("/revoke-permission <grant ID>"));
         assert_eq!(
-            format_permission_grants(&[]),
+            format_permission_grants(&[], &[]),
             "No active task-scoped permission grants."
         );
     }

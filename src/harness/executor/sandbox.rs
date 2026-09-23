@@ -131,6 +131,10 @@ fn sandbox_literal(path: &Path) -> Result<String> {
     ))
 }
 
+/// Entries the socket scan walks before it stops looking.
+#[cfg(target_os = "macos")]
+const MAX_SOCKET_SCAN_ENTRIES: usize = 100_000;
+
 #[cfg(target_os = "macos")]
 fn permitted_unix_sockets(permissions: &CommandPermissions) -> Result<Vec<PathBuf>> {
     use std::os::unix::fs::FileTypeExt;
@@ -143,27 +147,45 @@ fn permitted_unix_sockets(permissions: &CommandPermissions) -> Result<Vec<PathBu
     };
     let mut sockets = Vec::new();
     for path in granted() {
-        if super::is_socket(&std::fs::metadata(path)?) {
+        if std::fs::metadata(path).is_ok_and(|data| super::is_socket(&data)) {
             sockets.push(path.clone());
         }
     }
+    // This runs before EVERY command that holds a network grant, so it is
+    // bounded like any other walk of a granted tree and never fails on what it
+    // finds. A directory it cannot read, or a symlink that dangles, means no
+    // socket rule from there — not a dead command. Missing a socket costs a
+    // connection the human can re-grant; failing here costs the whole task.
     let mut pending = granted()
         .filter(|path| path.is_dir())
         .cloned()
         .collect::<Vec<_>>();
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(directory)? {
-            let path = entry?.path();
-            let metadata = std::fs::symlink_metadata(&path)?;
+    let mut entries = 0usize;
+    'walk: while let Some(directory) = pending.pop() {
+        let Ok(listing) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            entries += 1;
+            if entries > MAX_SOCKET_SCAN_ENTRIES {
+                break 'walk;
+            }
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
             if metadata.file_type().is_symlink() {
-                let target = path.canonicalize()?;
-                if std::fs::metadata(&target)?.file_type().is_socket() {
-                    sockets.push(target);
+                if let Ok(target) = path.canonicalize() {
+                    if std::fs::metadata(&target).is_ok_and(|data| data.file_type().is_socket()) {
+                        sockets.push(target);
+                    }
                 }
             } else if metadata.is_dir() {
                 pending.push(path);
             } else if metadata.file_type().is_socket() {
-                sockets.push(path.canonicalize()?);
+                if let Ok(path) = path.canonicalize() {
+                    sockets.push(path);
+                }
             }
         }
     }

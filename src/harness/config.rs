@@ -107,6 +107,57 @@ impl IndexRefresh {
     }
 }
 
+/// The `[harness.sandbox]` table: paths this project grants to every task
+/// without asking, because they belong to the machine rather than to a task.
+/// A cargo `[paths]` override, for instance, makes a sibling checkout part of
+/// every build here, and being asked for it once per task is the wrong
+/// granularity.
+///
+/// Read only, and never a substitute for the per-task gate: a standing path is
+/// a permanent, promptless capability, so the loader refuses the ones whose
+/// breadth would make the gate meaningless, and every surface that shows
+/// grants shows these beside them.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxKeys {
+    #[serde(default)]
+    pub read_paths: Vec<String>,
+}
+
+impl SandboxKeys {
+    /// Reject a standing path whose breadth would hand over more than a human
+    /// can reason about, or that the per-command allowlist deliberately
+    /// withholds. `~/.cargo` is the tempting one and the wrong one: a subpath
+    /// grant over it exposes `credentials.toml`, which `secret_free_cargo_config`
+    /// exists to withhold, and its registry alone outgrows any survey.
+    fn validate(&self) -> Result<()> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        for raw in &self.read_paths {
+            let path = Path::new(raw);
+            anyhow::ensure!(
+                path.is_absolute(),
+                "[harness.sandbox] read_paths must be absolute: {raw:?}"
+            );
+            anyhow::ensure!(
+                path.parent().is_some(),
+                "[harness.sandbox] read_paths cannot grant the filesystem root"
+            );
+            if let Some(home) = &home {
+                anyhow::ensure!(
+                    path != home,
+                    "[harness.sandbox] read_paths cannot grant the whole home directory: {raw:?}"
+                );
+                anyhow::ensure!(
+                    path != home.join(".cargo"),
+                    "[harness.sandbox] read_paths cannot grant ~/.cargo, which would expose credentials.toml; \
+                     the registry and a secret-free config.toml are already readable"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub present: bool,
@@ -116,6 +167,7 @@ pub struct ModelFile {
     pub plan: Option<ModelKeys>,
     pub implement: Option<ModelKeys>,
     pub index_refresh: IndexRefresh,
+    pub sandbox: SandboxKeys,
 }
 
 impl ModelFile {
@@ -146,7 +198,7 @@ impl ModelFile {
         };
         if let Some(unknown) = harness
             .keys()
-            .find(|key| !matches!(key.as_str(), "model" | "index_refresh"))
+            .find(|key| !matches!(key.as_str(), "model" | "index_refresh" | "sandbox"))
         {
             bail!("unknown key harness.{unknown}");
         }
@@ -155,6 +207,10 @@ impl ModelFile {
                 .clone()
                 .try_into()
                 .context("harness.index_refresh must be \"auto\", \"frozen-python\" or \"off\"")?;
+        }
+        if let Some(sandbox) = harness.get("sandbox") {
+            file.sandbox = sandbox.clone().try_into().context("[harness.sandbox]")?;
+            file.sandbox.validate()?;
         }
         let Some(model) = harness.get("model") else {
             return Ok(file);
@@ -307,6 +363,32 @@ mod tests {
         assert_eq!(implement.model.as_deref(), Some("small"));
         assert_eq!(implement.action_contract.as_deref(), Some("json_schema"));
         assert_eq!(implement.context_window_tokens, None);
+    }
+
+    #[test]
+    fn standing_sandbox_paths_load_but_the_broadest_ones_are_refused() {
+        let file = ModelFile::parse(
+            "[harness.sandbox]\nread_paths = [\"/usr/share\", \"/opt/homebrew\"]\n",
+        )
+        .unwrap();
+        assert_eq!(file.sandbox.read_paths, ["/usr/share", "/opt/homebrew"]);
+        // A standing path is permanent and promptless, so the breadth that
+        // would make the per-task gate meaningless is refused at load.
+        let home = std::env::var("HOME").unwrap();
+        for (text, expected) in [
+            ("relative/path".to_string(), "must be absolute"),
+            ("/".to_string(), "filesystem root"),
+            (home.clone(), "whole home directory"),
+            (format!("{home}/.cargo"), "credentials.toml"),
+        ] {
+            let error =
+                ModelFile::parse(&format!("[harness.sandbox]\nread_paths = [\"{text}\"]\n"))
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains(expected), "{text}: {error}");
+        }
+        // The table is ours, so a typo inside it is an error like any other.
+        assert!(ModelFile::parse("[harness.sandbox]\nwrite_paths = [\"/tmp\"]\n").is_err());
     }
 
     #[test]

@@ -173,7 +173,7 @@ fn permission_requests_normalize_a_not_yet_created_scratch_path() {
 
 #[cfg(unix)]
 #[test]
-fn permission_requests_reject_aliases_that_expand_the_displayed_scope() {
+fn a_symlink_out_of_scope_is_reported_and_an_aliasing_hardlink_is_refused() {
     use std::os::unix::fs::symlink;
 
     let project = Fixture::new();
@@ -183,24 +183,68 @@ fn permission_requests_reject_aliases_that_expand_the_displayed_scope() {
     fs::create_dir(external.0.join("scope")).unwrap();
     symlink(project.0.join("protected"), external.0.join("scope/alias")).unwrap();
     let scope = external.0.join("scope").display().to_string();
-    assert!(CommandPermissions::requested(
+    // A symlink cannot expand the grant: the sandbox matches the resolved path
+    // (proved by `a_symlink_out_of_a_granted_directory_reaches_nothing`), so
+    // this is reported for the human to weigh, not refused on their behalf.
+    let (permissions, findings) = CommandPermissions::surveyed(
         &project.0,
         &scratch.0,
         std::slice::from_ref(&scope),
         &[],
         false,
     )
-    .unwrap_err()
-    .to_string()
-    .contains("escaping symlink"));
+    .unwrap();
+    assert_eq!(permissions.read_paths.len(), 1);
+    assert_eq!(findings.escaping_symlink_count, 1);
+    assert!(
+        findings.escaping_symlinks[0].ends_with("scope/alias"),
+        "{findings:?}"
+    );
+    assert!(findings.lines()[0].contains("lead outside"), "{findings:?}");
+    // A hardlink has no resolution step, so the grant really would expose the
+    // linked bytes. This one is on the workspace's own device, so it is an
+    // alias and is refused.
     fs::remove_file(external.0.join("scope/alias")).unwrap();
     fs::hard_link(project.0.join("protected"), external.0.join("scope/alias")).unwrap();
-    assert!(
-        CommandPermissions::requested(&project.0, &scratch.0, &[scope], &[], false,)
-            .unwrap_err()
-            .to_string()
-            .contains("hardlinked file")
+    assert!(CommandPermissions::surveyed(
+        &project.0,
+        &scratch.0,
+        std::slice::from_ref(&scope),
+        &[],
+        false
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("hardlinked file"));
+    // The structural pass never walks the tree, so it is unaffected either way.
+    assert!(CommandPermissions::requested(&project.0, &scratch.0, &[scope], &[], false).is_ok());
+}
+
+/// `nlink > 1` is ordinary: uv hardlinks a venv out of its cache, cargo
+/// hardlinks its own artifacts. It only matters when the other link could be
+/// inside a protected tree, and a hardlink cannot cross filesystems.
+#[cfg(unix)]
+#[test]
+fn a_hardlink_on_another_filesystem_cannot_alias_and_is_not_refused() {
+    use std::os::unix::fs::MetadataExt;
+
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let external = Fixture::new();
+    fs::create_dir(external.0.join("scope")).unwrap();
+    fs::write(external.0.join("scope/one"), "content").unwrap();
+    fs::hard_link(external.0.join("scope/one"), external.0.join("scope/two")).unwrap();
+    assert_eq!(
+        fs::metadata(external.0.join("scope/one")).unwrap().nlink(),
+        2
     );
+    let scope = external.0.join("scope").display().to_string();
+    // Same device here, and neither link is in a protected tree, so the pair is
+    // still refused today; the device narrowing is what spares a real venv.
+    let same_device = fs::metadata(&project.0).unwrap().dev()
+        == fs::metadata(external.0.join("scope")).unwrap().dev();
+    let surveyed = CommandPermissions::surveyed(&project.0, &scratch.0, &[scope], &[], false);
+    assert_eq!(surveyed.is_ok(), !same_device, "{surveyed:?}");
 }
 
 #[cfg(unix)]
@@ -1498,4 +1542,53 @@ async fn confinement_lets_cargo_generate_a_lockfile_the_project_lacks() {
         .unwrap();
     assert!(!denied.success, "{}", denied.output);
     cleanup_task(&scratch.0).unwrap();
+}
+
+/// The premise the escaping-symlink finding rests on: seatbelt and landlock
+/// both match a granted subpath AFTER resolution, so a symlink leading out of
+/// a granted directory reaches a path no rule allows and `(deny default)` ends
+/// it. The permission set is built by hand because `requested` refuses this
+/// shape outright; what is under test is the sandbox, not the validator.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires functional OS sandbox; run explicitly outside nested sandbox"]
+async fn a_symlink_out_of_a_granted_directory_reaches_nothing() {
+    use std::os::unix::fs::symlink;
+
+    let project = Fixture::new();
+    let scratch = Fixture::new();
+    let external = Fixture::new();
+    let elsewhere = Fixture::new();
+    fs::write(elsewhere.0.join("secret"), "SENTINEL").unwrap();
+    fs::create_dir(external.0.join("scope")).unwrap();
+    fs::write(external.0.join("scope/plain"), "granted-content").unwrap();
+    symlink(elsewhere.0.join("secret"), external.0.join("scope/escape")).unwrap();
+    let permissions = CommandPermissions {
+        read_paths: vec![external.0.join("scope").canonicalize().unwrap()],
+        write_paths: vec![],
+        network: false,
+    };
+    let scope = external.0.join("scope").display().to_string();
+    let command_text =
+        format!("cat '{scope}/plain'; ! cat '{scope}/escape'; printf resolved-and-denied");
+    let result =
+        command_with_permissions(&project.0, &scratch.0, &command_text, &permissions, None)
+            .await
+            .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(
+        result.output.contains("granted-content"),
+        "{}",
+        result.output
+    );
+    assert!(
+        result.output.contains("resolved-and-denied"),
+        "{}",
+        result.output
+    );
+    assert!(
+        !result.output.contains("SENTINEL"),
+        "the symlink escaped its granted subpath: {}",
+        result.output
+    );
 }

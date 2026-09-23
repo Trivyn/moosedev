@@ -84,6 +84,9 @@ pub struct Runner {
     action_contract: Option<ActionContract>,
     /// Set by `configure_provider`; a runner nobody configured never indexes.
     index_refresh: Option<config::IndexRefresh>,
+    /// `[harness.sandbox].read_paths`: standing capability, granted without a
+    /// gate, so every surface that shows grants shows these too.
+    standing_read_paths: Vec<String>,
     /// Edits counted at the last refresh, so a repeated finish does not rebuild.
     indexed_edits: Option<usize>,
     progress: Option<ProgressSender>,
@@ -237,6 +240,7 @@ impl Runner {
             response_policy: None,
             action_contract: None,
             index_refresh: None,
+            standing_read_paths: Vec::new(),
             indexed_edits: None,
             progress: None,
             streaming: None,
@@ -286,6 +290,7 @@ impl Runner {
             response_policy: None,
             action_contract: None,
             index_refresh: None,
+            standing_read_paths: Vec::new(),
             indexed_edits: None,
             progress: None,
             streaming: None,
@@ -335,6 +340,12 @@ impl Runner {
         self.set_role(ModelRole::Plan, provider.plan.clone());
         self.set_role(ModelRole::Implement, provider.implement.clone());
         self.index_refresh = Some(provider.index_refresh);
+        self.standing_read_paths = provider.standing_read_paths.clone();
+    }
+
+    /// Paths this project grants every task without asking.
+    pub fn standing_read_paths(&self) -> &[String] {
+        &self.standing_read_paths
     }
 
     /// Whether this runner rebuilds the code index at finish.

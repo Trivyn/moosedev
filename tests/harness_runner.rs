@@ -211,13 +211,113 @@ async fn permission_request_cannot_overlap_the_live_workspace() {
         "write_paths":[],
         "network":false
     }));
-    let error = runner.advance().await.unwrap_err().to_string();
+    // The overlap is still refused, but the human is the one who is told:
+    // a refusal nobody sees is an unattended halt, and the model learns
+    // nothing it could narrow.
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    let pending = runner.task.pending_permission.clone().unwrap();
+    assert!(pending.is_refused());
+    let refusal = pending.refusal.unwrap();
     assert!(
-        error.contains("overlaps the protected workspace"),
-        "{error}"
+        refusal.contains("overlaps the protected workspace"),
+        "{refusal}"
     );
+    // Approving it is impossible; denying it tells the model why.
+    let error = runner.approve_permission().await.unwrap_err().to_string();
+    assert!(error.contains("cannot be granted as asked"), "{error}");
+    assert!(runner.task.permission_grants.is_empty());
+    runner.deny_permission().unwrap();
     assert_eq!(runner.task.phase, Phase::Working);
+    assert!(
+        runner
+            .task
+            .last_response
+            .contains("overlaps the protected workspace"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
+/// The incident: a request over a real directory tree, holding a symlink that
+/// leads out of it, reaches the human with the finding attached. Before this,
+/// the survey vetoed the request and the task died where nobody was asked.
+#[tokio::test]
+async fn a_tree_with_an_escaping_symlink_reaches_the_human_as_a_finding() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let outside =
+        std::env::temp_dir().join(format!("moosedev-finding-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(outside.join("nested")).unwrap();
+    let outside = outside.canonicalize().unwrap();
+    std::fs::write(outside.join("nested/real.txt"), "content\n").unwrap();
+    // The shape a venv or a toolchain leaves behind: a link to somewhere else
+    // on the machine. It reaches nothing, because the sandbox matches the
+    // resolved path, so it is the human's call and not a veto.
+    std::os::unix::fs::symlink("/usr/bin/env", outside.join("nested/link")).unwrap();
+
+    fixture.conversational(json!({
+        "action":"request_permission",
+        "command":"ls",
+        "justification":"Read a sibling checkout",
+        "read_paths":[outside.to_string_lossy()],
+        "write_paths":[],
+        "network":false
+    }));
+    runner.advance().await.unwrap();
+
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    let pending = runner.task.pending_permission.clone().unwrap();
+    assert!(!pending.is_refused(), "{pending:?}");
+    assert_eq!(pending.findings.escaping_symlink_count, 1);
+    assert!(
+        pending.findings.escaping_symlinks[0].ends_with("nested/link"),
+        "{:?}",
+        pending.findings
+    );
+    // Approval carries the findings onto the durable grant, so what the human
+    // agreed to stays visible after the gate is gone.
+    runner.approve_permission().await.unwrap();
+    assert_eq!(
+        runner.task.permission_grants[0]
+            .findings
+            .escaping_symlink_count,
+        1
+    );
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+/// Approval must be of what the human saw. If the scopes changed underneath
+/// them, the request is discarded rather than granted against something else.
+#[tokio::test]
+async fn paths_that_change_before_approval_discard_the_request() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let (mut runner, outside, _command) = awaiting_read_permission(&fixture).await;
+    assert!(runner
+        .task
+        .pending_permission
+        .as_ref()
+        .unwrap()
+        .findings
+        .is_empty());
+    std::os::unix::fs::symlink("/usr/bin/env", outside.join("appeared")).unwrap();
+
+    let error = runner.approve_permission().await.unwrap_err().to_string();
+    assert!(error.contains("changed before approval"), "{error}");
+    assert!(runner.task.permission_grants.is_empty());
     assert!(runner.task.pending_permission.is_none());
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(
+        runner
+            .task
+            .last_response
+            .contains("changed between the request"),
+        "{}",
+        runner.task.last_response
+    );
+    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[tokio::test]
@@ -232,6 +332,7 @@ async fn task_permission_can_be_revoked_by_id() {
         write_paths: vec![],
         network: true,
         approved_at: "2026-09-21T00:00:00Z".into(),
+        findings: Default::default(),
     });
     runner.revoke_permission("grant-1").unwrap();
     assert!(runner.task.permission_grants.is_empty());
@@ -266,10 +367,12 @@ async fn awaiting_read_permission(fixture: &Fixture) -> (Runner, std::path::Path
     (runner, outside, command)
 }
 
-/// The real sandbox denies an ungranted external read. The model must then be
-/// told what that failure means, or it never reaches the permission gate.
+/// A sandbox denial already names the paths it blocked, so the harness raises
+/// the gate itself. Asking the model to restate paths the symbolic layer just
+/// extracted is what Constraint cd9f1a96 forbids, and it cost a whole model
+/// turn to produce a WIDER grant than the denial warranted.
 #[tokio::test]
-async fn a_sandbox_denial_tells_the_model_to_request_permission() {
+async fn a_sandbox_denial_raises_the_permission_gate_without_a_model_turn() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;
@@ -278,57 +381,55 @@ async fn a_sandbox_denial_tells_the_model_to_request_permission() {
     std::fs::create_dir(&outside).unwrap();
     let outside = outside.canonicalize().unwrap();
     std::fs::write(outside.join("note.txt"), "granted\n").unwrap();
-    let command = format!("cat '{}'", outside.join("note.txt").display());
+    let note = outside.join("note.txt");
+    let command = format!("cat '{}'", note.display());
 
     fixture.conversational(json!({"action":"command","command":command}));
+    let calls_before = fixture.model_calls();
     runner.advance().await.unwrap();
-    assert_eq!(runner.task.phase, Phase::Working);
-    assert!(runner.task.permission_grants.is_empty());
-    assert!(
-        runner
-            .task
-            .last_response
-            .contains("sandbox blocked this command")
-            && runner.task.last_response.contains("request_permission"),
-        "{}",
-        runner.task.last_response
+
+    // Parked on the human, not handed back to the model.
+    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
+    let pending = runner.task.pending_permission.clone().unwrap();
+    assert!(!pending.is_refused(), "{pending:?}");
+    assert_eq!(pending.command, command);
+    // And the grant is exactly what the denial named — the one file, not the
+    // directory around it.
+    assert_eq!(pending.read_paths, vec![note.to_string_lossy().to_string()]);
+    assert!(pending.write_paths.is_empty());
+    assert!(!pending.network);
+    // One model turn produced the command; the gate costs no second turn,
+    // which is the whole point of deriving the paths symbolically.
+    assert_eq!(
+        fixture.model_calls(),
+        calls_before + 1,
+        "the gate must not cost a model turn of its own"
     );
     assert!(runner
         .task
         .intent_events
         .iter()
         .any(|event| event.kind == "sandbox_denial" && event.detail == command));
-    assert!(
-        runner.task.last_response.contains(&format!(
-            "Paths named in the output: {}\n",
-            outside.join("note.txt").display()
-        )),
-        "{}",
-        runner.task.last_response
-    );
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "permission_requested"));
 
-    fixture.conversational(json!({
-        "action":"request_permission",
-        "command":command,
-        "justification":"Read a sibling dependency",
-        "read_paths":[outside.to_string_lossy()],
-        "write_paths":[],
-        "network":false
-    }));
-    // A model-free capture checkpoint follows the command.
-    let calls = fixture.model_calls();
+    runner.approve_permission().await.unwrap();
+    // A model-free capture checkpoint follows the denied command, so the
+    // approved command runs on a later step.
     for _ in 0..3 {
-        if fixture.model_calls() == calls {
+        if runner.task.last_response.trim() != "granted" {
             runner.advance().await.unwrap();
         }
     }
-    assert_eq!(runner.task.phase, Phase::AwaitingPermission);
-    let prompt = requests_of_kind(&fixture, "model").last().unwrap()["body"].to_string();
-    assert!(prompt.contains("sandbox blocked this command"), "{prompt}");
-
-    runner.approve_permission().await.unwrap();
-    runner.advance().await.unwrap();
     assert_eq!(runner.task.last_response.trim(), "granted");
+    assert!(runner.task.events.iter().any(|event| {
+        event.message.starts_with("Command:")
+            && event.message.contains("Permission grants: ")
+            && !event.message.contains("Permission grants: none")
+    }));
     std::fs::remove_dir_all(outside).unwrap();
 }
 
@@ -486,21 +587,23 @@ async fn a_grant_that_stops_validating_names_itself_for_revocation() {
     let (mut runner, outside, _command) = awaiting_read_permission(&fixture).await;
     runner.approve_permission().await.unwrap();
     let grant = runner.task.permission_grants[0].id.clone();
-    // After approval, something links out of the granted directory.
-    std::os::unix::fs::symlink("/usr", outside.join("escape")).unwrap();
+    // After approval the granted directory goes away, so the grant can no
+    // longer be turned into sandbox rules. A symlink appearing inside it is no
+    // longer this failure: the sandbox resolves before it matches, so one
+    // reaches nothing and is reported at request time rather than invalidating
+    // a live grant.
+    std::fs::remove_dir_all(&outside).unwrap();
 
     let error = format!("{:#}", runner.advance().await.unwrap_err());
     assert!(
         error.contains(&format!("/revoke-permission {grant}")),
         "{error}"
     );
-    assert!(error.contains("escaping symlink"), "{error}");
     assert!(!runner
         .task
         .events
         .iter()
         .any(|event| event.message.starts_with("Command:")));
-    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[tokio::test]
@@ -515,6 +618,7 @@ async fn task_permissions_expire_durably_at_completion() {
         write_paths: vec![],
         network: true,
         approved_at: "2026-09-21T00:00:00Z".into(),
+        findings: Default::default(),
     });
     fixture.note("Every caller must preserve the observed contract.");
     fixture.typed_one("Constraint", "Preserve the observed contract");

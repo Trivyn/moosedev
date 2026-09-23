@@ -325,13 +325,18 @@ fn visible(value: &str) -> String {
         .collect()
 }
 
-fn gate(task: &Task) -> String {
+fn gate(task: &Task, standing: &[String]) -> String {
     match task.phase {
         Phase::AwaitingPlan => task.plan.as_ref().map(|plan| {
             let mut text = format!("PLAN · human approval required\n{}\nFiles: {}\nChecks:\n{}", plan.summary, plan.files.join(", "), plan.checks.join("\n"));
-            if !task.permission_grants.is_empty() {
-                // Grants outlive a replan, so re-approval must not hide them.
-                text.push_str(&format!("\nActive sandbox grants: {} · /permissions lists them", task.permission_grants.len()));
+            if !task.permission_grants.is_empty() || !standing.is_empty() {
+                // Grants outlive a replan, so re-approval must not hide them,
+                // and standing paths are in force whether or not any exist.
+                text.push_str(&format!(
+                    "\nActive sandbox grants: {} task · {} standing · /permissions lists them",
+                    task.permission_grants.len(),
+                    standing.len()
+                ));
             }
             text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
             text
@@ -345,7 +350,7 @@ fn gate(task: &Task) -> String {
         Phase::AwaitingPermission => task
             .pending_permission
             .as_ref()
-            .map(permission_gate)
+            .map(|pending| permission_gate(pending, standing))
             .unwrap_or_else(|| {
                 "PERMISSION REQUEST · details unavailable; deny it and retry the task.".into()
             }),
@@ -365,9 +370,14 @@ fn gate(task: &Task) -> String {
     }
 }
 
-fn permission_gate(request: &super::runner::PendingPermission) -> String {
+fn permission_gate(request: &super::runner::PendingPermission, standing: &[String]) -> String {
     let mut text = format!(
-        "PERMISSION REQUEST · human approval required\nRequest: {}\nCommand:\n  {}\nReason:\n  {}\n",
+        "{}\nRequest: {}\nCommand:\n  {}\nReason:\n  {}\n",
+        if request.is_refused() {
+            "PERMISSION REQUEST · cannot be granted as asked"
+        } else {
+            "PERMISSION REQUEST · human approval required"
+        },
         request.request_id,
         request.command.replace('\n', "\n  "),
         request.justification.replace('\n', "\n  ")
@@ -389,9 +399,35 @@ fn permission_gate(request: &super::runner::PendingPermission) -> String {
         ));
     }
     text.push_str(&format!(
-        "Network: {}\n/approve grants this access for the current task and runs the command · /deny refuses it",
-        if request.network { "enabled" } else { "disabled" }
+        "Network: {}\n",
+        if request.network {
+            "enabled"
+        } else {
+            "disabled"
+        }
     ));
+    if !standing.is_empty() {
+        // What is already ambient, so the human judges the delta and not the
+        // whole surface.
+        text.push_str(&format!(
+            "Already granted standing (every task): {}\n",
+            standing.join(", ")
+        ));
+    }
+    for line in request.findings.lines() {
+        text.push_str(&format!("Note: {line}\n"));
+    }
+    // A refused request is still shown: the human sees what was asked and why
+    // it was turned down, instead of the task dying silently.
+    match &request.refusal {
+        Some(refusal) => text.push_str(&format!(
+            "Refused:\n  {}\n/deny dismisses it and tells the model to ask for something narrower",
+            refusal.replace('\n', "\n  ")
+        )),
+        None => text.push_str(
+            "/approve grants this access for the current task and runs the command · /deny refuses it",
+        ),
+    }
     text
 }
 
@@ -570,7 +606,7 @@ fn conversation_body(snapshot: &Snapshot, view: &View) -> Text<'static> {
     }
     let mut control = String::new();
     if let Some(task) = &snapshot.task {
-        control.push_str(&gate(task));
+        control.push_str(&gate(task, &snapshot.standing_read_paths));
         if !task.reviews.is_empty() && task.phase != Phase::AwaitingReview {
             control.push_str(&format!(
                 "\n\n{} knowledge review(s) pending · /review or view Review",
@@ -1742,6 +1778,7 @@ async fn show(
         endpoint: provider.config.base_url.clone(),
         model: provider.config.model.clone(),
         live: Default::default(),
+        standing_read_paths: Vec::new(),
     };
     let mut controller = tokio::spawn(
         Controller::new(conversation, runner, startup, provider, input_rx, output)
@@ -1980,6 +2017,7 @@ mod tests {
             endpoint: String::new(),
             model: String::new(),
             live: Default::default(),
+            standing_read_paths: Vec::new(),
         };
         let summary = journal_summary(&snapshot);
         assert!(summary.len() < 2_000);
@@ -1996,6 +2034,7 @@ mod tests {
             endpoint: String::new(),
             model: String::new(),
             live: Default::default(),
+            standing_read_paths: Vec::new(),
         }
     }
     fn review_view() -> View {
@@ -2048,7 +2087,7 @@ mod tests {
             files: vec!["labels.py".into()],
             checks: vec!["pytest -q".into()],
         });
-        let text = gate(&task);
+        let text = gate(&task, &[]);
         assert!(text.contains("PLAN · human approval required"));
         assert!(text.contains(SYMBOLIC_APPROVAL));
         assert!(text.contains("no model call"));
@@ -2064,29 +2103,38 @@ mod tests {
             "approved_at": "2026-09-21T00:00:00Z"
         }))
         .unwrap()];
-        let text = gate(&task);
-        assert!(text.contains("Active sandbox grants: 1 · /permissions lists them"));
+        let text = gate(&task, &[]);
+        assert!(text.contains("Active sandbox grants: 1 task · 0 standing"));
         assert!(text.ends_with("/approve to execute · send feedback to revise"));
+        // Standing paths are in force with no approval, so re-approving a plan
+        // must show them even when the task itself has been granted nothing.
+        let standing = ["/opt/toolchain".to_string()];
+        task.permission_grants.clear();
+        let text = gate(&task, &standing);
+        assert!(
+            text.contains("Active sandbox grants: 0 task · 1 standing"),
+            "{text}"
+        );
     }
     #[test]
     fn input_gate_shows_the_request_it_waits_on() {
         let mut task = task_fixture(PathBuf::from("/project"));
         task.phase = Phase::AwaitingInput;
         task.last_response = "action failed validation after three attempts. Provide human guidance before retrying; pending work is preserved. replace old_text must match exactly once; found 0".into();
-        let text = gate(&task);
+        let text = gate(&task, &[]);
         assert!(text.starts_with("INPUT NEEDED\naction failed validation after three attempts."));
         assert!(text.ends_with(
             "Reply with guidance (the task returns to Plan for re-approval), or /plan."
         ));
 
         task.last_response = "Which database should the skeleton use?".into();
-        assert!(gate(&task).contains("Which database should the skeleton use?"));
+        assert!(gate(&task, &[]).contains("Which database should the skeleton use?"));
 
         task.last_response.clear();
-        assert_eq!(gate(&task), "Your input is needed. Reply below.");
+        assert_eq!(gate(&task, &[]), "Your input is needed. Reply below.");
 
         task.turn_finished = true;
-        assert!(gate(&task).starts_with("Your turn."));
+        assert!(gate(&task, &[]).starts_with("Your turn."));
     }
     #[test]
     fn permission_gate_displays_exact_capabilities_and_decision_commands() {
@@ -2104,7 +2152,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        let text = gate(&task);
+        let text = gate(&task, &[]);
         assert!(text.contains("PERMISSION REQUEST · human approval required"));
         assert!(text.contains("Request: permission-1"));
         assert!(text.contains("Command:\n  cargo install example"));
@@ -2135,7 +2183,7 @@ mod tests {
                 "already_approved": false
             }
         })).unwrap());
-        let text = gate(&task);
+        let text = gate(&task, &[]);
         assert!(
             text.contains("COMPONENT · none · the records below will not be linked"),
             "{text}"
@@ -2182,7 +2230,7 @@ mod tests {
                 "already_approved": false
             }
         })).unwrap());
-        let text = gate(&task);
+        let text = gate(&task, &[]);
         assert!(text.contains("SPEC APPROVAL · human approval required"));
         assert!(text.contains(
             "COMPONENT · labels · NEW\nCovers: labels/\nIRI: https://moosedev.dev/kg/SystemComponent/labels\n"
@@ -2635,6 +2683,7 @@ mod tests {
             endpoint: String::new(),
             model: String::new(),
             live: Default::default(),
+            standing_read_paths: Vec::new(),
         };
         let mut view = View::default();
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
@@ -2827,6 +2876,7 @@ mod tests {
                 assistant: "*Still streaming*".into(),
                 command: String::new(),
             })),
+            standing_read_paths: Vec::new(),
         };
 
         let text = body(&snapshot, &View::default());
@@ -2866,6 +2916,7 @@ mod tests {
                 assistant: "The parser".into(),
                 command: String::new(),
             })),
+            standing_read_paths: Vec::new(),
         };
         for (width, height) in [(100, 30), (40, 12), (10, 5)] {
             let mut terminal =

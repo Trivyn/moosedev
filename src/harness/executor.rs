@@ -51,6 +51,81 @@ pub struct CommandPermissions {
     pub network: bool,
 }
 
+/// How far a granted scope really reaches, for the human deciding whether to
+/// grant it. Advisory by construction: everything that is an actual escape is
+/// refused instead of reported.
+///
+/// Every list is capped at construction. This record is serialized into the
+/// task journal verbatim and can be paged by the model, so an uncapped list
+/// over a large tree would be a multi-megabyte event.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionFindings {
+    /// Symlinks whose target resolves outside the scope that contains them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escaping_symlinks: Vec<String>,
+    /// How many were found, which may exceed the names kept above.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub escaping_symlink_count: usize,
+    /// Scopes whose tree could not be surveyed completely, so what else it
+    /// holds is unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsurveyed: Vec<String>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+/// Entries one `surveyed` call will walk before it gives up and says so.
+const MAX_SURVEY_ENTRIES: usize = 100_000;
+/// Paths named per finding kind; the counts stay exact.
+const MAX_NAMED_FINDINGS: usize = 10;
+
+impl PermissionFindings {
+    pub fn is_empty(&self) -> bool {
+        self.escaping_symlinks.is_empty()
+            && self.unsurveyed.is_empty()
+            && self.escaping_symlink_count == 0
+    }
+
+    fn note_escaping_symlink(&mut self, path: &Path) {
+        self.escaping_symlink_count += 1;
+        if self.escaping_symlinks.len() < MAX_NAMED_FINDINGS {
+            self.escaping_symlinks.push(path.display().to_string());
+        }
+    }
+
+    fn note_unsurveyed(&mut self, path: &Path) {
+        let path = path.display().to_string();
+        if self.unsurveyed.len() < MAX_NAMED_FINDINGS && !self.unsurveyed.contains(&path) {
+            self.unsurveyed.push(path);
+        }
+    }
+
+    /// One line per finding for a human gate; empty when there is nothing to say.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.escaping_symlink_count > 0 {
+            lines.push(format!(
+                "{} symlink(s) lead outside the granted scope (the sandbox resolves before it matches, so they reach nothing): {}{}",
+                self.escaping_symlink_count,
+                self.escaping_symlinks.join(", "),
+                if self.escaping_symlink_count > self.escaping_symlinks.len() {
+                    ", …"
+                } else {
+                    ""
+                }
+            ));
+        }
+        for scope in &self.unsurveyed {
+            lines.push(format!(
+                "not fully surveyed, so what else it holds is unknown: {scope}"
+            ));
+        }
+        lines
+    }
+}
+
 impl CommandPermissions {
     /// Canonicalize and validate a requested permission set for one task.
     ///
@@ -77,6 +152,38 @@ impl CommandPermissions {
             write_paths,
             network,
         })
+    }
+
+    /// [`Self::requested`] plus a survey of every granted tree.
+    ///
+    /// The survey is only run where a human is about to look at the result —
+    /// the model's request and the human's approval — because its findings are
+    /// for the human, not for enforcement: the sandbox matches a granted
+    /// subpath AFTER resolution, so a symlink leading out of one reaches a path
+    /// no rule allows. An aliasing hardlink is the exception it cannot catch,
+    /// and is refused here. A confined command cannot create one: seatbelt has
+    /// no `file-link` allow and `(deny default)` covers it, and the Linux
+    /// writable binds never include a granted read path, so the survey does not
+    /// have to be repeated before every command.
+    pub fn surveyed(
+        root: &Path,
+        scratch: &Path,
+        read_paths: &[String],
+        write_paths: &[String],
+        network: bool,
+    ) -> Result<(Self, PermissionFindings)> {
+        let permissions = Self::requested(root, scratch, read_paths, write_paths, network)?;
+        let mut findings = PermissionFindings::default();
+        let protected = protected_devices(root, scratch);
+        for (paths, access) in [
+            (&permissions.read_paths, "read"),
+            (&permissions.write_paths, "write"),
+        ] {
+            for path in paths {
+                survey_permission_tree(path, access, &protected, &mut findings)?;
+            }
+        }
+        Ok((permissions, findings))
     }
 
     fn revalidate(&self, root: &Path, scratch: &Path) -> Result<Self> {
@@ -229,9 +336,6 @@ fn validated_permission_paths(
                 path.display()
             );
         }
-        if !new_file {
-            validate_permission_tree(&path, access)?;
-        }
         paths.push(path);
     }
     paths.sort();
@@ -269,14 +373,55 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn validate_permission_tree(scope: &Path, access: &str) -> Result<()> {
+fn protected_devices(root: &Path, scratch: &Path) -> Vec<u64> {
     use std::os::unix::fs::MetadataExt;
 
-    const MAX_PERMISSION_ENTRIES: usize = 100_000;
-    let metadata = fs::metadata(scope)?;
+    [root, scratch]
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok().map(|data| data.dev()))
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn protected_devices(_root: &Path, _scratch: &Path) -> Vec<u64> {
+    Vec::new()
+}
+
+/// Walk one granted scope, collecting what the human should see before
+/// approving it and refusing the one thing the sandbox cannot.
+///
+/// REFUSED: a hardlinked file that could alias protected content. A hardlink
+/// has no resolution step, so a granted subpath really does expose the linked
+/// bytes and no path-based policy can catch it. It is narrowed by device,
+/// because a hardlink cannot cross filesystems: a scope on another volume can
+/// hold no alias, and `nlink > 1` there is ordinary (uv hardlinks a venv out of
+/// its cache, cargo hardlinks its own artifacts, so does `git clone --local`).
+///
+/// REPORTED, not refused: symlinks leading out of the scope, and a tree too
+/// large to finish surveying. Neither is an escape — they describe how much the
+/// displayed scope really covers, which is the human's judgement to make.
+///
+/// Symlinked directories are never descended, which is also why this cannot
+/// cycle.
+#[cfg(unix)]
+fn survey_permission_tree(
+    scope: &Path,
+    access: &str,
+    protected: &[u64],
+    findings: &mut PermissionFindings,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let aliasable =
+        |metadata: &fs::Metadata| metadata.nlink() != 1 && protected.contains(&metadata.dev());
+    let Ok(metadata) = fs::metadata(scope) else {
+        // A path that vanished between the structural pass and here is not a
+        // finding; the next command's revalidation reports it as the error it is.
+        return Ok(());
+    };
     if !metadata.is_dir() {
         anyhow::ensure!(
-            metadata.nlink() == 1,
+            !aliasable(&metadata),
             "external {access} permission rejects hardlinked file {}",
             scope.display()
         );
@@ -285,41 +430,35 @@ fn validate_permission_tree(scope: &Path, access: &str) -> Result<()> {
     let mut pending = vec![scope.to_path_buf()];
     let mut entries = 0usize;
     while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory).with_context(|| {
-            format!(
-                "inspect external {access} directory {}",
-                directory.display()
-            )
-        })? {
-            let entry = entry.with_context(|| {
-                format!(
-                    "inspect external {access} directory {}",
-                    directory.display()
-                )
-            })?;
+        let Ok(listing) = fs::read_dir(&directory) else {
+            findings.note_unsurveyed(&directory);
+            continue;
+        };
+        for entry in listing {
+            let Ok(entry) = entry else {
+                findings.note_unsurveyed(&directory);
+                break;
+            };
             entries += 1;
-            anyhow::ensure!(
-                entries <= MAX_PERMISSION_ENTRIES,
-                "external {access} directory exceeds the {MAX_PERMISSION_ENTRIES} entry validation limit: {}",
-                scope.display()
-            );
+            if entries > MAX_SURVEY_ENTRIES {
+                findings.note_unsurveyed(scope);
+                return Ok(());
+            }
             let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)
-                .with_context(|| format!("inspect external {access} entry {}", path.display()))?;
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                findings.note_unsurveyed(&directory);
+                continue;
+            };
             if metadata.file_type().is_symlink() {
-                let target = path.canonicalize().with_context(|| {
-                    format!("resolve external {access} symlink {}", path.display())
-                })?;
-                anyhow::ensure!(
-                    target.starts_with(scope),
-                    "external {access} directory contains an escaping symlink: {}",
-                    path.display()
-                );
+                match path.canonicalize() {
+                    Ok(target) if target.starts_with(scope) => {}
+                    _ => findings.note_escaping_symlink(&path),
+                }
             } else if metadata.is_dir() {
                 pending.push(path);
             } else if metadata.is_file() {
                 anyhow::ensure!(
-                    metadata.nlink() == 1,
+                    !aliasable(&metadata),
                     "external {access} directory contains a hardlinked file: {}",
                     path.display()
                 );
@@ -330,7 +469,12 @@ fn validate_permission_tree(scope: &Path, access: &str) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn validate_permission_tree(_scope: &Path, _access: &str) -> Result<()> {
+fn survey_permission_tree(
+    _scope: &Path,
+    _access: &str,
+    _protected: &[u64],
+    _findings: &mut PermissionFindings,
+) -> Result<()> {
     Ok(())
 }
 

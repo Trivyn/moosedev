@@ -64,6 +64,18 @@ model = "your-model-id"
 # (only the study pilot's frozen producer, through the daemon), or off.
 # index_refresh = "auto"
 
+# Paths every task in this project may READ without asking. Use it for what
+# belongs to the machine rather than to a task — a cargo `paths` override in
+# ~/.cargo/config.toml makes a sibling checkout part of every build here, and
+# approving it once per task is the wrong granularity. Anything else still goes
+# through the per-task gate, and these are listed beside task grants wherever
+# grants are shown, because they are in force with no approval.
+# The whole home directory and ~/.cargo are refused: the registry and a
+# secret-free config.toml are already readable, and a blanket ~/.cargo grant
+# would expose credentials.toml.
+# [harness.sandbox]
+# read_paths = ["/Users/you/code/a-sibling-checkout"]
+
 # The harness default; unset keys inherit [model]. Same keys as [model], plus:
 # [harness.model]
 # response_policy = "auto"     # auto | provider-default | reasoning-off

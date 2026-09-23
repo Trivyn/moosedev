@@ -206,6 +206,11 @@ fn protected(name: &str, depth: usize) -> bool {
     if (lower == ".env" || lower.starts_with(".env.")) && lower != ".env.example" {
         return true;
     }
+    // `moosedev.toml` configures the sandbox itself, so a model that could edit
+    // it could widen its own capabilities. The example file carries no values.
+    if depth == 0 && lower == crate::config::FILE_NAME {
+        return true;
+    }
     matches!(
         lower.as_str(),
         ".git"

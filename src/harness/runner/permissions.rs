@@ -23,7 +23,12 @@ fn path_covered(granted: &str, requested: &str) -> bool {
 
 impl Runner {
     pub(super) fn command_permissions(&self) -> Result<CommandPermissions> {
-        let mut reads = Vec::new();
+        // Standing paths come first: they are read-only, project-wide, and
+        // granted without a gate, so they must pass exactly the structural
+        // checks a task grant passes. They are not surveyed here — the survey
+        // is for a human about to decide, and nobody is deciding before a
+        // command.
+        let mut reads = self.standing_read_paths().to_vec();
         let mut writes = Vec::new();
         let mut network = false;
         for grant in &self.task.permission_grants {
@@ -35,9 +40,21 @@ impl Runner {
         let scratch = self.scratch_path();
         let permissions = CommandPermissions::requested(root, &scratch, &reads, &writes, network);
         if permissions.is_err() {
-            // A granted tree can stop validating after approval, for example
-            // when a tool links out of it. Name the grant so it can be revoked
-            // instead of failing every later command anonymously.
+            // A granted path can stop resolving after approval, for example
+            // when the directory is deleted. Name what went wrong so it can be
+            // fixed instead of failing every later command anonymously.
+            if !self.standing_read_paths().is_empty() {
+                CommandPermissions::requested(
+                    root,
+                    &scratch,
+                    self.standing_read_paths(),
+                    &[],
+                    false,
+                )
+                .context(
+                    "a standing [harness.sandbox] read path in moosedev.toml is no longer valid",
+                )?;
+            }
             for grant in &self.task.permission_grants {
                 CommandPermissions::requested(
                     root,
@@ -75,6 +92,102 @@ impl Runner {
         }) && (!request.network || current.network))
     }
 
+    /// Build the frozen request a human will judge. `Err` here is only a
+    /// journal-write failure: a request that cannot be granted comes back as a
+    /// `refusal` the human still sees.
+    fn pending_permission_for(
+        &self,
+        command: String,
+        justification: String,
+        read_paths: Vec<String>,
+        write_paths: Vec<String>,
+        network: bool,
+    ) -> Result<(PendingPermission, bool)> {
+        let surveyed = CommandPermissions::surveyed(
+            self.workspace.root(),
+            &self.scratch_path(),
+            &read_paths,
+            &write_paths,
+            network,
+        );
+        let request_id = uuid::Uuid::new_v4().to_string();
+        Ok(match surveyed {
+            Ok((requested, findings)) => {
+                let covered = self.request_is_granted(&requested).unwrap_or(false);
+                (
+                    PendingPermission {
+                        request_id,
+                        command,
+                        justification,
+                        read_paths: canonical_strings(&requested.read_paths)?,
+                        write_paths: canonical_strings(&requested.write_paths)?,
+                        network: requested.network,
+                        revision: self.task.knowledge_revision.clone(),
+                        refusal: None,
+                        findings,
+                        approved_grant: None,
+                    },
+                    covered,
+                )
+            }
+            Err(error) => (
+                PendingPermission {
+                    request_id,
+                    command,
+                    justification,
+                    read_paths,
+                    write_paths,
+                    network,
+                    revision: self.task.knowledge_revision.clone(),
+                    refusal: Some(super::bounded(&format!("{error:#}"), 600)),
+                    findings: Default::default(),
+                    approved_grant: None,
+                },
+                false,
+            ),
+        })
+    }
+
+    /// Park the task on a frozen request. The gate the human answers.
+    fn park_on_permission(&mut self, pending: PendingPermission) -> Result<()> {
+        self.intent_event("permission_requested", &pending.request_id);
+        self.event(format!(
+            "Permission requested: {}",
+            serde_json::to_string(&pending)?
+        ));
+        self.task.pending_permission = Some(pending);
+        self.task.phase = Phase::AwaitingPermission;
+        self.persist()
+    }
+
+    /// A sandbox denial already names the paths it blocked, so the harness
+    /// raises the gate itself rather than asking the model to restate them
+    /// (Constraint cd9f1a96). The grant is then exactly as narrow as the
+    /// denial was, instead of whatever directory the model guessed at.
+    pub(super) fn raise_gate_for_denial(
+        &mut self,
+        command: &str,
+        paths: &[String],
+    ) -> Result<bool> {
+        let (pending, covered) = self.pending_permission_for(
+            command.to_string(),
+            format!(
+                "The sandbox blocked this command. Its output names {} path(s) outside the project.",
+                paths.len()
+            ),
+            paths.to_vec(),
+            Vec::new(),
+            false,
+        )?;
+        // Already granted, so the denial was about something else: let the
+        // model see the output rather than asking the human a settled question.
+        if covered {
+            return Ok(false);
+        }
+        self.park_on_permission(pending)?;
+        Ok(true)
+    }
+
     pub(super) async fn begin_permission_request(
         &mut self,
         command: String,
@@ -83,38 +196,21 @@ impl Runner {
         write_paths: Vec<String>,
         network: bool,
     ) -> Result<Option<executor::CommandResult>> {
-        let requested = CommandPermissions::requested(
-            self.workspace.root(),
-            &self.scratch_path(),
-            &read_paths,
-            &write_paths,
+        let (pending, covered) = self.pending_permission_for(
+            command.clone(),
+            justification.clone(),
+            read_paths,
+            write_paths,
             network,
         )?;
-        if self.request_is_granted(&requested)? {
+        if covered {
             self.intent_event(
                 "permission_reused",
                 &format!("task grants already cover: {justification}"),
             );
             return self.run_command(&command).await.map(Some);
         }
-        let pending = PendingPermission {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            command,
-            justification,
-            read_paths: canonical_strings(&requested.read_paths)?,
-            write_paths: canonical_strings(&requested.write_paths)?,
-            network: requested.network,
-            revision: self.task.knowledge_revision.clone(),
-            approved_grant: None,
-        };
-        self.intent_event("permission_requested", &pending.request_id);
-        self.event(format!(
-            "Permission requested: {}",
-            serde_json::to_string(&pending)?
-        ));
-        self.task.pending_permission = Some(pending);
-        self.task.phase = Phase::AwaitingPermission;
-        self.persist()?;
+        self.park_on_permission(pending)?;
         Ok(None)
     }
 
@@ -142,14 +238,26 @@ impl Runner {
             self.persist()?;
             bail!("knowledge changed before permission approval");
         }
-        // Re-run validation immediately before making the durable grant.
-        let normalized = CommandPermissions::requested(
+        if let Some(refusal) = &pending.refusal {
+            bail!("this request cannot be granted as asked: {refusal}");
+        }
+        // Re-survey immediately before making the durable grant, and hold the
+        // human to what they actually saw: if the scopes changed under them,
+        // their approval was of something else.
+        let (normalized, findings) = CommandPermissions::surveyed(
             self.workspace.root(),
             &self.scratch_path(),
             &pending.read_paths,
             &pending.write_paths,
             pending.network,
         )?;
+        if findings != pending.findings {
+            self.discard_pending_permission("the requested paths changed before approval")?;
+            self.task.phase = Phase::Working;
+            self.task.last_response = "The requested paths changed between the request and the approval, so the request was discarded rather than granted against something the human did not see. Request permission again if the command still needs it.".into();
+            self.persist()?;
+            bail!("the requested paths changed before approval; request it again");
+        }
         let grant = PermissionGrant {
             id: uuid::Uuid::new_v4().to_string(),
             justification: pending.justification.clone(),
@@ -157,6 +265,7 @@ impl Runner {
             write_paths: canonical_strings(&normalized.write_paths)?,
             network: normalized.network,
             approved_at: chrono::Utc::now().to_rfc3339(),
+            findings,
         };
         self.task.permission_grants.push(grant.clone());
         pending.approved_grant = Some(grant.id.clone());
@@ -222,10 +331,16 @@ impl Runner {
             .take()
             .context("no pending permission request")?;
         self.task.phase = Phase::Working;
-        self.task.last_response = format!(
-            "Human denied permission request {}. The command did not run and no capability was granted. Choose an approach that stays within current permissions or explain why a different request is needed.",
-            pending.request_id
-        );
+        self.task.last_response = match &pending.refusal {
+            Some(refusal) => format!(
+                "Permission request {} could not be granted as asked: {refusal}\nThe command did not run and no capability was granted. Request a narrower path that avoids this, or choose an approach that stays within current permissions.",
+                pending.request_id
+            ),
+            None => format!(
+                "Human denied permission request {}. The command did not run and no capability was granted. Choose an approach that stays within current permissions or explain why a different request is needed.",
+                pending.request_id
+            ),
+        };
         self.intent_event("permission_denied", &pending.request_id);
         self.event(format!(
             "Human denied permission request: {}",

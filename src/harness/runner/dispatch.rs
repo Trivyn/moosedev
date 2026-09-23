@@ -480,12 +480,18 @@ impl Runner {
             "command must contain 1..4000 bytes"
         );
         let permissions = self.command_permissions()?;
-        let grant_ids: Vec<_> = self
+        let mut grant_ids: Vec<_> = self
             .task
             .permission_grants
             .iter()
             .map(|grant| grant.id.clone())
             .collect();
+        // A command that ran on standing capability is a permissioned command,
+        // even with no task grant: journaling it as bare would understate what
+        // it could reach.
+        if !self.standing_read_paths().is_empty() {
+            grant_ids.push("moosedev.toml:[harness.sandbox]".into());
+        }
         self.task.intent = Some(if grant_ids.is_empty() {
             Intent::Command(command.to_string())
         } else {
@@ -531,14 +537,24 @@ impl Runner {
         let denial = self.note_sandbox_denial(command, &result);
         self.task.last_response = result.output;
         match denial {
-            Some(SandboxDenial::Grantable { paths, .. }) => {
-                self.task.last_response.push_str(SANDBOX_DENIAL_HINT);
-                if !paths.is_empty() {
-                    self.task.last_response.push_str(&format!(
-                        "Paths named in the output: {}\n",
-                        paths.join(", ")
-                    ));
+            // The denial already names the blocked paths, so ask the human
+            // directly instead of spending a model turn on a request the
+            // symbolic layer can write itself (Constraint cd9f1a96).
+            Some(SandboxDenial::Grantable { paths, .. }) if !paths.is_empty() => {
+                self.task.capture_due = true;
+                self.task.after_review = Phase::Working;
+                self.task.intent = None;
+                if self.raise_gate_for_denial(command, &paths)? {
+                    return Ok(());
                 }
+                self.task.last_response.push_str(SANDBOX_DENIAL_HINT);
+                self.task.last_response.push_str(&format!(
+                    "Paths named in the output: {}\n",
+                    paths.join(", ")
+                ));
+            }
+            Some(SandboxDenial::Grantable { .. }) => {
+                self.task.last_response.push_str(SANDBOX_DENIAL_HINT);
             }
             Some(SandboxDenial::Ungrantable) => {
                 self.task.last_response.push_str(UNGRANTABLE_DENIAL_HINT)
