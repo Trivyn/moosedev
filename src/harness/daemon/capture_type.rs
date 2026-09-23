@@ -21,6 +21,7 @@ use super::revision::ensure_unchanged;
 use crate::api::error::ApiError;
 use crate::graph::{self, AppState};
 use crate::harness::protocol::*;
+use crate::llm::{parse_model_json, JsonRecovery};
 
 const MAX_SENSOR_PROPOSALS: usize = 5;
 const MAX_PROPOSALS: usize = 16;
@@ -403,7 +404,13 @@ async fn type_note(
     };
     if sensor_enabled {
         match sensor_typing(state, request).await {
-            Ok(typed) => {
+            Ok((typed, recovery)) => {
+                if let Some(recovery) = recovery {
+                    typing_note = Some(format!(
+                        "sensor reply parsed after recovery: {}",
+                        recovery.as_str()
+                    ));
+                }
                 // A sensor proposal that only re-titles the plan duplicates the
                 // symbolic decision, whichever sentence names that one.
                 let mut known: Vec<String> =
@@ -720,7 +727,7 @@ struct StoredTyping {
 async fn sensor_typing(
     state: &AppState,
     request: &CaptureTypeRequest,
-) -> anyhow::Result<SensorTyping> {
+) -> anyhow::Result<(SensorTyping, Option<JsonRecovery>)> {
     let prompt = format!(
         "You type one engineer's note into durable software-project knowledge. Use only what the note and the listed facts state; do not invent.\n\nObjective of the approved plan: {}\nFiles changed: {}\nChecks: {}\n\nNote:\n{}\n\nReturn up to {MAX_SENSOR_PROPOSALS} proposals. Kinds: ArchitecturalDecision (a choice and why), Lesson (a non-obvious gotcha), Constraint (a hard rule), Requirement (a need), Pattern (a deliberate recurring approach), AntiPattern (something to avoid). Titles are short names under 100 characters; descriptions state the claim in one or two sentences.\n\nNot knowledge, so never propose it: a plan to do something later, or a choice to postpone a requirement or constraint; and general programming, language or tool knowledge any competent engineer already has (how a compiler, build tool or type system behaves, calling a function with the right types). A Lesson is something about this project that someone new to it would get wrong. Return an empty list rather than a generic claim, and when the note carries no durable claim.",
         request.plan_summary.trim(),
@@ -755,9 +762,12 @@ async fn sensor_typing(
             "reason": {"type": "string", "maxLength": 1000}
         }
     });
+    // The schema travels in the prompt, not as provider-enforced decoding,
+    // which corrupts text on some providers (see parse_model_json).
+    let prompt = format!("{prompt}{SCHEMA_MARKER}{schema}");
     let text = state
         .llm
-        .chat_completion_json_schema_checked(
+        .chat_completion_json_prompted_checked(
             &state.model,
             &prompt,
             None,
@@ -766,8 +776,12 @@ async fn sensor_typing(
         )
         .await
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    Ok(serde_json::from_str(&text)?)
+    Ok(parse_model_json(&text)?)
 }
+
+/// Introduces the schema appended to a sensor prompt, as the harness runner
+/// introduces its own.
+const SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
 
 async fn sensor_tiebreak(
     state: &AppState,
@@ -776,7 +790,7 @@ async fn sensor_tiebreak(
 ) -> Option<String> {
     let candidate_title = candidate_title?;
     let prompt = format!(
-        "Two software-project claims of the same kind.\nA (new): \"{}\" — {}\nB (existing): \"{candidate_title}\"\n\nIs A the same claim as B, a narrower special case of B, or a different claim? Answer with exactly one word: same, narrower, or different.",
+        "Two software-project claims of the same kind.\nA (new): \"{}\" — {}\nB (existing): \"{candidate_title}\"\n\nIs A the same claim as B, a narrower special case of B, or a different claim? Answer with one JSON object whose verdict is exactly one word: same, narrower, or different.",
         proposal.title, proposal.description
     );
     let schema = json!({
@@ -785,9 +799,10 @@ async fn sensor_tiebreak(
         "required": ["verdict"],
         "properties": {"verdict": {"type": "string", "enum": ["same", "narrower", "different"]}}
     });
+    let prompt = format!("{prompt}{SCHEMA_MARKER}{schema}");
     let text = state
         .llm
-        .chat_completion_json_schema_checked(
+        .chat_completion_json_prompted_checked(
             &state.model,
             &prompt,
             None,
@@ -796,7 +811,7 @@ async fn sensor_tiebreak(
         )
         .await
         .ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let (value, _): (serde_json::Value, _) = parse_model_json(&text).ok()?;
     value["verdict"].as_str().map(str::to_string)
 }
 

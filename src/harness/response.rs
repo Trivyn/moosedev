@@ -336,7 +336,7 @@ async fn probe(
     let request = async {
         if stream {
             client
-                .chat_completion_json_schema_streaming_checked(
+                .chat_completion_json_prompted_streaming_checked(
                     model,
                     PROMPT,
                     None,
@@ -347,7 +347,7 @@ async fn probe(
                 .await
         } else {
             client
-                .chat_completion_json_schema_checked(
+                .chat_completion_json_prompted_checked(
                     model,
                     PROMPT,
                     None,
@@ -362,7 +362,9 @@ async fn probe(
         .map_err(|_| {
             CompletionError::Incomplete("Neutral response probe exceeded 60 seconds".into())
         })??;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+    // The probe takes the path the runner's JSON calls take: the shape is
+    // stated in the prompt and the reply is parsed tolerantly.
+    let (value, _): (serde_json::Value, _) = crate::llm::parse_model_json(&text).map_err(|_| {
         CompletionError::InvalidResponse("Neutral response probe did not return valid JSON".into())
     })?;
     if value != json!({"status":"ok"}) {
@@ -528,9 +530,9 @@ mod tests {
             assert_eq!(requests.len(), 4);
             for request in requests.iter() {
                 assert_eq!(request["max_tokens"], 128);
-                assert_eq!(
-                    request["response_format"]["json_schema"]["name"],
-                    "harness_response_probe"
+                assert!(
+                    request.get("response_format").is_none(),
+                    "the probe asks the provider to enforce nothing unless required"
                 );
             }
             assert!(requests[0].get("reasoning_effort").is_none());
@@ -583,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_fallback_preserves_reasoning_policy_and_request_bound() {
+    async fn a_provider_without_json_schema_is_never_asked_for_it_under_auto() {
         let stub = Stub {
             reasoning_only: true,
             reject_schema: true,
@@ -596,7 +598,14 @@ mod tests {
             prepared.receipt.resolved,
             Some(ResponsePolicy::ReasoningOff)
         );
-        assert_eq!(requests.lock().unwrap().len(), 4);
+        // The schema travels in the prompt, so no request is refused for
+        // carrying response_format and none has to be repeated without it.
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests
+            .iter()
+            .all(|request| request.get("response_format").is_none()));
+        drop(requests);
         task.abort();
     }
 
@@ -752,7 +761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn physical_probe_receipts_include_schema_fallback_and_stream_usage() {
+    async fn physical_probe_receipts_include_stream_usage_and_no_schema_refusal() {
         use crate::llm::RequestStatus;
         let (config, task) = server(Stub {
             reject_schema: true,
@@ -769,14 +778,16 @@ mod tests {
             .iter()
             .filter(|receipt| receipt.status != RequestStatus::Started)
             .collect();
-        assert_eq!(finished.len(), 3);
-        assert_eq!(receipts.len(), 6);
-        assert_eq!(finished[0].status, RequestStatus::Failed);
-        assert_eq!(finished[0].http_status, Some(422));
-        assert!(finished[0].tokens.prompt_tokens.is_none());
-        assert_eq!(finished[1].tokens.prompt_tokens, Some(11));
-        assert_eq!(finished[2].tokens.prompt_tokens, Some(13));
-        assert!(finished[2].streaming);
+        // A provider that refuses json_schema is never sent it under Auto,
+        // so there is no refused request to account for.
+        assert_eq!(finished.len(), 2);
+        assert_eq!(receipts.len(), 4);
+        assert!(finished
+            .iter()
+            .all(|receipt| receipt.http_status != Some(422)));
+        assert_eq!(finished[0].tokens.prompt_tokens, Some(11));
+        assert_eq!(finished[1].tokens.prompt_tokens, Some(13));
+        assert!(finished[1].streaming);
         assert!(finished.iter().all(
             |receipt| receipt.context.purpose == "harness_response_probe"
                 && receipt.context.decision_id.is_none()
@@ -787,7 +798,7 @@ mod tests {
                 .map(|receipt| &receipt.id)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            3
+            2
         );
         assert!(!serde_json::to_string(&*receipts)
             .unwrap()

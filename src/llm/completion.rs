@@ -209,6 +209,66 @@ pub fn tool_call_from_text(text: &str) -> Option<ToolCall> {
         })
 }
 
+/// How [`parse_model_json`] got a value out of text that was not exactly JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonRecovery {
+    /// The JSON was wrapped in a markdown code fence.
+    Fence,
+    /// The JSON was the first balanced object inside other text.
+    Object,
+    /// The JSON itself was malformed and `jsonrepair` fixed it.
+    Repaired,
+}
+
+impl JsonRecovery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fence => "fence",
+            Self::Object => "object",
+            Self::Repaired => "repaired",
+        }
+    }
+}
+
+/// Parse a model's JSON answer when the provider was not asked to enforce a
+/// schema. The schema travels in the prompt instead, because provider-side
+/// constrained decoding corrupts text (LM Studio with Gemma writes every
+/// curly quote as `\u0002`); the price is that a model may fence its JSON,
+/// wrap it in prose or break it slightly. Tried in order, first success
+/// wins: the trimmed text, the text with a code fence removed, the first
+/// balanced object, then `jsonrepair` on that candidate. The step that
+/// succeeded is returned so a caller can journal it; the caller still
+/// validates the value, and an error here is the last parse error.
+pub fn parse_model_json<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> Result<(T, Option<JsonRecovery>), serde_json::Error> {
+    let trimmed = text.trim();
+    let first_error = match serde_json::from_str::<T>(trimmed) {
+        Ok(value) => return Ok((value, None)),
+        Err(error) => error,
+    };
+    let unfenced = strip_code_fence(trimmed);
+    if unfenced != trimmed {
+        if let Ok(value) = serde_json::from_str::<T>(unfenced) {
+            return Ok((value, Some(JsonRecovery::Fence)));
+        }
+    }
+    let object = first_json_object(unfenced);
+    if let Some(object) = object.filter(|object| *object != unfenced) {
+        if let Ok(value) = serde_json::from_str::<T>(object) {
+            return Ok((value, Some(JsonRecovery::Object)));
+        }
+    }
+    let candidate = object.unwrap_or(unfenced);
+    match jsonrepair::repair_json(candidate, &jsonrepair::Options::default()) {
+        Ok(repaired) if repaired != candidate => {
+            serde_json::from_str::<T>(&repaired).map(|value| (value, Some(JsonRecovery::Repaired)))
+        }
+        _ => Err(first_error),
+    }
+}
+
 fn strip_code_fence(text: &str) -> &str {
     let Some(rest) = text.strip_prefix("```") else {
         return text;
@@ -485,5 +545,53 @@ impl From<&str> for CompletionError {
 impl From<String> for CompletionError {
     fn from(message: String) -> Self {
         Self::InvalidResponse(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct Records {
+        action: String,
+        records: Vec<String>,
+    }
+
+    fn parsed(text: &str) -> (Records, Option<JsonRecovery>) {
+        parse_model_json::<Records>(text).unwrap()
+    }
+
+    #[test]
+    fn model_json_is_recovered_step_by_step_and_says_how() {
+        let clean = r#"{"action":"a","records":["Do not “play tall”."]}"#;
+        assert_eq!(parsed(clean).1, None);
+        assert_eq!(
+            parsed(clean).0.records,
+            vec!["Do not “play tall”.".to_string()],
+            "curly quotes survive byte for byte"
+        );
+        // The shape LM Studio returned once response_format was dropped.
+        let fenced = format!("```json\n{clean}\n```");
+        assert_eq!(parsed(&fenced).1, Some(JsonRecovery::Fence));
+        let prose = format!("Here are the records:\n{clean}\nLet me know if you need more.");
+        assert_eq!(parsed(&prose).1, Some(JsonRecovery::Object));
+        let trailing_comma = r#"{"action":"a","records":["x",],}"#;
+        assert_eq!(parsed(trailing_comma).1, Some(JsonRecovery::Repaired));
+        assert_eq!(parsed(trailing_comma).0.records, vec!["x".to_string()]);
+        let fenced_and_broken = "```json\n{\"action\":\"a\",\"records\":[\"x\",]}\n```";
+        assert_eq!(parsed(fenced_and_broken).1, Some(JsonRecovery::Repaired));
+    }
+
+    #[test]
+    fn model_json_that_is_not_the_shape_stays_an_error() {
+        assert!(parse_model_json::<Records>("I cannot help with that.").is_err());
+        assert!(parse_model_json::<Records>(r#"{"action":"a"}"#).is_err());
+        assert!(
+            parse_model_json::<Records>(r#"{"action":"a","records":[],"extra":1}"#).is_err(),
+            "repair never loosens the schema's own rules"
+        );
     }
 }

@@ -8,7 +8,9 @@
 mod completion;
 mod usage;
 use completion::{complete_content, complete_tool_message, CompletionStream, MAX_STREAM_BYTES};
-pub use completion::{tool_call_from_text, CompletionError, ToolCall, ToolCompletion};
+pub use completion::{
+    parse_model_json, tool_call_from_text, CompletionError, JsonRecovery, ToolCall, ToolCompletion,
+};
 use usage::{RequestObservation, UsageBinding};
 pub use usage::{RequestStatus, RequestUsage, TokenUsage, UsageContext, UsageObserver};
 
@@ -574,6 +576,67 @@ impl OpenAiCompatClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// A JSON answer whose schema travels in the prompt rather than in
+    /// `response_format`: the caller's prompt must state the schema, and the
+    /// caller parses the reply with [`parse_model_json`] and validates it.
+    /// Provider-side constrained decoding is requested only under
+    /// `StructuredOutputMode::Required`, the explicit opt-in; under `Auto` and
+    /// `Disabled` the request is plain content. Constrained decoding corrupts
+    /// text on some providers (LM Studio with Gemma writes every curly quote as
+    /// `\u0002`, identically on every retry), and other providers have other
+    /// quirks; a tolerant parse plus the caller's own validation handles them
+    /// all the same way.
+    pub async fn chat_completion_json_prompted_checked(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: Option<&LlmParams>,
+        schema_name: &str,
+        schema: serde_json::Value,
+    ) -> Result<String, CompletionError> {
+        if self.structured_output_mode == StructuredOutputMode::Required {
+            return self
+                .chat_completion_json_schema_checked(model, prompt, params, schema_name, schema)
+                .await;
+        }
+        self.request_completion(model, prompt, params, &RequestShape::Content(None))
+            .await
+            .map(|completion| completion.content)
+    }
+
+    /// The streaming form of [`Self::chat_completion_json_prompted_checked`].
+    pub async fn chat_completion_json_prompted_streaming_checked(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: Option<&LlmParams>,
+        schema_name: &str,
+        schema: serde_json::Value,
+        on_delta: impl Fn(&str) + Send + Sync,
+    ) -> Result<String, CompletionError> {
+        if self.structured_output_mode == StructuredOutputMode::Required {
+            return self
+                .chat_completion_json_schema_streaming_checked(
+                    model,
+                    prompt,
+                    params,
+                    schema_name,
+                    schema,
+                    on_delta,
+                )
+                .await;
+        }
+        self.request_stream(
+            model,
+            prompt,
+            params,
+            RequestShape::Content(None),
+            &on_delta,
+        )
+        .await
+        .map(|completion| completion.content)
     }
 
     /// Ask for exactly one native tool call (`tool_choice: "required"`, no parallel
@@ -1518,6 +1581,72 @@ mod tests {
         assert!(requests[2].get("response_format").is_none());
         assert_eq!(client.take_usage(), (4, 6));
     }
+    #[tokio::test]
+    async fn a_prompted_json_request_asks_the_provider_to_enforce_nothing_unless_required() {
+        #[derive(Clone, Default)]
+        struct Requests(Arc<Mutex<Vec<serde_json::Value>>>);
+        async fn complete(
+            State(requests): State<Requests>,
+            Json(body): Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            requests.0.lock().unwrap().push(body.clone());
+            if body["stream"] == true {
+                return (
+                    [("content-type", "text/event-stream")],
+                    sse("{\"ok\":true}", "stop"),
+                )
+                    .into_response();
+            }
+            Json(json!({"choices": [{"message": {"content": "{\"ok\":true}"}}]})).into_response()
+        }
+        let requests = Requests::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(complete))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for mode in [
+            StructuredOutputMode::Auto,
+            StructuredOutputMode::Disabled,
+            StructuredOutputMode::Required,
+        ] {
+            let client = OpenAiCompatClient::new_with_structured_output(
+                format!("http://{address}/v1"),
+                "test",
+                mode,
+            );
+            let schema = json!({"type": "object"});
+            let text = client
+                .chat_completion_json_prompted_checked("model", "prompt", None, "s", schema.clone())
+                .await
+                .unwrap();
+            assert_eq!(text, "{\"ok\":true}");
+            let text = client
+                .chat_completion_json_prompted_streaming_checked(
+                    "model",
+                    "prompt",
+                    None,
+                    "s",
+                    schema,
+                    |_| {},
+                )
+                .await
+                .unwrap();
+            assert_eq!(text, "{\"ok\":true}");
+            let sent: Vec<_> = std::mem::take(&mut *requests.0.lock().unwrap());
+            assert_eq!(sent.len(), 2);
+            for body in sent {
+                assert_eq!(
+                    body.get("response_format").is_some(),
+                    mode == StructuredOutputMode::Required,
+                    "{mode:?}: {body}"
+                );
+            }
+        }
+        server.abort();
+    }
+
     #[test]
     fn checked_content_never_uses_reasoning_or_incomplete_results() {
         let make = |message: serde_json::Value, finish: serde_json::Value| json!({"choices":[{"message":message,"finish_reason":finish}]});

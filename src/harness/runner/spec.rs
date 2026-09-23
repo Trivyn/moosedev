@@ -255,7 +255,7 @@ impl Runner {
                 sections.len(),
             );
             let proposed = loop {
-                match self.extract_section(path, &prompt, section).await {
+                match self.extract_section(path, &lines, &prompt, section).await {
                     Ok(proposed) => {
                         self.candidate_accepted();
                         break proposed;
@@ -288,12 +288,47 @@ impl Runner {
     async fn extract_section(
         &mut self,
         path: &str,
+        lines: &[&str],
         prompt: &str,
         section: &SpecSection,
     ) -> Result<Vec<SpecRecordDraft>> {
-        let extracted: SpecExtraction = self
+        let mut extracted: SpecExtraction = self
             .model_json(prompt, SPEC_EXTRACT_PURPOSE, spec_schema(path))
             .await?;
+        // Gemma under JSON-schema decoding writes each curly quote as \u0002,
+        // identically on every retry (badciv, 2026-09-23), so a repair cannot
+        // fix it. The section's own text can: a character whose surroundings
+        // occur in the source with exactly one character between them is that
+        // character. Anything not restored this way still fails validation.
+        let source: Vec<char> = lines[section.start - 1..section.end]
+            .join("\n")
+            .chars()
+            .collect();
+        let mut restored = Vec::new();
+        for record in &mut extracted.records {
+            let mut count = 0;
+            for field in [&mut record.title, &mut record.description] {
+                if let Some((text, fixed)) = restore_from_source(field, &source) {
+                    if fixed > 0 {
+                        *field = text;
+                        count += fixed;
+                    }
+                }
+            }
+            if count > 0 {
+                restored.push(format!("{} ({count})", record.title));
+            }
+        }
+        if !restored.is_empty() {
+            let detail = format!(
+                "{path}:{}-{}: control characters restored from the source in {}",
+                section.start,
+                section.end,
+                restored.join(", ")
+            );
+            self.intent_event("spec_text_restored", &detail);
+            self.event(format!("Spec extraction: {detail}."));
+        }
         let checked = (|| {
             anyhow::ensure!(
                 extracted.action == "propose_spec_records",
@@ -448,13 +483,63 @@ fn spec_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "You are the extraction sensor for MOOSEDev's symbolic project memory. You are reading part {number} of {total} of a specification, lines {start}-{end} of {count}. Extract only the requirements and hard constraints this part explicitly states. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide.\n\nEach description states its claim completely, in the specification's own terms: every value, name, table row, list item, grammar production and exception the cited lines give. A table, grammar or list of per-item rules is one record whose description restates all of it; never reduce it to a one-sentence summary. Separate claims are separate records. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>, citing exactly the lines that state the claim, every row of a table or list included. If this part states no requirement or constraint, return an empty records list. Produce no more than {MAX_SECTION_RECORDS} non-duplicate records.\n\nDocument title: {title}\nSpecification path: {path}\nSpecification sha256: {sha}\nLine-addressed part ({heading}):\n{numbered}",
+        "You are the extraction sensor for MOOSEDev's symbolic project memory. You are reading part {number} of {total} of a specification, lines {start}-{end} of {count}. Extract only the requirements and hard constraints this part explicitly states. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide.\n\nEach description states its claim completely, in the specification's own terms: every value, name, table row, list item, grammar production and exception the cited lines give. A table, grammar or list of per-item rules is one record whose description restates all of it; never reduce it to a one-sentence summary. Separate claims are separate records. Copy quotation marks and other punctuation exactly as the specification writes them. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>, citing exactly the lines that state the claim, every row of a table or list included. If this part states no requirement or constraint, return an empty records list. Produce no more than {MAX_SECTION_RECORDS} non-duplicate records.\n\nDocument title: {title}\nSpecification path: {path}\nSpecification sha256: {sha}\nLine-addressed part ({heading}):\n{numbered}",
         start = section.start,
         end = section.end,
         count = lines.len(),
         heading = if section.heading.is_empty() { "untitled" } else { &section.heading },
         sha = sha256_hex(source),
     )
+}
+
+/// Replace each control character (other than newline and tab) in `text` with
+/// the one character the source has between the same surroundings. They are
+/// restored left to right, so the left context may run over characters
+/// already restored (they are source text now); the right context stops at
+/// the next one still garbled. At most 16 characters a side, narrowed to 8
+/// and then 4 when the wider context does not occur; at least 6 characters
+/// of context are needed.
+/// Every occurrence must agree on the character. Returns the text and how many
+/// characters were restored, or `None` when any one cannot be restored.
+fn restore_from_source(text: &str, source: &[char]) -> Option<(String, usize)> {
+    let mut chars: Vec<char> = text.chars().collect();
+    let garbled: Vec<usize> = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_control() && !matches!(c, '\n' | '\t'))
+        .map(|(at, _)| at)
+        .collect();
+    for (position, &at) in garbled.iter().enumerate() {
+        let ceiling = garbled.get(position + 1).copied().unwrap_or(chars.len());
+        let mut restored = None;
+        for window in [16, 8, 4] {
+            let left = &chars[at.saturating_sub(window)..at];
+            let right = &chars[at + 1..(at + 1 + window).min(ceiling)];
+            if left.len() + right.len() < 6 {
+                continue;
+            }
+            let mut found: Option<char> = None;
+            for candidate in left.len()..source.len().saturating_sub(right.len()) {
+                let character = source[candidate];
+                if character.is_control()
+                    || source[candidate - left.len()..candidate] != *left
+                    || source[candidate + 1..candidate + 1 + right.len()] != *right
+                {
+                    continue;
+                }
+                match found {
+                    Some(other) if other != character => return None,
+                    _ => found = Some(character),
+                }
+            }
+            if found.is_some() {
+                restored = found;
+                break;
+            }
+        }
+        chars[at] = restored?;
+    }
+    Some((chars.into_iter().collect(), garbled.len()))
 }
 
 /// The heading level of a markdown ATX heading line.
@@ -512,8 +597,9 @@ fn document_title(lines: &[&str]) -> String {
 }
 
 /// Split at level-2 headings, then merge adjacent sections while the merged
-/// text stays under `SECTION_TARGET_BYTES`. A section holding nothing but
-/// headings is not worth a model call.
+/// text stays under `SECTION_TARGET_BYTES`. A part holding nothing but
+/// headings joins the next part (the last one joins the previous), so a
+/// heading that states a rule on its own is still read.
 fn spec_sections(lines: &[&str], headings: &[String]) -> Vec<SpecSection> {
     let mut starts = vec![0];
     let mut fenced = false;
@@ -538,13 +624,28 @@ fn spec_sections(lines: &[&str], headings: &[String]) -> Vec<SpecSection> {
             _ => merged.push((from, to)),
         }
     }
-    merged
+    let has_body = |from: usize, to: usize| {
+        lines[from..to]
+            .iter()
+            .any(|line| !line.trim().is_empty() && heading_level(line).is_none())
+    };
+    let mut parts: Vec<(usize, usize)> = Vec::new();
+    let mut waiting: Option<usize> = None;
+    for (from, to) in merged {
+        let from = waiting.take().unwrap_or(from);
+        if has_body(from, to) {
+            parts.push((from, to));
+        } else {
+            waiting = Some(from);
+        }
+    }
+    if waiting.is_some() {
+        if let Some(last) = parts.last_mut() {
+            last.1 = lines.len();
+        }
+    }
+    parts
         .into_iter()
-        .filter(|&(from, to)| {
-            lines[from..to]
-                .iter()
-                .any(|line| !line.trim().is_empty() && heading_level(line).is_none())
-        })
         .map(|(from, to)| SpecSection {
             start: from + 1,
             end: to,
@@ -554,11 +655,7 @@ fn spec_sections(lines: &[&str], headings: &[String]) -> Vec<SpecSection> {
 }
 
 fn normalized_title(title: &str) -> String {
-    title
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    spec_title_key(title)
 }
 
 /// Two sections may each name a record the same way ("Error format"). The
@@ -615,14 +712,20 @@ fn uncited_lines(path: &str, source: &str, records: &[SpecRecordDraft]) -> Vec<S
     }
     let mut ranges: Vec<SpecUncited> = Vec::new();
     let mut open = false;
+    let mut fenced = false;
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if heading_level(line).is_some() {
+        if is_fence(line) {
+            fenced = !fenced;
+            continue;
+        }
+        // A `#` line inside a fence is content (a comment in a grammar or an
+        // example), not a heading, and may itself be uncited.
+        if !fenced && heading_level(line).is_some() {
             open = false;
             continue;
         }
         if trimmed.is_empty()
-            || is_fence(line)
             || trimmed
                 .chars()
                 .all(|character| matches!(character, '-' | '=' | '*' | '_' | '|' | ':' | ' '))
@@ -956,6 +1059,103 @@ mod tests {
     }
 
     #[test]
+    fn a_garbled_character_is_restored_only_from_unambiguous_source_context() {
+        let source: Vec<char> =
+            "Rules:\n- Do not “play tall” or wait for a perfect plan.\nA wounded enemy is food."
+                .chars()
+                .collect();
+        assert_eq!(
+            restore_from_source(
+                "Do not \u{2}play tall\u{2} or wait for a perfect plan.",
+                &source
+            ),
+            Some((
+                "Do not “play tall” or wait for a perfect plan.".to_string(),
+                2
+            ))
+        );
+        assert_eq!(
+            restore_from_source("A wounded enemy is food.", &source),
+            Some(("A wounded enemy is food.".to_string(), 0)),
+            "nothing to restore"
+        );
+        assert_eq!(
+            restore_from_source("Never \u{2}hesitate\u{2} at all.", &source),
+            None,
+            "surroundings the source does not contain restore nothing"
+        );
+        let ambiguous: Vec<char> = "say “yes” now\nsay ‘yes” now".chars().collect();
+        assert_eq!(
+            restore_from_source("say \u{2}yes\u{2} now", &ambiguous),
+            None,
+            "two different characters between the same surroundings is a guess"
+        );
+        assert_eq!(
+            restore_from_source("a\u{2}b", &source),
+            None,
+            "too little context to trust"
+        );
+    }
+
+    #[test]
+    fn a_section_of_only_a_heading_is_still_read() {
+        // Too large to merge with its neighbours, a heading that states a rule
+        // on its own must reach an extraction call rather than be dropped.
+        let long = "x".repeat(2_100);
+        let source = format!("# T\n## A\n{long}\n## Names are never rewritten\n");
+        let lines: Vec<&str> = source.lines().collect();
+        let headings = line_headings(&lines);
+        assert_eq!(
+            spec_sections(&lines, &headings),
+            vec![SpecSection {
+                start: 1,
+                end: 4,
+                heading: "# T".into()
+            }],
+            "the title joins A, and the trailing heading joins the part before it"
+        );
+    }
+
+    #[test]
+    fn a_hash_line_inside_a_fence_can_be_uncited() {
+        let source = "## Grammar\n```\n# comment lines start with a hash\nrow := cell+\n```\n";
+        let records = vec![SpecRecordDraft {
+            kind: "Constraint".into(),
+            title: "Rows".into(),
+            description: "row := cell+".into(),
+            evidence: vec!["spec.md:4".into()],
+        }];
+        assert_eq!(
+            uncited_lines("spec.md", source, &records)
+                .iter()
+                .map(SpecUncited::describe)
+                .collect::<Vec<_>>(),
+            vec!["line 3 (## Grammar)".to_string()]
+        );
+    }
+
+    #[test]
+    fn titles_collide_the_way_the_daemon_compares_them() {
+        let lines = ["## A", "Étiquette text.", "## B", "étiquette text."];
+        let headings = line_headings(&lines);
+        let first = SpecRecordDraft {
+            kind: "Constraint".into(),
+            title: "Étiquette".into(),
+            description: "Étiquette text.".into(),
+            evidence: vec!["spec.md:2".into()],
+        };
+        let mut second = SpecRecordDraft {
+            title: "étiquette".into(),
+            description: "étiquette text.".into(),
+            evidence: vec!["spec.md:4".into()],
+            ..first.clone()
+        };
+        distinguish_title(&mut second, std::slice::from_ref(&first), &headings);
+        assert_eq!(second.title, "étiquette — B");
+        assert!(validate_spec_records("spec.md", &lines.join("\n"), &[first, second]).is_ok());
+    }
+
+    #[test]
     fn a_repeated_title_takes_its_section_heading() {
         let lines = [
             "# T",
@@ -991,43 +1191,55 @@ mod tests {
     async fn extraction_runs_per_section_and_repeated_approvals_never_exhaust_repairs() {
         async fn model(State(_): State<Arc<PathBuf>>, Json(body): Json<Value>) -> Json<Value> {
             let tools = body["tools"].as_array().is_some();
-            let name = body["response_format"]["json_schema"]["name"]
-                .as_str()
-                .unwrap_or("");
-            if tools || name == "harness_response_probe" {
+            let prompt = body["messages"].to_string();
+            // Nothing asks the provider to enforce a schema: the prompt
+            // carries it, so requests are told apart by what they say.
+            assert!(body.get("response_format").is_none(), "{body}");
+            if tools || prompt.contains("neutral connection test") {
                 return Json(if tools {
                     json!({"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]})
                 } else {
                     json!({"choices":[{"message":{"role":"assistant","content":"{\"status\":\"ok\"}"},"finish_reason":"stop"}]})
                 });
             }
-            assert_eq!(name, SPEC_EXTRACT_PURPOSE);
-            let prompt = body["messages"].to_string();
+            assert!(
+                prompt.contains("extraction sensor") && prompt.contains("Required JSON schema:")
+            );
+            let mut fenced = false;
             let records = if prompt.contains("| small | 3 |") {
+                // Answered the way LM Studio answers without response_format:
+                // inside a markdown fence.
+                fenced = true;
                 assert!(prompt.contains("5: | small | 3 |"), "original line numbers");
                 json!([{"kind":"Constraint","title":"Size limits","description":"| size | max |: small 3, large 9.","evidence":["spec.md:3-6"]}])
-            } else if prompt.contains("Widgets must be blue.") {
-                assert!(prompt.contains("9: Widgets must be blue."), "{prompt}");
-                // The first answer carries a control character where a
-                // quotation mark belonged (Gemma, badciv 2026-09-23): the
-                // runner must repair it, never pass it to the daemon.
+            } else if prompt.contains("Widgets must be “blue”.") {
+                assert!(prompt.contains("9: Widgets must be “blue”."), "{prompt}");
+                // Gemma writes curly quotes as U+0002 (badciv 2026-09-23). The
+                // first answer garbles text the source does not contain, so it
+                // cannot be restored and goes back to the model; every later
+                // answer garbles the source's own quotes, which are restored
+                // from the section text without another call.
                 static CALLS: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(0);
                 let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if call == 0 {
-                    json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be \u{2}blue\u{2}.","evidence":["spec.md:9"]}])
+                    json!([{"kind":"Constraint","title":"Size limits","description":"Paint every \u{2}widget\u{2} now.","evidence":["spec.md:9"]}])
                 } else {
                     assert_eq!(
                         prompt.contains("control character U+0002"),
                         call == 1,
                         "only the repair names the character"
                     );
-                    json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be blue.","evidence":["spec.md:9"]}])
+                    json!([{"kind":"Constraint","title":"Size limits","description":"Widgets must be \u{2}blue\u{2}.","evidence":["spec.md:9"]}])
                 }
             } else {
                 json!([])
             };
-            let content = json!({"action":"propose_spec_records","records":records}).to_string();
+            let mut content =
+                json!({"action":"propose_spec_records","records":records}).to_string();
+            if fenced {
+                content = format!("```json\n{content}\n```");
+            }
             Json(
                 json!({"choices":[{"message":{"role":"assistant","content":content},"finish_reason":"stop"}]}),
             )
@@ -1068,7 +1280,7 @@ mod tests {
 
         let long = "p".repeat(2_000);
         let source = format!(
-            "# Widgets\n## Sizes\n| size | max |\n|---|---|\n| small | 3 |\n| large | 9 |\n{long}\n## Colors\nWidgets must be blue.\n## Notes\nCommentary nobody cites.\n"
+            "# Widgets\n## Sizes\n| size | max |\n|---|---|\n| small | 3 |\n| large | 9 |\n{long}\n## Colors\nWidgets must be “blue”.\n## Notes\nCommentary nobody cites.\n"
         );
         let project = Project::new("spec-sections");
         std::fs::write(project.0.join("spec.md"), &source).unwrap();
@@ -1113,6 +1325,22 @@ mod tests {
             vec!["line 7 (## Sizes)".to_string(), "line 11 (## Notes)".into()]
         );
         assert!(runner.task.recovery.is_none());
+        assert!(runner
+            .task
+            .intent_events
+            .iter()
+            .any(|event| event.kind == "json_recovered"
+                && event.detail == "harness_spec_extract: fence"));
+        assert_eq!(
+            pending.preview.entries[1].draft.description,
+            "Widgets must be “blue”."
+        );
+        assert!(runner.task.intent_events.iter().any(|event| {
+            event.kind
+            == "spec_text_restored"
+            && event.detail
+                == "spec.md:8-11: control characters restored from the source in Size limits (2)"
+        }));
         let extractions = runner
             .task
             .model_requests

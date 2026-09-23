@@ -422,9 +422,18 @@ impl Runner {
             };
             self.task.model_requests.last_mut().unwrap()["response"] = Value::String(text.clone());
             self.persist()?;
-            serde_json::from_str::<T>(text.trim())
+            // The schema travelled in the prompt, not as provider-enforced
+            // decoding, so a fenced, wrapped or slightly broken reply is
+            // recovered here and the recovery journaled; the caller still
+            // validates what it gets.
+            let (value, recovery) = crate::llm::parse_model_json::<T>(&text)
                 .context(InvalidModelOutput)
-                .context("model returned malformed output")
+                .context("model returned malformed output")?;
+            if let Some(recovery) = recovery {
+                self.intent_event("json_recovered", &format!("{name}: {}", recovery.as_str()));
+                self.persist()?;
+            }
+            Ok(value)
         }
     }
 
@@ -536,7 +545,7 @@ impl Runner {
             self.streaming = Some(partial.clone());
             let progress = self.progress.clone();
             client
-                .chat_completion_json_schema_streaming_checked(
+                .chat_completion_json_prompted_streaming_checked(
                     model,
                     request,
                     None,
@@ -563,7 +572,7 @@ impl Runner {
                 .map(Generated::Content)
         } else {
             client
-                .chat_completion_json_schema_checked(model, request, None, name, schema.clone())
+                .chat_completion_json_prompted_checked(model, request, None, name, schema.clone())
                 .await
                 .map(Generated::Content)
         }

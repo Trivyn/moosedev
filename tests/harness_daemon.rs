@@ -3465,10 +3465,13 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
             ],
             "reason": "The note states one gotcha."
         }));
+        // Answered the way LM Studio answers once no schema is enforced:
+        // inside a markdown fence.
+        let fenced = format!("```json\n{content}\n```");
         (
             axum::http::StatusCode::OK,
             AxumJson(
-                json!({"choices":[{"message":{"role":"assistant","content":content.to_string()},"finish_reason":"stop"}]}),
+                json!({"choices":[{"message":{"role":"assistant","content":fenced},"finish_reason":"stop"}]}),
             ),
         )
     }
@@ -3494,7 +3497,7 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
             model: "scripted-daemon-model".into(),
             configured: true,
             context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
-            structured_output: moosedev::llm::StructuredOutputMode::Required,
+            structured_output: moosedev::llm::StructuredOutputMode::Auto,
             timeouts: Default::default(),
         },
     )
@@ -3510,7 +3513,10 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     );
     let response = capture_type_operation(&state, request).await.unwrap();
     assert_eq!(response.typing_mode, TypingMode::Sensor);
-    assert!(response.typing_note.is_none(), "{:?}", response.typing_note);
+    assert_eq!(
+        response.typing_note.as_deref(),
+        Some("sensor reply parsed after recovery: fence")
+    );
     let origins: Vec<_> = response.proposals.iter().map(|p| p.origin).collect();
     assert_eq!(
         origins,
@@ -3535,10 +3541,13 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     ));
     let recorded = script.requests.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1);
-    assert_eq!(
-        recorded[0]["response_format"]["json_schema"]["name"],
-        "harness_capture_typing"
+    assert!(
+        recorded[0].get("response_format").is_none(),
+        "the provider is not asked to enforce the schema"
     );
+    assert!(recorded[0]["messages"]
+        .to_string()
+        .contains("Required JSON schema:"));
     assert_eq!(recorded[0]["model"], "scripted-daemon-model");
     let prompt = recorded[0]["messages"].to_string();
     assert!(prompt.contains("a plan to do something later"), "{prompt}");

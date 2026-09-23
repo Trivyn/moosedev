@@ -268,7 +268,7 @@ belongs in `.env` or the environment, never in `moosedev.toml`.
 | `MOOSEDEV_LLM_MODEL` | Model name sent to the configured endpoint. |
 | `MOOSEDEV_LLM_ASSIST_LEVEL` | Select the configured assistance level. |
 | `MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS` | Declare the model context capacity. The default is `32768`. |
-| `MOOSEDEV_LLM_STRUCTURED_OUTPUT` | Set structured output to `auto`, `required`, or `disabled`. The default is `auto`. |
+| `MOOSEDEV_LLM_STRUCTURED_OUTPUT` | Set structured output to `auto`, `required`, or `disabled`. The default is `auto`. The harness and capture sensors send their schema in the prompt and parse replies tolerantly unless this is `required`; see `docs/harness.md`. |
 
 Setting `MOOSEDEV_HTTP_ADDR` to a non-loopback interface exposes the workbench
 to the network. Do so only when that access is intentional.

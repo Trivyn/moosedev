@@ -144,9 +144,19 @@ file as the interactive session.
 
 `MOOSEDEV_LLM_API_KEY` provides authentication;
 `MOOSEDEV_LLM_CONTEXT_WINDOW_TOKENS` declares the model context window.
-`MOOSEDEV_LLM_STRUCTURED_OUTPUT=auto` uses native structured output when available
-and validated JSON fallback otherwise. `required` rejects providers without
-native structured output. Complete model actions are validated before execution;
+The harness and the daemon's capture sensors state their JSON schema in the
+prompt and do not ask the provider to enforce it: provider-side constrained
+decoding corrupts text on some servers (LM Studio with Gemma writes every curly
+quote as `\u0002`, identically on every retry). A reply is parsed tolerantly — a
+markdown fence, prose around the object, or JSON that `jsonrepair` can fix — and
+the step that recovered it is journaled (`json_recovered`, or the capture
+`typing_note`); the value is then validated as before, and an unusable reply
+goes back to the model with the diagnostic. For these calls
+`MOOSEDEV_LLM_STRUCTURED_OUTPUT=required` restores provider enforcement, while
+`auto` and `disabled` both keep the schema in the prompt. Story narration, the
+query route and chat keep the original meaning: `auto` uses native structured
+output when available and validated JSON fallback otherwise, and `required`
+rejects providers without it. Complete model actions are validated before execution;
 streamed partial text never authorizes an edit or command.
 Before the first task generation, the harness verifies both streaming and
 nonstreaming responses for the action contract with neutral connection probes. The harness-only
@@ -362,7 +372,11 @@ Extraction runs one section at a time: the file is split at its level-2
 sensor is told to state each claim completely: a table, grammar or list of
 per-item rules becomes one record whose description restates all of it, not a
 one-line summary. A part's output is validated on its own and repaired with the
-diagnostic like any sensor output; a batch holds at most 96 records. Two parts
+diagnostic like any sensor output. A control character in a claim (Gemma writes
+curly quotes as `\u0002`, identically on every retry) is first restored from
+the section's own text when its surroundings occur there with exactly one
+character between them (`spec_text_restored`); only what cannot be restored
+goes back to the model; a batch holds at most 96 records. Two parts
 that name a record the same way keep both, the later one titled with its
 section. The gate ends with an `UNCITED` block listing the line ranges no
 record cites, under their headings (journaled as `spec_uncited`): whatever is

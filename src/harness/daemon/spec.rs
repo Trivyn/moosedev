@@ -1525,10 +1525,7 @@ fn validate_evidence(path: &str, evidence: &str, line_count: usize) -> anyhow::R
 }
 
 fn normalize(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    spec_title_key(text)
 }
 
 fn claim(draft: &SpecRecordDraft) -> String {

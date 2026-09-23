@@ -19,6 +19,17 @@ pub const MAX_SPEC_EVIDENCE: usize = 8;
 /// extraction sensor's output, where a failure is repaired with this
 /// message; the daemon applies it again to the request. One definition, so
 /// the runner can never pass what the daemon refuses.
+/// The key two drafts collide on when they share a kind: whitespace
+/// collapsed, Unicode lowercase. Shared so the runner disambiguates exactly
+/// the titles the daemon would reject as duplicates.
+pub fn spec_title_key(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 pub fn check_spec_draft(draft: &SpecRecordDraft) -> Result<(), String> {
     if !matches!(draft.kind.as_str(), "Requirement" | "Constraint") {
         return Err("a spec record's kind must be Requirement or Constraint".into());
