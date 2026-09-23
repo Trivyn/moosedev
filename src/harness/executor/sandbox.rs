@@ -194,6 +194,18 @@ fn permitted_unix_sockets(permissions: &CommandPermissions) -> Result<Vec<PathBu
     Ok(sockets)
 }
 
+/// The shell invocation every confined command runs under. `pipefail` makes a
+/// pipeline report its first failing stage, so `cargo check 2>&1 | tail` fails
+/// when cargo does instead of taking `tail`'s status; the probe in a subshell
+/// leaves a `/bin/sh` that lacks the option running the command unchanged.
+pub(super) fn shell_argv(command: &str) -> [String; 3] {
+    [
+        "/bin/sh".into(),
+        "-c".into(),
+        format!("(set -o pipefail) 2>/dev/null && set -o pipefail\n{command}"),
+    ]
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn confined_command(
     source: &Path,
@@ -277,7 +289,7 @@ pub(super) fn confined_command(
         ));
     }
     let mut process = tokio::process::Command::new("/usr/bin/sandbox-exec");
-    process.args(["-p", &profile, "/bin/sh", "-c", command]);
+    process.args(["-p", &profile]).args(shell_argv(command));
     Ok(process)
 }
 
@@ -350,7 +362,8 @@ pub(super) fn confined_command(
     process
         .arg("--chdir")
         .arg(source)
-        .args(["--seccomp", "198", "/bin/sh", "-c", command]);
+        .args(["--seccomp", "198"])
+        .args(shell_argv(command));
     // Network namespaces do not block pathname-based Unix sockets. Deny socket
     // creation in seccomp as well, including foreign syscall architectures.
     // A network grant shares the host network namespace, where abstract Unix

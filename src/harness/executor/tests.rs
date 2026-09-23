@@ -1592,3 +1592,32 @@ async fn a_symlink_out_of_a_granted_directory_reaches_nothing() {
         result.output
     );
 }
+
+#[test]
+fn a_pipeline_fails_when_any_stage_fails() {
+    // The shell line itself, outside any sandbox: a filter in the last stage
+    // must not turn a failing command into a success.
+    let run = |command: &str| {
+        let [shell, flag, line] = shell_argv(command);
+        std::process::Command::new(shell)
+            .args([flag, line])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(!run("false | true"));
+    assert!(!run("echo failed >&2; exit 3 | cat"));
+    assert!(run("true | true"));
+    assert!(run("printf 'a\\nb\\n' | tail -1"));
+}
+
+#[tokio::test]
+#[ignore = "requires OS sandbox execution outside a parent sandbox"]
+async fn confined_pipeline_reports_its_failing_stage() {
+    let fixture = Fixture::new();
+    let scratch = Fixture::new();
+    let result = command(&fixture.0, &scratch.0, "false 2>&1 | tail -1")
+        .await
+        .unwrap();
+    assert!(!result.success, "{}", result.output);
+}
