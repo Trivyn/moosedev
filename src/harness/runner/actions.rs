@@ -27,6 +27,7 @@ pub(super) enum Step {
         summary: String,
         files: Vec<String>,
         checks: Vec<String>,
+        addresses: Vec<String>,
     },
     Edit {
         file: String,
@@ -93,6 +94,7 @@ impl Runner {
                 summary,
                 files,
                 checks,
+                ..
             } => {
                 ensure!(!summary.trim().is_empty() && summary.len() <= MAX_PLAN_SUMMARY && !files.is_empty() && files.len() <= MAX_FILES,
                     "plan requires a nonempty summary of at most 4000 bytes and 1..100 explicit file paths");
@@ -182,11 +184,13 @@ impl Runner {
                 summary,
                 files,
                 checks,
+                addresses,
             } => {
                 return Ok(Step::Plan {
                     summary,
                     files,
                     checks,
+                    addresses,
                 })
             }
             Action::Command { command } => return Ok(Step::Command { command }),

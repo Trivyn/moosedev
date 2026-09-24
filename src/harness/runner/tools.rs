@@ -36,7 +36,7 @@ fn description(name: &str) -> &'static str {
         "read" => "Read a project file together with its governing knowledge.",
         "search" => "Search accepted project knowledge first, then repository matches.",
         "inspect" => "Page the complete output of a journal event.",
-        "plan" => "Propose the plan: a summary, the permitted files and the required checks.",
+        "plan" => "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses).",
         "replace" => "Replace exactly one unique literal occurrence of old_text in a file.",
         "write" => "Write a file's whole UTF-8 content; null content requests deletion.",
         "command" => "Run a shell command in the read-only source snapshot.",

@@ -371,7 +371,14 @@ Extraction runs one section at a time: the file is split at its level-2
 2 KB, and each part is one model call that sees its original line numbers. The
 sensor is told to state each claim completely: a table, grammar or list of
 per-item rules becomes one record whose description restates all of it, not a
-one-line summary. A part's output is validated on its own and repaired with the
+one-line summary. It records only what the cited lines state and adds nothing
+of its own, but a statement counts whatever its grammar: the system's stated
+structure and each named component's responsibility, the identity, goals,
+rules and text a persona or agent is given, and the behaviour the system is
+meant to produce are all Requirements when the spec states them. Background
+story and motivation are not records. (An earlier wording forbade "goals" and
+"architectural decisions" outright, and the sensor obeyed: a crate list and
+persona goals landed in `UNCITED`.) A part's output is validated on its own and repaired with the
 diagnostic like any sensor output. A control character in a claim (Gemma writes
 curly quotes as `\u0002`, identically on every retry) is first restored from
 the section's own text when its surroundings occur there with exactly one
@@ -462,6 +469,26 @@ outside that attested final note still require renewed plan approval before
 execution. If review succeeds but the
 final checkpoint fails, `/continue` retries completion without repeating capture
 or claiming that no knowledge changed.
+
+The final capture note is asked about the whole task: every approved plan in
+order, each followed by the edits made under it (previews shrink to fit about
+8 KB; plan summaries are never dropped), with the files and checks. The capture
+request carries every rule those plans addressed (`addressed_rules`); for the
+decision proposal each one that is a current Requirement or Constraint becomes
+an `isMotivatedBy` edge (derivation reason `addressed`), shown at review as
+`Motivated by:`. Only when no plan addressed any rule does the single-candidate
+obligation rule apply.
+
+Spec progress is derived from those edges, never stored. An approved spec's
+record is open until an accepted ArchitecturalDecision other than the spec's
+own approval marker `isMotivatedBy` it. Every context response lists each
+approved spec with open rules ("Approved spec spec.md: 4 of 18 rule(s)
+addressed by recorded decisions; 14 open: …", at most twelve named), so a later
+task starts from what the spec still asks for rather than from an earlier
+task's completion. A task that approved a governed plan ends its `Complete`
+event with the same line for every approved spec (`spec_progress`). A task
+whose note records nothing durable mints no decision, so its rules stay open:
+progress can be under-reported, never over-reported.
 
 The daemon's own intent routes refresh the index only for Python projects with an
 explicit absolute `MOOSEDEV_SCIP_PYTHON` launcher (the study pilot's frozen
@@ -659,7 +686,8 @@ contract 3 and intent contract 2.
   still holds it; past either it is named with an empty claim, never dropped.
   Topic fallback contributes none. The runner prints them after the guidance,
   before the output rule, under "Project rules (hard requirements; your plan
-  must satisfy each or say why it does not apply):", and Plan mode ends with a
+  must satisfy each or say why it does not apply, and list the ones it
+  implements in addresses):", and Plan mode ends with a
   line naming each rule's title. With no governing rules there is no block.
 
   Requirements are governing rules because they are what an approved spec
@@ -683,6 +711,18 @@ contract 3 and intent contract 2.
   stored and `constraint_coverage_unmet` is journaled. Invalid thresholds are
   journaled and the defaults used. The check reads wording only; required checks
   judge the code.
+- Plan addresses. A plan also lists, in `addresses`, the rules its change
+  implements, by label or IRI. Each entry is resolved against the rules
+  delivered for the plan files (IRI anywhere in the entry, else the label
+  compared case- and whitespace-insensitively, a leading `[Kind]` tolerated);
+  resolved entries are journaled as `plan_addresses`, and one naming no such
+  rule is dropped and journaled as `plan_addresses_unresolved`, never returned
+  to the model. Coverage still reads the summary, so "does not apply" satisfies
+  coverage, but only `addresses` becomes a knowledge edge: a rule the summary
+  merely mentions is never recorded as implemented. Each approved plan is kept
+  in `approved_plans` with its addresses, the rules delivered at its approval
+  and where its edits begin; a replan replaces the current plan but not this
+  history, and a new objective clears it.
 - Dossiers. A file dossier lists each knowledge-bearing entity's direct records
   rendered like linked evidence (superseded records show only their header
   line), and its component's records by title: accepted Constraints always,
@@ -823,7 +863,25 @@ contract 3 and intent contract 2.
   was verified, so it becomes a `Verified by:` paragraph on the decision rather
   than a Lesson of its own. The sensor is told that a postponement ("defer the
   database constraint") and general programming or tool knowledge ("a crate
-  needs a `lib.rs`") are not project knowledge. The sensor's first
+  needs a `lib.rs`") are not project knowledge, and the daemon enforces the
+  part it can decide. A note may mint only an ArchitecturalDecision, a Lesson
+  or an AntiPattern: a Constraint or Requirement is a hard rule that only the
+  human or an approved spec can state, and a Pattern claims a recurrence one
+  task cannot show. A Lesson or AntiPattern must cite, by number, at least one
+  of the task's support events, where the project or the human pushed back: a
+  failed command or check, or a human message after plan approval
+  (`support_events`, at most the 20 most recent). Repairs, scope escapes, held
+  first edits and replans are the harness's own mechanics and do not count: a
+  lesson about them belongs to the harness, not the project. The cited events
+  become its evidence in place of the bare note. Any other sensor proposal is
+  refused before reconciliation, returned as `dropped` with its reason,
+  journaled (`capture_dropped`) and listed on the review card as `Refused · …`.
+  (Prompt text alone let a Constraint, a Pattern and a generic Lesson through
+  on Gemma; a supported but banal Lesson can still pass, and per-proposal
+  review is the check for it.) A note records one change, so it mints one
+  decision: any further sensor decision is refused, since that decision's
+  description already carries the whole note (with the rule kinds refused, Gemma
+  re-typed a spec restatement and an invented rule as decisions). The sensor's first
   `ArchitecturalDecision` restates the symbolic decision from the same note, so
   it is folded in: its title names the decision and its claim leads the
   description, ahead of the note and the approved plan. A proposal whose own
@@ -850,6 +908,15 @@ contract 3 and intent contract 2.
   same note under fresh operation IDs without a model call (`capture_retyped`,
   three per note, then `capture_retype_exhausted`); a source or knowledge change
   between typing and capture does the same (`capture_note_invalidated`).
+- Per-proposal review. The review card numbers a capture's proposals; `/drop N`
+  leaves proposal N out and `/keep N` takes it back (`<review>.<proposal>` when
+  several captures are pending; `proposal_dropped`, `proposal_kept`). `/accept`
+  then sends the dropped entries as the review's `rejected` indices: the daemon
+  resolves those as rejected and the rest as accepted in one operation, records
+  the set with the decision (a replay must present the same set), and still
+  attests the acceptance as the operation's own revision change. Dropping every
+  proposal of a capture with nothing restated is a rejection. The journal says
+  `Human accepted captured knowledge; dropped: …`.
 - Index refresh. A finish with edits first rebuilds the code index with the
   project's producers when `index_refresh` is `auto` (`index_refreshed`,
   `index_refresh_failed` or `index_refresh_skipped`), so the associations and

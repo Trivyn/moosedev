@@ -248,6 +248,7 @@ mod tests {
             typing_mode: TypingMode::SymbolicOnly,
             typing_note: None,
             thresholds: ReconcileThresholds::default(),
+            dropped: vec![],
             proposals: vec![TypedProposal {
                 proposal: KnowledgeProposal {
                     kind: "Lesson".into(),
@@ -257,6 +258,7 @@ mod tests {
                     files: vec![],
                     components: vec![],
                     requirement: None,
+                    motivated_by: Vec::new(),
                     supersedes: None,
                     retracts: None,
                     learned_from: None,
@@ -311,6 +313,7 @@ mod tests {
             summary: "Preserve behavior".into(),
             files: vec![],
             checks: vec!["true".into()],
+            addresses: vec![],
         });
         runner.task.mode = Mode::Auto;
         runner.task.final_capture = true;

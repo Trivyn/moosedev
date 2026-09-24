@@ -81,6 +81,8 @@ pub(super) struct Script {
     pub(super) associate_status: Option<u16>,
     pub(super) capture_type_reply: Option<Vec<TypedProposal>>,
     pub(super) capture_type_requests: Vec<CaptureTypeRequest>,
+    /// Every review request received, in order.
+    pub(super) review_requests: Vec<ReviewRequest>,
     pub(super) fail_capture_type_once: bool,
     pub(super) fail_capture_type: bool,
     /// Every `capture/type` answers with this status instead of a typing.
@@ -454,6 +456,7 @@ pub(super) async fn review(
         .get("x-moosedev-expected-revision")
         .and_then(|value| value.to_str().ok());
     script.review_headers.push(expected.map(str::to_owned));
+    script.review_requests.push(request.clone());
     if script.reject_stale_review && expected.is_some_and(|revision| revision != base) {
         return (
             StatusCode::CONFLICT,
@@ -652,6 +655,7 @@ pub(super) fn distinct_proposal(kind: &str, title: &str) -> TypedProposal {
             files: vec!["code.txt".into()],
             components: vec![],
             requirement: None,
+            motivated_by: Vec::new(),
             supersedes: None,
             retracts: None,
             learned_from: None,
@@ -1093,6 +1097,7 @@ pub(super) async fn capture_type(
                 files: request.changed_files.clone(),
                 components: vec![],
                 requirement: None,
+                motivated_by: Vec::new(),
                 supersedes: None,
                 retracts: None,
                 learned_from: None,
@@ -1117,6 +1122,7 @@ pub(super) async fn capture_type(
                 typing_mode: TypingMode::SymbolicOnly,
                 typing_note: Some("fixture typing".into()),
                 thresholds: ReconcileThresholds::default(),
+                dropped: vec![],
                 proposals,
             })
             .unwrap(),

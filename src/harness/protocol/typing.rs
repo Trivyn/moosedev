@@ -41,6 +41,33 @@ pub struct CaptureTypeRequest {
     /// accepting it records a decision about a governing rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub governing_labels: Vec<String>,
+    /// IRIs of the rules the task's approved plans said they implement. Each
+    /// that is a current Requirement or Constraint motivates the decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addressed_rules: Vec<String>,
+    /// Journal events where something went wrong or was corrected. A Lesson
+    /// or AntiPattern typed from the note must cite one of them, and cites
+    /// them as its evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub support_events: Vec<SupportEvent>,
+}
+
+/// One journaled failure or correction a note-typed Lesson may rest on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupportEvent {
+    /// Index of the event in the task journal.
+    pub event: usize,
+    /// `command_failed` or `human_steer`.
+    pub kind: String,
+    pub summary: String,
+}
+
+/// A sensor proposal the daemon refused to type, with why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedProposal {
+    pub kind: String,
+    pub title: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +140,8 @@ pub struct DerivedRelation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen: Option<String>,
     pub candidates_considered: usize,
-    /// `asserted`, `none_legal`, or `ambiguous`.
+    /// `asserted`, `none_legal`, `ambiguous`, `addressed` (a rule an approved
+    /// plan said it implements) or `addressed_not_legal`.
     pub reason: String,
 }
 
@@ -125,4 +153,8 @@ pub struct CaptureTypeResponse {
     pub typing_note: Option<String>,
     pub thresholds: ReconcileThresholds,
     pub proposals: Vec<TypedProposal>,
+    /// Sensor proposals refused before reconciliation: kinds a note may not
+    /// mint, and Lessons that cite no journaled failure or correction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<DroppedProposal>,
 }

@@ -55,11 +55,42 @@ fn review_operation_checked(
             .is_none_or(|accepted| accepted == request.accept),
         "this capture operation already has a different review decision"
     );
+    // Entries the human rejected within an accept; a whole rejection rejects
+    // every entry anyway.
+    let mut rejected: Vec<usize> = if request.accept {
+        request.rejected.clone()
+    } else {
+        Vec::new()
+    };
+    rejected.sort_unstable();
+    rejected.dedup();
+    anyhow::ensure!(
+        rejected
+            .iter()
+            .all(|index| *index < operation.entries.len()),
+        "a rejected proposal number is out of range for this capture"
+    );
+    anyhow::ensure!(
+        operation.review.is_none() || operation.review_rejected == rejected,
+        "this capture operation already has a different review decision"
+    );
+    let entry_accepted = |index: usize| request.accept && !rejected.contains(&index);
     // Validate the entire review before advancing any member. The human saw
     // the journaled claims; an externally edited pending record is a different
     // proposal and needs a fresh review rather than accepting unseen content.
     if request.accept && !operation.reviewed {
-        for (entry, proposal) in operation.entries.iter().zip(&operation.request.proposals) {
+        for (index, (entry, proposal)) in operation
+            .entries
+            .iter()
+            .zip(&operation.request.proposals)
+            .enumerate()
+        {
+            if !entry_accepted(index) {
+                for iri in std::iter::once(&entry.response.iri).chain(&entry.response.links) {
+                    preflight_resolution(state, iri, false)?;
+                }
+                continue;
+            }
             let input = record_input(state, proposal)?;
             anyhow::ensure!(
                 graph::require_information_record(state, &NamedNode::new(&entry.response.iri)?)?
@@ -245,8 +276,26 @@ fn review_operation_checked(
         }
     }
     operation.review = Some(request.accept);
+    operation.review_rejected = rejected.clone();
     save_operation(&path, &operation)?;
     if !operation.reviewed {
+        if request.accept && !rejected.is_empty() {
+            let members: Vec<String> = operation
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !entry_accepted(*index))
+                .flat_map(|(_, entry)| {
+                    std::iter::once(&entry.response.iri)
+                        .chain(&entry.response.links)
+                        .chain(entry.rationale.iter().filter(|iri| {
+                            current_status(state, iri).as_deref() == Some("proposed")
+                        }))
+                })
+                .cloned()
+                .collect();
+            graph::reject_frozen_proposals_unlocked(state, &members, REVIEWER)?;
+        }
         if !request.accept {
             let mut members: Vec<String> = operation
                 .entries
@@ -270,12 +319,18 @@ fn review_operation_checked(
             );
             graph::reject_frozen_proposals_unlocked(state, &members, REVIEWER)?;
         }
-        for (entry, proposal) in operation.entries.iter().zip(&operation.request.proposals) {
-            resolve_proposal(state, &entry.response.iri, request.accept)?;
+        for (index, (entry, proposal)) in operation
+            .entries
+            .iter()
+            .zip(&operation.request.proposals)
+            .enumerate()
+        {
+            let accept = entry_accepted(index);
+            resolve_proposal(state, &entry.response.iri, accept)?;
             for iri in &entry.response.links {
-                resolve_proposal(state, iri, request.accept)?;
+                resolve_proposal(state, iri, accept)?;
             }
-            if request.accept {
+            if accept {
                 if let Some(target) = &proposal.retracts {
                     match current_status(state, target).as_deref() {
                         Some("deprecated") => {} // The prior attempt committed its lifecycle transaction.

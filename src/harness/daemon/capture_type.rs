@@ -45,6 +45,50 @@ struct SensorProposal {
     kind: String,
     title: String,
     description: String,
+    /// Support-event numbers the proposal rests on.
+    #[serde(default)]
+    support: Vec<usize>,
+}
+
+/// Kinds a coding model's note may mint. Hard rules (Constraint, Requirement)
+/// come from the human or an approved spec, never from the model's own
+/// account of its work; a Pattern claims recurrence one task cannot show.
+const NOTE_KINDS: [&str; 3] = ["ArchitecturalDecision", "Lesson", "AntiPattern"];
+/// Note kinds that must rest on a journaled failure or correction: a lesson
+/// nothing went wrong to teach is general knowledge, not this project's.
+const SUPPORTED_KINDS: [&str; 2] = ["Lesson", "AntiPattern"];
+
+/// Why a sensor proposal may not be typed, or the evidence lines of the
+/// support events it cites.
+fn note_proposal_evidence(
+    proposal: &SensorProposal,
+    support: &[SupportEvent],
+) -> Result<Vec<String>, String> {
+    if !NOTE_KINDS.contains(&proposal.kind.as_str()) {
+        return Err(format!(
+            "a {} is not typed from a coding note: hard rules come from the human or an approved spec, and one task cannot show a recurring pattern",
+            proposal.kind
+        ));
+    }
+    if !SUPPORTED_KINDS.contains(&proposal.kind.as_str()) {
+        return Ok(Vec::new());
+    }
+    let mut cited: Vec<String> = Vec::new();
+    for number in &proposal.support {
+        if let Some(event) = support.iter().find(|event| event.event == *number) {
+            let line = format!("Event {}: {} — {}", event.event, event.kind, event.summary);
+            if !cited.contains(&line) {
+                cited.push(line);
+            }
+        }
+    }
+    if cited.is_empty() {
+        return Err(format!(
+            "a {} must cite a journaled failure or correction, and this one cites none",
+            proposal.kind
+        ));
+    }
+    Ok(cited)
 }
 
 fn cap_title(text: &str) -> String {
@@ -241,8 +285,33 @@ fn derive_relation(
 pub(super) fn derive_relations(
     proposal: &mut KnowledgeProposal,
     obligations: &[String],
+    addressed: &[String],
     kind_of: impl Fn(&str) -> Option<String>,
 ) -> Vec<DerivedRelation> {
+    // The plans named the rules they implement, and the human approved those
+    // plans: each named rule motivates the decision, however many there are.
+    // Only when no plan named any does the single-candidate rule below apply.
+    if proposal.kind == "ArchitecturalDecision" && !addressed.is_empty() {
+        let mut derived = Vec::new();
+        for iri in addressed {
+            let legal = kind_of(iri).is_some_and(|kind| MOTIVATION_KINDS.contains(&kind.as_str()));
+            if legal && !proposal.motivated_by.contains(iri) {
+                proposal.motivated_by.push(iri.clone());
+            }
+            derived.push(DerivedRelation {
+                predicate: "isMotivatedBy".into(),
+                chosen: legal.then(|| iri.clone()),
+                candidates_considered: 1,
+                reason: if legal {
+                    "addressed"
+                } else {
+                    "addressed_not_legal"
+                }
+                .into(),
+            });
+        }
+        return derived;
+    }
     // Nothing to decide, so nothing to journal. `none_legal` means the plan
     // carried obligations and none were legal for this predicate — a real
     // signal. An empty list means no obligations were supplied at all (a plan
@@ -281,6 +350,7 @@ fn base_proposal(
         files,
         components: vec![],
         requirement: None,
+        motivated_by: Vec::new(),
         supersedes: None,
         retracts: None,
         learned_from: None,
@@ -402,6 +472,7 @@ async fn type_note(
             }),
         )
     };
+    let mut dropped: Vec<DroppedProposal> = Vec::new();
     if sensor_enabled {
         match sensor_typing(state, request).await {
             Ok((typed, recovery)) => {
@@ -421,8 +492,26 @@ async fn type_note(
                     if !is_record_kind(&proposal.kind)
                         || proposal.title.trim().is_empty()
                         || proposal.description.trim().is_empty()
-                        || known.contains(&normalized(&proposal.title))
                     {
+                        continue;
+                    }
+                    // Enforced here, not only asked for in the prompt: the
+                    // prompt's "not knowledge" paragraph alone let a Constraint,
+                    // a Pattern and a generic Lesson through (badciv 970e7162).
+                    // Checked before the duplicate-title skip, so every refusal
+                    // is reported.
+                    let support = match note_proposal_evidence(&proposal, &request.support_events) {
+                        Ok(support) => support,
+                        Err(reason) => {
+                            dropped.push(DroppedProposal {
+                                kind: proposal.kind.clone(),
+                                title: cap_title(&proposal.title),
+                                reason,
+                            });
+                            continue;
+                        }
+                    };
+                    if known.contains(&normalized(&proposal.title)) {
                         continue;
                     }
                     // The sensor reads the same note the symbolic decision
@@ -457,12 +546,35 @@ async fn type_note(
                             continue;
                         }
                     }
+                    // One note records one change, so it mints one decision,
+                    // and that decision's description already carries the
+                    // whole note. Further decisions from the same note were
+                    // its other sentences re-typed: in badciv 970e7162 a spec
+                    // restatement and an invented rule came back as decisions
+                    // once they could no longer be Constraints.
+                    if proposal.kind == "ArchitecturalDecision" {
+                        let decided = folded
+                            || raw
+                                .iter()
+                                .any(|(existing, _)| existing.kind == "ArchitecturalDecision");
+                        if decided {
+                            dropped.push(DroppedProposal {
+                                kind: proposal.kind.clone(),
+                                title: cap_title(&proposal.title),
+                                reason: "a note records one change and mints one decision; this change's decision already carries the whole note".into(),
+                            });
+                            continue;
+                        }
+                    }
                     raw.push((
                         base_proposal(
                             &proposal.kind,
                             cap_title(&proposal.title),
                             proposal.description.trim().to_string(),
-                            evidence.clone(),
+                            support
+                                .into_iter()
+                                .chain(evidence.iter().cloned())
+                                .collect(),
                             request.changed_files.clone(),
                         ),
                         ProposalOrigin::LlmSensor,
@@ -476,6 +588,21 @@ async fn type_note(
             }
         }
     }
+    if !dropped.is_empty() {
+        let summary = format!(
+            "dropped {}: {}",
+            dropped.len(),
+            dropped
+                .iter()
+                .map(|d| format!("{} \"{}\"", d.kind, d.title))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        typing_note = Some(match typing_note {
+            Some(note) => format!("{note}; {summary}"),
+            None => summary,
+        });
+    }
     raw.truncate(MAX_PROPOSALS);
     let tiebreak_enabled = sensor_enabled
         && state.engine_config.llm_assist_level == LlmAssistLevel::SensorWithFallback;
@@ -484,20 +611,25 @@ async fn type_note(
         // Before scoring, draw what the approved plan's obligations support.
         // This only ever sets `requirement`/`learned_from`, never a lifecycle
         // field, so a derived edge can never make the capture governing.
-        let derived = derive_relations(&mut proposal, &request.obligation_iris, |iri| {
-            // Re-validate rather than trust the runner's IRIs: the daemon owns
-            // what reaches the graph, as it does for lifecycle targets. An IRI
-            // that is not current ratified knowledge is simply not a candidate.
-            let node = oxigraph::model::NamedNode::new(iri).ok()?;
-            let class = graph::require_information_record(state, &node).ok()?;
-            graph::in_working_set(&current_status(state, iri).unwrap_or_default()).then(|| {
-                class
-                    .rsplit(['#', '/'])
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
-        });
+        let derived = derive_relations(
+            &mut proposal,
+            &request.obligation_iris,
+            &request.addressed_rules,
+            |iri| {
+                // Re-validate rather than trust the runner's IRIs: the daemon owns
+                // what reaches the graph, as it does for lifecycle targets. An IRI
+                // that is not current ratified knowledge is simply not a candidate.
+                let node = oxigraph::model::NamedNode::new(iri).ok()?;
+                let class = graph::require_information_record(state, &node).ok()?;
+                graph::in_working_set(&current_status(state, iri).unwrap_or_default()).then(|| {
+                    class
+                        .rsplit(['#', '/'])
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+            },
+        );
         let scored = score_proposal(state, &request.owner_id, &proposal, thresholds)?;
         let names_rules = rules_named(&proposal, &request.governing_labels);
         let receipt_id = format!("{}-r{index}", request.operation_id);
@@ -682,6 +814,7 @@ async fn type_note(
         typing_note,
         thresholds,
         proposals,
+        dropped,
     })
 }
 
@@ -729,7 +862,7 @@ async fn sensor_typing(
     request: &CaptureTypeRequest,
 ) -> anyhow::Result<(SensorTyping, Option<JsonRecovery>)> {
     let prompt = format!(
-        "You type one engineer's note into durable software-project knowledge. Use only what the note and the listed facts state; do not invent.\n\nObjective of the approved plan: {}\nFiles changed: {}\nChecks: {}\n\nNote:\n{}\n\nReturn up to {MAX_SENSOR_PROPOSALS} proposals. Kinds: ArchitecturalDecision (a choice and why), Lesson (a non-obvious gotcha), Constraint (a hard rule), Requirement (a need), Pattern (a deliberate recurring approach), AntiPattern (something to avoid). Titles are short names under 100 characters; descriptions state the claim in one or two sentences.\n\nNot knowledge, so never propose it: a plan to do something later, or a choice to postpone a requirement or constraint; and general programming, language or tool knowledge any competent engineer already has (how a compiler, build tool or type system behaves, calling a function with the right types). A Lesson is something about this project that someone new to it would get wrong. Return an empty list rather than a generic claim, and when the note carries no durable claim.",
+        "You type one engineer's note into durable software-project knowledge. Use only what the note and the listed facts state; do not invent.\n\nObjective of the approved plan: {}\nFiles changed: {}\nChecks: {}\n\nThings that went wrong or were corrected in this task (cite by number):\n{}\n\nNote:\n{}\n\nReturn up to {MAX_SENSOR_PROPOSALS} proposals. Kinds: ArchitecturalDecision (a choice and why), Lesson (a non-obvious gotcha this task ran into), AntiPattern (something that failed here and should be avoided). A Lesson or AntiPattern must list in support the numbers of the events above that it was learned from; with none, it is not a lesson of this project. Hard rules and requirements come from the human or the spec, not from this note, so never propose them. Titles are short names under 100 characters; descriptions state the claim in one or two sentences.\n\nNot knowledge, so never propose it: a plan to do something later, or a choice to postpone a requirement or constraint; and general programming, language or tool knowledge any competent engineer already has (how a compiler, build tool or type system behaves, calling a function with the right types). A Lesson is something about this project that someone new to it would get wrong. Return an empty list rather than a generic claim, and when the note carries no durable claim.",
         request.plan_summary.trim(),
         if request.changed_files.is_empty() { "none".to_string() } else { request.changed_files.join(", ") },
         request
@@ -738,6 +871,16 @@ async fn sensor_typing(
             .map(|c| format!("{} {}", c.command, if c.success { "passed" } else { "failed" }))
             .collect::<Vec<_>>()
             .join("; "),
+        if request.support_events.is_empty() {
+            "none".to_string()
+        } else {
+            request
+                .support_events
+                .iter()
+                .map(|event| format!("{}: {} — {}", event.event, event.kind, event.summary))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
         request.note.trim(),
     );
     let schema = json!({
@@ -751,11 +894,12 @@ async fn sensor_typing(
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["kind", "title", "description"],
+                    "required": ["kind", "title", "description", "support"],
                     "properties": {
-                        "kind": {"type": "string", "enum": RECORD_KINDS},
+                        "kind": {"type": "string", "enum": NOTE_KINDS},
                         "title": {"type": "string", "minLength": 1, "maxLength": 200},
-                        "description": {"type": "string", "minLength": 1, "maxLength": 2000}
+                        "description": {"type": "string", "minLength": 1, "maxLength": 2000},
+                        "support": {"type": "array", "items": {"type": "integer", "minimum": 0}}
                     }
                 }
             },
@@ -931,6 +1075,7 @@ mod tests {
             files: vec![],
             components: vec![],
             requirement: None,
+            motivated_by: Vec::new(),
             supersedes: None,
             retracts: None,
             learned_from: None,
@@ -1005,7 +1150,7 @@ mod tests {
     #[test]
     fn a_requirement_is_never_a_learned_from_source() {
         let mut lesson = proposal("Lesson");
-        let derived = derive_relations(&mut lesson, &[REQ.into(), AD.into()], |iri| {
+        let derived = derive_relations(&mut lesson, &[REQ.into(), AD.into()], &[], |iri| {
             kinds(&[(REQ, "Requirement"), (AD, "ArchitecturalDecision")])(iri)
         });
         assert_eq!(lesson.learned_from.as_deref(), Some(AD));
@@ -1016,12 +1161,50 @@ mod tests {
         );
     }
 
+    /// Rules the approved plans said they implement all motivate the
+    /// decision, however many; one that is not a current Requirement or
+    /// Constraint is journaled and drawn to nothing. A Lesson is unaffected.
+    #[test]
+    fn addressed_rules_each_motivate_the_decision() {
+        const CON: &str = "https://moosedev.dev/kg/Constraint/c";
+        let lookup = kinds(&[
+            (REQ, "Requirement"),
+            (CON, "Constraint"),
+            (AD, "ArchitecturalDecision"),
+        ]);
+        let mut decision = proposal("ArchitecturalDecision");
+        let derived = derive_relations(
+            &mut decision,
+            &[REQ.into()],
+            &[REQ.into(), CON.into(), AD.into()],
+            &lookup,
+        );
+        assert_eq!(
+            decision.motivated_by,
+            vec![REQ.to_string(), CON.to_string()]
+        );
+        assert!(decision.requirement.is_none());
+        assert_eq!(
+            derived
+                .iter()
+                .map(|d| d.reason.as_str())
+                .collect::<Vec<_>>(),
+            ["addressed", "addressed", "addressed_not_legal"]
+        );
+        assert!(!decision.is_governing());
+
+        let mut lesson = proposal("Lesson");
+        derive_relations(&mut lesson, &[AD.into()], &[REQ.into()], &lookup);
+        assert!(lesson.motivated_by.is_empty());
+        assert_eq!(lesson.learned_from.as_deref(), Some(AD));
+    }
+
     /// A plan over ungoverned files, or a runner older than the obligations
     /// field, must journal nothing rather than a misleading `none_legal`.
     #[test]
     fn no_obligations_at_all_journals_nothing() {
         let mut decision = proposal("ArchitecturalDecision");
-        let derived = derive_relations(&mut decision, &[], |_| None);
+        let derived = derive_relations(&mut decision, &[], &[], |_| None);
         assert!(derived.is_empty(), "{derived:?}");
         assert!(decision.requirement.is_none());
     }
@@ -1029,7 +1212,7 @@ mod tests {
     #[test]
     fn a_kind_with_no_derivation_draws_nothing() {
         let mut constraint = proposal("Constraint");
-        let derived = derive_relations(&mut constraint, &[REQ.into()], |iri| {
+        let derived = derive_relations(&mut constraint, &[REQ.into()], &[], |iri| {
             kinds(&[(REQ, "Requirement")])(iri)
         });
         assert!(derived.is_empty());

@@ -3,11 +3,11 @@
 //! invalidated when the evidence it was typed against changes.
 use super::super::model::observation_preview;
 use super::super::scope::changed_files;
-use super::super::{Phase, Runner};
+use super::super::{ApprovedPlan, Phase, Runner};
 use super::{CaptureNoteState, NoteAnswer, CAPTURE_NOTE_QUESTION, MAX_RETYPES};
 use crate::harness::protocol::{
     CaptureRequest, CaptureTypeRequest, CaptureTypeResponse, KnowledgeProposal, RestatedCandidate,
-    TypedDisposition,
+    SupportEvent, TypedDisposition,
 };
 use anyhow::{bail, Context, Result};
 use serde_json::json;
@@ -124,6 +124,8 @@ impl Runner {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    addressed_rules: self.addressed_rules(),
+                    support_events: self.support_events(),
                 };
                 let response: CaptureTypeResponse = self.post("capture/type", &request).await?;
                 anyhow::ensure!(
@@ -173,6 +175,12 @@ impl Runner {
                         ),
                     };
                     self.intent_event(kind, &detail);
+                }
+                for dropped in &response.dropped {
+                    self.intent_event(
+                        "capture_dropped",
+                        &format!("{} \"{}\": {}", dropped.kind, dropped.title, dropped.reason),
+                    );
                 }
                 let note = self
                     .symbolic_state_mut()
@@ -225,9 +233,14 @@ impl Runner {
             }
         }
         let reason = format!(
-            "Symbolic capture typing ({:?}): {} proposals, {restated} restated existing knowledge.",
+            "Symbolic capture typing ({:?}): {} proposals, {restated} restated existing knowledge{}.",
             response.typing_mode,
-            proposals.len()
+            proposals.len(),
+            if response.dropped.is_empty() {
+                String::new()
+            } else {
+                format!(", {} refused", response.dropped.len())
+            }
         );
         self.task.capture_reason = Some(reason.clone());
         self.event(format!("Capture assessment: {reason}"));
@@ -348,7 +361,6 @@ impl Runner {
     }
 
     fn capture_note_prompt(&self) -> String {
-        let plan = self.task.plan.as_ref();
         let checks: Vec<String> = self
             .task
             .symbolic
@@ -372,24 +384,172 @@ impl Runner {
                     .collect()
             })
             .unwrap_or_default();
-        let recent: Vec<String> = self
+        format!(
+            "{CAPTURE_NOTE_QUESTION}\n\nObjective: {}\nFiles edited: {}\nChecks: {}\n\n{}",
+            self.task.objective,
+            self.changed_file_names().join(", "),
+            if checks.is_empty() {
+                "none".to_string()
+            } else {
+                checks.join("; ")
+            },
+            self.capture_note_work(),
+        )
+    }
+
+    /// Every plan approved in this task with the edits made under it, oldest
+    /// first. A replan replaces `task.plan`, and the earlier plan's work is
+    /// often the decision worth recording, so the note is asked about all of
+    /// it. Edit previews shrink to fit the budget; plan summaries are kept.
+    fn capture_note_work(&self) -> String {
+        const BUDGET: usize = 8_000;
+        let current;
+        let plans: &[ApprovedPlan] = if self.task.approved_plans.is_empty() {
+            // A task journaled before approved plans were kept.
+            current = self
+                .task
+                .plan
+                .iter()
+                .map(|plan| ApprovedPlan {
+                    summary: plan.summary.clone(),
+                    files: plan.files.clone(),
+                    addresses: plan.addresses.clone(),
+                    rules_in_view: Vec::new(),
+                    edit_start: 0,
+                })
+                .collect::<Vec<_>>();
+            &current
+        } else {
+            &self.task.approved_plans
+        };
+        let summaries: usize = plans.iter().map(|plan| plan.summary.len() + 32).sum();
+        let edit_count = self.task.edits.len().max(1);
+        let per_edit = (BUDGET.saturating_sub(summaries) / edit_count).clamp(0, 600);
+        let mut out = String::new();
+        for (index, plan) in plans.iter().enumerate() {
+            let end = plans
+                .get(index + 1)
+                .map_or(self.task.edits.len(), |next| next.edit_start)
+                .min(self.task.edits.len());
+            out.push_str(&format!(
+                "Approved plan {} of {}:\n{}\n",
+                index + 1,
+                plans.len(),
+                plan.summary.trim()
+            ));
+            let start = plan.edit_start.min(end);
+            for edit in &self.task.edits[start..end] {
+                let after = edit.after.as_deref().unwrap_or("[deleted]");
+                if per_edit < 80 {
+                    out.push_str(&format!("- edited {}\n", edit.file));
+                } else {
+                    out.push_str(&format!(
+                        "- edited {}:\n{}\n",
+                        edit.file,
+                        observation_preview(after, per_edit)
+                    ));
+                }
+            }
+            out.push('\n');
+        }
+        out.trim_end().to_string()
+    }
+
+    /// Every rule an approved plan of this task said it implements, once each
+    /// and in the order first named. A plan replaced before any edit was made
+    /// under it implemented nothing, so its rules are not counted.
+    fn addressed_rules(&self) -> Vec<String> {
+        let mut rules: Vec<String> = Vec::new();
+        let plans = &self.task.approved_plans;
+        let named = if plans.is_empty() {
+            self.task
+                .plan
+                .iter()
+                .flat_map(|plan| plan.addresses.iter())
+                .collect::<Vec<_>>()
+        } else {
+            plans
+                .iter()
+                .enumerate()
+                .filter(|(index, plan)| {
+                    let end = plans
+                        .get(index + 1)
+                        .map_or(self.task.edits.len(), |next| next.edit_start);
+                    plan.edit_start < end.min(self.task.edits.len())
+                })
+                .flat_map(|(_, plan)| plan.addresses.iter())
+                .collect()
+        };
+        for iri in named {
+            if !rules.contains(iri) {
+                rules.push(iri.clone());
+            }
+        }
+        rules
+    }
+
+    /// Journal events where the project or the human pushed back: what a
+    /// note-typed Lesson must rest on. Only a failed command (the project's
+    /// own build and tests) and a human message after plan approval count.
+    /// Repairs, scope escapes, held edits and replans are the harness's own
+    /// mechanics; a lesson about them belongs to the harness, not the project
+    /// (badciv dc6a7586 minted "Plan Scope Adherence" from a scope escape).
+    /// Oldest first, the most recent 20.
+    fn support_events(&self) -> Vec<SupportEvent> {
+        const MAX: usize = 20;
+        let approved_at = self
             .task
             .events
             .iter()
-            .rev()
-            .take(6)
-            .map(|event| observation_preview(&event.message, 600))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!(
-            "{CAPTURE_NOTE_QUESTION}\n\nObjective: {}\nApproved plan: {}\nFiles edited: {}\nChecks: {}\n\nRecent journal:\n{}",
-            self.task.objective,
-            plan.map(|p| p.summary.as_str()).unwrap_or(""),
-            self.changed_file_names().join(", "),
-            if checks.is_empty() { "none".to_string() } else { checks.join("; ") },
-            recent.join("\n---\n"),
-        )
+            .position(|event| event.message.starts_with("Human approved the plan"));
+        let mut found = Vec::new();
+        for (index, event) in self.task.events.iter().enumerate() {
+            let message = event.message.as_str();
+            let kind = if message.starts_with("Command: ") {
+                // The status is the line after the grants header, never text
+                // the command printed.
+                let failed = message
+                    .split_once("\nPermission grants: ")
+                    .and_then(|(_, rest)| rest.lines().nth(1))
+                    == Some("Success: false");
+                if !failed {
+                    continue;
+                }
+                "command_failed"
+            } else if message.starts_with("Human response: ")
+                && approved_at.is_some_and(|approved| index > approved)
+            {
+                "human_steer"
+            } else {
+                continue;
+            };
+            found.push(SupportEvent {
+                event: index,
+                kind: kind.into(),
+                summary: one_line(message, 200),
+            });
+        }
+        let skip = found.len().saturating_sub(MAX);
+        found.split_off(skip)
     }
+}
+
+/// `text` on one line (line breaks become " | "), cut at a character
+/// boundary to at most `max` bytes.
+fn one_line(text: &str, max: usize) -> String {
+    let mut line = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if line.len() > max {
+        let mut cut = max.saturating_sub(3);
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+        line.push('…');
+    }
+    line
 }

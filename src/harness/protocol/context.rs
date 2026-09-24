@@ -157,6 +157,12 @@ pub struct ApprovedSpecStatus {
     pub stale: bool,
     /// Accepted Requirements and Constraints the approval owns.
     pub record_count: usize,
+    /// Titles of those records no accepted decision is yet motivated by: the
+    /// spec's work not yet done. Derived from the graph on every read.
+    /// `None` from a daemon that does not derive progress, which must never
+    /// read as "nothing open".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_rules: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +171,37 @@ pub struct CheckpointResponse {
     pub durable: bool,
     pub revision: String,
     pub pending: Vec<String>,
+}
+
+impl ApprovedSpecStatus {
+    /// One line: how many of the spec's records a decision has taken up, and
+    /// the titles of the rest (at most 12 named). None when the daemon did not
+    /// derive the open rules.
+    pub fn progress(&self) -> Option<String> {
+        const NAMED: usize = 12;
+        let open_rules = self.open_rules.as_ref()?;
+        let open = open_rules.len();
+        let addressed = self.record_count.saturating_sub(open);
+        if open == 0 {
+            return Some(format!(
+                "Approved spec {}: all {} rule(s) addressed by recorded decisions.",
+                self.path, self.record_count
+            ));
+        }
+        let mut names = open_rules
+            .iter()
+            .take(NAMED)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if open > NAMED {
+            names.push_str(&format!("; and {} more", open - NAMED));
+        }
+        Some(format!(
+            "Approved spec {}: {addressed} of {} rule(s) addressed by recorded decisions; {open} open: {names}.",
+            self.path, self.record_count
+        ))
+    }
 }
 
 #[cfg(test)]

@@ -693,9 +693,13 @@ fn body(snapshot: &Snapshot, view: &View) -> Text<'static> {
                         text.push_str("Review each record's relevance to its target; acceptance is not proof of correctness.\n");
                     }
                     text.push_str(&final_review(task, review));
-                    for proposal in &review.request.proposals {
+                    let drops = task.review_drops.get(&review.request.operation_id);
+                    for (index, proposal) in review.request.proposals.iter().enumerate() {
+                        let dropped = drops.is_some_and(|drops| drops.contains(&index));
                         text.push_str(&format!(
-                            "\n{} · {}\n{}\n\nEvidence\n{}\n",
+                            "\n[{}]{} {} · {}\n{}\n\nEvidence\n{}\n",
+                            index + 1,
+                            if dropped { " [dropped]" } else { "" },
                             proposal.kind,
                             proposal.title,
                             proposal.description,
@@ -715,7 +719,7 @@ fn body(snapshot: &Snapshot, view: &View) -> Text<'static> {
                         // and neither was rendered before — isMotivatedBy has
                         // been writable since the field existed and a reviewer
                         // could never see it.
-                        if let Some(record) = &proposal.requirement {
+                        for record in proposal.requirement.iter().chain(&proposal.motivated_by) {
                             text.push_str(&format!("Motivated by: {record}\n"));
                         }
                         if let Some(record) = &proposal.learned_from {
@@ -1281,6 +1285,15 @@ fn final_review(task: &Task, review: &ReviewItem) -> String {
                 proposal.names_rules.join(", ")
             ));
         }
+    }
+    for dropped in &typed.dropped {
+        text.push_str(&format!(
+            "Refused · {} · {} — {}\n",
+            dropped.kind, dropped.title, dropped.reason
+        ));
+    }
+    if !review.request.proposals.is_empty() {
+        text.push_str("/drop <n> leaves proposal n out of this capture; /accept keeps the rest.\n");
     }
     text
 }
@@ -2104,6 +2117,7 @@ mod tests {
             summary: "Trim label whitespace".into(),
             files: vec!["labels.py".into()],
             checks: vec!["pytest -q".into()],
+            addresses: vec![],
         });
         let text = gate(&task, &[]);
         assert!(text.contains("PLAN · human approval required"));
@@ -2563,16 +2577,28 @@ mod tests {
                      "origin": "llm_sensor", "resolved_by": "symbolic",
                      "disposition": {"kind": "distinct", "receipt_operation_id": "r3"},
                      "names_rules": ["Preserve names", "Label intent"]}
-                ]
+                ],
+                "dropped": [{"kind": "Constraint", "title": "TUI owns configuration", "reason": "not typed from a coding note"}]
             }
         }))
         .unwrap());
+        task.review_drops.insert("cap-1".into(), vec![0]);
         let text = text_content(&body(&snapshot_for(task), &review_view()));
         assert!(text.contains("REVIEW 1\nFinal checkpoint\n\nCapture note\nNames are stripped before comparison.\nTyping: symbolic with sensor · sensor added one proposal\n"));
         assert!(text.contains("SymbolicDecision · ArchitecturalDecision · Trim label whitespace — restates https://moosedev.dev/kg/Requirement/label-intent; no record proposed\n"));
         assert!(text.contains("SymbolicLesson · Lesson · Strip before comparing — refines https://moosedev.dev/kg/Constraint/preserve-names (0.63)\n"));
         assert!(text.contains("LlmSensor · Pattern · Normalize then compare — new record\n  Names governing rule(s): Preserve names, Label intent — accepting records a decision about them.\n"));
         assert!(text.contains("/accept 1 · /reject 1"));
+        // Refused proposals are named, numbers match /drop, and a dropped
+        // proposal is marked.
+        assert!(text.contains(
+            "Refused · Constraint · TUI owns configuration — not typed from a coding note\n"
+        ));
+        assert!(text.contains("/drop <n> leaves proposal n out of this capture"));
+        assert!(
+            text.contains("[1] [dropped] Lesson · Strip before comparing\n"),
+            "{text}"
+        );
     }
     #[test]
     fn opening_a_task_reuses_its_conversation_without_saving_before_a_lease() {

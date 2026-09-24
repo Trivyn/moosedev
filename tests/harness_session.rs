@@ -695,6 +695,13 @@ async fn approve_spec_starts_a_task_when_none_is_active() {
             "/approve-spec missing.md crates/missing/".into(),
         ))
         .unwrap();
+    // Extraction can run for minutes: the status says so before it starts.
+    until(&mut updates, |state| {
+        state
+            .status
+            .starts_with("Extracting requirements and constraints from missing.md")
+    })
+    .await;
     let state = until(&mut updates, |state| !state.busy && state.task.is_some()).await;
     assert_eq!(
         state.task.unwrap().objective,

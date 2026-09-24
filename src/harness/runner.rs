@@ -51,9 +51,10 @@ pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
 pub use symbolic::{CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
 pub use task::{
-    CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier, KnowledgeSearchResult,
-    KnowledgeTurn, Mode, PendingEdit, PendingPermission, PendingSpecApproval, PermissionGrant,
-    Phase, Plan, ReviewItem, SpecUncited, StandingGuidance, Task,
+    ApprovedPlan, CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier,
+    KnowledgeSearchResult, KnowledgeTurn, Mode, PendingEdit, PendingPermission,
+    PendingSpecApproval, PermissionGrant, Phase, Plan, ReviewItem, SpecUncited, StandingGuidance,
+    Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;
@@ -294,6 +295,8 @@ impl Runner {
             id,
             objective,
             objective_pending: false,
+            approved_plans: Vec::new(),
+            review_drops: BTreeMap::new(),
             mode: Mode::Plan,
             phase: Phase::Planning,
             plan: None,

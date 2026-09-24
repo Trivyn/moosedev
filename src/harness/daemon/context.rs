@@ -245,6 +245,17 @@ pub fn context_snapshot(
             spec.path, spec.record_count, spec.path
         ));
     }
+    // What an approved spec still asks for, so a later task does not take an
+    // earlier task's completion for the spec's.
+    for spec in approved_specs.iter().filter(|spec| {
+        spec.open_rules
+            .as_ref()
+            .is_some_and(|open| !open.is_empty())
+    }) {
+        if let Some(line) = spec.progress() {
+            context.push_str(&format!("\n{line}\n"));
+        }
+    }
     let revision = accepted_revision(state)?;
     anyhow::ensure!(
         generation == state.project_write_generation(),

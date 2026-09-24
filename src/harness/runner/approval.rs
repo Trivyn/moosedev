@@ -45,6 +45,7 @@ impl Runner {
             return self.persist();
         }
         self.derive_symbolic_scope(&context).await?;
+        self.record_approved_plan(&context);
         let state = self.symbolic_state_mut();
         state.unchanged_since_approval = true;
         state.cycle_replan_continuations = 0;
@@ -176,6 +177,7 @@ impl Runner {
             self.event(format!("Objective set: {text}"));
             self.task.objective = text.clone();
             self.task.guidance.clear();
+            self.task.approved_plans.clear();
         } else {
             self.task.guidance = text.clone();
         }
@@ -282,5 +284,38 @@ impl Runner {
         self.task.capture_due = true;
         self.task.after_review = self.task.phase;
         self.persist()
+    }
+}
+
+impl Runner {
+    /// Keep the approved plan beside `task.plan`, which the next replan
+    /// replaces. Approving the same plan again (knowledge changed underneath
+    /// it) refreshes its entry instead of adding one.
+    fn record_approved_plan(&mut self, context: &ContextResponse) {
+        let Some(plan) = self.task.plan.as_ref() else {
+            return;
+        };
+        let rules_in_view = context
+            .governing_rules
+            .iter()
+            .map(|rule| rule.iri.clone())
+            .collect();
+        let edit_start = self.task.edits.len();
+        match self.task.approved_plans.last_mut() {
+            Some(last) if last.summary == plan.summary && last.files == plan.files => {
+                last.addresses = plan.addresses.clone();
+                last.rules_in_view = rules_in_view;
+            }
+            _ => {
+                let entry = ApprovedPlan {
+                    summary: plan.summary.clone(),
+                    files: plan.files.clone(),
+                    addresses: plan.addresses.clone(),
+                    rules_in_view,
+                    edit_start,
+                };
+                self.task.approved_plans.push(entry);
+            }
+        }
     }
 }

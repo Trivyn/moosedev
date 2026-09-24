@@ -210,6 +210,7 @@ pub fn prepare_operation(
                     files: vec![],
                     components: vec![],
                     requirement: None,
+                    motivated_by: Vec::new(),
                     supersedes: None,
                     retracts: None,
                     learned_from: None,
@@ -1286,16 +1287,65 @@ struct ApprovalMarker {
 pub(super) fn approved_spec_statuses(state: &AppState) -> anyhow::Result<Vec<ApprovedSpecStatus>> {
     let root = state.project_root();
     let mut statuses = Vec::new();
-    for (path, marker) in current_approval_markers(state)? {
+    let motivated_by = state.resolve_object_property("isMotivatedBy")?;
+    let markers = current_approval_markers(state)?;
+    let marker_iris: Vec<&str> = markers
+        .iter()
+        .map(|(_, marker)| marker.iri.as_str())
+        .collect();
+    for (path, marker) in &markers {
+        let path = path.clone();
         let current = std::fs::read(root.join(&path)).ok().map(sha256_hex);
+        let records = marker_targets(state, &marker.iri)?;
+        let mut open_rules = Vec::new();
+        for record in &records {
+            if !motivates_a_decision(state, &motivated_by, &marker_iris, &record.iri)? {
+                open_rules.push(record.title.clone());
+            }
+        }
         statuses.push(ApprovedSpecStatus {
             stale: current.is_none() || current != marker.source_sha256,
-            record_count: marker_targets(state, &marker.iri)?.len(),
+            record_count: records.len(),
+            open_rules: Some(open_rules),
             path,
         });
     }
     statuses.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(statuses)
+}
+
+/// Whether an accepted ArchitecturalDecision that is not a spec approval
+/// marker (of this spec or any other that shares the record) is motivated by
+/// `record`. Until one is, the record is work the spec asks for that no
+/// recorded decision has taken up.
+fn motivates_a_decision(
+    state: &AppState,
+    motivated_by: &str,
+    markers: &[&str],
+    record: &str,
+) -> anyhow::Result<bool> {
+    for quad in state.store.quads_for_pattern(
+        None,
+        Some(NamedNodeRef::new(motivated_by)?),
+        Some(NamedNodeRef::new(record)?.into()),
+        Some(GraphNameRef::NamedNode(NamedNodeRef::new(
+            PROJECT_KG_GRAPH_IRI,
+        )?)),
+    ) {
+        let oxigraph::model::NamedOrBlankNode::NamedNode(subject) = quad?.subject else {
+            continue;
+        };
+        if markers.contains(&subject.as_str())
+            || current_status(state, subject.as_str()).as_deref() != Some("accepted")
+        {
+            continue;
+        }
+        let class = graph::require_information_record(state, &subject)?;
+        if graph::local_name(&class) == "ArchitecturalDecision" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn current_approval_for_path(
@@ -1901,15 +1951,57 @@ mod tests {
             .unwrap()
         };
         let fresh = context(&state);
+        assert_eq!(fresh.approved_specs.len(), 1);
+        let status = &fresh.approved_specs[0];
         assert_eq!(
-            fresh.approved_specs,
-            vec![ApprovedSpecStatus {
-                path: "docs/spec.md".into(),
-                stale: false,
-                record_count: 1,
-            }]
+            (status.path.as_str(), status.stale, status.record_count),
+            ("docs/spec.md", false, 1)
         );
+        // No decision has taken the approved record up yet, so it is open and
+        // the context says so.
+        assert_eq!(status.open_rules.as_ref().map(Vec::len), Some(1));
+        assert!(fresh
+            .context
+            .contains("Approved spec docs/spec.md: 0 of 1 rule(s) addressed"));
         assert!(!fresh.context.contains("changed since its approval"));
+
+        // A decision motivated by the record takes it up; the marker's own
+        // edge never counts.
+        let record = marker_targets(
+            &state,
+            &current_approval_for_path(&state, "docs/spec.md")
+                .unwrap()
+                .unwrap()
+                .iri,
+        )
+        .unwrap()
+        .remove(0)
+        .iri;
+        let decision = graph::record_instance(
+            &state,
+            &graph::RecordInput {
+                class_iri: state.resolve_class("ArchitecturalDecision").unwrap(),
+                class_local: "ArchitecturalDecision".into(),
+                properties: vec![
+                    (state.capture.title.clone(), "Accept specs over HTTP".into()),
+                    (
+                        state.capture.description.clone(),
+                        "Specs arrive through the daemon route.".into(),
+                    ),
+                ],
+            },
+            "test-human",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        graph::relate(&state, &decision, "isMotivatedBy", &record).unwrap();
+        let taken_up = context(&state);
+        assert_eq!(taken_up.approved_specs[0].open_rules, Some(vec![]));
+        assert_eq!(
+            taken_up.approved_specs[0].progress().as_deref(),
+            Some("Approved spec docs/spec.md: all 1 rule(s) addressed by recorded decisions.")
+        );
+        assert!(!taken_up.context.contains("Approved spec docs/spec.md:"));
 
         fixture.write_spec("# Spec\nThe harness accepts specs and more.\n");
         let drifted = context(&state);

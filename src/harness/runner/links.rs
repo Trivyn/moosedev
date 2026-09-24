@@ -139,6 +139,7 @@ impl Runner {
                 &ReviewRequest {
                     operation_id: request.operation_id.clone(),
                     accept: false,
+                    rejected: vec![],
                 },
             )
             .await?;
@@ -188,6 +189,7 @@ impl Runner {
                 &ReviewRequest {
                     operation_id: request.operation_id.clone(),
                     accept,
+                    rejected: vec![],
                 },
             )
             .await?;

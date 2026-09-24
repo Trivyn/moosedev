@@ -245,6 +245,22 @@ impl Runner {
         let sections = spec_sections(&lines, &headings);
         let mut records: Vec<SpecRecordDraft> = Vec::new();
         for (index, section) in sections.iter().enumerate() {
+            // Ephemeral, not journaled: a section is one model call that can
+            // take minutes, and the human should see which one is running.
+            if let Some(progress) = &self.progress {
+                let _ = progress.send(crate::harness::progress::Progress::Status(format!(
+                    "Extracting {path}: part {} of {} (lines {}-{}, {})…",
+                    index + 1,
+                    sections.len(),
+                    section.start,
+                    section.end,
+                    if section.heading.is_empty() {
+                        "untitled"
+                    } else {
+                        &section.heading
+                    }
+                )));
+            }
             let prompt = spec_prompt(
                 path,
                 source,
@@ -483,7 +499,7 @@ fn spec_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "You are the extraction sensor for MOOSEDev's symbolic project memory. You are reading part {number} of {total} of a specification, lines {start}-{end} of {count}. Extract only the requirements and hard constraints this part explicitly states. Do not infer goals, implementation choices, patterns, lessons, or architectural decisions. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide.\n\nEach description states its claim completely, in the specification's own terms: every value, name, table row, list item, grammar production and exception the cited lines give. A table, grammar or list of per-item rules is one record whose description restates all of it; never reduce it to a one-sentence summary. Separate claims are separate records. Copy quotation marks and other punctuation exactly as the specification writes them. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>, citing exactly the lines that state the claim, every row of a table or list included. If this part states no requirement or constraint, return an empty records list. Produce no more than {MAX_SECTION_RECORDS} non-duplicate records.\n\nDocument title: {title}\nSpecification path: {path}\nSpecification sha256: {sha}\nLine-addressed part ({heading}):\n{numbered}",
+        "You are the extraction sensor for MOOSEDev's symbolic project memory. You are reading part {number} of {total} of a specification, lines {start}-{end} of {count}. Extract every requirement and hard constraint this part states. Record only what the cited lines state: never add an implication, a goal of your own, or a choice the text does not make. A statement counts whatever its grammar: the system's stated structure and each named component's responsibility, the identity, goals, rules and text a persona or agent is given, and the behaviour the system is meant to produce are Requirements when this part states them. Background story and motivation state nothing and are not records. Use kind exactly Requirement or Constraint: a Constraint is a hard rule the implementation must not violate (a limit, invariant, prohibition or required format); a Requirement is a capability or outcome the system must provide.\n\nEach description states its claim completely, in the specification's own terms: every value, name, table row, list item, grammar production and exception the cited lines give. A table, grammar or list of per-item rules is one record whose description restates all of it; never reduce it to a one-sentence summary. Separate claims are separate records. Copy quotation marks and other punctuation exactly as the specification writes them. Each evidence entry must be only an exact 1-based line reference in the form {path}:<line> or {path}:<start>-<end>, citing exactly the lines that state the claim, every row of a table or list included. If this part states no requirement or constraint, return an empty records list. Produce no more than {MAX_SECTION_RECORDS} non-duplicate records.\n\nDocument title: {title}\nSpecification path: {path}\nSpecification sha256: {sha}\nLine-addressed part ({heading}):\n{numbered}",
         start = section.start,
         end = section.end,
         count = lines.len(),
@@ -1406,6 +1422,7 @@ mod tests {
             summary: "stale pre-approval plan".into(),
             files: vec!["src/lib.rs".into()],
             checks: vec!["cargo check".into()],
+            addresses: vec![],
         });
         runner.persist().unwrap();
         let id = runner.task.id.clone();

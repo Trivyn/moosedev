@@ -850,7 +850,7 @@ impl Controller {
                             break None;
                         },
                         Some(Command::Input(text)) => {
-                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/deny" | "/accept" | "/reject" | "/no-knowledge")) {
+                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/deny" | "/accept" | "/reject" | "/drop" | "/keep" | "/no-knowledge")) {
                                 self.status = "Review commands must be submitted while the gate is displayed. Your command is retained for resubmission.".into();
                                 let _ = self.output.send(Update::RestoreInput(text));
                             } else {
@@ -939,6 +939,52 @@ impl Controller {
             outcome?;
         }
         Ok(!quit)
+    }
+    /// Extract and prepare a spec preview: one model call per section, which
+    /// can take minutes. Driven like a step so the status line and progress
+    /// stream while it runs. It is not interruptible: once the daemon has
+    /// prepared a preview, abandoning the call would leave an operation the
+    /// task never recorded.
+    async fn prepare_spec(&mut self, path: &str, covers: &[String]) -> Result<()> {
+        self.status = format!("Extracting requirements and constraints from {path}…");
+        self.publish(true);
+        let mut runner = self
+            .runner
+            .take()
+            .context("No active task. Describe work first.")?;
+        let result = {
+            let operation = runner.begin_spec_approval(path, covers);
+            tokio::pin!(operation);
+            loop {
+                tokio::select! {
+                    result = &mut operation => break result,
+                    event = self.progress_rx.recv() => {
+                        if let Some(event) = event {
+                            self.progress_event(event);
+                            self.publish(true);
+                        }
+                    },
+                    command = self.input.recv() => {
+                        match command {
+                            Some(Command::Input(text)) => {
+                                let _ = self.output.send(Update::RestoreInput(text));
+                            }
+                            Some(Command::Quit) | None => self.quitting = true,
+                            Some(Command::Interrupt) => {}
+                        }
+                        self.status = format!(
+                            "Spec extraction from {path} is running and cannot be interrupted; input is kept until it finishes."
+                        );
+                        self.publish(true);
+                    },
+                }
+            }
+        };
+        while let Ok(event) = self.progress_rx.try_recv() {
+            self.progress_event(event);
+        }
+        self.runner = Some(runner);
+        result
     }
     fn progress_event(&mut self, event: ProgressEvent) {
         let mut live = self.live.lock().unwrap();
@@ -1099,7 +1145,8 @@ impl Controller {
                 }
             }
             "/approve" | "/approve-spec" | "/deny" | "/permissions" | "/revoke-permission"
-            | "/accept" | "/reject" | "/no-knowledge" | "/plan" | "/review" | "/continue" => {
+            | "/accept" | "/reject" | "/drop" | "/keep" | "/no-knowledge" | "/plan" | "/review"
+            | "/continue" => {
                 // A spec approval is planning work in its own right: it needs
                 // no prior description of work, so the spec names the task.
                 if command == "/approve-spec" {
@@ -1113,6 +1160,14 @@ impl Controller {
                             self.start_task(spec_approval_objective(path)).await?;
                             self.save_conversation()?;
                         }
+                        let covers: Vec<String> = parts.skip(1).map(str::to_string).collect();
+                        self.prepare_spec(path, &covers).await?;
+                        if let Some(runner) = &self.runner {
+                            self.conversation.sync_task(&runner.task);
+                        }
+                        self.save_conversation()?;
+                        self.auto = true;
+                        return Ok(());
                     }
                 }
                 let runner = self
@@ -1152,19 +1207,14 @@ impl Controller {
                         );
                         runner.revoke_permission(id)?;
                     }
-                    "/approve-spec" => match parts.next() {
-                        None => {
-                            anyhow::ensure!(
-                                runner.task.phase == Phase::AwaitingSpecApproval,
-                                "There is no spec approval pending. Use /approve-spec <path> [covered paths] first."
-                            );
-                            runner.approve_spec().await?;
-                        }
-                        Some(path) => {
-                            let covers: Vec<String> = parts.map(str::to_string).collect();
-                            runner.begin_spec_approval(path, &covers).await?;
-                        }
-                    },
+                    // With a path it was prepared above; alone it accepts the preview.
+                    "/approve-spec" => {
+                        anyhow::ensure!(
+                            runner.task.phase == Phase::AwaitingSpecApproval,
+                            "There is no spec approval pending. Use /approve-spec <path> [covered paths] first."
+                        );
+                        runner.approve_spec().await?;
+                    }
                     "/accept" | "/reject" => {
                         let accept = command == "/accept";
                         if let Some(id) = parts.next() {
@@ -1198,6 +1248,28 @@ impl Controller {
                         } else {
                             runner.review(accept).await?;
                         }
+                    }
+                    "/drop" | "/keep" => {
+                        let dropped = command == "/drop";
+                        let usage = || {
+                            anyhow::anyhow!(
+                                "usage: {command} <proposal> or {command} <review>.<proposal>"
+                            )
+                        };
+                        let target = parts.next().ok_or_else(usage)?;
+                        let (review, number) = match target.split_once('.') {
+                            Some((review, number)) => (
+                                Some(review.parse::<usize>().map_err(|_| usage())?),
+                                number.parse::<usize>().map_err(|_| usage())?,
+                            ),
+                            None => (None, target.parse::<usize>().map_err(|_| usage())?),
+                        };
+                        let title = runner.set_proposal_dropped(review, number, dropped)?;
+                        self.status = if dropped {
+                            format!("Dropped \"{title}\"; /accept keeps the rest.")
+                        } else {
+                            format!("Kept \"{title}\".")
+                        };
                     }
                     "/no-knowledge" => runner.confirm_no_knowledge().await?,
                     "/plan" => runner.mode_plan().await?,
@@ -1324,7 +1396,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/drop <proposal> · /keep <proposal> — leave one numbered proposal out of the capture you accept (or <review>.<proposal>)\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
 
 #[cfg(test)]
 mod tests {

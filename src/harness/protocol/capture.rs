@@ -40,6 +40,11 @@ pub struct KnowledgeProposal {
     pub components: Vec<String>,
     #[serde(default)]
     pub requirement: Option<String>,
+    /// Further `isMotivatedBy` targets: the rules the approved plans said
+    /// they implement. Written through the same relation path as
+    /// `requirement`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motivated_by: Vec<String>,
     #[serde(default)]
     pub supersedes: Option<String>,
     #[serde(default)]
@@ -227,4 +232,9 @@ pub struct RestatedLinks {
 pub struct ReviewRequest {
     pub operation_id: String,
     pub accept: bool,
+    /// On an accept, indices into the operation's entries (the request's
+    /// proposals, in order) the human rejected: those resolve as rejected and
+    /// the rest as accepted. Ignored on a whole rejection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<usize>,
 }

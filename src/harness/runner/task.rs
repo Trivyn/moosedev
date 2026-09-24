@@ -28,6 +28,28 @@ pub struct Plan {
     pub summary: String,
     pub files: Vec<String>,
     pub checks: Vec<String>,
+    /// IRIs of the governing rules the model says this plan implements,
+    /// resolved against the rules delivered for its files. These, not the
+    /// summary's prose, become the capture's `isMotivatedBy` edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
+}
+
+/// One plan the human approved during this task. A replan replaces
+/// `Task::plan`; this history is what the final capture note and the first-edit
+/// guard see of the earlier ones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedPlan {
+    pub summary: String,
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
+    /// IRIs of every governing rule delivered for the plan files at approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules_in_view: Vec<String>,
+    /// `Task::edits` index where this plan's work begins.
+    pub edit_start: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -238,6 +260,13 @@ pub struct Task {
     pub mode: Mode,
     pub phase: Phase,
     pub plan: Option<Plan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved_plans: Vec<ApprovedPlan>,
+    /// Proposals the human dropped from a pending capture, by operation id:
+    /// 0-based indices into that capture's proposals. Sent as the review's
+    /// `rejected` entries when the capture is accepted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub review_drops: BTreeMap<String, Vec<usize>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_change_scope: Option<ApprovedChangeScope>,
     /// Derived scope, associations, capture note and recovery counters.

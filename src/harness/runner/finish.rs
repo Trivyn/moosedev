@@ -84,7 +84,31 @@ impl Runner {
                 vacuous.join("; ")
             )
             };
-        self.event(format!("Complete: {verified}, human knowledge review resolved, graph validated and durably checkpointed.{specs}"));
+        // Completing this task is not completing the spec it worked from: say
+        // how much of each governing spec recorded decisions have taken up.
+        let governed = self
+            .task
+            .approved_plans
+            .iter()
+            .any(|plan| !plan.rules_in_view.is_empty());
+        let progress: Vec<String> = if governed {
+            self.context
+                .iter()
+                .flat_map(|context| context.approved_specs.iter())
+                .filter(|spec| spec.record_count > 0)
+                .filter_map(|spec| spec.progress())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for line in &progress {
+            self.intent_event("spec_progress", line);
+        }
+        let progress = progress
+            .iter()
+            .map(|line| format!(" {line}"))
+            .collect::<String>();
+        self.event(format!("Complete: {verified}, human knowledge review resolved, graph validated and durably checkpointed.{specs}{progress}"));
         self.persist()
     }
 

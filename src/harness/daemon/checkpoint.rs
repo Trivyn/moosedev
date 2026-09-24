@@ -52,14 +52,18 @@ fn checkpoint_status(
         if !operation.captured || !operation.reviewed {
             pending.insert(format!("operation:{id}"));
         }
-        for entry in operation.entries {
+        for (index, entry) in operation.entries.into_iter().enumerate() {
+            // An entry the human rejected within an accept resolves as rejected.
+            let review = operation
+                .review
+                .map(|accepted| accepted && !operation.review_rejected.contains(&index));
             for iri in std::iter::once(entry.response.iri).chain(entry.response.links) {
                 // A completed local journal is not proof that the canonical
                 // graph still contains its writes (for example after a branch
                 // switch). Missing or conflicting records remain obligations.
                 let status = current_status(state, &iri);
                 let resolved = matches!(
-                    (operation.review, status.as_deref()),
+                    (review, status.as_deref()),
                     (Some(true), Some("accepted" | "superseded" | "deprecated"))
                         | (Some(false), Some("rejected"))
                 );

@@ -122,6 +122,14 @@ impl Runner {
             .iter()
             .map(|rule| rule.iri.as_str())
             .chain(delivered.evidence_iris.iter().map(String::as_str))
+            // Rules delivered when a plan of this task was approved were in
+            // view for the whole of its work, not only on the turn they came.
+            .chain(
+                self.task
+                    .approved_plans
+                    .iter()
+                    .flat_map(|plan| plan.rules_in_view.iter().map(String::as_str)),
+            )
             .collect();
         let unseen: Vec<&str> = read
             .governing_rules
@@ -340,6 +348,7 @@ impl Runner {
                 summary,
                 files,
                 checks,
+                addresses,
             } => {
                 let context = self.refresh(&files).await?;
                 // Before anything is stored: a plan whose summary skips a
@@ -347,6 +356,7 @@ impl Runner {
                 if self.plan_coverage_return(&summary, &context) {
                     return self.persist();
                 }
+                let addresses = self.resolve_plan_addresses(&addresses, &context);
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));
@@ -354,6 +364,7 @@ impl Runner {
                     summary: summary.clone(),
                     files,
                     checks,
+                    addresses,
                 });
                 self.task.approved_change_scope = None;
                 self.start_intent_cycle();

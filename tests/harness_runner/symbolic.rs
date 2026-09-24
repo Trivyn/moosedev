@@ -1134,6 +1134,7 @@ async fn symbolic_restated_note_completes_without_new_knowledge() {
             files: vec![],
             components: vec![],
             requirement: None,
+            motivated_by: Vec::new(),
             supersedes: None,
             retracts: None,
             learned_from: None,
@@ -1218,6 +1219,7 @@ async fn symbolic_restated_note_links_the_existing_record_through_one_capture() 
             files: vec!["labels.py".into()],
             components: vec![],
             requirement: None,
+            motivated_by: Vec::new(),
             supersedes: None,
             retracts: None,
             learned_from: None,
@@ -1478,4 +1480,248 @@ async fn plan_grounding_resets_when_a_new_plan_is_approved() {
     let state = runner.task.symbolic.clone().unwrap();
     assert!(state.plan_grounded, "the memo survives resume");
     assert_eq!(state.cycle_replan_continuations, 2);
+}
+
+/// Two approved plans in one task: the second (after a replan) does not erase
+/// the first. The capture note is asked about both plans and the first plan's
+/// edit, and the capture carries every rule either plan said it implements,
+/// resolved to IRIs; an entry naming no rule is dropped and journaled.
+#[tokio::test]
+async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![
+        GoverningRule {
+            iri: PRESERVE.into(),
+            label: "Preserve display label behavior".into(),
+            kind: "Requirement".into(),
+            claim: "hasDescription: Display labels render as before.\n".into(),
+            via: "via: linked to labels.py".into(),
+        },
+        GoverningRule {
+            iri: UNLINKED.into(),
+            label: "Labels never exceed one line".into(),
+            kind: "Constraint".into(),
+            claim: "hasDescription: A label is a single line.\n".into(),
+            via: "via: linked to labels.py".into(),
+        },
+    ];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display label behavior while adding a normalize helper; labels never exceed one line is kept as is","files":["labels.py"],"checks":["true"],"addresses":["Preserve display label behavior","No such rule"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().addresses,
+        vec![PRESERVE.to_string()]
+    );
+    assert_eq!(
+        intent_details(&runner, "plan_addresses_unresolved"),
+        vec!["No such rule"]
+    );
+    runner.approve_plan().await.unwrap();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+
+    fixture.conversational(json!({"action":"replan","reason":"Labels must also be single-line"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    fixture.conversational(json!({"action":"plan","summary":"Collapse newlines in normalize so labels never exceed one line; preserve display label behavior otherwise","files":["labels.py"],"checks":["true"],"addresses":["[Constraint] Labels never exceed one line"]}));
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.confirm_no_knowledge().await.unwrap(),
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.approved_plans.len(), 2);
+    assert_eq!(runner.task.approved_plans[1].edit_start, 1);
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return value.strip()\n","new_text":"    return \" \".join(value.split())\n"}));
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 2);
+
+    fixture.conversational(
+        json!({"action":"finish","summary":"Normalize strips and collapses whitespace."}),
+    );
+    for _ in 0..4 {
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.review(true).await.unwrap(),
+            Phase::Verifying => break,
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    runner.task.check_results = vec![passed_check()];
+    fixture.note("Normalization lives in one helper so both rules are enforced in one place.");
+    runner.advance().await.unwrap();
+
+    let prompt = fixture.last_model_prompt("harness_capture_note");
+    assert!(prompt.contains(
+        "Approved plan 1 of 2:\nPreserve display label behavior while adding a normalize helper"
+    ));
+    assert!(prompt.contains("Approved plan 2 of 2:\nCollapse newlines in normalize"));
+    assert!(
+        prompt.contains("def normalize(value):\n    return value.strip()"),
+        "the first plan's edit is shown: {prompt}"
+    );
+    let request = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .capture_type_requests
+        .last()
+        .cloned()
+        .expect("the note was typed");
+    assert_eq!(
+        request.addressed_rules,
+        vec![PRESERVE.to_string(), UNLINKED.to_string()]
+    );
+
+    // Completing the task is not completing the spec: the completion says how
+    // much of it recorded decisions have taken up.
+    fixture.shared.lock().unwrap().approved_specs = vec![ApprovedSpecStatus {
+        path: "spec.md".into(),
+        stale: false,
+        record_count: 3,
+        open_rules: Some(vec!["Labels are localized".into()]),
+    }];
+    for _ in 0..4 {
+        match runner.task.phase {
+            Phase::Complete => break,
+            Phase::AwaitingReview => runner.review(true).await.unwrap(),
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::Complete);
+    let complete = &runner.task.events.last().unwrap().message;
+    assert!(
+        complete.ends_with("Approved spec spec.md: 2 of 3 rule(s) addressed by recorded decisions; 1 open: Labels are localized."),
+        "{complete}"
+    );
+}
+
+/// A plan returned for an unmentioned rule names the rule by its own kind.
+#[tokio::test]
+async fn a_returned_plan_names_each_rule_by_its_kind() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![GoverningRule {
+        iri: PRESERVE.into(),
+        label: "Preserve display label behavior".into(),
+        kind: "Requirement".into(),
+        claim: "hasDescription: Display labels render exactly as before.\n".into(),
+        via: "via: linked to labels.py".into(),
+    }];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[]}));
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_none(), "the plan was returned");
+    assert!(
+        runner.task.last_response.contains(&format!(
+            "[Requirement] Preserve display label behavior ({PRESERVE})"
+        )),
+        "{}",
+        runner.task.last_response
+    );
+}
+
+/// What the project and the human pushed back with reaches typing as
+/// numbered support events: a failed command and a human steer after
+/// approval. The harness's own mechanics (a repair, a scope escape) and a
+/// successful command do not.
+#[tokio::test]
+async fn capture_typing_receives_the_tasks_failures_and_corrections() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
+    for message in [
+        "Command: true\nPermission grants: none\nSuccess: false\nlabel kept its padding",
+        "Correcting harness_action, attempt 2 of 3: model output failed validation",
+        "Scope escape: the model proposed an edit to x.py outside the plan files [labels.py]; replanning (1 of 3).",
+        "Human response: strip only trailing whitespace",
+        "Command: ls\nPermission grants: none\nSuccess: true\nSuccess: false printed by the tool",
+    ] {
+        runner.task.events.push(moosedev::harness::runner::Event {
+            message: message.into(),
+        });
+    }
+    let first = runner.task.events.len() - 5;
+    fixture.note("Normalization lives in one helper.");
+    runner.advance().await.unwrap();
+    let request = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .capture_type_requests
+        .last()
+        .cloned()
+        .expect("the note was typed");
+    let support: Vec<(usize, &str, &str)> = request
+        .support_events
+        .iter()
+        .map(|event| (event.event, event.kind.as_str(), event.summary.as_str()))
+        .collect();
+    assert_eq!(
+        support,
+        vec![
+            (
+                first,
+                "command_failed",
+                "Command: true | Permission grants: none | Success: false | label kept its padding"
+            ),
+            (
+                first + 3,
+                "human_steer",
+                "Human response: strip only trailing whitespace"
+            ),
+        ]
+    );
+}
+
+/// `/drop` leaves one numbered proposal out of the capture the human
+/// accepts: the review carries it as a rejected entry and the journal names
+/// it.
+#[tokio::test]
+async fn a_dropped_proposal_is_rejected_within_the_accepted_capture() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = symbolic_task_ready_for_final_capture(&fixture).await;
+    fixture.typed(vec![
+        distinct_proposal("ArchitecturalDecision", "One normalize helper"),
+        distinct_proposal("Lesson", "Resolver two is critical"),
+    ]);
+    fixture.note("Normalization lives in one helper.");
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert!(runner.set_proposal_dropped(None, 3, true).is_err());
+    assert_eq!(
+        runner.set_proposal_dropped(None, 2, true).unwrap(),
+        "Resolver two is critical"
+    );
+    runner.review(true).await.unwrap();
+    let review = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .review_requests
+        .last()
+        .cloned()
+        .unwrap();
+    assert!(review.accept);
+    assert_eq!(review.rejected, vec![1]);
+    assert!(runner.task.review_drops.is_empty());
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .starts_with("Human accepted captured knowledge; dropped: Resolver two is critical.")));
+    assert!(intent_details(&runner, "record_review")
+        .iter()
+        .any(|detail| detail.starts_with("rejected ")));
 }

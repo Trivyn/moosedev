@@ -66,6 +66,7 @@ fn proposal(kind: &str, title: &str) -> KnowledgeProposal {
         files: vec![],
         components: vec![],
         requirement: None,
+        motivated_by: Vec::new(),
         supersedes: None,
         retracts: None,
         learned_from: None,
@@ -232,6 +233,7 @@ fn intent_bindings_are_proven_reviewed_and_idempotent() {
     let review = ReviewRequest {
         operation_id: "intent-reuse".into(),
         accept: true,
+        rejected: vec![],
     };
     assert!(review_links(&state, &review).unwrap().pending.is_empty());
     assert!(review_links(&state, &review).unwrap().pending.is_empty());
@@ -268,6 +270,7 @@ fn intent_review_rejects_changed_source_and_allows_human_rejection() {
     let mut review = ReviewRequest {
         operation_id: "intent-stale".into(),
         accept: true,
+        rejected: vec![],
     };
     assert!(review_links(&state, &review)
         .unwrap_err()
@@ -363,6 +366,7 @@ fn intent_review_rejects_truncated_journal_associations() {
         &ReviewRequest {
             operation_id: "intent-tamper".into(),
             accept: true,
+            rejected: vec![],
         },
     )
     .unwrap_err();
@@ -398,6 +402,7 @@ fn abandoning_uncertain_intent_rejects_unacknowledged_links_and_blocks_late_requ
         &ReviewRequest {
             operation_id: early.operation_id.clone(),
             accept: false,
+            rejected: vec![],
         },
     )
     .unwrap();
@@ -419,7 +424,8 @@ fn abandoning_uncertain_intent_rejects_unacknowledged_links_and_blocks_late_requ
         &state,
         &ReviewRequest {
             operation_id: uncertain.operation_id.clone(),
-            accept: false
+            accept: false,
+            rejected: vec![],
         }
     )
     .unwrap()
@@ -1436,6 +1442,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
         .json(&ReviewRequest {
             operation_id: "all-kinds".into(),
             accept: true,
+            rejected: vec![],
         })
         .await;
     review.assert_status_ok();
@@ -1479,6 +1486,7 @@ fn lost_capture_response_and_restart_reuse_record_identity() {
     let review = ReviewRequest {
         operation_id: capture.operation_id.clone(),
         accept: false,
+        rejected: vec![],
     };
     assert!(daemon::review_operation(&state, &review)
         .unwrap()
@@ -1492,6 +1500,7 @@ fn lost_capture_response_and_restart_reuse_record_identity() {
         &state,
         &ReviewRequest {
             accept: true,
+            rejected: vec![],
             ..review
         }
     )
@@ -1538,6 +1547,7 @@ fn supersession_and_retraction_leave_predecessor_current_until_review() {
         &ReviewRequest {
             operation_id: "replace".into(),
             accept: true,
+            rejected: vec![],
         },
     )
     .unwrap();
@@ -1555,6 +1565,7 @@ fn supersession_and_retraction_leave_predecessor_current_until_review() {
     let review = ReviewRequest {
         operation_id: "retract".into(),
         accept: true,
+        rejected: vec![],
     };
     daemon::review_operation(&state, &review).unwrap();
     daemon::review_operation(&state, &review).unwrap();
@@ -1670,6 +1681,7 @@ fn file_links_are_queued_and_materialized_only_after_record_ratification() {
     let review = ReviewRequest {
         operation_id: "linked".into(),
         accept: true,
+        rejected: vec![],
     };
     let result = daemon::review_operation(&state, &review).unwrap();
     assert!(result.pending.is_empty() && result.conforms && result.durable);
@@ -1701,6 +1713,7 @@ fn empty_capture_is_an_explicit_human_review_obligation() {
     let review = ReviewRequest {
         operation_id: "no-change".into(),
         accept: true,
+        rejected: vec![],
     };
     assert!(daemon::review_operation(&state, &review)
         .unwrap()
@@ -1735,7 +1748,8 @@ fn changed_pending_claim_requires_fresh_review() {
         &state,
         &ReviewRequest {
             operation_id: "changed".into(),
-            accept: true
+            accept: true,
+            rejected: vec![],
         }
     )
     .is_err());
@@ -1852,6 +1866,7 @@ fn unseen_supersedes_relation_cannot_retire_a_record() {
         &ReviewRequest {
             operation_id: "tampered-edge".into(),
             accept: true,
+            rejected: vec![],
         },
     )
     .unwrap_err();
@@ -1869,6 +1884,7 @@ fn unseen_supersedes_relation_cannot_retire_a_record() {
         &ReviewRequest {
             operation_id: "tampered-edge".into(),
             accept: false,
+            rejected: vec![],
         },
     )
     .unwrap();
@@ -1915,6 +1931,7 @@ fn unseen_semantic_edges_cannot_be_accepted_with_an_unchanged_title() {
             &ReviewRequest {
                 operation_id: predicate.into(),
                 accept: true,
+                rejected: vec![],
             },
         )
         .unwrap_err();
@@ -1965,6 +1982,7 @@ fn missing_retraction_target_leaves_entire_batch_pending_and_rejectable() {
         &ReviewRequest {
             operation_id: "missing-target".into(),
             accept: true,
+            rejected: vec![],
         },
     )
     .unwrap_err();
@@ -1980,6 +1998,7 @@ fn missing_retraction_target_leaves_entire_batch_pending_and_rejectable() {
         &ReviewRequest {
             operation_id: "missing-target".into(),
             accept: false,
+            rejected: vec![],
         },
     )
     .unwrap();
@@ -2016,6 +2035,7 @@ async fn simple_review_attests_its_revision_transition_and_retries_keep_that_pai
     let request = ReviewRequest {
         operation_id: "attested".into(),
         accept: true,
+        rejected: vec![],
     };
     let response = server
         .post("/api/v1/harness/review")
@@ -2095,6 +2115,7 @@ async fn review_expecting(state: &Arc<AppState>, operation_id: &str, expected: &
         .json(&ReviewRequest {
             operation_id: operation_id.into(),
             accept: true,
+            rejected: vec![],
         })
         .await;
     let header = |name: &str| {
@@ -2727,6 +2748,7 @@ fn symbolic_association_filters_kinds_and_binds_by_legal_predicate() {
         &ReviewRequest {
             operation_id: "seed-render-link".into(),
             accept: true,
+            rejected: vec![],
         },
     )
     .unwrap();
@@ -3150,6 +3172,8 @@ fn typing_request(
         obligation_iris: vec![],
         obligations_digest: String::new(),
         governing_labels: vec![],
+        addressed_rules: vec![],
+        support_events: vec![],
     }
 }
 
@@ -3459,9 +3483,11 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
         let scripted = script.content.lock().unwrap().clone();
         let content = scripted.unwrap_or_else(|| json!({
             "proposals": [
-                {"kind":"Lesson","title":"Renderer trims labels before display","description":"Trimming happens in the renderer, not the model layer."},
+                {"kind":"Lesson","title":"Renderer trims labels before display","description":"Trimming happens in the renderer, not the model layer.","support":[7]},
                 {"kind":"ArchitecturalDecision","title":"Preserve display behavior","description":"Duplicate of the symbolic decision; dropped."},
-                {"kind":"Bogus","title":"Not a kind","description":"Dropped."}
+                {"kind":"Constraint","title":"Labels are trimmed only in the renderer","description":"The model's own rule.","support":[7]},
+                {"kind":"Pattern","title":"Keep crate dependencies","description":"Maintain them as features are added.","support":[]},
+                {"kind":"Lesson","title":"Workspace resolver matters","description":"Generic tool knowledge.","support":[99]}
             ],
             "reason": "The note states one gotcha."
         }));
@@ -3503,7 +3529,7 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     )
     .unwrap();
     let revision = daemon::accepted_revision(&state).unwrap();
-    let request = typing_request(
+    let mut request = typing_request(
         "type-sensor",
         "The renderer trims labels; the model layer must not.",
         "Preserve display behavior",
@@ -3511,11 +3537,34 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
         &[],
         &revision,
     );
+    request.support_events = vec![SupportEvent {
+        event: 7,
+        kind: "command_failed".into(),
+        summary: "Command: pytest -q | Success: false | label kept its padding".into(),
+    }];
     let response = capture_type_operation(&state, request).await.unwrap();
     assert_eq!(response.typing_mode, TypingMode::Sensor);
+    // A note never mints a hard rule or a Pattern, and a Lesson must cite a
+    // supplied failure or correction; each refusal is named, not silent.
+    assert_eq!(
+        response
+            .dropped
+            .iter()
+            .map(|d| (d.kind.as_str(), d.title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Constraint", "Labels are trimmed only in the renderer"),
+            ("Pattern", "Keep crate dependencies"),
+            ("Lesson", "Workspace resolver matters"),
+        ]
+    );
+    assert!(response.dropped[0]
+        .reason
+        .contains("hard rules come from the human or an approved spec"));
+    assert!(response.dropped[2].reason.contains("cites none"));
     assert_eq!(
         response.typing_note.as_deref(),
-        Some("sensor reply parsed after recovery: fence")
+        Some("sensor reply parsed after recovery: fence; dropped 3: Constraint \"Labels are trimmed only in the renderer\"; Pattern \"Keep crate dependencies\"; Lesson \"Workspace resolver matters\"")
     );
     let origins: Vec<_> = response.proposals.iter().map(|p| p.origin).collect();
     assert_eq!(
@@ -3532,7 +3581,12 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     );
     assert_eq!(
         sensed.proposal.evidence,
-        vec!["event 12: capture note".to_string()]
+        vec![
+            "Event 7: command_failed — Command: pytest -q | Success: false | label kept its padding"
+                .to_string(),
+            "event 12: capture note".to_string()
+        ],
+        "the Lesson's evidence is the failure it was learned from"
     );
     assert_eq!(sensed.proposal.files, vec!["labels.py".to_string()]);
     assert!(matches!(
@@ -3552,10 +3606,16 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
     let prompt = recorded[0]["messages"].to_string();
     assert!(prompt.contains("a plan to do something later"), "{prompt}");
     assert!(prompt.contains("general programming, language or tool knowledge"));
+    assert!(
+        prompt.contains("7: command_failed — Command: pytest -q"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("Constraint (a hard rule)"));
 
     // The sensor's first decision is the symbolic decision under a better
     // name: it folds in, its claim leading and the approved plan kept as its
-    // own paragraph. A second decision stands on its own. The claim names one
+    // own paragraph. A second decision from the same note is refused: the
+    // change's decision already carries the whole note. The claim names one
     // governing rule; the plan paragraph's mention of another does not count.
     *script.content.lock().unwrap() = Some(json!({
         "proposals": [
@@ -3586,14 +3646,14 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
         .collect();
     assert_eq!(
         summary,
-        vec![
-            (
-                ProposalOrigin::SymbolicDecision,
-                "Renderer owns label trimming"
-            ),
-            (ProposalOrigin::LlmSensor, "Views show labels as given"),
-        ]
+        vec![(
+            ProposalOrigin::SymbolicDecision,
+            "Renderer owns label trimming"
+        )]
     );
+    assert_eq!(response.dropped.len(), 1);
+    assert_eq!(response.dropped[0].title, "Views show labels as given");
+    assert!(response.dropped[0].reason.contains("mints one decision"));
     let decision = &response.proposals[0].proposal;
     assert!(decision.description.starts_with(
         "Labels are trimmed in the renderer so every view shows the same text.\n\nThe renderer trims labels; the model layer must not.\n\nApproved plan: Preserve display behavior\n\n"
@@ -3607,7 +3667,6 @@ async fn sensor_capture_typing_uses_the_daemon_model_and_degrades_on_failure() {
         response.proposals[0].names_rules,
         vec!["Model layer".to_string()]
     );
-    assert!(response.proposals[1].names_rules.is_empty());
     *script.content.lock().unwrap() = None;
 
     script.fail.store(true, Ordering::Release);
@@ -3812,6 +3871,7 @@ fn accept(state: &AppState, operation_id: &str) {
         &ReviewRequest {
             operation_id: operation_id.into(),
             accept: true,
+            rejected: vec![],
         },
     )
     .unwrap();
@@ -4821,4 +4881,153 @@ async fn one_prompt_carries_a_shared_claim_once_across_its_files() {
         second.contains("- [Constraint] Listener binds before serving"),
         "the header still names the rule under every file it governs: {second}"
     );
+}
+
+/// Every rule a decision's approved plans addressed is written as its own
+/// `isMotivatedBy` edge beside the single-candidate `requirement`, once each,
+/// and the edges survive review.
+#[test]
+fn capture_writes_one_motivation_edge_per_addressed_rule() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let need = record(&state, "Requirement", "Render every faction");
+    let limit = record(&state, "Constraint", "Store games in sqlite");
+    let mut decision = proposal("ArchitecturalDecision", "Three-crate workspace");
+    decision.requirement = Some(need.clone());
+    decision.motivated_by = vec![need.clone(), limit.clone()];
+    let capture = daemon::capture_operation(&state, request("addressed", vec![decision])).unwrap();
+    daemon::review_operation(
+        &state,
+        &ReviewRequest {
+            operation_id: "addressed".into(),
+            accept: true,
+            rejected: vec![],
+        },
+    )
+    .unwrap();
+    let iri = capture.proposals[0].iri.clone();
+    let predicate = state.resolve_object_property("isMotivatedBy").unwrap();
+    let mut targets: Vec<String> = state
+        .store
+        .quads_for_pattern(
+            Some(oxigraph::model::NamedNodeRef::new(&iri).unwrap().into()),
+            Some(oxigraph::model::NamedNodeRef::new(&predicate).unwrap()),
+            None,
+            None,
+        )
+        .map(|quad| quad.unwrap().object.to_string())
+        .collect();
+    targets.sort();
+    targets.dedup();
+    let mut expected = vec![format!("<{need}>"), format!("<{limit}>")];
+    expected.sort();
+    assert_eq!(targets, expected);
+}
+
+/// A record's lifecycle status straight from the store.
+fn status_of(state: &AppState, iri: &str) -> Option<String> {
+    state
+        .store
+        .quads_for_pattern(
+            Some(oxigraph::model::NamedNodeRef::new(iri).unwrap().into()),
+            Some(oxigraph::model::NamedNodeRef::new(&state.capture.status).unwrap()),
+            None,
+            None,
+        )
+        .filter_map(|quad| match quad.unwrap().object {
+            oxigraph::model::Term::Literal(value) => Some(value.value().to_string()),
+            _ => None,
+        })
+        .next()
+}
+
+/// The human rejects one proposal of a capture and accepts the rest: that
+/// entry resolves as rejected, the others as accepted, and the acceptance
+/// is still attested as the operation's own revision change. A replay must
+/// present the same decision.
+#[tokio::test]
+async fn a_review_can_reject_single_proposals_and_still_attest() {
+    let fixture = Fixture::new();
+    let state = Arc::new(fixture.state());
+    let base = review_base(&state);
+    let capture = daemon::capture_operation(
+        &state,
+        request(
+            "partial",
+            vec![
+                proposal("ArchitecturalDecision", "Three crates in one workspace"),
+                proposal("Lesson", "Resolver two is critical"),
+                proposal("Lesson", "The map parser rejects tabs"),
+            ],
+        ),
+    )
+    .unwrap();
+    let iris: Vec<String> = capture.proposals.iter().map(|p| p.iri.clone()).collect();
+    let server = TestServer::new(build_routes(state.clone())).unwrap();
+    let partial = ReviewRequest {
+        operation_id: "partial".into(),
+        accept: true,
+        rejected: vec![1],
+    };
+    let response = server
+        .post("/api/v1/harness/review")
+        .add_header("x-moosedev-expected-revision", base.clone())
+        .json(&partial)
+        .await;
+    response.assert_status_ok();
+    let checkpoint: CheckpointResponse = response.json();
+    assert!(
+        checkpoint.conforms && checkpoint.durable && checkpoint.pending.is_empty(),
+        "{} {} {:?}",
+        checkpoint.conforms,
+        checkpoint.durable,
+        checkpoint.pending
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-moosedev-review-result-revision")
+            .map(|value| value.to_str().unwrap().to_string()),
+        Some(checkpoint.revision.clone()),
+        "a partial acceptance is still the operation's own change"
+    );
+    let statuses: Vec<Option<String>> = iris.iter().map(|iri| status_of(&state, iri)).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            Some("accepted".to_string()),
+            Some("rejected".to_string()),
+            Some("accepted".to_string())
+        ]
+    );
+
+    // The same decision replays; a different one is refused.
+    server
+        .post("/api/v1/harness/review")
+        .json(&partial)
+        .await
+        .assert_status_ok();
+    let changed = server
+        .post("/api/v1/harness/review")
+        .json(&ReviewRequest {
+            operation_id: "partial".into(),
+            accept: true,
+            rejected: vec![],
+        })
+        .await;
+    assert!(!changed.status_code().is_success());
+    let out_of_range = daemon::capture_operation(
+        &state,
+        request("range", vec![proposal("Lesson", "One more learning")]),
+    );
+    assert!(out_of_range.is_ok());
+    assert!(daemon::review_operation(
+        &state,
+        &ReviewRequest {
+            operation_id: "range".into(),
+            accept: true,
+            rejected: vec![3],
+        }
+    )
+    .is_err());
 }

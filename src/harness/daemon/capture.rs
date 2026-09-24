@@ -201,8 +201,11 @@ fn prepare(
             .iter()
             .map(|c| ("concerns".into(), c.clone()))
             .collect();
-        if let Some(requirement) = &proposal.requirement {
-            relations.push(("isMotivatedBy".into(), requirement.clone()));
+        for requirement in proposal.requirement.iter().chain(&proposal.motivated_by) {
+            let relation = ("isMotivatedBy".to_string(), requirement.clone());
+            if !relations.contains(&relation) {
+                relations.push(relation);
+            }
         }
         // Travels the same ordinary path as isMotivatedBy: validated by
         // `plan_relation_args` against the ontology's domain and range, frozen
@@ -355,6 +358,7 @@ fn prepare(
         review_result_revision: None,
         review_claims: None,
         review_unminted_symbols: Vec::new(),
+        review_rejected: Vec::new(),
     })
 }
 

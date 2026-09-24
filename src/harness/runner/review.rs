@@ -7,10 +7,33 @@ use crate::harness::protocol::{
 use anyhow::{Context, Result};
 
 impl Runner {
+    /// The daemon decision for a capture the human accepted or rejected: an
+    /// accept carries the proposals the human dropped, and dropping every
+    /// proposal of a capture with nothing restated is a rejection.
+    fn capture_decision(&self, request: &CaptureRequest, accept: bool) -> (bool, Vec<usize>) {
+        let dropped = self
+            .task
+            .review_drops
+            .get(&request.operation_id)
+            .cloned()
+            .unwrap_or_default();
+        if !accept {
+            return (false, Vec::new());
+        }
+        if !request.proposals.is_empty()
+            && dropped.len() == request.proposals.len()
+            && request.restated.is_empty()
+        {
+            return (false, Vec::new());
+        }
+        (true, dropped)
+    }
+
     pub(super) async fn resolve_capture(
         &mut self,
         request: &CaptureRequest,
         accept: bool,
+        rejected: &[usize],
     ) -> Result<CheckpointResponse> {
         let attestable = accept && self.own_final_capture(request);
         if attestable {
@@ -31,6 +54,7 @@ impl Runner {
             .json(&ReviewRequest {
                 operation_id: request.operation_id.clone(),
                 accept,
+                rejected: rejected.to_vec(),
             });
         if let Some(revision) = &expected {
             call = call.header("x-moosedev-expected-revision", revision);
@@ -83,6 +107,79 @@ impl Runner {
         Ok(checkpoint)
     }
 
+    /// Mark proposal `number` (1-based, as the review card numbers it) of a
+    /// pending capture dropped or kept. `review` (1-based) picks the card when
+    /// more than one capture awaits review. Returns the proposal's title.
+    pub fn set_proposal_dropped(
+        &mut self,
+        review: Option<usize>,
+        number: usize,
+        dropped: bool,
+    ) -> Result<String> {
+        let captures: Vec<&CaptureRequest> = match review {
+            Some(review) => vec![
+                &self
+                    .task
+                    .reviews
+                    .get(
+                        review
+                            .checked_sub(1)
+                            .context("Review numbers start at 1.")?,
+                    )
+                    .filter(|item| item.intent_links.is_none())
+                    .context("No capture review with that number.")?
+                    .request,
+            ],
+            None => self
+                .task
+                .reviews
+                .iter()
+                .filter(|item| item.intent_links.is_none())
+                .map(|item| &item.request)
+                .chain(self.task.capture_request.iter())
+                .collect(),
+        };
+        let request = match captures.as_slice() {
+            [request] => (*request).clone(),
+            [] => anyhow::bail!("no captured proposals await review"),
+            _ => anyhow::bail!(
+                "several captures await review; name one as <review>.<proposal>, for example /drop 1.{number}"
+            ),
+        };
+        let index = number
+            .checked_sub(1)
+            .context("Proposal numbers start at 1.")?;
+        let title = request
+            .proposals
+            .get(index)
+            .context("No proposal with that number in this capture.")?
+            .title
+            .clone();
+        let drops = self
+            .task
+            .review_drops
+            .entry(request.operation_id.clone())
+            .or_default();
+        drops.retain(|known| *known != index);
+        if dropped {
+            drops.push(index);
+            drops.sort_unstable();
+        }
+        if drops.is_empty() {
+            self.task.review_drops.remove(&request.operation_id);
+        }
+        self.intent_event(
+            if dropped {
+                "proposal_dropped"
+            } else {
+                "proposal_kept"
+            },
+            &format!("{number} {title} in {}", request.operation_id),
+        );
+        self.persist()?;
+        Ok(title)
+    }
+
     /// One human decision on one card; journaled as one interaction.
     pub async fn review_operation(&mut self, id: &str, accept: bool) -> Result<()> {
         self.settle_review(id, accept, true).await
@@ -110,19 +207,22 @@ impl Runner {
         }
         anyhow::ensure!(self.task.batch_capture, "interactive review is not enabled");
         let request = self.task.reviews[position].request.clone();
-        let result = self.resolve_capture(&request, accept).await?;
+        let (accept, rejected) = self.capture_decision(&request, accept);
+        let result = self.resolve_capture(&request, accept, &rejected).await?;
         anyhow::ensure!(
             result.durable && result.conforms && result.pending.is_empty(),
             "knowledge review is not durably resolved"
         );
         let item = self.task.reviews.remove(position);
+        self.task.review_drops.remove(id);
         if journal_interaction {
             self.emit_review_interaction(accept, id);
         }
-        self.emit_capture_review_events(id, &item.response, accept);
+        self.emit_capture_review_events(id, &item.response, accept, &rejected);
         self.event(format!(
-            "Human {} captured knowledge.\n{}",
+            "Human {} captured knowledge{}.\n{}",
             if accept { "accepted" } else { "rejected" },
+            dropped_titles(&item.request, &rejected),
             serde_json::to_string(&item.request)?
         ));
         if self.task.reviews.is_empty() && self.task.phase == Phase::AwaitingReview {
@@ -216,14 +316,17 @@ impl Runner {
             .capture_request
             .clone()
             .context("missing capture operation")?;
-        let result = self.resolve_capture(&request, accept).await?;
+        let (accept, rejected) = self.capture_decision(&request, accept);
+        let result = self.resolve_capture(&request, accept, &rejected).await?;
         anyhow::ensure!(
             result.durable && result.conforms && result.pending.is_empty(),
             "knowledge review is not durably resolved"
         );
+        self.task.review_drops.remove(&request.operation_id);
         self.event(format!(
-            "Human {} captured knowledge.\n{}",
+            "Human {} captured knowledge{}.\n{}",
             if accept { "accepted" } else { "rejected" },
+            dropped_titles(&request, &rejected),
             serde_json::to_string(&self.task.capture_request)?
         ));
         self.emit_review_interaction(accept, &request.operation_id);
@@ -232,7 +335,7 @@ impl Runner {
             .pending_capture
             .clone()
             .context("missing persisted capture response")?;
-        self.emit_capture_review_events(&request.operation_id, &pending, accept);
+        self.emit_capture_review_events(&request.operation_id, &pending, accept, &rejected);
         self.task.pending_capture = None;
         self.task.capture_request = None;
         self.commit_capture_page();
@@ -281,9 +384,14 @@ impl Runner {
         operation_id: &str,
         response: &CaptureResponse,
         accept: bool,
+        rejected: &[usize],
     ) {
-        let disposition = if accept { "accepted" } else { "rejected" };
-        for proposal in &response.proposals {
+        for (index, proposal) in response.proposals.iter().enumerate() {
+            let disposition = if accept && !rejected.contains(&index) {
+                "accepted"
+            } else {
+                "rejected"
+            };
             self.intent_event(
                 "record_review",
                 &format!("{disposition} {} in {operation_id}", proposal.iri),
@@ -295,6 +403,7 @@ impl Runner {
                 );
             }
         }
+        let disposition = if accept { "accepted" } else { "rejected" };
         for link in response
             .restated
             .iter()
@@ -305,5 +414,19 @@ impl Runner {
                 &format!("{disposition} {link} in {operation_id}"),
             );
         }
+    }
+}
+
+/// "; dropped: A; B" for the proposals rejected within an accept.
+fn dropped_titles(request: &CaptureRequest, rejected: &[usize]) -> String {
+    let titles: Vec<&str> = rejected
+        .iter()
+        .filter_map(|index| request.proposals.get(*index))
+        .map(|proposal| proposal.title.as_str())
+        .collect();
+    if titles.is_empty() {
+        String::new()
+    } else {
+        format!("; dropped: {}", titles.join("; "))
     }
 }

@@ -75,6 +75,10 @@ struct Operation {
     /// when the review base was recorded; the acceptance's own are the rest.
     #[serde(default)]
     review_restated_edges: Vec<String>,
+    /// Entries the human rejected within an accepted review, sorted. Frozen
+    /// with `review`: a replay must present the same set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    review_rejected: Vec<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
