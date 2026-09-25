@@ -50,6 +50,7 @@ pub fn load_components(state: &AppState) -> anyhow::Result<Vec<ComponentEntry>> 
     let system_component = state.resolve_class("SystemComponent")?;
     let class = NamedNodeRef::new(&system_component)?;
     let covers_path = datatype_property_iri(&state.arch_vocab, "coversPath")?;
+    let component_name = datatype_property_iri(&state.arch_vocab, "hasComponentName").ok();
     let mut out = Vec::new();
 
     // SystemComponents are identified by their rdf:type in the project graph.
@@ -66,9 +67,17 @@ pub fn load_components(state: &AppState) -> anyhow::Result<Vec<ComponentEntry>> 
         };
         let iri = subject.as_str().to_string();
 
-        // rdfs:label is canonical for display/search; capture.title is kept as
-        // a compatibility fallback for older or partially seeded records.
+        // rdfs:label is canonical for display/search; hasComponentName is where
+        // a component's own name lives, and capture.title is kept as a
+        // compatibility fallback for older or partially seeded records. The
+        // same order as the walk's via label, so a component is known by one
+        // name everywhere (spec approval matches components by it).
         let name = first_literal(&state.store, &iri, moose::RDFS_LABEL)
+            .or_else(|| {
+                component_name
+                    .as_deref()
+                    .and_then(|predicate| first_literal(&state.store, &iri, predicate))
+            })
             .or_else(|| first_literal(&state.store, &iri, &state.capture.title))
             .unwrap_or_else(|| iri.clone());
         let covers_paths = literal_values(&state.store, &iri, &covers_path)?;
@@ -194,7 +203,10 @@ pub fn components_for_path<'a>(
         }
     }
     matched.sort_by_key(|(_, specificity)| std::cmp::Reverse(*specificity));
-    matched.into_iter().map(|(component, _)| component).collect()
+    matched
+        .into_iter()
+        .map(|(component, _)| component)
+        .collect()
 }
 
 /// Declare repository path coverage for a minted `SystemComponent`.

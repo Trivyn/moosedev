@@ -94,6 +94,25 @@ pub struct SpecPrepareRequest {
     /// records unanchored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub covers: Vec<String>,
+    /// Parts of the covered scope that the specification names, each
+    /// governing only the records listed for it. Records in no part govern
+    /// the approval's component (`covers`). Requires `covers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<SpecPartDraft>,
+}
+
+/// A part of a specification's scope: a component, module or package the
+/// specification names, with the repository path that holds it and the
+/// records (indices into the drafts) that govern only it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecPartDraft {
+    pub name: String,
+    /// Repo-relative: a directory ending in `/`, or a file.
+    pub path: String,
+    /// The draft that names the part and states its responsibility.
+    pub stated_by: usize,
+    pub records: Vec<usize>,
 }
 
 /// Ask for the current approval of a specification path.
@@ -116,6 +135,19 @@ pub struct SpecCurrentResponse {
     /// The source digest that approval recorded.
     pub source_sha256: Option<String>,
     pub drafts: Vec<SpecRecordDraft>,
+    /// The SystemComponents the drafts' records concern, with the indices of
+    /// those drafts, so an unchanged source is prepared again with the same
+    /// parts and no model call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<SpecComponentGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecComponentGroup {
+    pub name: String,
+    pub covers: Vec<String>,
+    pub records: Vec<usize>,
 }
 
 /// The SystemComponent an approval anchors its records to, minted or reused
@@ -131,6 +163,17 @@ pub struct SpecComponentPlan {
     pub covers: Vec<String>,
     /// The paths this approval adds to an existing component.
     pub added: Vec<String>,
+}
+
+/// A part's component as the approval will mint or reuse it, with the entries
+/// (indices) that will concern it instead of the approval's component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecPartPlan {
+    pub plan: SpecComponentPlan,
+    /// The title of the record that names the part.
+    pub stated_by: String,
+    pub records: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +241,8 @@ pub struct SpecPrepareResponse {
     pub retirements: Vec<SpecRetirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component: Option<SpecComponentPlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<SpecPartPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_approval_iri: Option<String>,
     /// The same source digest and active record set are already approved.

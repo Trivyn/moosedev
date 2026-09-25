@@ -55,18 +55,55 @@ pub fn current_operation(
             approval_iri: None,
             source_sha256: None,
             drafts: vec![],
+            components: vec![],
         });
     };
-    let mut drafts = marker_targets(state, &marker.iri)?
+    let mut records = marker_targets(state, &marker.iri)?
         .into_iter()
-        .map(draft_of)
+        .map(|record| {
+            let iri = record.iri.clone();
+            anyhow::Ok((draft_of(record)?, iri))
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    drafts.sort_by(|a, b| (&a.kind, &a.title).cmp(&(&b.kind, &b.title)));
+    records.sort_by(|a, b| (&a.0.kind, &a.0.title).cmp(&(&b.0.kind, &b.0.title)));
+    // The components the records concern, so an unchanged source is prepared
+    // again with the same parts and no model call.
+    let concerns = state.resolve_object_property("concerns")?;
+    let catalog = graph::load_components(state)?;
+    // Only the components the approval recorded as its own; a marker from
+    // before scoping recorded none, and then every component counts.
+    let own = marker_components(state, &marker.iri);
+    let mut components: Vec<SpecComponentGroup> = Vec::new();
+    for (index, (_, iri)) in records.iter().enumerate() {
+        for component in &catalog {
+            let Some(component_iri) = component.iri.as_deref() else {
+                continue;
+            };
+            if !own.is_empty() && !own.iter().any(|owned| owned == component_iri) {
+                continue;
+            }
+            if !direct_objects(state, iri, &concerns)?.contains(component_iri) {
+                continue;
+            }
+            match components
+                .iter_mut()
+                .find(|group| group.name == component.name)
+            {
+                Some(group) => group.records.push(index),
+                None => components.push(SpecComponentGroup {
+                    name: component.name.clone(),
+                    covers: component.covers_paths.iter().cloned().collect(),
+                    records: vec![index],
+                }),
+            }
+        }
+    }
     Ok(SpecCurrentResponse {
         path: request.path,
         approval_iri: Some(marker.iri),
         source_sha256: marker.source_sha256,
-        drafts,
+        drafts: records.into_iter().map(|(draft, _)| draft).collect(),
+        components,
     })
 }
 
@@ -132,6 +169,7 @@ pub fn prepare_operation(
     validate_source(state, &request.path, &request.source_sha256)?;
     validate_drafts(&request.path, &request.drafts, state)?;
     let component = plan_component(state, &request)?;
+    let parts = plan_parts(state, &request, component.as_ref())?;
 
     let _operations = lock_operations()?;
     let path = journal_path(state, &request.operation_id, "spec.json")?;
@@ -308,19 +346,40 @@ pub fn prepare_operation(
     }
     // An unchanged batch still needs an approval when it is being anchored to
     // a component for the first time, or the component gains paths.
+    // …or a part is new, gains paths, or an entry's edges differ from its
+    // assigned component (its part's, else the approval's).
     let component_pending = match &component {
         None => false,
         Some(plan) => {
             let concerns = state.resolve_object_property("concerns")?;
-            plan.new
+            let mut owned: Vec<String> = planned_component_iris(Some(plan), &parts)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            if let Some(marker) = &previous {
+                owned.extend(marker_components(state, &marker.iri));
+            }
+            let targets = entry_targets(entries.len(), Some(plan), &parts);
+            let mut pending = plan.new
                 || !plan.added.is_empty()
-                || entries.iter().try_fold(false, |pending, entry| {
-                    anyhow::Ok(
-                        pending
-                            || !direct_objects(state, entry.disposition.active_iri(), &concerns)?
-                                .contains(&plan.iri),
-                    )
-                })?
+                || parts
+                    .iter()
+                    .any(|part| part.plan.new || !part.plan.added.is_empty());
+            for (entry, target) in entries.iter().zip(&targets) {
+                let iri = entry.disposition.active_iri();
+                let edges = direct_objects(state, iri, &concerns)?;
+                pending |= target.is_some_and(|target| !edges.contains(target));
+                if !referenced_by_other_current_approval(
+                    state,
+                    iri,
+                    previous.as_ref().map(|marker| marker.iri.as_str()),
+                )? {
+                    pending |= owned
+                        .iter()
+                        .any(|owned| Some(owned.as_str()) != *target && edges.contains(owned));
+                }
+            }
+            pending
         }
     };
     let already_approved = records_unchanged && !component_pending;
@@ -334,6 +393,7 @@ pub fn prepare_operation(
         entries,
         retirements,
         component,
+        parts,
         previous_approval_iri: previous.as_ref().map(|marker| marker.iri.clone()),
         already_approved,
     };
@@ -503,8 +563,17 @@ fn verify_committed_operation(state: &AppState, operation: &SpecOperation) -> an
                 &operation.approval_iri,
                 &state.capture.description
             )
-            .as_deref()
-                == Some(marker_description.as_str()),
+            .is_some_and(|stored| {
+                // A marker committed before markers recorded their components
+                // carries the same text without the `spec-component:` lines.
+                stored == marker_description
+                    || stored
+                        == marker_description
+                            .lines()
+                            .filter(|line| !line.starts_with("spec-component: "))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+            }),
         "accepted spec approval marker does not match its durable operation"
     );
 
@@ -579,31 +648,137 @@ fn verify_committed_operation(state: &AppState, operation: &SpecOperation) -> an
     }
     if let Some(plan) = &operation.preview.component {
         let concerns = state.resolve_object_property("concerns")?;
-        let covered = graph::load_components(state)?
-            .into_iter()
-            .find(|component| component.iri.as_deref() == Some(plan.iri.as_str()))
-            .map(|component| component.covers_paths)
-            .unwrap_or_default();
-        anyhow::ensure!(
-            plan.covers.iter().all(|path| covered.contains(path))
-                && operation
-                    .preview
-                    .entries
+        let components = graph::load_components(state)?;
+        let covered = |plan: &SpecComponentPlan| {
+            components
+                .iter()
+                .find(|component| component.iri.as_deref() == Some(plan.iri.as_str()))
+                .is_some_and(|component| {
+                    plan.covers
+                        .iter()
+                        .all(|path| component.covers_paths.contains(path))
+                })
+        };
+        let parts = &operation.preview.parts;
+        let owned = owned_components(state, &operation.preview);
+        let targets = entry_targets(operation.preview.entries.len(), Some(plan), parts);
+        let mut matches = covered(plan) && parts.iter().all(|part| covered(&part.plan));
+        for (entry, target) in operation.preview.entries.iter().zip(&targets) {
+            let iri = entry.disposition.active_iri();
+            let edges = direct_objects(state, iri, &concerns)?;
+            matches &= target.is_some_and(|target| edges.contains(target));
+            if !referenced_by_other_current_approval(state, iri, Some(&operation.approval_iri))? {
+                matches &= owned
                     .iter()
-                    .try_fold(true, |all, entry| {
-                        anyhow::Ok(
-                            all && direct_objects(
-                                state,
-                                entry.disposition.active_iri(),
-                                &concerns,
-                            )?
-                            .contains(&plan.iri),
-                        )
-                    })?,
+                    .all(|owned| Some(owned.as_str()) == *target || !edges.contains(owned));
+            }
+        }
+        anyhow::ensure!(
+            matches,
             "committed spec component differs from its durable preview"
         );
     }
     Ok(())
+}
+
+/// Every component this approval plans: its own, then each part's.
+fn planned_component_iris<'a>(
+    component: Option<&'a SpecComponentPlan>,
+    parts: &'a [SpecPartPlan],
+) -> Vec<&'a str> {
+    component
+        .map(|plan| plan.iri.as_str())
+        .into_iter()
+        .chain(parts.iter().map(|part| part.plan.iri.as_str()))
+        .collect()
+}
+
+/// The component each entry will concern: its part's, else the approval's;
+/// `None` when the approval anchors nothing.
+fn entry_targets<'a>(
+    entries: usize,
+    component: Option<&'a SpecComponentPlan>,
+    parts: &'a [SpecPartPlan],
+) -> Vec<Option<&'a str>> {
+    let mut targets = vec![component.map(|plan| plan.iri.as_str()); entries];
+    for part in parts {
+        for &index in &part.records {
+            if let Some(target) = targets.get_mut(index) {
+                *target = Some(part.plan.iri.as_str());
+            }
+        }
+    }
+    targets
+}
+
+/// The parts of the covered scope the request names, validated and planned.
+/// A part needs the approval's own component (covered paths), a name of its
+/// own, a path inside the covered paths, and records no other part claims.
+fn plan_parts(
+    state: &AppState,
+    request: &SpecPrepareRequest,
+    component: Option<&SpecComponentPlan>,
+) -> anyhow::Result<Vec<SpecPartPlan>> {
+    if request.parts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let component = component.ok_or_else(|| anyhow::anyhow!("spec parts need covered paths"))?;
+    anyhow::ensure!(
+        request.parts.len() <= 16,
+        "a specification names at most 16 parts"
+    );
+    let covers = normalize_covers(state, &request.covers)?;
+    let mut names: HashSet<String> = HashSet::from([component.name.to_lowercase()]);
+    let mut claimed: HashSet<usize> = HashSet::new();
+    let mut planned = Vec::new();
+    for part in &request.parts {
+        let name = part.name.trim();
+        anyhow::ensure!(
+            !name.is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
+            "spec part name must be 1..=80 bytes without control characters"
+        );
+        anyhow::ensure!(
+            names.insert(name.to_lowercase()),
+            "spec part {name:?} repeats another part or the specification's component"
+        );
+        let stated_by = request.drafts.get(part.stated_by).ok_or_else(|| {
+            anyhow::anyhow!(
+                "spec part {name:?} is stated by record {}, which does not exist",
+                part.stated_by
+            )
+        })?;
+        for &index in &part.records {
+            anyhow::ensure!(
+                index < request.drafts.len(),
+                "spec part {name:?} lists record {index}, which does not exist"
+            );
+            anyhow::ensure!(
+                claimed.insert(index),
+                "record {index} is listed in more than one spec part"
+            );
+        }
+        let path = normalize_covers(state, std::slice::from_ref(&part.path))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("spec part {name:?} has no path"))?;
+        anyhow::ensure!(
+            path != graph::COVERS_WHOLE_PROJECT && !covers.contains(&path),
+            "spec part {name:?} must cover less than the specification does"
+        );
+        anyhow::ensure!(
+            covers
+                .iter()
+                .any(|cover| cover == graph::COVERS_WHOLE_PROJECT
+                    || (cover.ends_with('/') && path.starts_with(cover.as_str()))),
+            "spec part {name:?} path {path} lies outside the specification's covered paths"
+        );
+        planned.push(SpecPartPlan {
+            plan: plan_named_component(state, name, &[path])?,
+            stated_by: stated_by.title.clone(),
+            records: part.records.clone(),
+        });
+    }
+    Ok(planned)
 }
 
 fn verify_unchanged_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Result<()> {
@@ -662,13 +837,57 @@ fn marker_description(operation: &SpecOperation) -> String {
         .map(|entry| format!("- {}", entry.disposition.active_iri()))
         .collect::<Vec<_>>()
         .join("\n");
+    // The components this approval scopes its records to, so a later
+    // approval of the same spec knows which `concerns` edges it owns.
+    let components: String = planned_component_iris(
+        operation.preview.component.as_ref(),
+        &operation.preview.parts,
+    )
+    .iter()
+    .map(|iri| format!("\nspec-component: {iri}"))
+    .collect();
     format!(
-        "Approved specification.\n\nApprover: harness human\nApproved at: {}\nActive records:\n{}\n\nspec-approval: {}\nspec-sha256: {}",
+        "Approved specification.\n\nApprover: harness human\nApproved at: {}\nActive records:\n{}\n\nspec-approval: {}\nspec-sha256: {}{components}",
         operation.timestamp,
         active,
         operation.request.path,
         operation.request.source_sha256,
     )
+}
+
+/// The components an approval marker recorded as its own (`spec-component:`
+/// lines). A marker written before markers recorded them owns none this way:
+/// inferring them from the records' edges could remove an edge added for
+/// another reason, and a stale edge is less harmful than a lost one, so a
+/// legacy approval re-anchored elsewhere keeps its old edge (as it always did).
+fn marker_components(state: &AppState, marker_iri: &str) -> Vec<String> {
+    graph::first_literal(&state.store, marker_iri, &state.capture.description)
+        .map(|description| {
+            description
+                .lines()
+                .filter_map(|line| line.strip_prefix("spec-component: "))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every component whose `concerns` edges from this approval's records the
+/// approval manages: the ones it plans and the ones the approval it replaces
+/// recorded (a part dropped since then must lose its edges too).
+fn owned_components(state: &AppState, preview: &SpecPrepareResponse) -> Vec<String> {
+    let mut owned: Vec<String> = planned_component_iris(preview.component.as_ref(), &preview.parts)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if let Some(previous) = &preview.previous_approval_iri {
+        for iri in marker_components(state, previous) {
+            if !owned.contains(&iri) {
+                owned.push(iri);
+            }
+        }
+    }
+    owned
 }
 
 fn direct_objects(
@@ -815,9 +1034,15 @@ fn preflight_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Re
             "previous spec approval is no longer current"
         );
     }
-    if let Some(plan) = &operation.preview.component {
-        let minted = graph::load_components(state)?
-            .into_iter()
+    let components = graph::load_components(state)?;
+    for plan in operation
+        .preview
+        .component
+        .iter()
+        .chain(operation.preview.parts.iter().map(|part| &part.plan))
+    {
+        let minted = components
+            .iter()
             .any(|component| component.iri.as_deref() == Some(plan.iri.as_str()));
         anyhow::ensure!(
             minted != plan.new,
@@ -924,7 +1149,47 @@ fn commit_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Resul
         .map(|entry| entry.disposition.active_iri().to_string())
         .collect();
     if let Some(plan) = &operation.preview.component {
-        insertions.extend(component_quads(state, plan, &active_iris, &stamp)?);
+        // Each record concerns its part's component, else the approval's, and
+        // loses any edge to another component this approval plans: a record
+        // moved into a part stops governing the rest of the covered scope.
+        let parts = &operation.preview.parts;
+        let targets = entry_targets(active_iris.len(), Some(plan), parts);
+        let concerns = state.resolve_object_property("concerns")?;
+        let owned = owned_components(state, &operation.preview);
+        let assigned = |component: &str| -> Vec<String> {
+            active_iris
+                .iter()
+                .zip(&targets)
+                .filter(|(_, target)| **target == Some(component))
+                .map(|(iri, _)| iri.clone())
+                .collect()
+        };
+        insertions.extend(component_quads(state, plan, &assigned(&plan.iri), &stamp)?);
+        for part in parts {
+            insertions.extend(component_quads(
+                state,
+                &part.plan,
+                &assigned(&part.plan.iri),
+                &stamp,
+            )?);
+        }
+        for (iri, target) in active_iris.iter().zip(&targets) {
+            // A record another current spec also owns only gains edges: the
+            // other approval's scope for it is not this one's to remove.
+            if referenced_by_other_current_approval(
+                state,
+                iri,
+                operation.preview.previous_approval_iri.as_deref(),
+            )? {
+                continue;
+            }
+            let edges = direct_objects(state, iri, &concerns)?;
+            for other in &owned {
+                if Some(other.as_str()) != *target && edges.contains(other) {
+                    removals.push(object_quad(iri, &concerns, other)?);
+                }
+            }
+        }
     }
     let marker_description = marker_description(operation);
     let marker_class = state.resolve_class("ArchitecturalDecision")?;
@@ -947,10 +1212,24 @@ fn commit_approval(state: &AppState, operation: &SpecOperation) -> anyhow::Resul
                 if previous_marker_sha256(state, previous)?.as_deref()
                     == Some(operation.request.source_sha256.as_str()) =>
             {
-                format!(
-                    "The approval now anchors the specification's records to component {}; the source digest is unchanged.",
-                    plan.name
-                )
+                if operation.preview.parts.is_empty() {
+                    format!(
+                        "The approval now anchors the specification's records to component {}; the source digest is unchanged.",
+                        plan.name
+                    )
+                } else {
+                    format!(
+                        "The approval now scopes the specification's records to component {} and its parts {}; the source digest is unchanged.",
+                        plan.name,
+                        operation
+                            .preview
+                            .parts
+                            .iter()
+                            .map(|part| part.plan.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
             }
             _ => "A changed source digest replaced the previous approval of this specification."
                 .to_string(),
@@ -1053,9 +1332,32 @@ fn plan_component(
         request.covers.len() <= 16,
         "a specification covers at most 16 paths"
     );
+    let covers = normalize_covers(state, &request.covers)?;
+    let name = match covers[0].as_str() {
+        graph::COVERS_WHOLE_PROJECT => Path::new(&request.path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("project")
+            .to_string(),
+        first => first
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(first)
+            .to_string(),
+    };
+    Ok(Some(plan_named_component(state, &name, &covers)?))
+}
+
+/// Covered paths as stored: a directory keeps or gains its trailing `/` and
+/// need not exist yet (a spec may describe a crate still to be created); a
+/// file path is exact; a path that does not exist yet and has no trailing
+/// slash is a directory unless its last segment has an extension; `.` covers
+/// the whole project. Duplicates are dropped.
+fn normalize_covers(state: &AppState, raw_covers: &[String]) -> anyhow::Result<Vec<String>> {
     let root = state.project_root().canonicalize()?;
     let mut covers: Vec<String> = Vec::new();
-    for raw in &request.covers {
+    for raw in raw_covers {
         let path = if raw == graph::COVERS_WHOLE_PROJECT {
             raw.clone()
         } else {
@@ -1101,24 +1403,21 @@ fn plan_component(
             covers.push(path);
         }
     }
-    let name = match covers[0].as_str() {
-        graph::COVERS_WHOLE_PROJECT => Path::new(&request.path)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("project")
-            .to_string(),
-        first => first
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(first)
-            .to_string(),
-    };
+    Ok(covers)
+}
+
+/// The component named `name` covering `covers`: an existing component with
+/// that name (ignoring case) gains any new paths, otherwise one is minted.
+fn plan_named_component(
+    state: &AppState,
+    name: &str,
+    covers: &[String],
+) -> anyhow::Result<SpecComponentPlan> {
     let components = graph::load_components(state)?;
     let existing = components
         .iter()
-        .find(|component| component.name.eq_ignore_ascii_case(&name));
-    Ok(Some(match existing {
+        .find(|component| component.name.eq_ignore_ascii_case(name));
+    Ok(match existing {
         Some(component) => {
             let added: Vec<String> = covers
                 .iter()
@@ -1140,12 +1439,12 @@ fn plan_component(
         }
         None => SpecComponentPlan {
             iri: graph::mint_instance_iri("SystemComponent"),
-            name,
+            name: name.to_string(),
             new: true,
-            covers: covers.clone(),
-            added: covers,
+            covers: covers.to_vec(),
+            added: covers.to_vec(),
         },
-    }))
+    })
 }
 
 /// The quads that mint or extend the component and attach every active
@@ -1659,6 +1958,7 @@ mod tests {
             knowledge_revision: revision,
             drafts,
             covers: vec![],
+            parts: vec![],
         }
     }
 
@@ -1907,6 +2207,181 @@ mod tests {
         request.covers = vec!["badciv-map/".into()];
         let preview = prepare_operation(&state, request).unwrap();
         assert!(preview.already_approved);
+        assert!(crate::validation::validate_project(&state)
+            .unwrap()
+            .conforms());
+    }
+
+    #[test]
+    fn records_govern_the_part_they_are_about_and_move_between_parts() {
+        let fixture = Fixture::new();
+        let hash = fixture.write_spec(
+            "# Game\nWritten in Rust.\nThe sim crate runs the rules.\nFactions have weaknesses.\n",
+        );
+        let state = fixture.state();
+        let drafts = vec![
+            draft("Constraint", "Rust only", "The game is written in Rust.", 2),
+            draft(
+                "Requirement",
+                "sim crate responsibility",
+                "The sim crate runs the rules.",
+                3,
+            ),
+            draft(
+                "Requirement",
+                "Faction weaknesses",
+                "Each faction has a weakness.",
+                4,
+            ),
+        ];
+        let sim = |records: Vec<usize>| SpecPartDraft {
+            name: "sim".into(),
+            path: "sim/".into(),
+            stated_by: 1,
+            records,
+        };
+        let prepare = |id: &str, parts: Vec<SpecPartDraft>| {
+            let revision = accepted_revision(&state).unwrap();
+            let mut request = prepare_request(id, hash.clone(), revision, drafts.clone());
+            request.covers = vec![".".into()];
+            request.parts = parts;
+            prepare_operation(&state, request)
+        };
+        let approve = |id: &str| {
+            approve_operation(
+                &state,
+                SpecApproveRequest {
+                    operation_id: id.into(),
+                    owner_id: "spec-test".into(),
+                },
+            )
+            .unwrap()
+        };
+
+        // Validation: every part is checked before anything is planned.
+        for (parts, expected) in [
+            (vec![sim(vec![7])], "does not exist"),
+            (
+                vec![
+                    sim(vec![1]),
+                    SpecPartDraft {
+                        name: "tui".into(),
+                        path: "tui/".into(),
+                        stated_by: 1,
+                        records: vec![1],
+                    },
+                ],
+                "more than one spec part",
+            ),
+            (
+                vec![SpecPartDraft {
+                    name: "spec".into(),
+                    ..sim(vec![])
+                }],
+                "repeats",
+            ),
+            (
+                vec![SpecPartDraft {
+                    path: "../sim/".into(),
+                    ..sim(vec![])
+                }],
+                "repository-relative",
+            ),
+        ] {
+            let error = format!("{:#}", prepare("spec-bad", parts).unwrap_err());
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+
+        // The sim part: its records concern it, the rest the spec's component.
+        let preview = prepare("spec-parts", vec![sim(vec![2])]).unwrap();
+        assert_eq!(preview.parts.len(), 1);
+        let part = preview.parts[0].clone();
+        assert!(part.plan.new);
+        assert_eq!(part.plan.covers, vec!["sim/".to_string()]);
+        assert_eq!(part.stated_by, "sim crate responsibility");
+        let main = preview.component.clone().unwrap();
+        let approved = approve("spec-parts");
+        assert!(approved.checkpoint.conforms);
+        let concerns = state.resolve_object_property("concerns").unwrap();
+        let edges = |title: &str| {
+            let iri = &approved
+                .records
+                .iter()
+                .find(|record| record.title == title)
+                .unwrap()
+                .iri;
+            direct_objects(&state, iri, &concerns).unwrap()
+        };
+        assert_eq!(
+            edges("Faction weaknesses"),
+            HashSet::from([part.plan.iri.clone()])
+        );
+        assert_eq!(edges("Rust only"), HashSet::from([main.iri.clone()]));
+        assert_eq!(
+            edges("sim crate responsibility"),
+            HashSet::from([main.iri.clone()])
+        );
+
+        // The same parts again: already approved. The current route reports
+        // the groups, from which the runner rebuilds the parts.
+        assert!(
+            prepare("spec-same", vec![sim(vec![2])])
+                .unwrap()
+                .already_approved
+        );
+        let current = current_operation(
+            &state,
+            SpecCurrentRequest {
+                path: "docs/spec.md".into(),
+            },
+        )
+        .unwrap();
+        let sim_group = current
+            .components
+            .iter()
+            .find(|group| group.name == "sim")
+            .unwrap();
+        assert_eq!(sim_group.covers, vec!["sim/".to_string()]);
+        assert_eq!(
+            sim_group
+                .records
+                .iter()
+                .map(|&index| current.drafts[index].title.as_str())
+                .collect::<Vec<_>>(),
+            ["Faction weaknesses"]
+        );
+
+        // Moving the stating record into the part too: approved again, and
+        // its edge to the spec's component is removed.
+        let preview = prepare("spec-move", vec![sim(vec![1, 2])]).unwrap();
+        assert!(!preview.already_approved);
+        assert!(!preview.parts[0].plan.new);
+        let moved = approve("spec-move");
+        let iri = &moved
+            .records
+            .iter()
+            .find(|record| record.title == "sim crate responsibility")
+            .unwrap()
+            .iri;
+        assert_eq!(
+            direct_objects(&state, iri, &concerns).unwrap(),
+            HashSet::from([part.plan.iri.clone()])
+        );
+        assert!(marker_components(&state, &moved.approval_iri).contains(&part.plan.iri));
+
+        // Dropping the part: the approval replaced recorded it as its own, so
+        // its records lose that edge and govern the spec's component again.
+        let preview = prepare("spec-drop", vec![]).unwrap();
+        assert!(!preview.already_approved);
+        let dropped = approve("spec-drop");
+        for record in &dropped.records {
+            assert_eq!(
+                direct_objects(&state, &record.iri, &concerns).unwrap(),
+                HashSet::from([main.iri.clone()]),
+                "{}",
+                record.title
+            );
+        }
         assert!(crate::validation::validate_project(&state)
             .unwrap()
             .conforms());

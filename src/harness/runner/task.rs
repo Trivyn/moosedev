@@ -222,6 +222,10 @@ pub struct PendingSpecApproval {
     /// the human sees what the batch leaves out, not only what it holds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uncited: Vec<SpecUncited>,
+    /// Why scoping the records to the specification's parts failed, when it
+    /// did: every record then governs the specification's own component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoping_failed: Option<String>,
 }
 
 /// A run of specification lines no record cites, under its nearest heading.

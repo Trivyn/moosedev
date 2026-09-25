@@ -1,7 +1,7 @@
 //! Thin interactive frontend. Human review commands never enter the model action surface.
 use super::protocol::{
-    AssociatePage, DerivedBasis, SpecDisposition, SpecPrepareResponse, SpecRetirementDisposition,
-    TypedDisposition, TypingMode,
+    AssociatePage, DerivedBasis, SpecComponentPlan, SpecDisposition, SpecPrepareResponse,
+    SpecRetirementDisposition, TypedDisposition, TypingMode,
 };
 use super::runner::{Phase, ReviewItem, Runner, SpecUncited, Task};
 use super::{
@@ -344,7 +344,13 @@ fn gate(task: &Task, standing: &[String]) -> String {
         Phase::AwaitingSpecApproval => task
             .pending_spec
             .as_ref()
-            .map(|pending| spec_approval_gate(&pending.preview, &pending.uncited))
+            .map(|pending| {
+                spec_approval_gate(
+                    &pending.preview,
+                    &pending.uncited,
+                    pending.scoping_failed.as_deref(),
+                )
+            })
             .unwrap_or_else(|| "SPEC APPROVAL · preview unavailable; run /approve-spec <path> again.".into()),
         Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Review (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
         Phase::AwaitingPermission => task
@@ -431,7 +437,11 @@ fn permission_gate(request: &super::runner::PendingPermission, standing: &[Strin
     text
 }
 
-fn spec_approval_gate(preview: &SpecPrepareResponse, uncited: &[SpecUncited]) -> String {
+fn spec_approval_gate(
+    preview: &SpecPrepareResponse,
+    uncited: &[SpecUncited],
+    scoping_failed: Option<&str>,
+) -> String {
     let mut text = format!(
         "SPEC APPROVAL · human approval required\nSource: {}\nSHA-256: {}\nKnowledge revision: {}\n",
         preview.path, preview.source_sha256, preview.knowledge_revision
@@ -440,19 +450,37 @@ fn spec_approval_gate(preview: &SpecPrepareResponse, uncited: &[SpecUncited]) ->
         text.push_str("\nUNCHANGED · this source and active record set are already approved\n");
     }
     match &preview.component {
-        Some(plan) => text.push_str(&format!(
-            "\nCOMPONENT · {} · {}\nCovers: {}\nIRI: {}\nEvery record below concerns this component; its Constraints govern the files it covers.\n",
-            plan.name,
-            if plan.new {
-                "NEW".to_string()
-            } else if plan.added.is_empty() {
-                "existing".to_string()
-            } else {
-                format!("existing, adding {}", plan.added.join(" "))
-            },
-            plan.covers.join(" "),
-            plan.iri
-        )),
+        Some(plan) => {
+            text.push_str(&format!(
+                "\nCOMPONENT · {} · {}\nCovers: {}\nIRI: {}\n{}\n",
+                plan.name,
+                component_state(plan),
+                plan.covers.join(" "),
+                plan.iri,
+                if preview.parts.is_empty() {
+                    "Every record below concerns this component; its rules govern the files it covers."
+                } else {
+                    "Records without a part below concern this component; its rules govern every file it covers, parts included."
+                }
+            ));
+            for part in &preview.parts {
+                text.push_str(&format!(
+                    "PART · {} · {} · Covers {} · {} record(s) · stated by \"{}\"\nIRI: {}\n",
+                    part.plan.name,
+                    component_state(&part.plan),
+                    part.plan.covers.join(" "),
+                    part.records.len(),
+                    part.stated_by,
+                    part.plan.iri
+                ));
+            }
+            if let Some(diagnostic) = scoping_failed {
+                text.push_str(&format!(
+                    "SCOPING FAILED · every record governs component {}. {diagnostic}\n",
+                    plan.name
+                ));
+            }
+        }
         // Floating records are findable only by lexical luck: say so before
         // the human accepts, and name the command that anchors them.
         None => text.push_str(&format!(
@@ -460,7 +488,13 @@ fn spec_approval_gate(preview: &SpecPrepareResponse, uncited: &[SpecUncited]) ->
             preview.path
         )),
     }
-    for entry in &preview.entries {
+    for (index, entry) in preview.entries.iter().enumerate() {
+        let part = preview
+            .parts
+            .iter()
+            .find(|part| part.records.contains(&index))
+            .map(|part| format!(" · part {}", part.plan.name))
+            .unwrap_or_default();
         let (effect, identity) = match &entry.disposition {
             SpecDisposition::New { iri } => ("NEW", iri.clone()),
             SpecDisposition::Reuse { iri } => ("REUSE", iri.clone()),
@@ -469,7 +503,7 @@ fn spec_approval_gate(preview: &SpecPrepareResponse, uncited: &[SpecUncited]) ->
             }
         };
         text.push_str(&format!(
-            "\n{effect} · {} · {}\nExtracted claim: {}\nIRI: {identity}\n",
+            "\n{effect} · {} · {}{part}\nExtracted claim: {}\nIRI: {identity}\n",
             entry.draft.kind, entry.draft.title, entry.draft.description
         ));
         text.push_str("Evidence:\n");
@@ -518,6 +552,16 @@ fn spec_approval_gate(preview: &SpecPrepareResponse, uncited: &[SpecUncited]) ->
         preview.path
     ));
     text
+}
+
+fn component_state(plan: &SpecComponentPlan) -> String {
+    if plan.new {
+        "NEW".to_string()
+    } else if plan.added.is_empty() {
+        "existing".to_string()
+    } else {
+        format!("existing, adding {}", plan.added.join(" "))
+    }
 }
 
 fn push_plain_lines(lines: &mut Vec<Line<'static>>, value: &str, style: Style) {
@@ -2290,6 +2334,51 @@ mod tests {
         assert!(text.contains("Approval marker: spec-approval: specs/labels.md"));
         assert!(text.contains("A separate /approve is still required before code execution."));
     }
+    #[test]
+    fn spec_gate_shows_each_part_and_tags_the_records_it_governs() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingSpecApproval;
+        task.pending_spec = Some(serde_json::from_value(serde_json::json!({
+            "preview": {
+                "operation_id": "spec-2", "owner_id": "task-1", "path": "spec.md",
+                "source_sha256": "0123456789abcdef", "knowledge_revision": "accepted-v3",
+                "entries": [
+                    {"draft": {"kind": "Constraint", "title": "Rust only", "description": "Written in Rust.", "evidence": ["spec.md:1"]},
+                     "disposition": {"kind": "new", "iri": "https://moosedev.dev/kg/Constraint/rust"}},
+                    {"draft": {"kind": "Requirement", "title": "Faction weaknesses", "description": "Each faction has a weakness.", "evidence": ["spec.md:2"]},
+                     "disposition": {"kind": "new", "iri": "https://moosedev.dev/kg/Requirement/factions"}}
+                ],
+                "retirements": [],
+                "component": {"iri": "https://moosedev.dev/kg/SystemComponent/spec", "name": "spec", "new": true, "covers": ["."], "added": ["."]},
+                "parts": [{"plan": {"iri": "https://moosedev.dev/kg/SystemComponent/sim", "name": "sim", "new": true, "covers": ["sim/"], "added": ["sim/"]},
+                           "stated_by": "sim crate responsibility", "records": [1]}]
+            }
+        })).unwrap());
+        let text = gate(&task, &[]);
+        assert!(
+            text.contains("Records without a part below concern this component"),
+            "{text}"
+        );
+        assert!(text.contains(
+            "PART · sim · NEW · Covers sim/ · 1 record(s) · stated by \"sim crate responsibility\"\nIRI: https://moosedev.dev/kg/SystemComponent/sim\n"
+        ), "{text}");
+        assert!(
+            text.contains("NEW · Requirement · Faction weaknesses · part sim\n"),
+            "{text}"
+        );
+        assert!(text.contains("NEW · Constraint · Rust only\n"), "{text}");
+
+        // A failed scoping says every record stays with the spec's component.
+        let pending = task.pending_spec.as_mut().unwrap();
+        pending.preview.parts.clear();
+        pending.scoping_failed =
+            Some("part sim is stated by record 0, which does not name it".into());
+        let text = gate(&task, &[]);
+        assert!(text.contains(
+            "SCOPING FAILED · every record governs component spec. part sim is stated by record 0"
+        ), "{text}");
+    }
+
     #[test]
     fn review_tab_renders_derived_obligations_for_the_approved_plan() {
         let text = text_content(&body(&snapshot_for(symbolic_task()), &review_view()));

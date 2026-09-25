@@ -77,6 +77,10 @@ pub struct Dossier {
     pub direct_records: Vec<RecordSummary>,
     /// Records linked through the realized component; rendered only as secondary context.
     pub component_records: Vec<RecordSummary>,
+    /// Components enclosing the realized one (a crate's workspace, a whole
+    /// project), most specific first, each with the records that concern it
+    /// and none already listed closer in. Their rules govern this code too.
+    pub enclosing_components: Vec<ComponentContext>,
     /// True when the loaded substrate was built from a different commit.
     pub substrate_stale: bool,
     /// True when this entity is backed by a tree-sitter syntactic identity.
@@ -85,6 +89,14 @@ pub struct Dossier {
     pub judgments: Vec<JudgmentSummary>,
     /// Observation digest lines from the churn sidecar (derived, not knowledge).
     pub observations: Vec<String>,
+}
+
+/// A component that encloses an entity's own, with the records that concern it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentContext {
+    pub iri: String,
+    pub label: String,
+    pub records: Vec<RecordSummary>,
 }
 
 /// Return the read-only dossier for a target, or `None` when no directly linked
@@ -117,7 +129,32 @@ pub fn get_entity_dossier(
     let defined_in = first_literal(&state.store, &entity_iri, &terms.defined_in_path);
     let syntactic_anchor = first_literal(&state.store, &entity_iri, &terms.has_substrate_symbol)
         .is_some_and(|symbol| symbol.starts_with("ts:"));
-    let realizes = first_realized_component(state, &terms, &entity_iri)?;
+    // The components come from the file's path when it has one, read now
+    // rather than from the `realizes` edge written at minting: a component
+    // declared, split or moved since then takes effect at once. The stored
+    // edge remains the fallback for an entity with no file.
+    let catalog = super::components::load_components(state)?;
+    let by_path: Vec<(String, String)> = defined_in
+        .as_deref()
+        .map(|file| {
+            super::components::components_for_path(file, &catalog)
+                .into_iter()
+                .filter_map(|component| {
+                    component
+                        .iri
+                        .clone()
+                        .map(|iri| (iri, component.name.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // An entity with a file is governed by what covers that file now; one no
+    // component covers any more has none, whatever it realized once.
+    let realizes = match (defined_in.is_some(), by_path.first()) {
+        (_, Some(first)) => Some(first.clone()),
+        (true, None) => None,
+        (false, None) => first_realized_component(state, &terms, &entity_iri)?,
+    };
 
     let mut direct_records = direct_records_for_entity(state, &entity_iri)?;
     // Silence-rule amendment (of AD 8f20452a): judgments count as direct
@@ -139,7 +176,7 @@ pub fn get_entity_dossier(
         .iter()
         .map(|record| record.iri.as_str())
         .collect::<BTreeSet<_>>();
-    let mut component_records = match realizes.as_ref() {
+    let mut component_records: Vec<RecordSummary> = match realizes.as_ref() {
         Some((component_iri, _)) => collect_records(state, &pairs.concerns, component_iri)?
             .into_iter()
             .filter(|record| !direct_iris.contains(record.iri.as_str()))
@@ -147,6 +184,21 @@ pub fn get_entity_dossier(
         None => Vec::new(),
     };
     sort_records(&mut component_records);
+    let mut listed: BTreeSet<String> = direct_iris.iter().map(|iri| iri.to_string()).collect();
+    listed.extend(component_records.iter().map(|record| record.iri.clone()));
+    let mut enclosing_components = Vec::new();
+    for (iri, label) in by_path.iter().skip(1) {
+        let mut records: Vec<RecordSummary> = collect_records(state, &pairs.concerns, iri)?
+            .into_iter()
+            .filter(|record| listed.insert(record.iri.clone()))
+            .collect();
+        sort_records(&mut records);
+        enclosing_components.push(ComponentContext {
+            iri: iri.clone(),
+            label: label.clone(),
+            records,
+        });
+    }
 
     // Observation digest: derived churn/authorship for the defining file.
     let mut observations = Vec::new();
@@ -172,6 +224,7 @@ pub fn get_entity_dossier(
         realizes,
         direct_records,
         component_records,
+        enclosing_components,
         substrate_stale: state.substrate().map(|s| s.is_stale()).unwrap_or(false),
         syntactic_anchor,
         judgments,
@@ -356,10 +409,20 @@ pub fn harness_file_dossier(
         let Some(mut dossier) = get_entity_dossier(state, &DossierTarget::Iri(iri))? else {
             continue;
         };
-        for record in dossier
-            .direct_records
+        let Dossier {
+            direct_records,
+            component_records,
+            enclosing_components,
+            ..
+        } = &mut dossier;
+        for record in direct_records
             .iter_mut()
-            .chain(dossier.component_records.iter_mut())
+            .chain(component_records.iter_mut())
+            .chain(
+                enclosing_components
+                    .iter_mut()
+                    .flat_map(|c| c.records.iter_mut()),
+            )
         {
             record.workbench_url = None;
             if record.claim.is_some() {
@@ -564,6 +627,36 @@ fn render_dossier_markdown_with_records(
                         *component_story_url,
                     );
                 }
+            }
+        }
+    }
+    for enclosing in &dossier.enclosing_components {
+        if enclosing.records.is_empty() {
+            continue;
+        }
+        let label = &enclosing.label;
+        match &mut record_rendering {
+            DossierRecordRendering::Exhaustive { shown, .. } => {
+                if let Some(first) = shown.components.get(&enclosing.iri) {
+                    out.push_str(&format!(
+                        "\n**Via enclosing component {label}**: listed above for `{first}`\n"
+                    ));
+                } else {
+                    shown
+                        .components
+                        .insert(enclosing.iri.clone(), dossier.display_name.clone());
+                    out.push_str(&format!("\n**Via enclosing component {label}**\n"));
+                    let limit = if core_only { 0 } else { COMPONENT_TITLE_LIMIT };
+                    render_component_record_titles(&mut out, label, &enclosing.records, limit);
+                }
+            }
+            DossierRecordRendering::Hover { .. } => {
+                let (noun, verb) = record_noun_verb(enclosing.records.len());
+                out.push_str(&format!(
+                    "\n**Enclosing component {label}**\n- Total: {} {noun} that {verb} it ({}), not necessarily this code entity.\n",
+                    enclosing.records.len(),
+                    kind_counts(&enclosing.records)
+                ));
             }
         }
     }

@@ -1154,6 +1154,77 @@ async fn linked_evidence_walks_unindexed_file_by_component_path() {
     );
 }
 
+/// A file inside a nested component is governed by its own component's rules
+/// and by every enclosing component's (a whole-project spec's), each named
+/// with its via line; a file outside the nested component gets only the
+/// enclosing rules. Component paths that match no file are reported by
+/// validation without failing it.
+#[tokio::test]
+async fn a_nested_file_gets_the_rules_of_every_enclosing_component() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    std::fs::create_dir_all(fixture.0.join("sim/src")).unwrap();
+    std::fs::write(fixture.0.join("sim/src/lib.rs"), "pub fn run() {}\n").unwrap();
+    std::fs::write(fixture.0.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let project = record(&state, "SystemComponent", "Game");
+    graph::declare_component_paths(&state, &project, &[".".into()]).unwrap();
+    let sim = record(&state, "SystemComponent", "Simulation");
+    graph::declare_component_paths(&state, &sim, &["sim/".into()]).unwrap();
+    let whole = record_with(
+        &state,
+        "Constraint",
+        "Rust only",
+        "The game is written in Rust.",
+        "accepted",
+    );
+    graph::relate(&state, &whole, "concerns", &project).unwrap();
+    let local = record_with(
+        &state,
+        "Requirement",
+        "Faction weaknesses",
+        "Each faction has a weakness.",
+        "accepted",
+    );
+    graph::relate(&state, &local, "concerns", &sim).unwrap();
+
+    let nested = linked_context(&state, "unrelated topic words", &["sim/src/lib.rs"]);
+    let rules: Vec<(&str, &str)> = nested
+        .governing_rules
+        .iter()
+        .map(|rule| (rule.iri.as_str(), rule.via.as_str()))
+        .collect();
+    assert!(
+        rules.contains(&(whole.as_str(), "via: component Game")),
+        "{rules:?}"
+    );
+    assert!(
+        rules.contains(&(local.as_str(), "via: component Simulation")),
+        "{rules:?}"
+    );
+
+    let root = linked_context(&state, "unrelated topic words", &["Cargo.toml"]);
+    let rules: Vec<&str> = root
+        .governing_rules
+        .iter()
+        .map(|rule| rule.iri.as_str())
+        .collect();
+    assert_eq!(rules, [whole.as_str()], "the sim rule stays in sim/");
+
+    // A component path with nothing behind it is reported, not a violation.
+    let gone = record(&state, "SystemComponent", "Renderer");
+    graph::declare_component_paths(&state, &gone, &["render/".into()]).unwrap();
+    let report = moosedev::validation::validate_project(&state).unwrap();
+    assert!(report.conforms());
+    assert_eq!(
+        report
+            .stale_coverage
+            .iter()
+            .map(|stale| (stale.component.as_str(), stale.path.as_str()))
+            .collect::<Vec<_>>(),
+        [("Renderer", "render/")]
+    );
+}
+
 #[tokio::test]
 async fn fallback_topic_evidence_excludes_dossier_claims() {
     let fixture = Fixture::new();

@@ -97,7 +97,7 @@ impl Runner {
         // asked to re-extract claims it could only reword.
         let reused = self.current_spec_records(path, &source_sha256).await?;
         let records = match &reused {
-            Some((records, approval_iri)) => {
+            Some((records, approval_iri, _)) => {
                 self.intent_event("spec_records_reused", approval_iri);
                 self.event(format!(
                     "Reused {} record(s) of the current approval {approval_iri} for {path}: the source digest is unchanged, so nothing was extracted.",
@@ -120,6 +120,35 @@ impl Runner {
             );
         }
 
+        // Each record governs the part of the covered scope it is about: the
+        // parts an unchanged approval already has, else what the scope sensor
+        // finds. Scoping that fails leaves every record with the approval's
+        // own component.
+        let mut scoping_failed = None;
+        let parts = if covers.is_empty() {
+            Vec::new()
+        } else if let Some(parts) = reused.as_ref().and_then(|(records, _, groups)| {
+            super::spec_scope::parts_from_components(groups, &covers, records)
+        }) {
+            self.intent_event(
+                "spec_parts_reused",
+                &parts
+                    .iter()
+                    .map(|part| format!("{} {}", part.name, part.path))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            parts
+        } else {
+            match self.scope_spec(path, &covers, &records).await? {
+                super::spec_scope::SpecScope::Parts(parts) => parts,
+                super::spec_scope::SpecScope::Failed(diagnostic) => {
+                    scoping_failed = Some(diagnostic);
+                    Vec::new()
+                }
+            }
+        };
+
         // Bind the preview to exactly the bytes seen by the extraction sensor.
         let current = self
             .workspace
@@ -139,6 +168,7 @@ impl Runner {
             knowledge_revision: knowledge_revision.clone(),
             drafts: records,
             covers,
+            parts,
         };
         let preview: SpecPrepareResponse = self.post("spec/prepare", &request).await?;
         anyhow::ensure!(
@@ -167,7 +197,11 @@ impl Runner {
         self.task.approved_revision = None;
         self.task.snapshots.clear();
         self.task.check_results.clear();
-        self.task.pending_spec = Some(PendingSpecApproval { preview, uncited });
+        self.task.pending_spec = Some(PendingSpecApproval {
+            preview,
+            uncited,
+            scoping_failed,
+        });
         self.task.mode = Mode::Plan;
         self.task.phase = Phase::AwaitingSpecApproval;
         self.task.turn_finished = true;
@@ -189,6 +223,20 @@ impl Runner {
                 None => String::new(),
             }
         );
+        if let Some(pending) = &self.task.pending_spec {
+            if !pending.preview.parts.is_empty() {
+                self.task.last_response.push_str(&format!(
+                    " Its parts: {}.",
+                    pending
+                        .preview
+                        .parts
+                        .iter()
+                        .map(|part| format!("{} ({} records)", part.plan.name, part.records.len()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
         self.event(format!(
             "Prepared spec approval preview for {path} at source sha256 {source_sha256}; no project knowledge was written."
         ));
@@ -202,7 +250,7 @@ impl Runner {
         &mut self,
         path: &str,
         source_sha256: &str,
-    ) -> Result<Option<(Vec<SpecRecordDraft>, String)>> {
+    ) -> Result<Option<(Vec<SpecRecordDraft>, String, Vec<SpecComponentGroup>)>> {
         let request = SpecCurrentRequest {
             path: path.to_owned(),
         };
@@ -226,7 +274,7 @@ impl Runner {
         );
         Ok(match (current.approval_iri, current.source_sha256) {
             (Some(iri), Some(sha)) if sha == source_sha256 && !current.drafts.is_empty() => {
-                Some((current.drafts, iri))
+                Some((current.drafts, iri, current.components))
             }
             _ => None,
         })
@@ -981,6 +1029,7 @@ mod tests {
             }],
             retirements: vec![],
             component: None,
+            parts: vec![],
             previous_approval_iri: None,
             already_approved: false,
         }
@@ -1371,6 +1420,7 @@ mod tests {
                     .collect(),
                 retirements: vec![],
                 component: None,
+                parts: vec![],
                 previous_approval_iri: None,
                 already_approved: false,
             })
@@ -1460,6 +1510,226 @@ mod tests {
         server.abort();
     }
 
+    /// With covered paths, records are scoped to the parts the spec names:
+    /// the sensor's parts and per-record answers reach the daemon as parts;
+    /// answers that keep failing validation leave every record with the
+    /// spec's own component; an unchanged approval keeps its parts with no
+    /// model call.
+    #[tokio::test]
+    async fn scoping_sends_parts_falls_back_and_is_reused_unchanged() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        // 0: valid answers; 1: parts that never validate; 2: reuse.
+        static MODE: AtomicUsize = AtomicUsize::new(0);
+        static SENT: Mutex<Vec<Vec<SpecPartDraft>>> = Mutex::new(Vec::new());
+        async fn model(State(_): State<Arc<PathBuf>>, Json(body): Json<Value>) -> Json<Value> {
+            let tools = body["tools"].as_array().is_some();
+            let prompt = body["messages"].to_string();
+            if tools || prompt.contains("neutral connection test") {
+                return Json(if tools {
+                    json!({"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]})
+                } else {
+                    json!({"choices":[{"message":{"role":"assistant","content":"{\"status\":\"ok\"}"},"finish_reason":"stop"}]})
+                });
+            }
+            let content = if prompt.contains("extraction sensor") {
+                json!({"action":"propose_spec_records","records":[
+                    {"kind":"Constraint","title":"Rust only","description":"The game is written in Rust.","evidence":["spec.md:2"]},
+                    {"kind":"Requirement","title":"sim crate responsibility","description":"The sim crate runs the rules.","evidence":["spec.md:3"]},
+                    {"kind":"Requirement","title":"Faction weaknesses","description":"Each faction has a weakness.","evidence":["spec.md:4"]}
+                ]})
+            } else if prompt.contains("List the parts") {
+                assert_ne!(MODE.load(Ordering::SeqCst), 2, "reuse asks no model");
+                let stated_by = if MODE.load(Ordering::SeqCst) == 1 {
+                    0
+                } else {
+                    1
+                };
+                json!({"action":"propose_spec_parts","parts":[{"name":"sim","path":"sim/","stated_by":stated_by}]})
+            } else if prompt.contains("For every record below") {
+                assert!(
+                    prompt.contains("- sim: The sim crate runs the rules."),
+                    "{prompt}"
+                );
+                json!({"action":"assign_spec_parts","assignments":[
+                    {"record":0,"part":"whole"},{"record":1,"part":"sim"},{"record":2,"part":"sim"}
+                ]})
+            } else {
+                panic!("unexpected prompt {prompt}")
+            };
+            Json(
+                json!({"choices":[{"message":{"role":"assistant","content":content.to_string()},"finish_reason":"stop"}]}),
+            )
+        }
+        async fn prepare(Json(request): Json<SpecPrepareRequest>) -> Json<SpecPrepareResponse> {
+            SENT.lock().unwrap().push(request.parts.clone());
+            Json(SpecPrepareResponse {
+                operation_id: request.operation_id,
+                owner_id: request.owner_id,
+                path: request.path,
+                source_sha256: request.source_sha256,
+                knowledge_revision: request.knowledge_revision,
+                entries: request
+                    .drafts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, draft)| SpecPreviewEntry {
+                        draft,
+                        disposition: SpecDisposition::New {
+                            iri: format!("https://moosedev.dev/kg/Requirement/{index}"),
+                        },
+                        existing: None,
+                    })
+                    .collect(),
+                retirements: vec![],
+                component: Some(SpecComponentPlan {
+                    iri: "https://moosedev.dev/kg/SystemComponent/spec".into(),
+                    name: "spec".into(),
+                    new: true,
+                    covers: vec![".".into()],
+                    added: vec![".".into()],
+                }),
+                parts: vec![],
+                previous_approval_iri: None,
+                already_approved: false,
+            })
+        }
+        async fn current(
+            State(root): State<Arc<PathBuf>>,
+            Json(request): Json<SpecCurrentRequest>,
+        ) -> Json<SpecCurrentResponse> {
+            if MODE.load(Ordering::SeqCst) != 2 {
+                return Json(SpecCurrentResponse {
+                    path: request.path,
+                    approval_iri: None,
+                    source_sha256: None,
+                    drafts: vec![],
+                    components: vec![],
+                });
+            }
+            let source = std::fs::read_to_string(root.join("spec.md")).unwrap();
+            let draft = |kind: &str, title: &str, description: &str, line: usize| SpecRecordDraft {
+                kind: kind.into(),
+                title: title.into(),
+                description: description.into(),
+                evidence: vec![format!("spec.md:{line}")],
+            };
+            Json(SpecCurrentResponse {
+                path: request.path,
+                approval_iri: Some("https://moosedev.dev/kg/ArchitecturalDecision/approved".into()),
+                source_sha256: Some(sha256_hex(&source)),
+                drafts: vec![
+                    draft("Constraint", "Rust only", "The game is written in Rust.", 2),
+                    draft(
+                        "Requirement",
+                        "sim crate responsibility",
+                        "The sim crate runs the rules.",
+                        3,
+                    ),
+                    draft(
+                        "Requirement",
+                        "Faction weaknesses",
+                        "Each faction has a weakness.",
+                        4,
+                    ),
+                ],
+                components: vec![
+                    SpecComponentGroup {
+                        name: "spec".into(),
+                        covers: vec![".".into()],
+                        records: vec![0],
+                    },
+                    SpecComponentGroup {
+                        name: "sim".into(),
+                        covers: vec!["sim/".into()],
+                        records: vec![1, 2],
+                    },
+                ],
+            })
+        }
+        async fn checkpoint() -> Json<CheckpointResponse> {
+            Json(CheckpointResponse {
+                conforms: true,
+                durable: true,
+                revision: "fixture".into(),
+                pending: vec![],
+            })
+        }
+        let project = Project::new("spec-scope");
+        std::fs::write(
+            project.0.join("spec.md"),
+            "# Game\nWritten in Rust.\nThe sim crate runs the rules.\nFactions have weaknesses.\n",
+        )
+        .unwrap();
+        let router = context_router()
+            .route("/v1/chat/completions", post(model))
+            .route("/api/v1/harness/spec/prepare", post(prepare))
+            .route("/api/v1/harness/spec/current", post(current))
+            .route("/api/v1/harness/checkpoint", axum::routing::get(checkpoint));
+        let (daemon, server) = serve(router, &project).await;
+        let mut runner = Runner::create(
+            project.0.clone(),
+            daemon.clone(),
+            "Approve specification spec.md".into(),
+        )
+        .await
+        .unwrap();
+        runner.configure(
+            crate::llm::LlmConfig {
+                base_url: format!("{daemon}/v1"),
+                ..crate::harness::runner::test_support::test_config()
+            },
+            None,
+        );
+        let covers = vec![".".to_string()];
+        let expected = vec![SpecPartDraft {
+            name: "sim".into(),
+            path: "sim/".into(),
+            stated_by: 1,
+            records: vec![1, 2],
+        }];
+
+        runner
+            .begin_spec_approval("spec.md", &covers)
+            .await
+            .unwrap();
+        assert_eq!(SENT.lock().unwrap().last().unwrap(), &expected);
+        assert!(runner
+            .task
+            .intent_events
+            .iter()
+            .any(|event| event.kind == "spec_parts"
+                && event.detail == "spec.md: sim sim/ (2 records); 1 record(s) govern spec"));
+
+        MODE.store(1, Ordering::SeqCst);
+        runner
+            .begin_spec_approval("spec.md", &covers)
+            .await
+            .unwrap();
+        assert!(SENT.lock().unwrap().last().unwrap().is_empty());
+        let failed = runner
+            .task
+            .pending_spec
+            .as_ref()
+            .unwrap()
+            .scoping_failed
+            .clone()
+            .unwrap();
+        assert!(failed.contains("does not name it"), "{failed}");
+        assert!(runner.task.recovery.is_none());
+        assert_eq!(runner.task.phase, Phase::AwaitingSpecApproval);
+
+        MODE.store(2, Ordering::SeqCst);
+        let before = runner.task.model_requests.len();
+        runner
+            .begin_spec_approval("spec.md", &covers)
+            .await
+            .unwrap();
+        assert_eq!(SENT.lock().unwrap().last().unwrap(), &expected);
+        assert_eq!(runner.task.model_requests.len(), before, "no model call");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn pending_preview_survives_restart_and_approval_returns_to_planning() {
         async fn approve(Json(request): Json<SpecApproveRequest>) -> Json<SpecApproveResponse> {
@@ -1506,6 +1776,7 @@ mod tests {
         runner.task.pending_spec = Some(PendingSpecApproval {
             preview: pending,
             uncited: Vec::new(),
+            scoping_failed: None,
         });
         runner.task.phase = Phase::AwaitingSpecApproval;
         runner.task.plan = Some(Plan {
@@ -1575,6 +1846,7 @@ mod tests {
         runner.task.pending_spec = Some(PendingSpecApproval {
             preview: pending,
             uncited: Vec::new(),
+            scoping_failed: None,
         });
         runner.task.phase = Phase::AwaitingSpecApproval;
         runner.approve_spec().await.unwrap();

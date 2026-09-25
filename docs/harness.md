@@ -391,7 +391,10 @@ batch never supersedes a record over the extraction sensor's rewording.
 
 Extraction runs one section at a time: the file is split at its level-2
 (`##`) headings, adjacent sections are joined while they stay under about
-2 KB, and each part is one model call that sees its original line numbers. The
+2 KB, and each part is one model call that sees its original line numbers. A
+part still over 2 KB is split again at its `###` headings, and deeper, then
+merged back up to 2 KB; a part with no heading left to split on stays whole,
+so a table is never cut. The
 sensor is told to state each claim completely: a table, grammar or list of
 per-item rules becomes one record whose description restates all of it, not a
 one-line summary. It records only what the cited lines state and adds nothing
@@ -424,6 +427,40 @@ Constraints appear under Project rules for any file the component covers, before
 the file is indexed, and decisions captured for those files concern the same
 component. Without covered paths the records are approved but float: they reach
 the model only as an inventory of titles.
+
+With covered paths, the records are also scoped to the parts the spec names
+(`runner/spec_scope.rs`), because a whole-project spec's records mostly govern
+one part, and anchoring them all to `.` made every one reach every file. Two
+sensor calls do it. The first lists the parts the spec names as separate parts
+of the system (components, modules, packages, crates), each with its path and
+the record that names it and states its responsibility. The second gives every
+record exactly one part or `whole`, in batches of 40, with each part's stated
+responsibility in view; asking for an answer per record matters, since letting
+records go unassigned by omission let the model skip the decision. The runner
+checks both before anything is planned: a part's name must appear in its
+stating record, must not repeat another part or the spec's own component, and
+its path must lie inside the covered paths; a path that does not exist yet must
+be the part's name directly under a covered path (`sim/` under `.`), so an
+invented parent directory is refused. Answers that fail three times leave every
+record with the spec's own component (`spec_parts_failed`; the gate says
+`SCOPING FAILED`) rather than blocking the approval. The gate shows each part
+(`PART · name · NEW|existing · Covers … · N record(s) · stated by "…"`) and tags
+each record with its part. At approval each part becomes (or reuses) a
+`SystemComponent`; its records `concerns` it and lose any edge to another
+component the approval plans, so a record moved into a part stops reaching the
+rest of the covered scope. An unchanged approval rebuilds its parts from the
+components its records concern (`spec/current` reports them), with no model
+call.
+
+A file receives the rules of every component that contains it, most specific
+first (`graph::components_for_path`): a crate's own spec's rules and a
+whole-project spec's. Dossiers and hover read an entity's components from its
+file's path when they are built, listing each enclosing component under "Via
+enclosing component", so a component declared, split or moved takes effect at
+once; the `realizes` edge written at minting remains the fallback for an entity
+with no file. `validate_against_architecture` reports, without failing, every
+component path that matches no file ("not created yet, or moved"): components
+are the only holders of paths, so a moved directory has one place to fix.
 At the displayed spec gate, `I approve the spec` and `approve the spec` are also
 accepted as case-insensitive aliases (with collapsed whitespace and an optional
 trailing `.` or `!`). Those phrases remain ordinary steering everywhere else.

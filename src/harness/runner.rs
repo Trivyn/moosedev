@@ -36,6 +36,7 @@ mod review;
 mod scope;
 mod source;
 mod spec;
+mod spec_scope;
 pub use spec::spec_approval_objective;
 mod symbolic;
 mod task;
