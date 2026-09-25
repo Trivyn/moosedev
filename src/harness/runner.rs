@@ -357,6 +357,7 @@ impl Runner {
             source: BTreeMap::new(),
             source_recency: Vec::new(),
             source_outlined: Default::default(),
+            source_outlined_seen: Default::default(),
             standing_guidance: Some(standing_guidance),
         };
         let mut runner = Self {

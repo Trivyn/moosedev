@@ -12,7 +12,7 @@ use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion,
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 const MAX_CONTEXT: usize = 100_000;
@@ -55,15 +55,33 @@ const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, q
 const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied in full. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
 
 /// The governing rules the daemon delivered, each with its `via:` line and claim.
+/// A rule the daemon named without its claim (past its kind's claim limit) is
+/// counted in a closing line naming the kinds and the retrieval route
+/// (Constraint 927d5176, rule 3).
 fn project_rules(rules: &[GoverningRule]) -> String {
     if rules.is_empty() {
         return String::new();
     }
     let mut out = String::from(RULES_HEADER);
+    let mut unclaimed = BTreeMap::<&str, usize>::new();
     for rule in rules {
         out.push_str(&format!(
             "\n[{}] {} ({})\n{}\n{}",
             rule.kind, rule.label, rule.iri, rule.via, rule.claim
+        ));
+        if rule.claim.trim().is_empty() {
+            *unclaimed.entry(rule.kind.as_str()).or_default() += 1;
+        }
+    }
+    if !unclaimed.is_empty() {
+        let count: usize = unclaimed.values().sum();
+        let kinds: Vec<String> = unclaimed
+            .iter()
+            .map(|(kind, n)| format!("{kind}: {n}"))
+            .collect();
+        out.push_str(&format!(
+            "\n{count} project rule(s) named without their claim ({}); search project knowledge for their claims\n",
+            kinds.join("; ")
         ));
     }
     out
@@ -660,7 +678,15 @@ impl Runner {
     /// source is shown in full within its budget and as outlines beyond it;
     /// when even the outlines do not fit, the step stops with a typed
     /// [`PromptOverflow`] before any request.
-    fn mandatory_prompt(&self, context: &ContextResponse) -> Result<Mandatory> {
+    ///
+    /// `observation_reserve` is held back from source for the observations
+    /// block: the floor while a search result is pending, else what this
+    /// step's observations actually take ([`Self::observation_reserve`]).
+    fn mandatory_prompt(
+        &self,
+        context: &ContextResponse,
+        observation_reserve: usize,
+    ) -> Result<Mandatory> {
         let config = self.active_config()?;
         let mut prompt = String::from(ROLE_OPENING);
         let standing = self.task.standing_guidance.as_ref().map_or_else(
@@ -747,7 +773,7 @@ impl Runner {
         let source = self
             .source_view(
                 &blocks,
-                source_budget(limit, fixed + outlines, OBSERVATION_FLOOR),
+                source_budget(limit, fixed + outlines, observation_reserve),
             )
             .map_err(|oversized| {
                 overflow(Some((oversized.file, oversized.bytes, oversized.budget)))
@@ -762,6 +788,36 @@ impl Runner {
             remaining: limit.saturating_sub(required),
             source,
         })
+    }
+
+    /// What the next prompt will show of the working-set source, built as
+    /// the prompt builds it.
+    #[cfg(test)]
+    pub(super) fn source_view_for(&self, context: &ContextResponse) -> Result<SourceView> {
+        Ok(self
+            .mandatory_prompt(context, self.observation_reserve()?)?
+            .source)
+    }
+
+    /// The last result as the observations block shows it.
+    fn last_result(&self) -> &str {
+        if self.task.last_response == self.task.guidance
+            || self.task.last_response == self.task.objective
+        {
+            "Current human input is given above."
+        } else {
+            &self.task.last_response
+        }
+    }
+
+    /// Bytes source must leave for this step's observations block: what it
+    /// will render, up to the floor. The last result is known before the
+    /// prompt is built, so a one-line read result does not hold back the whole
+    /// floor from source (badciv 7e0c50eb: 2.3 KB shown, 8 KB held back,
+    /// while five files rotated through a budget one file short).
+    pub(super) fn observation_reserve(&self) -> Result<usize> {
+        let needed = self.observations_prefix()?.len() + self.last_result().len() + 1;
+        Ok(needed.min(OBSERVATION_FLOOR))
     }
 
     fn observations_prefix(&self) -> Result<String> {
@@ -795,7 +851,7 @@ impl Runner {
         // Dispatch journals the search response after this preflight. That
         // adds one 800-byte recent-event preview plus the delivered-evidence
         // sentence and JSON quoting to the next observations header.
-        let remaining = self.mandatory_prompt(context)?.remaining;
+        let remaining = self.mandatory_prompt(context, OBSERVATION_FLOOR)?.remaining;
         Ok(observation_budget(remaining)
             .saturating_sub(self.observations_prefix()?.len())
             .saturating_sub(PENDING_SEARCH_PREFIX_RESERVE)
@@ -812,14 +868,8 @@ impl Runner {
             text: prompt,
             mut remaining,
             source,
-        } = self.mandatory_prompt(context)?;
-        let last = if self.task.last_response == self.task.guidance
-            || self.task.last_response == self.task.objective
-        {
-            "Current human input is given above."
-        } else {
-            &self.task.last_response
-        };
+        } = self.mandatory_prompt(context, self.observation_reserve()?)?;
+        let last = self.last_result();
         let header = self.observations_prefix()?;
         // The last result is usually the evidence the model just asked for. A
         // fixed 3 KB of a 25 KB search result costs a dozen inspect round trips
@@ -1195,6 +1245,27 @@ mod tests {
     }
 
     #[test]
+    fn project_rules_count_the_rules_named_without_their_claim() {
+        let rule = |iri: &str, kind: &str, claim: &str| GoverningRule {
+            iri: iri.into(),
+            label: iri.into(),
+            kind: kind.into(),
+            claim: claim.into(),
+            via: "via: component Map".into(),
+        };
+        let rendered = project_rules(&[
+            rule("urn:a", "Constraint", "hasDescription: a\n"),
+            rule("urn:b", "Constraint", ""),
+            rule("urn:c", "Requirement", ""),
+        ]);
+        assert!(rendered.ends_with(
+            "\n2 project rule(s) named without their claim (Constraint: 1; Requirement: 1); search project knowledge for their claims\n"
+        ), "{rendered}");
+        let all = project_rules(&[rule("urn:a", "Constraint", "hasDescription: a\n")]);
+        assert!(!all.contains("named without their claim"), "{all}");
+    }
+
+    #[test]
     fn the_observation_budget_scales_with_what_the_prompt_has_left() {
         // A knowledge question carries no dossiers, so nearly the whole budget
         // is free and a 25 KB search result must not be clipped to 3 KB.
@@ -1342,7 +1413,7 @@ mod tests {
         ];
         assert_eq!(
             project_rules(&rules),
-            "\nProject rules (hard requirements; your plan must satisfy each or say why it does not apply, and list the ones it implements in addresses):\n\n[Constraint] Retries stop at the limit (urn:rule:a)\nvia: component Transfers\nhasDescription: A retry loop stops after the configured limit.\n\n[Requirement] Titles only past the cap (urn:rule:b)\nvia: linked to src/send.rs\n"
+            "\nProject rules (hard requirements; your plan must satisfy each or say why it does not apply, and list the ones it implements in addresses):\n\n[Constraint] Retries stop at the limit (urn:rule:a)\nvia: component Transfers\nhasDescription: A retry loop stops after the configured limit.\n\n[Requirement] Titles only past the cap (urn:rule:b)\nvia: linked to src/send.rs\n\n1 project rule(s) named without their claim (Requirement: 1); search project knowledge for their claims\n"
         );
         assert_eq!(
             plan_rule_echo(&rules),

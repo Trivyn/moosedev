@@ -711,7 +711,13 @@ contract 3 and intent contract 2.
   before the output rule, under "Project rules (hard requirements; your plan
   must satisfy each or say why it does not apply, and list the ones it
   implements in addresses):", and Plan mode ends with a
-  line naming each rule's title. With no governing rules there is no block.
+  line naming each rule's title. A rule named without its claim is counted in
+  a closing line naming the kinds and the search route. With no governing
+  rules there is no block. Each rule is listed once: linked evidence leaves
+  out the governing rules the walk reached and says how many are under Project
+  rules. (It used to repeat each as a header, `via:` line and "claim under
+  Project rules" pointer, about 180 bytes per rule: 15.6 KB for 86 rules in
+  badciv 7e0c50eb.)
 
   Requirements are governing rules because they are what an approved spec
   mostly records: `/approve-spec` links both kinds to the covering component,
@@ -782,8 +788,12 @@ contract 3 and intent contract 2.
 - Source bounded by scope. The task keeps the full text of every working-set
   file, but a prompt shows it in full only within a source budget: two fifths
   of the prompt budget, which follows the role's `context_window_tokens`, and
-  never more than the budget leaves after the protected part and the
-  observation floor. Files are ranked, then shown whole while they fit: the file
+  never more than the budget leaves after the protected part and this step's
+  observations. The observations reserve is what the observations block will
+  actually show, up to the 8 KB floor; the last result is known when the
+  prompt is built, so a one-line read result does not hold back the whole
+  floor. Budgeting the next search's capacity still reserves the full floor.
+  Files are ranked, then shown whole while they fit: the file
   the model read or edited last, the files the latest failed command names in
   its output (compiler errors cite `path:line`), then the rest, most recently
   read or edited first. A read and an edit count alike: ranking an old edit
@@ -796,6 +806,16 @@ contract 3 and intent contract 2.
   only the files shown in full. A step that shortened anything journals
   `source_delivery` with each file's tier, size and reason, and the model
   request records `source_outlined`.
+- Source swap notice. When a prompt shows as an outline a file the previous
+  prompt showed in full, the outlines section opens by naming it, with the
+  working set's size and the source budget, and `source_swap` is journaled.
+  The notice is built by the same step that picks the tiers and is counted in
+  the protected part at its largest, so it never changes the last result or
+  the budget. A file stays named until an action on a prompt that showed it is
+  accepted, so a repair prompt after a rejected action names it again. A
+  model reading its files in
+  a cycle through a budget one file short (badciv 7e0c50eb) is told it is
+  swapping, rather than finding out one read at a time.
 - Edit guard for outlined files. An edit to a file the producing prompt showed
   only as an outline is not applied: an edit written from an outline would
   guess the text it replaces. The step becomes a read, which makes the file the

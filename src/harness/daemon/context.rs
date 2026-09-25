@@ -138,9 +138,22 @@ pub fn context_snapshot(
             }
         } else {
             context.push_str("\nLinked evidence (records linked to the files' code and components; complete claims):\n");
-            context.push_str(&graph::render_linked_evidence(&graph::with_rule_pointers(
-                &linked.records,
-            )));
+            // A governing rule is listed once, under Project rules, with its
+            // via: line and claim. Repeating it here as a pointer cost about
+            // 180 bytes per rule and told the model nothing (86 rules, 15.6 KB
+            // in badciv 7e0c50eb).
+            let (rules, evidence): (Vec<_>, Vec<_>) = linked
+                .records
+                .iter()
+                .cloned()
+                .partition(|record| graph::is_rule_kind(&record.kind));
+            context.push_str(&graph::render_linked_evidence(&evidence));
+            if !rules.is_empty() {
+                context.push_str(&format!(
+                    "\n{} governing rule(s) linked here are listed with their claims under Project rules.\n",
+                    rules.len()
+                ));
+            }
         }
         Vec::new()
     };

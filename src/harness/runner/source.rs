@@ -63,6 +63,11 @@ pub(super) struct SourceView {
     /// The outlines section; empty when every file is shown in full.
     pub outlines: String,
     pub placed: Vec<Placed>,
+    /// Bytes of full source this prompt could show.
+    pub budget: usize,
+    /// Files outlined here that the previous prompt showed in full; the
+    /// outlines section names them (see [`swap_notice`]).
+    pub swapped: Vec<String>,
 }
 
 impl SourceView {
@@ -121,11 +126,33 @@ pub(super) fn protected_source(blocks: &[SourceBlock]) -> usize {
         .map(|block| block.full_cost)
         .sum();
     let header = if outlines > 0 {
-        OUTLINES_HEADER.len()
+        OUTLINES_HEADER.len() + swap_notice_bound(blocks)
     } else {
         0
     };
     header + outlines + absent
+}
+
+/// The line that names files a prompt shows as outlines although the previous
+/// prompt showed them in full. When the working set is larger than the source
+/// budget, a model re-reading the files it needs rotates them through the
+/// budget without knowing it (badciv 7e0c50eb); the harness knows, so the
+/// prompt says so (AD 6166bb16). It is part of the source section, built by
+/// the same pure step that picks the tiers, so it never touches the last
+/// result and a retry renders it identically.
+fn swap_notice(swapped: &[String], files: usize, total: usize, budget: usize) -> String {
+    format!(
+        "Newly shown only as {} to fit the source budget: {}. The {files} files in the working set hold {total} bytes; {budget} bytes of source fit in full. Read a file again only when you need its full text to edit it.\n",
+        if swapped.len() == 1 { "an outline" } else { "outlines" },
+        swapped.join(", ")
+    )
+}
+
+/// The largest the swap notice can be for these files: every file named, and
+/// the widest numbers.
+fn swap_notice_bound(blocks: &[SourceBlock]) -> usize {
+    let names: Vec<String> = blocks.iter().map(|block| block.file.clone()).collect();
+    swap_notice(&names, usize::MAX, usize::MAX, usize::MAX).len()
 }
 
 /// The file too large to show in full, when the one the model just read does
@@ -229,6 +256,13 @@ impl Runner {
     pub(super) fn clear_source_order(&mut self) {
         self.task.source_recency.clear();
         self.task.source_outlined.clear();
+        self.task.source_outlined_seen.clear();
+    }
+
+    /// The model acted on the last prompt, so it has seen that prompt's
+    /// outlines; the swap notice stops naming them.
+    pub(super) fn source_outlines_seen(&mut self) {
+        self.task.source_outlined_seen = self.task.source_outlined.clone();
     }
 
     /// Every working-set file, each with the cost of showing it in full and
@@ -358,13 +392,29 @@ impl Runner {
                 reason: "over_budget",
             });
         }
+        let swapped: Vec<String> = placed
+            .iter()
+            .filter(|placed| {
+                placed.tier != Tier::Full && !self.task.source_outlined_seen.contains(&placed.file)
+            })
+            .map(|placed| placed.file.clone())
+            .collect();
         if !outlines.is_empty() {
+            if !swapped.is_empty() {
+                let total: usize = self.task.source.values().flatten().map(String::len).sum();
+                outlines.insert_str(
+                    0,
+                    &swap_notice(&swapped, self.task.source.len(), total, budget),
+                );
+            }
             outlines.insert_str(0, OUTLINES_HEADER);
         }
         Ok(SourceView {
             full_json: serde_json::to_string(&full).unwrap_or_default(),
             outlines,
             placed,
+            budget,
+            swapped,
         })
     }
 }
@@ -521,6 +571,93 @@ mod tests {
                 }
             }
         }
+        server.abort();
+    }
+
+    /// Source gives way to the observations the step will show, not to a
+    /// fixed floor: a one-line read result leaves source more room than a
+    /// long command output does.
+    #[tokio::test]
+    async fn source_reserves_only_the_observations_the_step_shows() {
+        let project = Project::new("source-reserve");
+        let (mut runner, server) = runner_with(&project, &[("a.rs", module(100))]).await;
+        let mut context = runner.context.clone().unwrap();
+        // Knowledge large enough that what is left, not the share, bounds source.
+        context.context = "k".repeat(45_000);
+        runner.task.last_response = "Read a.rs with its governing knowledge.".into();
+        let short = runner.source_view_for(&context).unwrap().budget;
+        runner.task.last_response = "x".repeat(20_000);
+        let long = runner.source_view_for(&context).unwrap().budget;
+        assert!(short > long, "{short} vs {long}");
+        assert!(
+            short - long < 8_000,
+            "never more than the floor: {short} vs {long}"
+        );
+        server.abort();
+    }
+
+    /// badciv 7e0c50eb: five files one short of the budget, read in a cycle.
+    /// Each read says which file it pushed to an outline, and the sizes.
+    #[tokio::test]
+    async fn a_file_pushed_to_an_outline_is_named_in_the_source_section() {
+        let project = Project::new("source-swap");
+        let file = module(40);
+        let names = ["a.rs", "b.rs", "c.rs", "d.rs"];
+        let files: Vec<(&str, String)> = names.iter().map(|name| (*name, file.clone())).collect();
+        let (mut runner, server) = runner_with(&project, &files).await;
+        let mut context = runner.context.clone().unwrap();
+        for name in names {
+            runner.touch_source(name);
+        }
+        // Pad knowledge until exactly one of the four no longer fits.
+        let mut pad = 0;
+        while runner
+            .source_view_for(&context)
+            .unwrap()
+            .outlined()
+            .is_empty()
+        {
+            pad += 500;
+            context.context = "k".repeat(pad);
+        }
+        for round in 0..2 {
+            for name in names {
+                let (_, view) = runner.prompt(&context, &[]).unwrap();
+                runner.task.source_outlined = view.outlined();
+                assert_eq!(
+                    runner.task.source_outlined.len(),
+                    1,
+                    "round {round}: one file outlined"
+                );
+                let outlined = runner.task.source_outlined.iter().next().unwrap().clone();
+                if outlined != name {
+                    continue;
+                }
+                // The model reads the outlined file: the next prompt shows it in
+                // full and names the file that took its place as an outline.
+                runner.touch_source(name);
+                let (prompt, view) = runner.prompt(&context, &[]).unwrap();
+                assert_eq!(view.swapped.len(), 1, "{view:?}");
+                assert_ne!(view.swapped[0], name);
+                let notice = format!(
+                    "Newly shown only as an outline to fit the source budget: {}. The 4 files in the working set hold",
+                    view.swapped[0]
+                );
+                assert!(prompt.contains(&notice), "{prompt}");
+                // The same prompt built again (a retry) says the same thing.
+                assert_eq!(runner.prompt(&context, &[]).unwrap().0, prompt);
+            }
+        }
+        // A repair prompt, rebuilt after a rejected action, names it again;
+        // once an action on that prompt is accepted, it is not named again.
+        let (_, view) = runner.prompt(&context, &[]).unwrap();
+        runner.task.source_outlined = view.outlined();
+        let (repair, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(repair.contains("Newly shown only as"), "{repair}");
+        runner.source_outlines_seen();
+        let (prompt, view) = runner.prompt(&context, &[]).unwrap();
+        assert!(view.swapped.is_empty());
+        assert!(!prompt.contains("Newly shown only as"));
         server.abort();
     }
 

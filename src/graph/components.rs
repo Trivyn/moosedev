@@ -161,22 +161,40 @@ pub fn best_component_for_path<'a>(
     path: &str,
     components: &'a [ComponentEntry],
 ) -> Option<&'a ComponentEntry> {
-    let mut best: Option<(&ComponentEntry, usize)> = None;
+    components_for_path(path, components).into_iter().next()
+}
+
+/// Every component that covers `path`, most specific first: a file inside a
+/// crate that has its own spec is governed by that crate's rules and by the
+/// rules of every component enclosing it, such as a whole-project spec's.
+/// Specificity is the length of the matching `coversPath` (the whole-project
+/// marker is 0); ties keep catalog order.
+pub fn components_for_path<'a>(
+    path: &str,
+    components: &'a [ComponentEntry],
+) -> Vec<&'a ComponentEntry> {
+    let mut matched: Vec<(&ComponentEntry, usize)> = Vec::new();
     for component in components {
-        for covers_path in &component.covers_paths {
-            let (matched, specificity) = if covers_path == COVERS_WHOLE_PROJECT {
-                (true, 0)
-            } else if covers_path.ends_with('/') {
-                (path.starts_with(covers_path), covers_path.len())
-            } else {
-                (path == covers_path, covers_path.len())
-            };
-            if matched && best.is_none_or(|(_, len)| specificity > len) {
-                best = Some((component, specificity));
-            }
+        let specificity = component
+            .covers_paths
+            .iter()
+            .filter_map(|covers_path| {
+                if covers_path == COVERS_WHOLE_PROJECT {
+                    Some(0)
+                } else if covers_path.ends_with('/') {
+                    path.starts_with(covers_path.as_str())
+                        .then_some(covers_path.len())
+                } else {
+                    (path == covers_path).then_some(covers_path.len())
+                }
+            })
+            .max();
+        if let Some(specificity) = specificity {
+            matched.push((component, specificity));
         }
     }
-    best.map(|(component, _)| component)
+    matched.sort_by_key(|(_, specificity)| std::cmp::Reverse(*specificity));
+    matched.into_iter().map(|(component, _)| component).collect()
 }
 
 /// Declare repository path coverage for a minted `SystemComponent`.
@@ -443,6 +461,27 @@ mod tests {
                 .name,
             "graph"
         );
+    }
+
+    #[test]
+    fn every_enclosing_component_covers_a_path_most_specific_first() {
+        let components = vec![
+            component("project", &[COVERS_WHOLE_PROJECT]),
+            component("map", &["map/"]),
+            component("parser", &["map/src/parse.rs"]),
+            component("sim", &["sim/"]),
+        ];
+        let names = |path: &str| -> Vec<String> {
+            components_for_path(path, &components)
+                .into_iter()
+                .map(|component| component.name.clone())
+                .collect()
+        };
+        assert_eq!(names("map/src/parse.rs"), ["parser", "map", "project"]);
+        assert_eq!(names("map/src/lib.rs"), ["map", "project"]);
+        assert_eq!(names("Cargo.toml"), ["project"]);
+        let local = vec![component("map", &["map/"])];
+        assert!(components_for_path("sim/src/lib.rs", &local).is_empty());
     }
 
     #[test]

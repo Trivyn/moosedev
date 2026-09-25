@@ -17,7 +17,7 @@ use oxigraph::model::NamedNode;
 
 use super::capture::asserted_project_types;
 use super::code_entities::{file_entity_iris, CodeTerms};
-use super::components::{best_component_for_path, load_components};
+use super::components::{components_for_path, load_components};
 use super::context::{context_item_for_iri, first_literal, render_claim_body};
 use super::dossier::{
     collect_records, direct_records_for_entity, linked_records, realized_components, sort_records,
@@ -152,9 +152,14 @@ pub fn linked_evidence(state: &AppState, files: &[String]) -> anyhow::Result<Lin
             }
             components.extend(realized_components(state, &terms, &entity)?);
         }
-        if let Some(iri) = best_component_for_path(file, &catalog).and_then(|c| c.iri.clone()) {
-            components.insert(iri);
-        }
+        // Every enclosing component governs the file, not only the most
+        // specific: a whole-project spec's rules reach files inside a crate
+        // that has its own spec.
+        components.extend(
+            components_for_path(file, &catalog)
+                .into_iter()
+                .filter_map(|component| component.iri.clone()),
+        );
     }
     let sources: Vec<&RecordSummary> = direct
         .values()
@@ -347,9 +352,6 @@ pub fn render_linked_evidence(records: &[LinkedRecord]) -> String {
     out
 }
 
-/// The line that replaces a governing rule's claim in linked evidence.
-pub const RULE_POINTER: &str = "claim under Project rules\n";
-
 /// The governing rules of the walked files: accepted rules linked directly to
 /// their code, then the rules the walk reached, in hop order, and Constraints
 /// ahead of Requirements.
@@ -415,21 +417,6 @@ pub fn rules_delivery(rules: &[(String, bool)]) -> String {
         .map(|(kind, (total, with_claim))| format!("{kind}: {total}, {with_claim} with claims"))
         .collect::<Vec<_>>()
         .join("; ")
-}
-
-/// The walk's records with each governing rule's claim replaced by a pointer
-/// to the Project rules, which carry it.
-pub fn with_rule_pointers(records: &[LinkedRecord]) -> Vec<LinkedRecord> {
-    records
-        .iter()
-        .map(|record| {
-            let mut record = record.clone();
-            if is_rule_kind(&record.kind) {
-                record.claim = RULE_POINTER.to_string();
-            }
-            record
-        })
-        .collect()
 }
 
 /// Candidates for one hop, in the order they were found.
@@ -615,9 +602,6 @@ mod tests {
             24
         );
         assert!(rules[26].claim.is_empty());
-        let pointed = with_rule_pointers(&evidence.records);
-        assert_eq!(pointed[0].claim, RULE_POINTER);
-        assert_eq!(pointed[26].claim, "hasDescription: claim of urn:l\n");
     }
 
     /// Requirements govern too, but never at a Constraint's expense: they sort

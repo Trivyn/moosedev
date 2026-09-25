@@ -75,7 +75,9 @@ def membership(response, *, iri, title, claim):
     files = response.get("files") or []
     dossiers = "\n".join(item.get("dossier", "") for item in files)
     policies = "\n".join(json.dumps(item.get("policy"), ensure_ascii=False) for item in files)
-    rules = response.get("governing_constraints") or []
+    # The daemon's field is governing_rules; archived responses from before the
+    # rename carry governing_constraints.
+    rules = response.get("governing_rules") or response.get("governing_constraints") or []
     governing = "\n".join(rule.get("claim", "") for rule in rules)
     return {"inventory": any(item["iri"] == iri for item in parsed["inventory"]),
             "topic_evidence": any(item["iri"] == iri and not item["walked"] and not item["linked"]

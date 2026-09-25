@@ -236,6 +236,18 @@ impl Runner {
         }
         let files = self.workspace.files()?;
         let (prompt, source) = self.prompt(&context, &files)?;
+        if !source.swapped.is_empty() {
+            let total: usize = self.task.source.values().flatten().map(String::len).sum();
+            self.intent_event(
+                "source_swap",
+                &format!(
+                    "{}; working set {} files, {total} bytes; source budget {}",
+                    source.swapped.join(", "),
+                    self.task.source.len(),
+                    source.budget
+                ),
+            );
+        }
         self.task.source_outlined = source.outlined();
         if let Some(receipt) = source.receipt() {
             self.intent_event("source_delivery", &receipt);
@@ -248,11 +260,13 @@ impl Runner {
         // replan can be continued.
         let proposed_replan = matches!(action, model::Action::Replan { .. });
         let Some(action) = self.symbolic_intercept(action)? else {
+            self.source_outlines_seen();
             return self.persist();
         };
         self.validate_permission(&action)?;
         if self.read_new_edit_target(&action, &context).await? == Some(false) {
             self.candidate_accepted();
+            self.source_outlines_seen();
             if !message.trim().is_empty() {
                 self.event(format!("Assistant: {message}"));
             }
@@ -269,6 +283,7 @@ impl Runner {
             .symbolic_finish_guard(step)
             .map_err(|error| error.context(model::InvalidModelOutput))?;
         self.candidate_accepted();
+        self.source_outlines_seen();
         if !message.trim().is_empty() {
             self.task.last_response = message.clone();
             self.event(format!("Assistant: {message}"));

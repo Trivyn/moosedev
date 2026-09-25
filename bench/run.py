@@ -335,7 +335,9 @@ def materialize_tree(corpus: str, wd):
     via `git archive`. Excluding .git enforces the comprehension-debt premise (no history for the
     agent); .env is dropped too."""
     c = config.CORPORA[corpus]
-    ref = c.get("sha", "HEAD")
+    # BENCH_TREE_REF re-materializes a corpus as it stood at an earlier commit (a cold-arm
+    # re-measurement against a past batch's tree) without touching the corpus config.
+    ref = os.environ.get("BENCH_TREE_REF") or c.get("sha", "HEAD")
     cmd = f"git -C {shlex.quote(c['repo'])} archive {shlex.quote(ref)} | tar -x -C {shlex.quote(str(wd))}"
     subprocess.run(cmd, shell=True, check=True)
     (wd / ".env").unlink(missing_ok=True)
@@ -699,9 +701,24 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         cmd = ["codex", "exec", "-m", model, "--dangerously-bypass-approvals-and-sandbox",
                "--skip-git-repo-check", "--json", "-o", str(final_file)]
         cmd += codex_mcp_overrides(arm, corpus, mode)
+        # Route the SAME model through another provider when Codex's hosted list drops it
+        # (Sep 2026: gpt-5.4-mini vanished from the ChatGPT-account model list mid-trial).
+        # OpenRouter's id carries the vendor prefix, so pass e.g. `-m openai/gpt-5.4-mini`.
+        if provider := os.environ.get("CODEX_MODEL_PROVIDER"):
+            cmd += ["-c", f'model_provider="{provider}"']
+            if provider == "openrouter":
+                cmd += ["-c", 'model_providers.openrouter.name="OpenRouter"',
+                        "-c", 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"',
+                        "-c", 'model_providers.openrouter.env_key="OPENROUTER_API_KEY"']
         if variant:  # codex reasoning effort, e.g. minimal|low|medium|high
             cmd += ["-c", f'model_reasoning_effort="{variant}"']
         cmd += [prompt]
+        # A cold arm is only cold if the process cannot READ outside its workdir: codex's
+        # bypass flag lifts its own seatbelt, and an unconfined B0 walked `..` into the frozen
+        # task JSON (the gold) and sibling checkouts' rationale docs (Lesson 0ef057d5). The
+        # profile is a macOS seatbelt (SBPL) file; sandbox-exec wraps the whole codex tree.
+        if profile := os.environ.get("BENCH_SANDBOX_PROFILE"):
+            cmd = ["sandbox-exec", "-f", profile] + cmd
     else:
         # --pure: no external opencode plugins, so runs are insulated from the global setup.
         cmd = ["opencode", "run", "--pure", "--model", model, "--format", "json", "--dir", str(wd)]
@@ -814,6 +831,7 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         ),
         "cell_errors": cell_errors or None,
         "stderr_tail": (stderr or "").strip()[-2000:] if returncode != 0 else None,
+        "agent_provider": os.environ.get("CODEX_MODEL_PROVIDER") if backend == "codex" else None,
     }
     with open(runs_dir / "runs.jsonl", "a") as f:
         f.write(json.dumps(row) + "\n")

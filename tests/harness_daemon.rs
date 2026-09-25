@@ -844,10 +844,13 @@ async fn linked_evidence_delivers_unlinked_component_constraint() {
     let evidence = evidence_section(&response.context);
     assert!(evidence.starts_with("\nLinked evidence ("), "{evidence}");
     assert!(!response.context.contains("\nTopic evidence ("));
+    // A governing rule is listed once, under Project rules, not repeated
+    // here as a pointer.
+    assert!(!evidence.contains(&format!("({np7})")), "{evidence}");
     assert!(
-        evidence.contains(&format!(
-            "({np7})\nvia: component Billing\nclaim under Project rules\n"
-        )),
+        evidence.contains(
+            "governing rule(s) linked here are listed with their claims under Project rules."
+        ),
         "{evidence}"
     );
     assert!(
@@ -970,15 +973,15 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
 
     let response = linked_context(&state, "harness", &["src/harness.rs"]);
     let evidence = evidence_section(&response.context);
+    // Both rules the walk reached are listed once, under Project rules.
+    assert!(!evidence.contains(&format!("({need})")), "{evidence}");
+    assert!(!evidence.contains(&format!("({driver})")), "{evidence}");
     assert!(
-        evidence.contains(&format!(
-            "({need})\nvia: motivates Harness current decision\nclaim under Project rules\n"
-        )),
+        evidence.contains(
+            "governing rule(s) linked here are listed with their claims under Project rules."
+        ),
         "{evidence}"
     );
-    assert!(evidence.contains(&format!(
-        "({driver})\nvia: motivates Harness current decision\nclaim under Project rules\n"
-    )));
     let governing: Vec<_> = response
         .governing_rules
         .iter()
@@ -1059,8 +1062,15 @@ async fn linked_evidence_never_drops_accepted_constraints() {
     let evidence = evidence_section(&response.context);
     for constraint in &constraints {
         assert!(
-            evidence.contains(&format!("({constraint})\nvia: component Billing\n")),
-            "{constraint} listed"
+            !evidence.contains(&format!("({constraint})")),
+            "{constraint} is listed under Project rules, not repeated here"
+        );
+        assert!(
+            response
+                .governing_rules
+                .iter()
+                .any(|rule| &rule.iri == constraint),
+            "{constraint} named under Project rules"
         );
     }
     assert_eq!(
@@ -1069,7 +1079,12 @@ async fn linked_evidence_never_drops_accepted_constraints() {
             .count(),
         0
     );
-    assert_eq!(evidence.matches("claim under Project rules\n").count(), 24);
+    assert!(
+        evidence.contains(
+            "\n30 governing rule(s) linked here are listed with their claims under Project rules.\n"
+        ),
+        "{evidence}"
+    );
     assert_eq!(response.governing_rules.len(), 30);
     assert_eq!(
         response
@@ -1088,9 +1103,11 @@ async fn linked_evidence_never_drops_accepted_constraints() {
         evidence.matches("hasDescription: Cap lesson claim").count(),
         6
     );
+    // The rules are counted once, under Project rules, where the runner
+    // names the six shown without their claim (model.rs project_rules).
     assert!(
         evidence.ends_with(
-            "\n10 further linked records not shown in full (Constraint: 6; Lesson: 4); search project knowledge for their claims\n"
+            "\n4 further linked records not shown in full (Lesson: 4); search project knowledge for their claims\n\n30 governing rule(s) linked here are listed with their claims under Project rules.\n"
         ),
         "{evidence}"
     );
@@ -1123,10 +1140,11 @@ async fn linked_evidence_walks_unindexed_file_by_component_path() {
 
     let response = linked_context(&state, "unrelated topic words", &["src/fees.py"]);
     let evidence = evidence_section(&response.context);
+    assert!(!evidence.contains(&format!("({rule})")), "{evidence}");
     assert!(
-        evidence.contains(&format!(
-            "({rule})\nvia: component Billing\nclaim under Project rules\n"
-        )),
+        evidence.contains(
+            "\n1 governing rule(s) linked here are listed with their claims under Project rules.\n"
+        ),
         "{evidence}"
     );
     assert_eq!(response.governing_rules.len(), 1);

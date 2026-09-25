@@ -114,6 +114,18 @@ class RankingTests(unittest.TestCase):
            "• Lesson — \"Walked lesson\"\n  linkedVia: isMotivatedBy\n  " + WALKED + "\n\n"
            "• Constraint — \"" + TITLE + "\"\n  hasDescription: " + CLAIM + "\n  " + NP7 + "\n")
 
+    def test_a_rule_listed_only_under_project_rules_is_delivered(self):
+        # The current daemon lists a governing rule once, under Project rules (governing_rules), and
+        # linked evidence only counts it; the probe must still see the rule and its claim delivered.
+        context = (RULES_PREAMBLE + "\n\n" + LINKED_HEADER + "\n"
+                   + "\n1 governing rule(s) linked here are listed with their claims under Project rules.\n")
+        response = {"context": context, "files": [],
+                    "governing_rules": [{"iri": NP7, "label": TITLE, "kind": "Constraint",
+                                         "claim": "hasDescription: " + CLAIM + "\n", "via": "via: linked to fees.py"}]}
+        member = crowding.membership(response, iri=NP7, title=TITLE, claim=CLAIM)
+        self.assertTrue(member["rules"] and member["claim_anywhere"])
+        self.assertFalse(member["linked_evidence"])
+
     def test_ranking_rank_and_cross_check(self):
         items = crowding.parse_ranking(self.MCP)
         self.assertEqual([(item["iri"], item["walked"]) for item in items], [(OTHER, False), (WALKED, True), (NP7, False)])
