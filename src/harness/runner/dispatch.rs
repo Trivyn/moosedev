@@ -865,15 +865,55 @@ const VACUOUS_CHECKS: [&str; 6] = [
 /// Why a check that succeeded nonetheless verified nothing, or `None`.
 ///
 /// A failed check is never vacuous: its failure is the signal, and
-/// [`classify_denial`] already owns reading that output.
+/// [`classify_denial`] already owns reading that output. A zero signature
+/// alone is not enough: `cargo test` prints "running N tests" once per test
+/// binary, and its doc-test stage reports "running 0 tests" even when the
+/// integration tests ran 14 (badciv 3ba41310, where the model then added a
+/// filler unit test to satisfy the harness). The check verified nothing only
+/// when no count in its output shows a test ran.
 fn vacuous_reason(result: &executor::CommandResult) -> Option<&'static str> {
-    if !result.success {
+    if !result.success || tests_ran(&result.output) {
         return None;
     }
     VACUOUS_CHECKS
         .iter()
         .find(|signature| result.output.contains(**signature))
         .copied()
+}
+
+/// Whether any test-count phrase in a runner's output is above zero: cargo's
+/// "running N tests" and "N passed", pytest's "collected N items" and "N
+/// passed", mocha's "N passing", jest's "Tests: … N total".
+fn tests_ran(output: &str) -> bool {
+    let count = |token: &str| {
+        token
+            .trim_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u64>()
+            .ok()
+    };
+    output.lines().any(|line| {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        tokens.windows(2).enumerate().any(|(index, pair)| {
+            let (word, next) = (pair[0], pair[1]);
+            let counted = match word {
+                "running" | "collected" => count(next),
+                _ if next.starts_with("passed")
+                    || next.starts_with("passing")
+                    || (next.starts_with("total") && line.trim_start().starts_with("Tests:")) =>
+                {
+                    count(word)
+                }
+                _ => None,
+            };
+            // "running 1 test" / "collected 3 items": the count must be a
+            // whole token followed by the noun, not a stray digit.
+            let noun_follows = !matches!(word, "running" | "collected")
+                || tokens
+                    .get(index + 2)
+                    .is_some_and(|noun| noun.starts_with("test") || noun.starts_with("item"));
+            counted.is_some_and(|n| n > 0) && noun_follows
+        })
+    })
 }
 
 const PATH_DENIALS: [&str; 5] = [
@@ -1177,6 +1217,29 @@ mod check_failure_tests {
             )),
             None
         );
+        // badciv 3ba41310: cargo's unit binary and doc-tests ran nothing, the
+        // integration binary ran 14. Not vacuous.
+        assert_eq!(
+            vacuous_reason(&passed(
+                "     Running unittests src/lib.rs\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n\n     Running tests/roundtrip.rs\n\nrunning 14 tests\ntest parse_tiny_fixture ... ok\n\ntest result: ok. 14 passed; 0 failed; 0 ignored\n\n   Doc-tests badciv_map\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n"
+            )),
+            None
+        );
+        // Every binary empty: still vacuous. Other runners' positive counts
+        // clear their own zero-looking lines.
+        assert_eq!(
+            vacuous_reason(&passed(
+                "running 0 tests\ntest result: ok. 0 passed\n\n   Doc-tests x\n\nrunning 0 tests\n"
+            )),
+            Some("running 0 tests")
+        );
+        for output in [
+            "collected 3 items\n\n3 passed in 0.02s",
+            "  2 passing (4ms)\n  0 pending",
+            "Tests:       5 passed, 5 total",
+        ] {
+            assert_eq!(vacuous_reason(&passed(output)), None, "{output}");
+        }
         // A failed check is never vacuous: the failure is the signal, and
         // classify_denial owns reading that output.
         assert_eq!(

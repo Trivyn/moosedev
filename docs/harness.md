@@ -881,8 +881,12 @@ contract 3 and intent contract 2.
   signature (`running 0 tests`, `no tests ran`, `No tests found`,
   `collected 0 items`, `0 passing`, `Tests:       0 total`), the runner
   journals `check_vacuous` and returns the check to the model once, naming it
-  and asking for a test that fails without the change. A failed check is never
-  vacuous: its failure is the signal, and the sandbox-denial classifier already
+  and asking for a test that fails without the change. A zero signature does
+  not count when any count in the same output shows a test ran (`running 14
+  tests`, `3 passed`, `2 passing`, `Tests: 5 total`): `cargo test` prints one
+  "running N tests" line per test binary, and its empty doc-test stage made a
+  crate with 14 passing integration tests look untested (badciv 3ba41310). A
+  failed check is never vacuous: its failure is the signal, and the sandbox-denial classifier already
   owns that output. After one return the task may finish anyway — a project
   with no tests yet is not trapped — but `check_vacuous_unmet` is journaled and
   the completion line says the checks passed while verifying nothing, instead
