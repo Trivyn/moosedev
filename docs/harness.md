@@ -181,7 +181,21 @@ accumulated by index; assistant text beside the call becomes the message, and
 reasoning text is ignored.
 
 Only the first call runs. Later calls are journaled as `extra_tool_calls_ignored`,
-and the session notes that one action runs per step. Arguments that are not valid
+and the session notes that one action runs per step. The exception is a `reply`
+sent beside an action: that is the model narrating what it is about to do, so the
+action runs and the reply's text becomes its message (`reply_as_message`).
+Running the reply alone ended the turn on "I will …" with the action dropped.
+A `reply` carries `then`: `wait` (the default) when it answers the human and
+the turn ends, `continue` when the model is about to act. On `continue` the
+reply is shown with a note and the turn continues, asking for the plan in Plan
+mode or the next step (or `finish`) while working (`reply_continued`). This
+happens once per human message; a second continuing reply hands the turn back.
+The field is typed because neither the reply's wording ("I have read the
+specifications. I will now begin…") nor the human's can tell an answer from a
+premature stop, while the model can. Replayed on the badciv prompt that stalled,
+Gemma chose `reply` 6 of 6 times, marked it `continue` 6 of 6 times (and `wait`
+6 of 6 for a question), and proposed the plan 6 of 6 times on the continued
+turn. Arguments that are not valid
 JSON are repaired when possible (`tool_arguments_repaired`); otherwise the
 candidate is invalid output and spends a repair. Some models write the call as
 text instead, as Llama 3.3 does on LM Studio. When a response has no native call,
@@ -224,7 +238,16 @@ can be interrupted like any other command; revoking the grant first voids it.
 infers a permission need itself: when a failed command's output shows the sandbox
 blocked a path or the network, it tells the model so, names `request_permission`
 as the next action and the paths the output named, and records a `sandbox_denial`
-event. A denial whose output names no path outside the project and no network
+event. Network denials include the package managers' own offline messages, since
+the sandbox runs them offline unless network is granted: Cargo's "but --offline
+was specified", uv's "Network connectivity is disabled", pip's "Failed to
+establish a new connection", and Node's `getaddrinfo`.
+
+A free command identical to one that already ran is not run again when nothing
+could have changed its output since: no applied edit, no human message or
+decision, and no permission change. The model is pointed at the earlier result
+(`command_repeat_refused`). A second such repeat parks the task for the human
+instead of spending more model calls. A denial whose output names no path outside the project and no network
 need is not a permission need — the program wants a terminal, a device or a
 process right no grant provides — so a free command gets the opposite hint
 (`sandbox_denial_ungrantable`), and a required check parks the task for the
@@ -756,6 +779,36 @@ contract 3 and intent contract 2.
   carry, the edit proceeds (`first_edit_satisfied_absent`) instead of costing
   a turn. When it brings something new, the write is held and the model
   proposes again with it in view.
+- Source bounded by scope. The task keeps the full text of every working-set
+  file, but a prompt shows it in full only within a source budget: two fifths
+  of the prompt budget, which follows the role's `context_window_tokens`, and
+  never more than the budget leaves after the protected part and the
+  observation floor. Files are ranked, then shown whole while they fit: the file
+  the model read or edited last, the files the latest failed command names in
+  its output (compiler errors cite `path:line`), then the rest, most recently
+  read or edited first. A read and an edit count alike: ranking an old edit
+  above later reads kept an unrelated file in full while the files being read
+  rotated out (badciv c75d5d20). A file that does not fit is not cut; it appears under `Source
+  outlines` as its declarations with line numbers, taken from the in-memory
+  text with the tree-sitter grammars the syntactic fallback uses, or as its
+  name, size and line count when its type has no grammar. Every file appears
+  on some tier. The `Current source` line keeps its JSON-object form and holds
+  only the files shown in full. A step that shortened anything journals
+  `source_delivery` with each file's tier, size and reason, and the model
+  request records `source_outlined`.
+- Edit guard for outlined files. An edit to a file the producing prompt showed
+  only as an outline is not applied: an edit written from an outline would
+  guess the text it replaces. The step becomes a read, which makes the file the
+  latest read and shows it in full next.
+- Prompt overflow stops the task. When the part of the prompt the harness never
+  cuts (rules, knowledge, dossiers, instructions and every outline) exceeds
+  the budget, or the file the model just read cannot fit the source budget
+  alone, no request is sent: every retry would build the same prompt. The task
+  moves to AwaitingInput with `last_error_kind` `context_overflow`, and its
+  message gives the budget, where it comes from and each section's size, and
+  asks for guidance naming a smaller part of the work. Guidance returns the task
+  to Plan and clears its working set. The study classifies the stop as
+  `runner_error`/`context_overflow`.
 - Whole-file rewrites. A `replace` whose `old_text` covers at least 90% of a
   file of 1 KB or more, while the text it actually changes is at most a quarter
   of that span, is journaled as `edit_whole_file` and named in the

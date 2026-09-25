@@ -55,6 +55,55 @@ pub fn parse_source(relative_path: &str, source: &str) -> Option<Tree> {
     parser.parse(source, None)
 }
 
+/// One declaration of a source outline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineEntry {
+    /// 1-based line the declaration starts on.
+    pub line: usize,
+    /// Declarations enclosing this one: an impl method is 1.
+    pub depth: usize,
+    pub kind: &'static str,
+    /// The declaration's first line, trimmed.
+    pub text: String,
+}
+
+/// The declarations of in-memory source, in source order, located by the same
+/// grammar and declaration kinds as the syntactic fallback (Constraint
+/// 6bf5ef13: one definition locator). Parses the given text rather than the
+/// index, so it describes files written since the last indexing. `None` for a
+/// path with no registered grammar or source too large to parse.
+pub fn outline(relative_path: &str, source: &str) -> Option<Vec<OutlineEntry>> {
+    let fallback = lang::fallback_for_path(Path::new(relative_path))?;
+    let tree = parse_source(relative_path, source)?;
+    let mut entries = Vec::new();
+    // Iterative, so a deeply nested expression cannot exhaust the stack.
+    let mut stack = vec![(tree.root_node(), 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            match (fallback.declaration_kind)(child.kind()) {
+                Some(_) => stack.push((child, depth + 1)),
+                None => stack.push((child, depth)),
+            }
+        }
+        if let Some(kind) = (fallback.declaration_kind)(node.kind()) {
+            let text = node_text(node, source)
+                .and_then(|text| text.lines().next())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            entries.push(OutlineEntry {
+                line: node.start_position().row + 1,
+                depth: depth - 1,
+                kind,
+                text,
+            });
+        }
+    }
+    Some(entries)
+}
+
 impl TreeSitterFallback {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -538,5 +587,40 @@ mod tests {
 
         assert_eq!(first.identity, second.identity);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn outlines_list_declarations_with_lines_and_nesting() {
+        let rust = "use std::fmt;\n\n/// A map.\n#[derive(Debug)]\npub struct Map {\n    width: u32,\n}\n\nimpl Map {\n    pub fn new() -> Self {\n        Map { width: 0 }\n    }\n}\n\npub enum Terrain { Ocean }\n\npub fn parse_map(input: &str) -> Map {\n    Map::new()\n}\n";
+        let entries: Vec<(usize, usize, &str, String)> = outline("src/lib.rs", rust)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.line, entry.depth, entry.kind, entry.text))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (5, 0, "struct", "pub struct Map {".to_string()),
+                (9, 0, "impl", "impl Map {".to_string()),
+                (10, 1, "fn", "pub fn new() -> Self {".to_string()),
+                (15, 0, "enum", "pub enum Terrain { Ocean }".to_string()),
+                (
+                    17,
+                    0,
+                    "fn",
+                    "pub fn parse_map(input: &str) -> Map {".to_string()
+                ),
+            ]
+        );
+
+        let python = "class Fees:\n    @staticmethod\n    def late(days):\n        return days\n\ndef total(items):\n    return sum(items)\n";
+        let entries: Vec<(usize, usize, &str)> = outline("fees.py", python)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.line, entry.depth, entry.kind))
+            .collect();
+        assert_eq!(entries, vec![(1, 0, "class"), (3, 1, "fn"), (6, 0, "fn")]);
+
+        assert_eq!(outline("Cargo.toml", "[package]\n"), None, "no grammar");
     }
 }

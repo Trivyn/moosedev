@@ -378,3 +378,32 @@ async fn a_tools_task_reads_plans_edits_and_finishes() {
         runner.task.phase
     );
 }
+
+/// A `reply` sent beside an action is the model saying what it is about to
+/// do. The action runs and the reply becomes its message; running the reply
+/// alone ended the turn on "I will …" with the action dropped.
+#[tokio::test]
+async fn a_reply_beside_an_action_becomes_its_message_and_the_action_runs() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.reply(
+        "harness_action",
+        tool_answer(
+            "",
+            &[
+                ("reply", r#"{"message":"I will read code.txt first."}"#),
+                ("read", r#"{"file":"code.txt"}"#),
+            ],
+        ),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.read_files, vec!["code.txt".to_string()]);
+    assert_eq!(intent_details(&runner, "reply_as_message"), vec!["read"]);
+    assert!(intent_details(&runner, "extra_tool_calls_ignored").is_empty());
+    let request = runner.task.model_requests.last().unwrap();
+    let response: Value = serde_json::from_str(request["response"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        response,
+        json!({"message":"I will read code.txt first.","action":{"action":"read","file":"code.txt"}})
+    );
+}

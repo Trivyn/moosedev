@@ -99,7 +99,9 @@ def classify(outcome, last_task, final, driver_state):
         if kind == "other" and str(task["last_error"]).startswith("task reached") \
                 and (task.get("steps") or 0) >= 256:
             return "runner_error", "step_cap"
-        if kind in {"model_output", "other"}:
+        # context_overflow: the runner stopped because the part of the prompt
+        # it never cuts outgrew the budget (it parks in AwaitingInput).
+        if kind in {"model_output", "other", "context_overflow"}:
             return "runner_error", kind
         if "last_error_kind" not in task:
             return "unknown", "missing last_error_kind"

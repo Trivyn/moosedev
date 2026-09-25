@@ -29,7 +29,7 @@ pub use resolver::{
     definition_name_key, DefinitionEntry, DefinitionScope, FileDefinition, Position, Resolution,
     ResolutionMode, SourceRange, SourceWindowRequest, Substrate, SubstrateStats, STALE_CHECK_TTL,
 };
-pub use treesitter::parse_source;
+pub use treesitter::{outline, parse_source, OutlineEntry};
 
 pub const SUBSTRATE_DIR: &str = "substrate";
 pub const GENERATIONS_DIR: &str = "generations";

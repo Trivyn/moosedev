@@ -44,7 +44,7 @@ fn description(name: &str) -> &'static str {
             "Ask the human to grant explicit external paths or network access for an exact command."
         }
         "question" => "Ask the human a question.",
-        "reply" => "Answer in prose without declaring a code task complete.",
+        "reply" => "Say something to the human in prose. then: \"wait\" when this reply answers the human and the turn should end; \"continue\" when you are about to act and the harness should ask for your next action.",
         "replan" => "Say why the approved files or checks must change.",
         "finish" => "Declare the requested changes applied; the harness runs the required checks.",
         "edit" => "Legacy whole-file edit.",
@@ -97,6 +97,9 @@ pub(super) struct Decoded {
     pub(super) repaired: Option<String>,
     /// Names of native calls after the first, which do not run.
     pub(super) ignored: Vec<String>,
+    /// A `reply` call sent beside an action: its text became the message and
+    /// the action ran.
+    pub(super) reply_as_message: bool,
 }
 
 /// Decode the first native tool call, or a call written as text that names an
@@ -110,9 +113,43 @@ pub(super) fn decode(
 ) -> Result<Decoded, String> {
     let allowed = names(schema);
     let listing = allowed.join(", ");
-    let (call, from_content, ignored) = match completion.tool_calls.split_first() {
+    // A `reply` beside an action is the model narrating what it is about to
+    // do: run the action and show the reply as its message. Running the reply
+    // alone ended the turn with "I will …" and dropped the action (badciv
+    // a2e43815: "ran reply; ignored plan", twice).
+    let mut calls: Vec<_> = completion.tool_calls.iter().collect();
+    let mut narration: Option<String> = None;
+    if calls.len() > 1 {
+        if let Some(position) = calls
+            .iter()
+            .position(|call| call.name != "reply" && allowed.contains(&call.name))
+        {
+            let replies: Vec<String> = calls
+                .iter()
+                .filter(|call| call.name == "reply")
+                .filter_map(|call| {
+                    parse_arguments(&call.name, &call.arguments)
+                        .ok()
+                        .and_then(|(arguments, _)| {
+                            arguments
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                })
+                .collect();
+            if !replies.is_empty() {
+                narration = Some(replies.join("\n\n"));
+                let action = calls.remove(position);
+                calls.retain(|call| call.name != "reply");
+                calls.insert(0, action);
+            }
+        }
+    }
+    let reply_as_message = narration.is_some();
+    let (call, from_content, ignored) = match calls.split_first() {
         Some((first, rest)) => (
-            first.clone(),
+            (*first).clone(),
             false,
             rest.iter().map(|call| call.name.clone()).collect(),
         ),
@@ -143,10 +180,15 @@ pub(super) fn decode(
     }
     let action = Value::Object(action);
     let text = if conversational {
-        let message = if from_content {
+        let content = if from_content {
             ""
         } else {
             completion.content.trim()
+        };
+        let message = match &narration {
+            Some(narration) if content.is_empty() => narration.trim().to_owned(),
+            Some(narration) => format!("{content}\n\n{}", narration.trim()),
+            None => content.to_owned(),
         };
         json!({"message": message, "action": action}).to_string()
     } else {
@@ -158,6 +200,7 @@ pub(super) fn decode(
         from_content,
         repaired,
         ignored,
+        reply_as_message,
     })
 }
 

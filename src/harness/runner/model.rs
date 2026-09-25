@@ -1,4 +1,5 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
+use super::source::{protected_source, source_budget, SourceView};
 use super::task::KnowledgeSearchResult;
 use super::tools;
 use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
@@ -44,14 +45,14 @@ const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief 
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
-const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; current source supplied below counts as already read. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
+const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message,then), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A reply's then is wait when it answers the human and the turn should end, and continue when you are about to act and want your next action requested. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; source supplied in full below counts as already read, and a file listed only under Source outlines must be read before it is edited. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
 /// execution and finishing wait for approval, and a replan while planning changes nothing.
 const PLAN_MODE_ACTION_NAMES: [&str; 6] =
     ["read", "search", "inspect", "question", "reply", "plan"];
 const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, question, reply, plan. Editing and execution require human plan approval.";
-const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
+const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied in full. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
 
 /// The governing rules the daemon delivered, each with its `via:` line and claim.
 fn project_rules(rules: &[GoverningRule]) -> String {
@@ -110,6 +111,77 @@ impl std::fmt::Display for NoopEdit {
     }
 }
 impl std::error::Error for NoopEdit {}
+
+/// The part of a step's prompt the harness never cuts does not fit its budget
+/// (Constraint 927d5176, rule 5): the rules, knowledge, instructions and every
+/// working-set outline, or the file the model just read does not fit the
+/// source budget alone. The step stops for the human before any request,
+/// since every retry would build the same prompt.
+#[derive(Debug)]
+pub(super) struct PromptOverflow {
+    pub budget: usize,
+    pub window_tokens: usize,
+    pub sections: Vec<(&'static str, usize)>,
+    /// The file too large to show in full: path, bytes, source budget.
+    pub file: Option<(String, usize, usize)>,
+}
+
+impl PromptOverflow {
+    fn required(&self) -> usize {
+        self.sections.iter().map(|(_, bytes)| bytes).sum()
+    }
+
+    /// What the human is told: why the step stopped, the sizes behind it and
+    /// what to do.
+    pub(super) fn guidance(&self) -> String {
+        let cause = match &self.file {
+            Some((file, bytes, budget)) => format!(
+                "{file} is {bytes} bytes, more than the {budget} bytes of full source this prompt can hold, so it cannot be shown in full for editing."
+            ),
+            None => format!(
+                "the part of the prompt the harness never cuts is {} bytes, over the budget.",
+                self.required()
+            ),
+        };
+        let sizes: Vec<String> = self
+            .sections
+            .iter()
+            .map(|(name, bytes)| format!("{name} {bytes}"))
+            .collect();
+        format!(
+            "Stopped before asking the model: {cause}\nPrompt budget: {} bytes, from context_window_tokens {} (at most {MAX_CONTEXT} bytes).\nRequired bytes: {}.\nNarrow the task: reply with guidance naming a smaller part of the work, or /plan. The task returns to Plan and its working set is cleared.",
+            self.budget,
+            self.window_tokens,
+            sizes.join(", ")
+        )
+    }
+}
+
+impl std::fmt::Display for PromptOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.file {
+            Some((file, bytes, budget)) => write!(
+                f,
+                "{file} ({bytes} bytes) does not fit the {budget}-byte source budget"
+            ),
+            None => write!(
+                f,
+                "required prompt context of {} bytes exceeds the {}-byte budget",
+                self.required(),
+                self.budget
+            ),
+        }
+    }
+}
+impl std::error::Error for PromptOverflow {}
+
+/// The never-truncated part of a step prompt.
+struct Mandatory {
+    text: String,
+    /// Bytes left after it and the output schema.
+    remaining: usize,
+    source: SourceView,
+}
 
 /// One physical generation: action JSON text (json_schema contract, capture note)
 /// or a tool-contract completion still to be decoded.
@@ -366,7 +438,7 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model
@@ -472,6 +544,9 @@ impl Runner {
                             super::bounded(&completion.content, 400)
                         ),
                     );
+                }
+                if decoded.reply_as_message {
+                    self.intent_event("reply_as_message", &decoded.name);
                 }
                 if !decoded.ignored.is_empty() {
                     let ignored = decoded.ignored.join(", ");
@@ -581,8 +656,11 @@ impl Runner {
     /// Mandatory, never-truncated prompt sections and the bytes left after the
     /// selected action contract's output schema. Retrieval uses the same
     /// accounting before it asks the daemon for evidence, so the daemon can
-    /// shape whole records to the real next-prompt capacity.
-    fn mandatory_prompt(&self, context: &ContextResponse) -> Result<(String, usize)> {
+    /// shape whole records to the real next-prompt capacity. Working-set
+    /// source is shown in full within its budget and as outlines beyond it;
+    /// when even the outlines do not fit, the step stops with a typed
+    /// [`PromptOverflow`] before any request.
+    fn mandatory_prompt(&self, context: &ContextResponse) -> Result<Mandatory> {
         let config = self.active_config()?;
         let mut prompt = String::from(ROLE_OPENING);
         let standing = self.task.standing_guidance.as_ref().map_or_else(
@@ -594,7 +672,8 @@ impl Runner {
             prompt.push('\n');
         }
         prompt.push_str(ROLE_BOUNDARY);
-        prompt.push_str(&project_rules(&context.governing_rules));
+        let rules = project_rules(&context.governing_rules);
+        prompt.push_str(&rules);
         let contract = self.action_contract();
         prompt.push_str(match (contract, self.task.batch_capture) {
             (ActionContract::Tools, true) => TOOLS_CONVERSATIONAL_OUTPUT,
@@ -604,10 +683,10 @@ impl Runner {
         });
         prompt.push_str(ACTION_MEANINGS);
         prompt.push_str(JOB);
+        let dossiers = serde_json::to_string(&context.files)?;
         prompt.push_str(&format!(
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent human guidance: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
-            config.model, self.task.objective, self.task.guidance, context.context,
-            serde_json::to_string(&context.files)?,
+            config.model, self.task.objective, self.task.guidance, context.context, dossiers,
         ));
         let edited: Vec<_> = self.task.edits.iter().map(|edit| &edit.file).collect();
         let checks: Vec<_> = self
@@ -618,31 +697,71 @@ impl Runner {
             .map(|(index, c)| json!({"check":index,"success":c.success}))
             .collect();
         prompt.push_str(&format!(
-            "\nCurrent harness state (observed results; earlier assistant intentions may be obsolete):\nMode: {:?}\nPhase: {:?}\nPlan: {}\nFiles already read with dossiers: {}\nEdits already applied to: {}\nCurrent source, refreshed before this action:\n{}\nRequired check results (indices into plan checks): {}\n",
+            "\nCurrent harness state (observed results; earlier assistant intentions may be obsolete):\nMode: {:?}\nPhase: {:?}\nPlan: {}\nFiles already read with dossiers: {}\nEdits already applied to: {}\nCurrent source, refreshed before this action:\n",
             self.task.mode, self.task.phase, serde_json::to_string(&self.task.plan)?,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
-            serde_json::to_string(&self.task.source)?, serde_json::to_string(&checks)?,
         ));
-        prompt.push_str(match self.task.mode {
+        let mut tail = format!(
+            "Required check results (indices into plan checks): {}\n",
+            serde_json::to_string(&checks)?
+        );
+        tail.push_str(match self.task.mode {
             Mode::Plan => PLAN_MODE_ACTIONS,
             Mode::Auto => AUTO_MODE_ACTIONS,
         });
         if self.task.mode == Mode::Plan {
-            prompt.push_str(&plan_rule_echo(&context.governing_rules));
+            tail.push_str(&plan_rule_echo(&context.governing_rules));
         }
         // Count the complete mandatory prompt and output schema first. Discovery
         // and historical prose spend only the remainder; governing claims and
         // file dossiers are never clipped to accommodate a directory listing.
         let schema = self.action_schema();
+        let schema_bytes = match contract {
+            ActionContract::Tools => serde_json::to_string(&tools::definitions(&schema))?.len(),
+            ActionContract::JsonSchema => {
+                JSON_SCHEMA_MARKER.len() + serde_json::to_string(&schema)?.len()
+            }
+        };
         let limit = self.prompt_budget()?;
-        let required = prompt.len()
-            + match contract {
-                ActionContract::Tools => serde_json::to_string(&tools::definitions(&schema))?.len(),
-                ActionContract::JsonSchema => {
-                    JSON_SCHEMA_MARKER.len() + serde_json::to_string(&schema)?.len()
-                }
-            };
-        Ok((prompt, limit.saturating_sub(required)))
+        // Every file is at least outlined, so all outlines are protected.
+        let blocks = self.source_blocks();
+        let outlines = protected_source(&blocks);
+        let fixed = prompt.len() + "{}\n".len() + tail.len() + schema_bytes;
+        let known = rules.len() + context.context.len() + dossiers.len() + schema_bytes;
+        let overflow = |file: Option<(String, usize, usize)>| PromptOverflow {
+            budget: limit,
+            window_tokens: config.context_window_tokens,
+            sections: vec![
+                ("project rules", rules.len()),
+                ("accepted knowledge", context.context.len()),
+                ("entity dossiers", dossiers.len()),
+                ("source outlines", outlines),
+                ("instructions and task state", fixed.saturating_sub(known)),
+                ("output schema", schema_bytes),
+            ],
+            file,
+        };
+        if fixed + outlines > limit {
+            return Err(overflow(None).into());
+        }
+        let source = self
+            .source_view(
+                &blocks,
+                source_budget(limit, fixed + outlines, OBSERVATION_FLOOR),
+            )
+            .map_err(|oversized| {
+                overflow(Some((oversized.file, oversized.bytes, oversized.budget)))
+            })?;
+        prompt.push_str(&source.full_json);
+        prompt.push('\n');
+        prompt.push_str(&source.outlines);
+        prompt.push_str(&tail);
+        let required = prompt.len() + schema_bytes;
+        Ok(Mandatory {
+            text: prompt,
+            remaining: limit.saturating_sub(required),
+            source,
+        })
     }
 
     fn observations_prefix(&self) -> Result<String> {
@@ -676,15 +795,24 @@ impl Runner {
         // Dispatch journals the search response after this preflight. That
         // adds one 800-byte recent-event preview plus the delivered-evidence
         // sentence and JSON quoting to the next observations header.
-        let (_, remaining) = self.mandatory_prompt(context)?;
+        let remaining = self.mandatory_prompt(context)?.remaining;
         Ok(observation_budget(remaining)
             .saturating_sub(self.observations_prefix()?.len())
             .saturating_sub(PENDING_SEARCH_PREFIX_RESERVE)
             .saturating_sub(1))
     }
 
-    pub(super) fn prompt(&self, context: &ContextResponse, files: &[String]) -> Result<String> {
-        let (prompt, mut remaining) = self.mandatory_prompt(context)?;
+    /// The step prompt and what it showed of the working-set source.
+    pub(super) fn prompt(
+        &self,
+        context: &ContextResponse,
+        files: &[String],
+    ) -> Result<(String, SourceView)> {
+        let Mandatory {
+            text: prompt,
+            mut remaining,
+            source,
+        } = self.mandatory_prompt(context)?;
         let last = if self.task.last_response == self.task.guidance
             || self.task.last_response == self.task.objective
         {
@@ -739,7 +867,7 @@ impl Runner {
         // Historical intentions precede the current authoritative execution state.
         optional.push_str(&prompt);
         optional.push_str(&observations);
-        Ok(optional)
+        Ok((optional, source))
     }
 
     pub(super) fn preserve_stream(&mut self) {
@@ -754,6 +882,24 @@ impl Runner {
     }
 }
 
+/// What a reply asks of the harness: `wait` when it answers the human and
+/// the turn ends, `continue` when the model is about to act. Typed, because a
+/// reply's wording cannot tell the two apart ("I have read the
+/// specifications. I will now begin…") and the model can.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum ReplyThen {
+    #[default]
+    Wait,
+    Continue,
+}
+
+impl ReplyThen {
+    pub(super) fn is_wait(&self) -> bool {
+        *self == ReplyThen::Wait
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Action {
@@ -763,6 +909,8 @@ pub(super) enum Action {
     },
     Reply {
         message: String,
+        #[serde(default, skip_serializing_if = "ReplyThen::is_wait")]
+        then: ReplyThen,
     },
     Read {
         file: String,
@@ -984,7 +1132,7 @@ pub(super) fn action_schema(mode: Mode) -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone())]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
+    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
     if mode == Mode::Plan {
         retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
     }
@@ -1115,7 +1263,7 @@ mod tests {
             delivery_receipt: None,
         });
         runner.knowledge_event(runner.task.last_response.clone());
-        let prompt = runner.prompt(&context, &[]).unwrap();
+        let (prompt, _) = runner.prompt(&context, &[]).unwrap();
         let last = prompt.rsplit_once("Last result:\n").unwrap().1;
         assert!(last.contains(suffix), "{last}");
         assert!(!last.contains("[observation shortened;"), "{last}");

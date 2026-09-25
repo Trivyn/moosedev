@@ -20,6 +20,8 @@ impl std::error::Error for HttpFailure {}
 pub(super) fn error_kind(error: &anyhow::Error) -> &'static str {
     if error.is::<model::InvalidModelOutput>() {
         "model_output"
+    } else if error.is::<model::PromptOverflow>() {
+        "context_overflow"
     } else if let Some(failure) = error.downcast_ref::<HttpFailure>() {
         if (400..500).contains(&failure.status) {
             "daemon_rejection"

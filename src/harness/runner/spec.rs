@@ -613,33 +613,25 @@ fn document_title(lines: &[&str]) -> String {
 }
 
 /// Split at level-2 headings, then merge adjacent sections while the merged
-/// text stays under `SECTION_TARGET_BYTES`. A part holding nothing but
-/// headings joins the next part (the last one joins the previous), so a
-/// heading that states a rule on its own is still read.
+/// text stays under `SECTION_TARGET_BYTES`. A part still over that size is
+/// split again at its level-3 headings, and so on down to level 6, so a long
+/// section with subsections is never read as one part (badciv-map.md's
+/// `## Sections`: five tables in one part, more records than a part may
+/// propose). A part with no heading left to split on stays whole: a table is
+/// never cut. A part holding nothing but headings joins the next part (the
+/// last one joins the previous), so a heading that states a rule on its own
+/// is still read.
 fn spec_sections(lines: &[&str], headings: &[String]) -> Vec<SpecSection> {
-    let mut starts = vec![0];
+    let mut levels = vec![None; lines.len()];
     let mut fenced = false;
     for (index, line) in lines.iter().enumerate() {
         if is_fence(line) {
             fenced = !fenced;
-        } else if !fenced && index > 0 && heading_level(line) == Some(2) {
-            starts.push(index);
+        } else if !fenced {
+            levels[index] = heading_level(line);
         }
     }
-    let bytes = |from: usize, to: usize| {
-        lines[from..to]
-            .iter()
-            .map(|line| line.len() + 1)
-            .sum::<usize>()
-    };
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (position, &from) in starts.iter().enumerate() {
-        let to = starts.get(position + 1).copied().unwrap_or(lines.len());
-        match merged.last_mut() {
-            Some(last) if bytes(last.0, to) <= SECTION_TARGET_BYTES => last.1 = to,
-            _ => merged.push((from, to)),
-        }
-    }
+    let merged = split_part(lines, &levels, 0, lines.len(), 2);
     let has_body = |from: usize, to: usize| {
         lines[from..to]
             .iter()
@@ -668,6 +660,46 @@ fn spec_sections(lines: &[&str], headings: &[String]) -> Vec<SpecSection> {
             heading: headings[from].clone(),
         })
         .collect()
+}
+
+/// `from..to` as parts: whole when it fits the target or has no heading of
+/// `level` or deeper to split on; otherwise cut at its level-`level` headings,
+/// each piece split at the next level down, and adjacent pieces merged while
+/// the merged text fits.
+fn split_part(
+    lines: &[&str],
+    levels: &[Option<usize>],
+    from: usize,
+    to: usize,
+    level: usize,
+) -> Vec<(usize, usize)> {
+    let bytes = |from: usize, to: usize| {
+        lines[from..to]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+    };
+    if level > 6 || bytes(from, to) <= SECTION_TARGET_BYTES {
+        return vec![(from, to)];
+    }
+    let mut bounds: Vec<usize> = (from + 1..to)
+        .filter(|&index| levels[index] == Some(level))
+        .collect();
+    if bounds.is_empty() {
+        return split_part(lines, levels, from, to, level + 1);
+    }
+    bounds.insert(0, from);
+    bounds.push(to);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for window in bounds.windows(2) {
+        for (start, end) in split_part(lines, levels, window[0], window[1], level + 1) {
+            match merged.last_mut() {
+                Some(last) if bytes(last.0, end) <= SECTION_TARGET_BYTES => last.1 = end,
+                _ => merged.push((start, end)),
+            }
+        }
+    }
+    merged
 }
 
 fn normalized_title(title: &str) -> String {
@@ -1048,6 +1080,64 @@ mod tests {
         assert_eq!(
             headings[7], "## B",
             "a # line inside a fence is not a heading"
+        );
+    }
+
+    #[test]
+    fn an_oversized_part_splits_at_its_sub_headings() {
+        // badciv-map.md's shape: one level-2 section over the target whose
+        // subsections each carry their own table.
+        let table = |name: &str| format!("### `[{name}]`\n\n{}", "| c | meaning |\n".repeat(70));
+        let source = format!(
+            "# Map\nIntro.\n## Sections\nEach grid is height lines.\n{}{}```\n### not a heading\n```\n{}## Tail\n{}\n",
+            table("terrain"),
+            table("climate"),
+            table("resource"),
+            "y".repeat(2_100),
+        );
+        let lines: Vec<&str> = source.lines().collect();
+        let headings = line_headings(&lines);
+        let sections = spec_sections(&lines, &headings);
+
+        // Every line exactly once, in order.
+        assert_eq!(sections.first().unwrap().start, 1);
+        assert_eq!(sections.last().unwrap().end, lines.len());
+        for pair in sections.windows(2) {
+            assert_eq!(pair[1].start, pair[0].end + 1, "{sections:?}");
+        }
+        let heading_of = |line: &str| {
+            sections
+                .iter()
+                .find(|section| lines[section.start - 1] == line)
+                .map(|section| section.heading.clone())
+        };
+        // The oversized section is cut at its subsections, and a sub-heading
+        // inside a fence cuts nothing.
+        assert_eq!(
+            heading_of("### `[climate]`").as_deref(),
+            Some("### `[climate]`")
+        );
+        assert_eq!(
+            heading_of("### `[resource]`").as_deref(),
+            Some("### `[resource]`")
+        );
+        assert!(heading_of("### not a heading").is_none());
+        let bytes = |section: &SpecSection| {
+            lines[section.start - 1..section.end]
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+        };
+        for section in &sections {
+            let fits = bytes(section) <= SECTION_TARGET_BYTES;
+            let tail = section.heading == "## Tail";
+            assert!(fits || tail, "{section:?} is {} bytes", bytes(section));
+        }
+        // A part over the target with nothing left to split on stays whole.
+        let tail = sections.last().unwrap();
+        assert_eq!(
+            (tail.heading.as_str(), bytes(tail) > SECTION_TARGET_BYTES),
+            ("## Tail", true)
         );
     }
 

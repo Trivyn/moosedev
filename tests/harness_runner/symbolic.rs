@@ -1725,3 +1725,89 @@ async fn a_dropped_proposal_is_rejected_within_the_accepted_capture() {
         .iter()
         .any(|detail| detail.starts_with("rejected ")));
 }
+
+/// An exact repeat of a command whose output cannot have changed is not run:
+/// the model is pointed at the earlier result, and a second repeat parks the
+/// task for the human.
+#[tokio::test]
+async fn an_unchanged_repeat_of_a_command_is_refused_then_parks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let runs = |runner: &Runner| {
+        runner
+            .task
+            .events
+            .iter()
+            .filter(|event| event.message.starts_with("Command: ls labels.py\n"))
+            .count()
+    };
+    async fn step(fixture: &Fixture, runner: &mut Runner) {
+        fixture.conversational(json!({"action":"command","command":"ls labels.py"}));
+        for _ in 0..3 {
+            if fixture.shared.lock().unwrap().replies.is_empty() {
+                return;
+            }
+            runner.advance().await.unwrap();
+        }
+    }
+    step(&fixture, &mut runner).await;
+    assert_eq!(runs(&runner), 1);
+    step(&fixture, &mut runner).await;
+    assert_eq!(runs(&runner), 1, "the repeat did not run");
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("Not run: this exact command ran at event"));
+    assert_eq!(intent_details(&runner, "command_repeat_refused").len(), 1);
+    step(&fixture, &mut runner).await;
+    assert_eq!(runs(&runner), 1);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner.task.last_response.contains("Guidance is needed"));
+}
+
+/// A reply marked `then: continue` says the model is about to act: the turn
+/// continues once, so the plan follows without the human saying "ok"; a
+/// second such reply before the human speaks hands the turn back. A reply
+/// that waits (the default) is an answer and ends the turn.
+#[tokio::test]
+async fn a_reply_that_continues_asks_for_the_next_action_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"reply","message":"I have read the file. I will now add the helper.","then":"continue"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning, "the turn continues");
+    assert_eq!(intent_details(&runner, "reply_continued").len(), 1);
+    assert!(runner.task.last_response.contains(
+        "(Continuing: you said you are about to act, so take that action now; in Plan mode the next action is plan.)"
+    ));
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["true"],"addresses":[]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+
+    // Continuing twice in a row gives the turn back.
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(
+        json!({"action":"reply","message":"I will begin by adding the helper.","then":"continue"}),
+    );
+    runner.advance().await.unwrap();
+    fixture.conversational(
+        json!({"action":"reply","message":"Starting with labels.py.","then":"continue"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "reply_continued").len(), 1);
+
+    // A reply that waits is an answer.
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(
+        json!({"action":"reply","message":"It returns the name unchanged.","then":"wait"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(intent_details(&runner, "reply_continued").is_empty());
+}

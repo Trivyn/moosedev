@@ -199,6 +199,7 @@ impl Runner {
         self.task.after_review = Phase::Planning;
         self.task.read_files.clear();
         self.task.source.clear();
+        self.clear_source_order();
         if let Some(state) = self.task.symbolic.as_mut() {
             state.read_snapshots.clear();
         }
@@ -248,6 +249,7 @@ impl Runner {
         self.task.after_review = Phase::Planning;
         self.task.read_files.clear();
         self.task.source.clear();
+        self.clear_source_order();
         if let Some(state) = self.task.symbolic.as_mut() {
             state.read_snapshots.clear();
         }
@@ -271,10 +273,22 @@ impl Runner {
         self.task.recovery = None;
         self.task.last_response = text;
         self.task.steps = 0;
-        if self.task.intent.take().is_some() {
+        // A task stopped because its prompt outgrew the budget would build the
+        // same prompt again: the answer returns it to Plan with an empty
+        // working set, as the stop message says.
+        let overflow = self.task.last_error_kind.as_deref() == Some("context_overflow");
+        if self.task.intent.take().is_some() || overflow {
             self.task.mode = Mode::Plan;
             self.task.approved_revision = None;
             self.task.check_results.clear();
+        }
+        if overflow {
+            self.task.read_files.clear();
+            self.task.source.clear();
+            self.clear_source_order();
+            if let Some(state) = self.task.symbolic.as_mut() {
+                state.read_snapshots.clear();
+            }
         }
         self.task.phase = if self.task.mode == Mode::Plan {
             Phase::Planning

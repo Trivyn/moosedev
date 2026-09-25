@@ -3,6 +3,7 @@
 //! invalidated when the evidence it was typed against changes.
 use super::super::model::observation_preview;
 use super::super::scope::changed_files;
+use super::super::source::failed_command_output;
 use super::super::{ApprovedPlan, Phase, Runner};
 use super::{CaptureNoteState, NoteAnswer, CAPTURE_NOTE_QUESTION, MAX_RETYPES};
 use crate::harness::protocol::{
@@ -506,13 +507,7 @@ impl Runner {
         for (index, event) in self.task.events.iter().enumerate() {
             let message = event.message.as_str();
             let kind = if message.starts_with("Command: ") {
-                // The status is the line after the grants header, never text
-                // the command printed.
-                let failed = message
-                    .split_once("\nPermission grants: ")
-                    .and_then(|(_, rest)| rest.lines().nth(1))
-                    == Some("Success: false");
-                if !failed {
+                if failed_command_output(message).is_none() {
                     continue;
                 }
                 "command_failed"

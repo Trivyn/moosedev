@@ -89,7 +89,8 @@ impl Runner {
             "Read {file}: {}",
             source.as_deref().unwrap_or("[file does not exist]")
         ));
-        self.task.source.insert(file, source);
+        self.task.source.insert(file.clone(), source);
+        self.touch_source(&file);
         Ok(context)
     }
 
@@ -168,6 +169,15 @@ impl Runner {
             self.task.last_error = Some(format!("{error:#}"));
             self.task.last_error_kind = Some(error_kind(error).into());
             self.event(format!("Step rejected or interrupted: {error:#}"));
+            // Every retry would build the same prompt: stop for the human with
+            // what outgrew the budget and what to do (Constraint 927d5176).
+            if let Some(overflow) = error.downcast_ref::<model::PromptOverflow>() {
+                self.task.last_response = overflow.guidance();
+                self.event(self.task.last_response.clone());
+                self.task.phase = Phase::AwaitingInput;
+                self.persist()?;
+                return Ok(());
+            }
         }
         self.persist()?;
         result
@@ -225,7 +235,11 @@ impl Runner {
                 .insert(file.clone(), self.workspace.read(file)?);
         }
         let files = self.workspace.files()?;
-        let prompt = self.prompt(&context, &files)?;
+        let (prompt, source) = self.prompt(&context, &files)?;
+        self.task.source_outlined = source.outlined();
+        if let Some(receipt) = source.receipt() {
+            self.intent_event("source_delivery", &receipt);
+        }
         let output: ModelOutput = self
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;
@@ -439,6 +453,9 @@ impl Runner {
                 if !self.fresh_approval().await? {
                     return Ok(());
                 }
+                if self.refuse_repeated_command(&command) {
+                    return self.persist();
+                }
                 self.end_unchanged_window();
                 let result = self.run_command(&command).await?;
                 self.commit_command_result(&command, result)?;
@@ -472,9 +489,15 @@ impl Runner {
                 self.task.last_response = question;
                 self.task.phase = Phase::AwaitingInput;
             }
-            Step::Reply { message: reply } => {
+            Step::Reply {
+                message: reply,
+                then,
+            } => {
                 if reply != message {
                     self.event(format!("Assistant: {reply}"));
+                }
+                if then == ReplyThen::Continue && self.continue_after_reply(&reply) {
+                    return self.persist();
                 }
                 self.task.last_response = reply;
                 self.task.turn_finished = true;
@@ -530,6 +553,7 @@ impl Runner {
         self.task
             .source
             .insert(edit.file.clone(), edit.after.clone());
+        self.touch_source(&edit.file);
         self.clear_symbolic_batch_state(&edit);
         self.end_unchanged_window();
         self.intent_event("edit_applied", &edit.file);
@@ -844,11 +868,19 @@ const PATH_DENIALS: [&str; 5] = [
     "os error 13)",
     "Read-only file system",
 ];
-const NETWORK_DENIALS: [&str; 4] = [
+const NETWORK_DENIALS: [&str; 8] = [
     "Could not resolve host",
     "failed to lookup address",
     "Temporary failure in name resolution",
     "Network is unreachable",
+    // Package managers the sandbox runs offline say so in their own words:
+    // Cargo under CARGO_NET_OFFLINE (badciv a2e43815 spent its task digging
+    // through registry caches for a crate one network grant would fetch), uv,
+    // pip, and Node's resolver.
+    "but --offline was specified",
+    "Network connectivity is disabled",
+    "Failed to establish a new connection",
+    "getaddrinfo",
 ];
 /// Appended to a failed command's observation when the output shows the OS
 /// sandbox blocked it. It steers the model to the typed request; it never
@@ -984,6 +1016,107 @@ fn check_failure_response(
     }
 }
 
+impl Runner {
+    /// The journal event of the last run of exactly `command`, when nothing
+    /// that could change its output has happened since: no applied edit, no
+    /// human message or decision, no permission change. Rerunning it would
+    /// print the same thing (badciv a2e43815 ran one `ls` of the cargo
+    /// registry four times in a row).
+    fn unchanged_command_run(&self, command: &str) -> Option<usize> {
+        let prefix = format!("Command: {command}\nPermission grants: ");
+        let last = self
+            .task
+            .events
+            .iter()
+            .rposition(|event| event.message.starts_with(&prefix))?;
+        let changed = self.task.events[last + 1..].iter().any(|event| {
+            let message = event.message.as_str();
+            message.starts_with("Applied edit")
+                || message.starts_with("Human ")
+                || message.starts_with("Task permission")
+        });
+        (!changed).then_some(last)
+    }
+
+    /// Refuse an exact repeat of a command whose output cannot have changed,
+    /// pointing at the earlier result. A second refusal in a row parks the
+    /// task for the human instead of spending more model calls. True when the
+    /// command must not run.
+    fn refuse_repeated_command(&mut self, command: &str) -> bool {
+        let Some(event) = self.unchanged_command_run(command) else {
+            return false;
+        };
+        let refused_before = self.task.events[event + 1..]
+            .iter()
+            .any(|later| later.message.starts_with("Not run: this exact command"));
+        self.intent_event(
+            "command_repeat_refused",
+            &format!("event {event}: {command}"),
+        );
+        if refused_before {
+            let message = format!(
+                "The model keeps proposing a command that already ran at event {event} with nothing changed since, so it would print the same output:\n{command}\nGuidance is needed: say what to try instead, grant what it lacks, or /plan to change the approach."
+            );
+            self.event(format!(
+                "Not run: this exact command repeated again; parked for guidance (event {event})."
+            ));
+            self.task.last_response = message;
+            self.task.phase = Phase::AwaitingInput;
+            self.task.turn_finished = true;
+            return true;
+        }
+        let message = format!(
+            "Not run: this exact command ran at event {event} and nothing has changed since (no edit, no permission change, no message from the human), so it would print the same output. Its result is in event {event}; inspect({event}, 0) pages it. Take a different step: change the code, run a different command, request_permission if the sandbox blocked it, or ask the human with question."
+        );
+        self.event(message.clone());
+        self.task.last_response = message;
+        true
+    }
+}
+
+impl Runner {
+    /// The model said its reply is not the end of its turn (`then:
+    /// continue`): it is about to act. Without this the turn ended on "I will
+    /// now begin…" and the human had to say "ok" (badciv, six runs; replayed,
+    /// Gemma chose reply on that prompt 6 of 6 times). Show the reply and ask
+    /// for the next action. Once per human message, so a model that keeps
+    /// replying still hands the turn back. True when the turn continues.
+    fn continue_after_reply(&mut self, reply: &str) -> bool {
+        if !matches!(self.task.phase, Phase::Planning | Phase::Working) {
+            return false;
+        }
+        let since_human = self
+            .task
+            .events
+            .iter()
+            .rposition(|event| event.message.starts_with("Human "))
+            .map_or(0, |index| index + 1);
+        if self.task.events[since_human..]
+            .iter()
+            .any(|event| event.message.starts_with(REPLY_CONTINUED))
+        {
+            return false;
+        }
+        self.intent_event("reply_continued", &bounded(reply, 200));
+        let next = if self.task.mode == Mode::Plan {
+            "in Plan mode the next action is plan"
+        } else {
+            "take the next step of the approved plan, or finish if the work is done"
+        };
+        self.event(format!(
+            "{REPLY_CONTINUED} the reply said the model is about to act: {next}."
+        ));
+        self.task.last_response = format!(
+            "{}\n\n(Continuing: you said you are about to act, so take that action now; {next}.)",
+            reply.trim()
+        );
+        true
+    }
+}
+
+/// Journal marker of a continued reply; one per human message.
+const REPLY_CONTINUED: &str = "Continuing after a reply:";
+
 #[cfg(test)]
 mod check_failure_tests {
     use super::*;
@@ -1100,6 +1233,17 @@ mod check_failure_tests {
         );
         // With network already granted, a lookup failure is a real failure.
         assert_eq!(classify_denial(&offline, true, root()), None);
+        let cargo_offline = result(
+            Some(101),
+            "error: failed to download `zerocopy-derive v0.8.57`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified",
+        );
+        assert_eq!(
+            classify_denial(&cargo_offline, false, root()),
+            Some(SandboxDenial::Grantable {
+                paths: vec![],
+                network: true
+            })
+        );
         let passed = executor::CommandResult {
             success: true,
             output: "Permission denied".into(),

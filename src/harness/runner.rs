@@ -34,6 +34,7 @@ mod permissions;
 mod recovery;
 mod review;
 mod scope;
+mod source;
 mod spec;
 pub use spec::spec_approval_objective;
 mod symbolic;
@@ -45,7 +46,7 @@ mod transport;
 mod usage;
 use actions::Step;
 pub use links::IntentEvent;
-use model::{action_schema, conversational_schema, ModelOutput, StreamedMessage};
+use model::{action_schema, conversational_schema, ModelOutput, ReplyThen, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
 pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
 pub use symbolic::{CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicState};
@@ -354,6 +355,8 @@ impl Runner {
             completion_pending: false,
             cleanup_pending: false,
             source: BTreeMap::new(),
+            source_recency: Vec::new(),
+            source_outlined: Default::default(),
             standing_guidance: Some(standing_guidance),
         };
         let mut runner = Self {

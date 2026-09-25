@@ -40,6 +40,7 @@ class CauseTableTests(unittest.TestCase):
                                ("daemon_rejection", ("daemon_rejection", "daemon_rejection")),
                                ("service", ("infrastructure", "service")),
                                ("model_output", ("runner_error", "model_output")),
+                               ("context_overflow", ("runner_error", "context_overflow")),
                                ("other", ("runner_error", "other"))):
             with self.subTest(kind=kind):
                 task = {"phase": "Working", "last_error": "failed", "last_error_kind": kind}

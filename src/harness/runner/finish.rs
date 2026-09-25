@@ -179,6 +179,7 @@ impl Runner {
                             .snapshots
                             .insert(edit.file.clone(), fingerprint(&current));
                         self.task.source.insert(edit.file.clone(), current);
+                        self.touch_source(&edit.file);
                         self.end_unchanged_window();
                         self.task.intent = None;
                         self.task.capture_due = true;

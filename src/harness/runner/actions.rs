@@ -1,5 +1,8 @@
 //! Validate sensor arguments and materialize edits before permission or execution.
-use super::{model::Action, Mode, Runner, MAX_FILES, MAX_PLAN_SUMMARY};
+use super::{
+    model::{Action, ReplyThen},
+    Mode, Runner, MAX_FILES, MAX_PLAN_SUMMARY,
+};
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 
@@ -16,6 +19,8 @@ pub(super) enum Step {
     },
     Reply {
         message: String,
+        #[serde(skip_serializing_if = "ReplyThen::is_wait")]
+        then: ReplyThen,
     },
     Read {
         file: String,
@@ -137,7 +142,7 @@ impl Runner {
                 );
             }
             Action::Search { query } => ensure!(!query.is_empty(), "search query cannot be empty"),
-            Action::Reply { message } => {
+            Action::Reply { message, .. } => {
                 ensure!(!message.trim().is_empty(), "reply message cannot be empty")
             }
             Action::Command { command } => {
@@ -177,7 +182,7 @@ impl Runner {
             | Action::Write { ref file, .. }
             | Action::Edit { ref file, .. } => file,
             Action::Inspect { event, offset } => return Ok(Step::Inspect { event, offset }),
-            Action::Reply { message } => return Ok(Step::Reply { message }),
+            Action::Reply { message, then } => return Ok(Step::Reply { message, then }),
             Action::Read { file } => return Ok(Step::Read { file }),
             Action::Search { query } => return Ok(Step::Search { query }),
             Action::Plan {
@@ -217,6 +222,12 @@ impl Runner {
             // The next generation receives the source and dossier. Never apply a
             // proposal whose author did not see the governing source snapshot.
             self.event(format!("First-edit guard: requesting source and dossier for {file}; the unread edit proposal will not execute."));
+            return Ok(Step::Read { file: file.clone() });
+        }
+        if self.task.source_outlined.contains(file) {
+            // An outline is not the source: an edit written from it would
+            // guess the text it replaces. Read it, which shows it in full next.
+            self.event(format!("Edit guard: {file} was shown only as an outline; showing its full source. The edit proposal will not execute."));
             return Ok(Step::Read { file: file.clone() });
         }
         let before = self

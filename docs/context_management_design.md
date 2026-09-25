@@ -161,6 +161,38 @@ File dossiers retain the earlier complementary safeguards: one deduplication
 state per prompt and a daemon-owned claim budget that preserves the complete
 record inventory with a counted by-kind notice.
 
+## Source, the section the study did not grow
+
+The study's files were small, so working-set source stayed mandatory and whole.
+The first real multi-file plan outgrew it at once. badciv task `59b33920`
+(qwen3.8-27b, 65.5K-token window, 2026-09-24) stopped with "prompt plus output
+schema exceeds configured context budget". Its last prompt that went through
+was 95.5 KB against a 99 KB budget:
+
+| section | bytes |
+|---|---|
+| current source (every read or edited file, whole) | 49,894 |
+| project rules | 20,868 |
+| recent conversation | 8,031 |
+| accepted knowledge | 6,767 |
+| everything else | about 10,000 |
+
+The next step added a 12 KB test file, and every later step would have built
+the same oversized prompt. The failure was loud but said nothing a human could
+act on.
+
+The same resolution applies: bound by scope, not by truncation. Source shown in
+full is capped at two fifths of the prompt budget. Within that cap files are
+ranked by what the step needs: the file read or edited last, the files the
+latest failed command names, then the rest by recency. (A first version ranked
+the last edit second; in task `c75d5d20` that kept an unrelated file in full
+while the three files the model was debugging rotated in and out of outlines,
+and it re-read them for 70 events.) The rest are outlined from their
+declarations, and none is cut or left out. An edit to an outlined file becomes a
+read first. A protected part that still cannot fit stops the task with its
+sizes (`context_overflow`). Replayed offline on the failed step, the prompt is
+71 KB: eight of ten files in full, and two outlined in 1.3 KB.
+
 ## Open questions, to settle with measurement not argument
 
 - **Does scope-narrowing lose deciding knowledge?** Re-run the crowded-probe

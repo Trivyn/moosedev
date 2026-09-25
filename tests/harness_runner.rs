@@ -2312,10 +2312,23 @@ async fn interactive_oversized_governing_evidence_blocks_before_model_call() {
         "Constraint: This complete governing evidence cannot be silently discarded.\n".repeat(1500),
     );
     let mut runner = fixture.interactive_objective("Hello").await;
-    let error = runner.advance().await.unwrap_err().to_string();
+    // Every retry would build the same prompt, so the task stops for the
+    // human with the sizes behind it instead of failing step after step.
+    runner.advance().await.unwrap();
+    let error = runner.task.last_error.clone().unwrap();
     assert!(
         error.contains("context") && error.contains("budget"),
         "{error}"
+    );
+    assert_eq!(
+        runner.task.last_error_kind.as_deref(),
+        Some("context_overflow")
+    );
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(
+        runner.task.last_response.contains("accepted knowledge"),
+        "{}",
+        runner.task.last_response
     );
     assert_eq!(fixture.model_calls(), 0);
     assert!(runner.task.model_requests.is_empty());

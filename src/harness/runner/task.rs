@@ -363,6 +363,14 @@ pub struct Task {
     pub cleanup_pending: bool,
     /// Verbatim recent source for generation; historical evidence lives in events.
     pub(super) source: BTreeMap<String, Option<String>>,
+    /// Working-set files, least recently read or edited first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) source_recency: Vec<String>,
+    /// Files the prompt that produced the current action showed only as an
+    /// outline. An edit to one of them is not applied until its full source
+    /// has been shown.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(super) source_outlined: std::collections::BTreeSet<String>,
     /// The standing guidance this task was created with, replayed verbatim on
     /// resume. `None` only in journals written before the guidance file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
