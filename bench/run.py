@@ -719,6 +719,10 @@ def run_cell(corpus: str, task_id: str, arm: str, model: str, mode: str = "toolu
         # profile is a macOS seatbelt (SBPL) file; sandbox-exec wraps the whole codex tree.
         if profile := os.environ.get("BENCH_SANDBOX_PROFILE"):
             cmd = ["sandbox-exec", "-f", profile] + cmd
+        # Scope the egress allow-list proxy to the agent process only: the harness's own
+        # calls (judge, MCP identity probes) must not be routed through it.
+        if proxy := os.environ.get("BENCH_CODEX_PROXY"):
+            cmd = ["env", f"HTTPS_PROXY={proxy}", f"HTTP_PROXY={proxy}"] + cmd
     else:
         # --pure: no external opencode plugins, so runs are insulated from the global setup.
         cmd = ["opencode", "run", "--pure", "--model", model, "--format", "json", "--dir", str(wd)]
