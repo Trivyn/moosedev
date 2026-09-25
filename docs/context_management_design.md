@@ -193,6 +193,44 @@ read first. A protected part that still cannot fit stops the task with its
 sizes (`context_overflow`). Replayed offline on the failed step, the prompt is
 71 KB: eight of ten files in full, and two outlined in 1.3 KB.
 
+## Prompt order and the prefix cache
+
+A local server such as LM Studio keeps the previous request's KV cache and
+reuses it up to the first byte where the next prompt differs. Only the rest is
+prefilled again. The harness rebuilds its prompt every step, which is what
+keeps it bounded without compaction, so how much it reuses depends on where the
+changing parts sit.
+
+On badciv task `3ba41310` (qwen3.8-27b, 101 action prompts averaging 78 KB),
+each prompt shared 24.8% of its bytes with the request before it, leaving
+58.6 KB to prefill each step. OpenCode's append-only conversation on the same objective ran its
+late steps in about 5 s against the harness's 87 s, with nearly the same total
+input tokens. Two causes put the changing bytes near the front:
+
+- The prompt opened with the recent conversation. Every tool observation the
+  model asked for while working (an `inspect` page, a read confirmation,
+  command output) was also replayed as an assistant turn, so the conversation
+  changed on 67 of 100 steps and the thirteen 2 KB inspect pages of one search
+  filled it.
+- Full source was ordered by path, so an edit to one file changed every file
+  after it.
+
+The prompt is now ordered by how rarely each part changes: role and guidance,
+project rules, action meanings, objective, accepted knowledge, dossiers, source,
+repository paths, conversation, then the harness state (human guidance, mode,
+phase, plan, reads, edits, checks, allowed actions) and the observations. The
+conversation still precedes the authoritative state it may contradict. Full
+source is shown with files never edited first, in read order, then edited files
+least recently edited first. Tool observations are no longer replayed as
+conversation turns while the task works, and the conversation window drops old
+turns 4.8 KB at a time, so between trims it only grows by appending. The prompt
+size and every budget are unchanged.
+
+Replayed offline over the same journal, moving the sections and ordering the
+source by edit age raises reuse to 65%, or 27 KB to prefill per step. The
+observations and state, about 7 KB, change every step by design.
+`python3 -m bench.harness_study prefix-reuse <task journal>` measures a run.
+
 ## Open questions, to settle with measurement not argument
 
 - **Does scope-narrowing lose deciding knowledge?** Re-run the crowded-probe

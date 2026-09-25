@@ -282,19 +282,26 @@ impl Conversation {
         self.queued.push(QueuedMessage { id, text });
         self.save()
     }
+    /// The recent conversation for the model's prompt, at most
+    /// `CONTEXT_BUDGET` bytes of whole turns.
+    ///
+    /// Older turns are dropped in `CONTEXT_TRIM` chunks counted from the
+    /// start of the conversation, not one turn per new turn, so the window
+    /// only grows by appending between trims and a model server's prefix
+    /// cache keeps reusing it.
     pub fn context(&self) -> String {
         // Conversation is expendable prompt context; accepted knowledge is not.
-        let mut budget = 12_000usize;
-        let mut selected = Vec::new();
+        const CONTEXT_BUDGET: usize = 12_000;
+        const CONTEXT_TRIM: usize = 4_800;
+        const SEPARATOR: &str = "\n\n";
         let current = self
             .messages
             .iter()
             .rposition(|message| message.role == "user" && message.task == self.active_task);
-        for message in self
+        let turns: Vec<String> = self
             .messages
             .iter()
             .enumerate()
-            .rev()
             .filter(|(index, message)| {
                 (message.role == "user" || message.role == "assistant")
                     && Some(*index) != current
@@ -303,17 +310,27 @@ impl Conversation {
                         .iter()
                         .any(|queued| message.id.as_ref() == Some(&queued.id))
             })
-            .map(|(_, message)| message)
-        {
-            let value = format!("{}: {}", message.role, message.text);
-            if value.len() > budget {
-                break;
+            .map(|(_, message)| format!("{}: {}", message.role, message.text))
+            .collect();
+        let size = |turns: &[String]| {
+            turns.iter().map(String::len).sum::<usize>()
+                + SEPARATOR.len() * turns.len().saturating_sub(1)
+        };
+        let mut start = 0;
+        let total = size(&turns);
+        if total > CONTEXT_BUDGET {
+            let drop = (total - CONTEXT_BUDGET).div_ceil(CONTEXT_TRIM) * CONTEXT_TRIM;
+            let mut dropped = 0;
+            while start < turns.len() && dropped < drop {
+                dropped += turns[start].len() + SEPARATOR.len();
+                start += 1;
             }
-            budget -= value.len();
-            selected.push(value);
         }
-        selected.reverse();
-        selected.join("\n\n")
+        // A turn larger than the whole budget is never shown in part.
+        while size(&turns[start..]) > CONTEXT_BUDGET {
+            start += 1;
+        }
+        turns[start..].join(SEPARATOR)
     }
     fn sync_task(&mut self, task: &Task) {
         let seen = *self.seen_events.get(&task.id).unwrap_or(&0);
@@ -340,6 +357,11 @@ fn parked_for_guidance(task: &Task) -> bool {
             .is_some_and(|repair| repair.status == RecoveryStatus::AwaitingGuidance)
 }
 
+/// Whether the runner's last result becomes an assistant turn. A tool
+/// observation the model asked for while it keeps working (a page, a read,
+/// command output) is not: it is already an activity line and the model's
+/// Last result, and replaying it as history would repeat it in every later
+/// prompt and change the conversation on nearly every step.
 fn should_append_last_response(
     last_response: &str,
     prior_response: &str,
@@ -347,10 +369,13 @@ fn should_append_last_response(
     outcome_ok: bool,
     interrupted: bool,
     searched_knowledge: bool,
+    observation: bool,
 ) -> bool {
+    let working = matches!(phase, Phase::Planning | Phase::Working | Phase::Verifying);
     outcome_ok
         && !interrupted
         && !searched_knowledge
+        && !(observation && working)
         && !last_response.is_empty()
         && (last_response != prior_response || phase == Phase::AwaitingInput)
 }
@@ -894,6 +919,7 @@ impl Controller {
             outcome.is_ok(),
             interrupted,
             searched_knowledge,
+            runner.task.last_response_observation,
         ) {
             self.conversation
                 .push("assistant", runner.task.last_response.clone());
@@ -1544,6 +1570,25 @@ mod tests {
         assert!(conversation.context().contains("99 "));
     }
     #[test]
+    fn the_prompt_window_grows_by_appending_between_trims() {
+        let mut conversation = Conversation::new(PathBuf::from("/unused"));
+        let mut previous = String::new();
+        let mut trims = 0;
+        for n in 0..200 {
+            conversation.push("assistant", format!("{n} {}", "x".repeat(300)));
+            let context = conversation.context();
+            assert!(context.len() <= 12_000);
+            assert!(context.ends_with(&"x".repeat(300)));
+            if !context.starts_with(&previous) {
+                trims += 1;
+            }
+            previous = context;
+        }
+        // About 60 KB of turns through a 12 KB window trimmed 4.8 KB at a
+        // time: each trim is followed by appends only.
+        assert!((10..=14).contains(&trims), "{trims} trims");
+    }
+    #[test]
     fn knowledge_events_stay_out_of_the_conversation_transcript() {
         assert_eq!(transcript_role(3, &[4]), Some("activity"));
         assert_eq!(transcript_role(4, &[4]), None);
@@ -1558,6 +1603,7 @@ mod tests {
             true,
             false,
             true,
+            false,
         ));
         assert!(should_append_last_response(
             "A user-facing answer",
@@ -1566,6 +1612,33 @@ mod tests {
             true,
             false,
             false,
+            false,
+        ));
+    }
+    #[test]
+    fn tool_observations_are_not_replayed_as_assistant_turns() {
+        // badciv 3ba41310: thirteen inspect pages became assistant turns and
+        // filled the conversation window the model saw on every later step.
+        for phase in [Phase::Planning, Phase::Working, Phase::Verifying] {
+            assert!(!should_append_last_response(
+                "Journal event 18, bytes 0..2000 of 13908:\n...",
+                "",
+                phase,
+                true,
+                false,
+                false,
+                true,
+            ));
+        }
+        // An observation that ends at a human gate is still shown.
+        assert!(should_append_last_response(
+            "Command needs a permission grant",
+            "",
+            Phase::AwaitingPermission,
+            true,
+            false,
+            false,
+            true,
         ));
     }
     #[test]

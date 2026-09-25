@@ -324,6 +324,7 @@ impl Runner {
             response_receipt: None,
             token_usage: UsageLedger::new(&journal),
             last_response: String::new(),
+            last_response_observation: false,
             knowledge_revision: String::new(),
             knowledge_turn_sequence: 0,
             knowledge_turns: Vec::new(),

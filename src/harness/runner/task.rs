@@ -314,6 +314,11 @@ pub struct Task {
     #[serde(default)]
     pub token_usage: UsageLedger,
     pub last_response: String,
+    /// `last_response` is a tool observation for the model (a page, a read,
+    /// command output), not prose for the human, so the conversation does
+    /// not replay it as an assistant turn.
+    #[serde(default)]
+    pub last_response_observation: bool,
     pub knowledge_revision: String,
     #[serde(default)]
     pub knowledge_turn_sequence: u64,

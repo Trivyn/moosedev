@@ -138,6 +138,8 @@ def main(argv=None):
     command.add_argument("--roots", nargs="+", default=None, help="study evidence roots for the action census")
     command.add_argument("--crowded-roots", nargs="+", default=None, help="crowded probe field-check roots")
     command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
+    command = sub.add_parser("prefix-reuse", help="offline prefix-cache reuse of a harness task journal; no model calls")
+    command.add_argument("journal", type=Path, help="a .moosedev/harness/tasks/<id>.json task journal")
     command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
     command.add_argument("runs", type=Path, nargs="+")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -250,6 +252,10 @@ def main(argv=None):
                                        parent_preflight=args.parent_preflight, output=args.output,
                                        deciding_fact=args.deciding_fact)
         print(json.dumps({"summary": summary(result), "evidence": str(args.output / "intercept.json")}))
+        return 0
+    elif args.command == "prefix-reuse":
+        from .prefix_reuse import report_file
+        print(json.dumps(report_file(args.journal), indent=2))
         return 0
     elif args.command == "crowding-report":
         from .crowding import report as crowding_report

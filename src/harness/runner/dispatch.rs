@@ -159,6 +159,8 @@ impl Runner {
     pub async fn advance(&mut self) -> Result<()> {
         self.task.last_error = None;
         self.task.last_error_kind = None;
+        // Set again only by the path that leaves an observation this advance.
+        self.task.last_response_observation = false;
         let result = loop {
             match self.advance_inner().await {
                 Err(error) if self.repair_candidate(&error)? => continue,
@@ -291,6 +293,10 @@ impl Runner {
         self.task.steps += 1;
         self.event(format!("Model action: {}", serde_json::to_string(&step)?));
         self.persist()?;
+        self.task.last_response_observation = matches!(
+            step,
+            Step::Inspect { .. } | Step::Read { .. } | Step::Search { .. }
+        );
         match step {
             Step::Inspect { event, offset } => {
                 let observation = self
@@ -652,6 +658,9 @@ impl Runner {
     ) -> Result<()> {
         let denial = self.note_sandbox_denial(command, &result);
         self.task.last_response = result.output;
+        // Every command path ends here: a model command, an already covered
+        // permission request, and an approved one run on the next advance.
+        self.task.last_response_observation = true;
         match denial {
             // The denial already names the blocked paths, so ask the human
             // directly instead of spending a model turn on a request the

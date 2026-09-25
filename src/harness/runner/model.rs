@@ -33,6 +33,7 @@ const LAST_RESULT_FLOOR: usize = 3_000;
 /// separators and the delivered-evidence counters, including `usize::MAX`.
 const PENDING_SEARCH_PREFIX_RESERVE: usize = 5_500;
 const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
+const SOURCE_HEADER: &str = "\nCurrent source, refreshed before this action:\n";
 
 /// The compiled opening of the role. The project's standing guidance
 /// (`.moosedev/GUIDANCE.md` or the compiled default) follows it.
@@ -193,9 +194,14 @@ impl std::fmt::Display for PromptOverflow {
 }
 impl std::error::Error for PromptOverflow {}
 
-/// The never-truncated part of a step prompt.
+/// The never-truncated part of a step prompt, split where the step prompt
+/// places optional sections between them. `head` changes only when rules,
+/// knowledge or dossiers do; `source` when working-set source does; `state`
+/// on most steps.
 struct Mandatory {
-    text: String,
+    head: String,
+    source_text: String,
+    state: String,
     /// Bytes left after it and the output schema.
     remaining: usize,
     source: SourceView,
@@ -711,8 +717,8 @@ impl Runner {
         prompt.push_str(JOB);
         let dossiers = serde_json::to_string(&context.files)?;
         prompt.push_str(&format!(
-            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent human guidance: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
-            config.model, self.task.objective, self.task.guidance, context.context, dossiers,
+            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
+            config.model, self.task.objective, context.context, dossiers,
         ));
         let edited: Vec<_> = self.task.edits.iter().map(|edit| &edit.file).collect();
         let checks: Vec<_> = self
@@ -722,21 +728,25 @@ impl Runner {
             .enumerate()
             .map(|(index, c)| json!({"check":index,"success":c.success}))
             .collect();
-        prompt.push_str(&format!(
-            "\nCurrent harness state (observed results; earlier assistant intentions may be obsolete):\nMode: {:?}\nPhase: {:?}\nPlan: {}\nFiles already read with dossiers: {}\nEdits already applied to: {}\nCurrent source, refreshed before this action:\n",
-            self.task.mode, self.task.phase, serde_json::to_string(&self.task.plan)?,
+        // The step prompt places this state after source, navigation and
+        // conversation: it changes on most steps, and everything before the
+        // first changed byte is reused from the model server's prefix cache.
+        let mut state = format!(
+            "\nCurrent human guidance: {}\nCurrent harness state (observed results; earlier assistant intentions may be obsolete):\nMode: {:?}\nPhase: {:?}\nPlan: {}\nFiles already read with dossiers: {}\nEdits already applied to: {}\n",
+            self.task.guidance, self.task.mode, self.task.phase,
+            serde_json::to_string(&self.task.plan)?,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
-        ));
-        let mut tail = format!(
+        );
+        state.push_str(&format!(
             "Required check results (indices into plan checks): {}\n",
             serde_json::to_string(&checks)?
-        );
-        tail.push_str(match self.task.mode {
+        ));
+        state.push_str(match self.task.mode {
             Mode::Plan => PLAN_MODE_ACTIONS,
             Mode::Auto => AUTO_MODE_ACTIONS,
         });
         if self.task.mode == Mode::Plan {
-            tail.push_str(&plan_rule_echo(&context.governing_rules));
+            state.push_str(&plan_rule_echo(&context.governing_rules));
         }
         // Count the complete mandatory prompt and output schema first. Discovery
         // and historical prose spend only the remainder; governing claims and
@@ -752,7 +762,7 @@ impl Runner {
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
         let outlines = protected_source(&blocks);
-        let fixed = prompt.len() + "{}\n".len() + tail.len() + schema_bytes;
+        let fixed = prompt.len() + SOURCE_HEADER.len() + "{}\n".len() + state.len() + schema_bytes;
         let known = rules.len() + context.context.len() + dossiers.len() + schema_bytes;
         let overflow = |file: Option<(String, usize, usize)>| PromptOverflow {
             budget: limit,
@@ -778,13 +788,12 @@ impl Runner {
             .map_err(|oversized| {
                 overflow(Some((oversized.file, oversized.bytes, oversized.budget)))
             })?;
-        prompt.push_str(&source.full_json);
-        prompt.push('\n');
-        prompt.push_str(&source.outlines);
-        prompt.push_str(&tail);
-        let required = prompt.len() + schema_bytes;
+        let source_text = format!("{SOURCE_HEADER}{}\n{}", source.full_json, source.outlines);
+        let required = prompt.len() + source_text.len() + state.len() + schema_bytes;
         Ok(Mandatory {
-            text: prompt,
+            head: prompt,
+            source_text,
+            state,
             remaining: limit.saturating_sub(required),
             source,
         })
@@ -865,7 +874,9 @@ impl Runner {
         files: &[String],
     ) -> Result<(String, SourceView)> {
         let Mandatory {
-            text: prompt,
+            head,
+            source_text,
+            state,
             mut remaining,
             source,
         } = self.mandatory_prompt(context, self.observation_reserve()?)?;
@@ -900,24 +911,33 @@ impl Runner {
         );
         let observations = observation_preview(&observations, block);
         remaining = remaining.saturating_sub(observations.len());
-        let mut optional = String::new();
+        let mut history = String::new();
         if self.task.batch_capture && !self.task.conversation_context.is_empty() {
             let header = "Recent conversation (historical context; current human instructions and accepted knowledge govern):\n";
             let budget = remaining.min(12_000);
             if budget > header.len() + 80 {
-                let history =
-                    history_tail(&self.task.conversation_context, budget - header.len() - 1);
-                optional.push_str(header);
-                optional.push_str(&history);
-                optional.push('\n');
-                remaining = remaining.saturating_sub(optional.len());
+                history.push_str(header);
+                history.push_str(&history_tail(
+                    &self.task.conversation_context,
+                    budget - header.len() - 1,
+                ));
+                history.push('\n');
+                remaining = remaining.saturating_sub(history.len());
             }
         }
-        optional.push_str(&navigation_context(files, remaining.min(8000)));
-        // Historical intentions precede the current authoritative execution state.
-        optional.push_str(&prompt);
-        optional.push_str(&observations);
-        Ok((optional, source))
+        let navigation = navigation_context(files, remaining.min(8000));
+        // Ordered by how often each part changes, so a model server's prefix
+        // cache reuses the stable head and source: rules, knowledge and
+        // source first, then navigation, then conversation, then the state
+        // and observations that change every step. Historical intentions
+        // still precede the current authoritative execution state.
+        let mut prompt = head;
+        prompt.push_str(&source_text);
+        prompt.push_str(&navigation);
+        prompt.push_str(&history);
+        prompt.push_str(&state);
+        prompt.push_str(&observations);
+        Ok((prompt, source))
     }
 
     pub(super) fn preserve_stream(&mut self) {

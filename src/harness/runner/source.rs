@@ -331,6 +331,27 @@ impl Runner {
         ranked
     }
 
+    /// Where a working-set file is displayed: files never edited first, in
+    /// the order they were read, then edited files, least recently edited
+    /// first. A model server reuses its prefix cache up to the first changed
+    /// byte, and this puts the source that changes least before the source
+    /// that changes most.
+    fn source_stability(&self, file: &str) -> (usize, usize, String) {
+        let edited = self
+            .task
+            .edits
+            .iter()
+            .rposition(|edit| edit.file == file)
+            .map_or(0, |index| index + 1);
+        let read = self
+            .task
+            .read_files
+            .iter()
+            .position(|read| read == file)
+            .unwrap_or(usize::MAX);
+        (edited, read, file.to_owned())
+    }
+
     /// Choose each file's tier within `budget` bytes of full source. A file
     /// that does not fit is shown as its outline and the next one is tried.
     /// Errs when the file the model just read or edited cannot fit even
@@ -345,9 +366,9 @@ impl Runner {
             .map(|block| (block.file.as_str(), block))
             .collect();
         let mut left = budget;
-        let mut full: BTreeMap<&str, &Option<String>> = BTreeMap::new();
+        let mut full: Vec<(&str, &Option<String>)> = Vec::new();
         let mut placed = Vec::new();
-        let mut outlines = String::new();
+        let mut outlined: Vec<&SourceBlock> = Vec::new();
         for (file, reason) in self.source_ranking() {
             let Some(block) = by_file.get(file.as_str()) else {
                 continue;
@@ -357,7 +378,7 @@ impl Runner {
             // An absent file is always shown, and its `null` is counted with
             // the protected part, not against the source budget.
             if block.short_tier == Tier::Full {
-                full.insert(block.file.as_str(), text);
+                full.push((block.file.as_str(), text));
                 placed.push(Placed {
                     file,
                     tier: Tier::Full,
@@ -368,7 +389,7 @@ impl Runner {
             }
             if block.full_cost <= left {
                 left -= block.full_cost;
-                full.insert(block.file.as_str(), text);
+                full.push((block.file.as_str(), text));
                 placed.push(Placed {
                     file,
                     tier: Tier::Full,
@@ -384,7 +405,7 @@ impl Runner {
                     budget,
                 });
             }
-            outlines.push_str(&block.outline);
+            outlined.push(block);
             placed.push(Placed {
                 file,
                 tier: block.short_tier,
@@ -399,6 +420,14 @@ impl Runner {
             })
             .map(|placed| placed.file.clone())
             .collect();
+        // Ranking decides tiers; display order is stability order, so an
+        // edit changes the prompt only from the edited file onward.
+        full.sort_by_key(|(file, _)| self.source_stability(file));
+        outlined.sort_by_key(|block| self.source_stability(&block.file));
+        let mut outlines: String = outlined
+            .iter()
+            .map(|block| block.outline.as_str())
+            .collect();
         if !outlines.is_empty() {
             if !swapped.is_empty() {
                 let total: usize = self.task.source.values().flatten().map(String::len).sum();
@@ -409,8 +438,18 @@ impl Runner {
             }
             outlines.insert_str(0, OUTLINES_HEADER);
         }
+        let entries: Vec<String> = full
+            .iter()
+            .map(|(file, text)| {
+                format!(
+                    "{}:{}",
+                    serde_json::to_string(file).unwrap_or_default(),
+                    serde_json::to_string(text).unwrap_or_default()
+                )
+            })
+            .collect();
         Ok(SourceView {
-            full_json: serde_json::to_string(&full).unwrap_or_default(),
+            full_json: format!("{{{}}}", entries.join(",")),
             outlines,
             placed,
             budget,
@@ -423,6 +462,7 @@ impl Runner {
 mod tests {
     use super::super::actions::Step;
     use super::super::model::{Action, PromptOverflow};
+    use super::super::task::PendingEdit;
     use super::super::test_support::{context_router, serve, test_config, Project};
     use super::super::Phase;
     use super::*;
@@ -468,6 +508,77 @@ mod tests {
             .unwrap();
         let full: BTreeMap<String, Option<String>> = serde_json::from_str(line).unwrap();
         full.into_keys().collect()
+    }
+
+    fn shared_prefix(left: &str, right: &str) -> usize {
+        left.bytes()
+            .zip(right.bytes())
+            .take_while(|(a, b)| a == b)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn consecutive_prompts_share_everything_before_what_changed() {
+        let project = Project::new("prefix-order");
+        let (mut runner, server) = runner_with(
+            &project,
+            &[
+                ("a.rs", module(5)),
+                ("b.rs", module(6)),
+                ("c.rs", module(7)),
+            ],
+        )
+        .await;
+        let context = runner.context.clone().unwrap();
+        let (first, _) = runner.prompt(&context, &[]).unwrap();
+
+        // A new observation changes nothing before the state block.
+        runner.task.last_response = "Read c.rs with its governing knowledge.".into();
+        let (second, _) = runner.prompt(&context, &[]).unwrap();
+        let state = second.find("\nCurrent human guidance:").unwrap();
+        assert!(shared_prefix(&first, &second) >= state);
+        assert!(second.find("Current source, refreshed").unwrap() < state);
+        assert!(second
+            .find("Project rules")
+            .is_none_or(|rules| rules < state));
+
+        // An edit moves the edited file to the end of the full source, so the
+        // prompt is unchanged up to that file.
+        let before = runner.task.source["a.rs"].clone();
+        let after = Some(format!("{}// edited\n", before.clone().unwrap()));
+        runner.task.source.insert("a.rs".into(), after.clone());
+        runner.task.edits.push(PendingEdit {
+            file: "a.rs".into(),
+            before,
+            after,
+            reason: String::new(),
+            revision: String::new(),
+        });
+        let (third, _) = runner.prompt(&context, &[]).unwrap();
+        let order = |prompt: &str| {
+            let at = |file: &str| prompt.find(&format!("\"{file}\":")).unwrap();
+            (at("a.rs"), at("b.rs"), at("c.rs"))
+        };
+        let (a, b, c) = order(&second);
+        assert!(a < b && b < c, "files never edited keep their read order");
+        let (a, b, c) = order(&third);
+        assert!(b < c && c < a, "the edited file is shown last");
+
+        // Editing it again changes nothing before it.
+        let before = runner.task.source["a.rs"].clone();
+        let after = Some(format!("{}// again\n", before.clone().unwrap()));
+        runner.task.source.insert("a.rs".into(), after.clone());
+        runner.task.edits.push(PendingEdit {
+            file: "a.rs".into(),
+            before,
+            after,
+            reason: String::new(),
+            revision: String::new(),
+        });
+        let (fourth, _) = runner.prompt(&context, &[]).unwrap();
+        assert_eq!(order(&fourth), (a, b, c));
+        assert!(shared_prefix(&third, &fourth) > a);
+        server.abort();
     }
 
     #[test]

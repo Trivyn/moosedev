@@ -426,7 +426,7 @@ async fn queued_steering_is_durable_and_delivered_before_the_next_action() {
             .collect::<Vec<_>>()
             .join("\n");
         let recent = prompt.split("Recent conversation (historical context; current human instructions and accepted knowledge govern):").nth(1).unwrap_or("")
-            .split("You are the coding sensor in MOOSEDev.").next().unwrap();
+            .split("Current human guidance:").next().unwrap();
         assert!(
             !recent.contains("Also explain the parser."),
             "current guidance must not be repeated as history"
