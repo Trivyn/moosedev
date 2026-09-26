@@ -247,7 +247,11 @@ A free command identical to one that already ran is not run again when nothing
 could have changed its output since: no applied edit, no human message or
 decision, and no permission change. The model is pointed at the earlier result
 (`command_repeat_refused`). A second such repeat parks the task for the human
-instead of spending more model calls. A denial whose output names no path outside the project and no network
+instead of spending more model calls. A failed command whose error lines and locations
+(`error…` and `--> file:line` lines) are exactly those of the previous failed
+command, although edits were applied in between, ends with a note saying so:
+the edits did not change what fails, so read the code and definitions the
+errors name before editing again. A denial whose output names no path outside the project and no network
 need is not a permission need — the program wants a terminal, a device or a
 process right no grant provides — so a free command gets the opposite hint
 (`sandbox_denial_ungrantable`), and a required check parks the task for the

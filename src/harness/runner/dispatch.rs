@@ -739,7 +739,13 @@ impl Runner {
         result: executor::CommandResult,
     ) -> Result<()> {
         let denial = self.note_sandbox_denial(command, &result);
+        let unchanged = (!result.success)
+            .then(|| self.unchanged_failure_note())
+            .flatten();
         self.task.last_response = result.output;
+        if let Some(note) = unchanged {
+            self.task.last_response.push_str(&note);
+        }
         // Every command path ends here: a model command, an already covered
         // permission request, and an approved one run on the next advance.
         self.task.last_response_observation = true;
@@ -772,6 +778,38 @@ impl Runner {
         self.task.after_review = Phase::Working;
         self.task.intent = None;
         self.persist()
+    }
+
+    /// A note when this failure reports exactly the errors the previous failed
+    /// command did, although source was edited in between: the edit did not
+    /// touch what fails. badciv 839ebeec rebuilt through four edits of the same
+    /// file with the same three errors at the same lines, each time reading
+    /// only a tail of the output. The current command's event is the last
+    /// `Command:` event in the journal.
+    fn unchanged_failure_note(&self) -> Option<String> {
+        let mut failures = self
+            .task
+            .events
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, event)| event.message.starts_with("Command: "));
+        let (current, latest) = failures.next()?;
+        let latest = super::source::failed_command_output(&latest.message)?;
+        let (previous, earlier) = failures.find_map(|(index, event)| {
+            super::source::failed_command_output(&event.message).map(|output| (index, output))
+        })?;
+        let edits = self.task.events[previous + 1..current]
+            .iter()
+            .filter(|event| event.message.starts_with("Applied edit"))
+            .count();
+        let errors = error_lines(latest);
+        (edits > 0 && !errors.is_empty() && errors == error_lines(earlier)).then(|| {
+            format!(
+                "\n[Harness: the same {} error line(s) as the failed command at event {previous}, although {edits} edit(s) were applied since; those edits did not change what fails. Read the code the errors point at, and the definitions they name, before editing again.]\n",
+                errors.len()
+            )
+        })
     }
 
     /// Journal a command the OS sandbox appears to have blocked. The caller
@@ -942,6 +980,20 @@ fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
 /// Vacuous-check returns per task before the task is allowed to finish anyway.
 /// One, matching the plan-coverage return limit: the nudge is worth sending
 /// once, and a project that genuinely has no tests must not be trapped.
+/// The error lines of a failed command's output, with the locations
+/// compilers print under them: what "the same failure" compares.
+fn error_lines(output: &str) -> std::collections::BTreeSet<&str> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            (lower.starts_with("error") && !lower.starts_with("error: could not compile"))
+                || line.starts_with("--> ")
+        })
+        .collect()
+}
+
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";
 /// Room for the "Journal event N, bytes a..b of c:" line above a page.

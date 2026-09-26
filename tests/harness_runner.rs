@@ -2505,6 +2505,41 @@ async fn one_inspect_returns_an_event_that_fits_the_next_prompt_whole() {
 }
 
 #[tokio::test]
+async fn a_failure_unchanged_by_an_edit_is_named_as_such() {
+    // badciv 839ebeec rebuilt through four edits with the same three errors.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    async fn step(fixture: &Fixture, runner: &mut Runner, action: Value) {
+        fixture.conversational(action);
+        for _ in 0..4 {
+            if fixture.shared.lock().unwrap().replies.is_empty() {
+                return;
+            }
+            runner.advance().await.unwrap();
+        }
+        panic!("the scripted action was never requested");
+    }
+    let failing = json!({"action":"command","command":"printf 'error[E0308]: mismatched types\\n  --> code.txt:1:1\\n'; exit 1"});
+    step(&fixture, &mut runner, failing.clone()).await;
+    assert!(!runner.task.last_response.contains("[Harness: the same"));
+    step(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"code.txt","old_text":"original\n","new_text":"changed\n"}),
+    )
+    .await;
+    step(&fixture, &mut runner, failing).await;
+    assert!(
+        runner
+            .task
+            .last_response
+            .contains("[Harness: the same 2 error line(s)"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
+#[tokio::test]
 async fn a_long_plan_is_accepted_and_each_step_sees_the_part_it_needs() {
     // badciv e948c9c7: plans of 5.7, 5.1 and 4.0 KB were refused by a
     // 4,000-byte cap that existed only to bound later prompts.
