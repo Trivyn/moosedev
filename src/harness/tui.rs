@@ -318,6 +318,24 @@ struct View {
     copy_request: Option<String>,
 }
 
+/// What the language servers said after the last applied edit, for the
+/// header: clean, the error count, or unknown when they did not settle.
+fn checker_span(task: &Task) -> Option<Span<'static>> {
+    let diagnostics = task.diagnostics.as_ref()?;
+    let servers = diagnostics.servers.join(", ");
+    let (text, color) = if !diagnostics.settled {
+        (format!(" · {servers} ?"), Color::Yellow)
+    } else if diagnostics.errors.is_empty() {
+        (format!(" · {servers} ✓"), Color::Green)
+    } else {
+        (
+            format!(" · {servers}: {} error(s)", diagnostics.errors.len()),
+            Color::Red,
+        )
+    };
+    Some(Span::styled(visible(&text), Style::default().fg(color)))
+}
+
 fn visible(value: &str) -> String {
     value
         .chars()
@@ -1469,10 +1487,15 @@ fn render(frame: &mut ratatui::Frame, snapshot: &Snapshot, view: &mut View) {
         .unwrap_or_else(|| "Conversation".into());
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(" MOOSEDev ", Style::default().fg(Color::Cyan)),
-                Span::raw(visible(&format!("{} · {}", snapshot.model, phase))),
-            ]),
+            Line::from(
+                [
+                    Span::styled(" MOOSEDev ", Style::default().fg(Color::Cyan)),
+                    Span::raw(visible(&format!("{} · {}", snapshot.model, phase))),
+                ]
+                .into_iter()
+                .chain(snapshot.task.as_ref().and_then(checker_span))
+                .collect::<Vec<_>>(),
+            ),
             Line::raw(visible(&format!(
                 " {} · {}",
                 snapshot.conversation.root.display(),
@@ -2120,6 +2143,34 @@ mod tests {
     }
     const PRESERVE: &str = "https://moosedev.dev/kg/Constraint/preserve-names";
     const LABELS: &str = "https://moosedev.dev/kg/Requirement/label-intent";
+    #[test]
+    fn the_header_shows_what_the_language_server_last_said() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        assert!(checker_span(&task).is_none(), "no checker, no indicator");
+        let snapshot = |settled, errors: usize| crate::harness::runner::DiagnosticsSnapshot {
+            servers: vec!["rust-analyzer".into()],
+            settled,
+            errors: (0..errors)
+                .map(|line| crate::harness::runner::Finding {
+                    file: "src/lib.rs".into(),
+                    line: line as u32 + 1,
+                    column: 1,
+                    message: "mismatched types".into(),
+                })
+                .collect(),
+            warnings: 0,
+            finish_refused: false,
+        };
+        for (settled, errors, shown) in [
+            (true, 0, " · rust-analyzer ✓"),
+            (true, 2, " · rust-analyzer: 2 error(s)"),
+            (false, 2, " · rust-analyzer ?"),
+        ] {
+            task.diagnostics = Some(snapshot(settled, errors));
+            assert_eq!(checker_span(&task).unwrap().content, shown);
+        }
+    }
+
     fn symbolic_task() -> Task {
         let mut task = task_fixture(PathBuf::from("/project"));
         task.symbolic = Some(

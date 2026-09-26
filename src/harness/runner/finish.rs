@@ -51,6 +51,7 @@ impl Runner {
         );
         self.update_knowledge_revision(checkpoint.revision);
         executor::cleanup_task(&self.scratch_path())?;
+        self.stop_language_servers();
         self.expire_permissions();
         self.task.phase = Phase::Complete;
         self.task.completion_pending = false;
@@ -135,6 +136,7 @@ impl Runner {
             self.task.phase = Phase::Cancelled;
             self.task.cleanup_pending = true;
             self.event("Cancelled; unresolved actions, capture obligations, and scratch cleanup preserved.");
+            self.stop_language_servers();
             self.persist()?;
         }
         self.retry_cancelled_cleanup()
@@ -175,6 +177,9 @@ impl Runner {
                         }) {
                             self.task.edits.push(edit.clone());
                         }
+                        // Recovered without a language-server check: the last
+                        // diagnostics describe the source before this edit.
+                        self.task.diagnostics = None;
                         self.task
                             .snapshots
                             .insert(edit.file.clone(), fingerprint(&current));

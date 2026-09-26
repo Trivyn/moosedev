@@ -549,7 +549,12 @@ impl Runner {
                     self.task.pending_edit = Some(edit);
                     self.task.phase = Phase::AwaitingPolicy;
                 } else {
+                    let (file, existed, after) =
+                        (edit.file.clone(), edit.before.is_some(), edit.after.clone());
                     self.apply_edit(edit)?;
+                    self.check_applied_edit(&file, existed, after.as_deref())
+                        .await;
+                    self.persist()?;
                 }
             }
             Step::Command { command } => {
@@ -631,6 +636,33 @@ impl Runner {
                 self.task.after_review = Phase::Planning;
             }
             Step::Finish { summary } => {
+                // Settled language-server errors would fail the required
+                // checks: send the model back once with them, before any
+                // check runs. A repeat finish on the same errors goes on to
+                // the checks, which decide.
+                let refusal = self
+                    .task
+                    .diagnostics
+                    .as_mut()
+                    .filter(|d| d.settled && !d.errors.is_empty() && !d.finish_refused)
+                    .map(|diagnostics| {
+                        diagnostics.finish_refused = true;
+                        (
+                            diagnostics.render(DIAGNOSTICS_BYTES),
+                            diagnostics.errors.len(),
+                        )
+                    });
+                if let Some((block, errors)) = refusal {
+                    self.intent_event("finish_refused_diagnostics", &format!("{errors} error(s)"));
+                    self.event(
+                        "Finish refused: the language server reports errors in the current source."
+                            .to_owned(),
+                    );
+                    self.task.last_response = format!(
+                        "Not finished: the language server reports errors in the current source, which the required checks would fail on. Fix them, then finish.\n{block}"
+                    );
+                    return self.persist();
+                }
                 self.task.last_response = summary;
                 self.refresh_code_index().await?;
                 if self.prepare_symbolic_associations().await? {
@@ -993,6 +1025,9 @@ fn error_lines(output: &str) -> std::collections::BTreeSet<&str> {
         })
         .collect()
 }
+
+/// Bytes the language-server block may take in a prompt or a refusal.
+pub(super) const DIAGNOSTICS_BYTES: usize = 3_000;
 
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";

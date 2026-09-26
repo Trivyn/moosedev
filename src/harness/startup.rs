@@ -308,6 +308,26 @@ pub struct ProviderSettings {
     /// `[harness.sandbox].read_paths`: capabilities this project grants every
     /// task without a gate.
     pub standing_read_paths: Vec<String>,
+    /// `[harness.lsp]`, with `MOOSEDEV_HARNESS_LSP=off` switching it off.
+    pub language: LanguageSettings,
+}
+
+/// Whether the runner runs language servers, and how long it waits for one
+/// to settle after an edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanguageSettings {
+    pub enabled: bool,
+    pub settle_timeout: std::time::Duration,
+}
+
+impl LanguageSettings {
+    fn of(keys: &config::LspKeys) -> Self {
+        let off = std::env::var("MOOSEDEV_HARNESS_LSP").is_ok_and(|value| value == "off");
+        Self {
+            enabled: keys.enabled.unwrap_or(true) && !off,
+            settle_timeout: std::time::Duration::from_secs(keys.settle_timeout_secs.unwrap_or(30)),
+        }
+    }
 }
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1234/v1";
@@ -362,6 +382,7 @@ impl ProviderSettings {
             implement: None,
             index_refresh: config::IndexRefresh::default(),
             standing_read_paths: Vec::new(),
+            language: LanguageSettings::of(&config::LspKeys::default()),
             config: LlmConfig {
                 base_url: DEFAULT_ENDPOINT.into(),
                 api_key: std::env::var(DEFAULT_API_KEY_ENV).unwrap_or_else(|_| "lm-studio".into()),
@@ -399,6 +420,7 @@ impl ProviderSettings {
             action_contract: Some(default.action_contract),
             index_refresh: file.index_refresh,
             standing_read_paths: file.sandbox.read_paths.clone(),
+            language: LanguageSettings::of(&file.lsp),
         })
     }
 

@@ -800,6 +800,9 @@ impl Runner {
             serde_json::to_string(&plan)?,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
         );
+        if let Some(diagnostics) = &self.task.diagnostics {
+            state.push_str(&diagnostics.render(super::dispatch::DIAGNOSTICS_BYTES));
+        }
         state.push_str(&format!(
             "Required check results (indices into plan checks): {}\n",
             serde_json::to_string(&checks)?

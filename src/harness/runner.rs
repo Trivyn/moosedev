@@ -28,6 +28,7 @@ mod capture;
 mod dispatch;
 mod finish;
 mod index;
+mod langserver;
 mod links;
 mod model;
 mod permissions;
@@ -47,6 +48,7 @@ mod tools;
 mod transport;
 mod usage;
 use actions::Step;
+pub use langserver::{DiagnosticsSnapshot, Finding};
 pub use links::IntentEvent;
 use model::{action_schema, conversational_schema, ModelOutput, ReplyThen, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
@@ -105,6 +107,10 @@ pub struct Runner {
     /// past the daemon's fixed floor: its refreshes ask for the floor alone
     /// and retrieved claims are not filled in. Cleared at every advance.
     rule_claims_floor_only: bool,
+    /// Set by `configure_provider`; a runner nobody configured runs no
+    /// language server.
+    language_settings: Option<crate::harness::startup::LanguageSettings>,
+    language: langserver::LanguageState,
 }
 
 pub use crate::harness::{DEFAULT_GUIDANCE, GUIDANCE_FILE};
@@ -334,6 +340,7 @@ impl Runner {
             token_usage: UsageLedger::new(&journal),
             last_response: String::new(),
             last_response_observation: false,
+            diagnostics: None,
             knowledge_revision: String::new(),
             knowledge_turn_sequence: 0,
             knowledge_turns: Vec::new(),
@@ -392,6 +399,8 @@ impl Runner {
             streaming: None,
             last_saved: Mutex::new(None),
             rule_claims_floor_only: false,
+            language_settings: None,
+            language: Default::default(),
         };
         let context = runner.refresh(&[]).await?;
         Self::validate_daemon_contracts(&context)?;
@@ -443,6 +452,8 @@ impl Runner {
             streaming: None,
             last_saved: Mutex::new(None),
             rule_claims_floor_only: false,
+            language_settings: None,
+            language: Default::default(),
         };
         if missing_guidance {
             // A journal from before the guidance file gets the compiled default.
@@ -494,6 +505,7 @@ impl Runner {
         self.set_role(ModelRole::Implement, provider.implement.clone());
         self.index_refresh = Some(provider.index_refresh);
         self.standing_read_paths = provider.standing_read_paths.clone();
+        self.language_settings = Some(provider.language);
     }
 
     /// Paths this project grants every task without asking.

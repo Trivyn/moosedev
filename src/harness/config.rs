@@ -158,6 +158,17 @@ impl SandboxKeys {
     }
 }
 
+/// `[harness.lsp]`: language servers the harness runs as a checker.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LspKeys {
+    /// Run language servers for the project's languages (default true).
+    pub enabled: Option<bool>,
+    /// Seconds to wait for a server to settle after an edit (default 30;
+    /// the first settle, which indexes the project, gets at least 120).
+    pub settle_timeout_secs: Option<u64>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub present: bool,
@@ -168,6 +179,7 @@ pub struct ModelFile {
     pub implement: Option<ModelKeys>,
     pub index_refresh: IndexRefresh,
     pub sandbox: SandboxKeys,
+    pub lsp: LspKeys,
 }
 
 impl ModelFile {
@@ -198,7 +210,7 @@ impl ModelFile {
         };
         if let Some(unknown) = harness
             .keys()
-            .find(|key| !matches!(key.as_str(), "model" | "index_refresh" | "sandbox"))
+            .find(|key| !matches!(key.as_str(), "model" | "index_refresh" | "sandbox" | "lsp"))
         {
             bail!("unknown key harness.{unknown}");
         }
@@ -207,6 +219,9 @@ impl ModelFile {
                 .clone()
                 .try_into()
                 .context("harness.index_refresh must be \"auto\", \"frozen-python\" or \"off\"")?;
+        }
+        if let Some(lsp) = harness.get("lsp") {
+            file.lsp = lsp.clone().try_into().context("[harness.lsp]")?;
         }
         if let Some(sandbox) = harness.get("sandbox") {
             file.sandbox = sandbox.clone().try_into().context("[harness.sandbox]")?;

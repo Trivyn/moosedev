@@ -1719,3 +1719,20 @@ async fn confined_pipeline_reports_its_failing_stage() {
         .unwrap();
     assert!(!result.success, "{}", result.output);
 }
+
+/// A single-package project (no `[workspace]`) whose scratch lies under it:
+/// Cargo's upward workspace search meets the project's own manifest.
+/// Must run outside a parent sandbox which forbids installing OS sandboxes.
+#[tokio::test]
+#[ignore = "requires Rust toolchain and functional OS sandbox; run explicitly"]
+async fn confinement_builds_a_single_package_project_whose_scratch_is_inside_it() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("Cargo.toml"), "[package]\nname = \"plain\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    fs::write(fixture.0.join("lib.rs"), "pub fn f() {}\n").unwrap();
+    let scratch = fixture.0.join(".moosedev/harness/scratch/plain");
+    fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+    let result = command(&fixture.0, &scratch, "cargo build --offline")
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.output);
+}

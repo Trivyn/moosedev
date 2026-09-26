@@ -92,7 +92,11 @@ impl Runner {
             "Human approved the exact pending edit to {}.",
             edit.file
         ));
-        self.apply_edit(edit)
+        let (file, existed, after) = (edit.file.clone(), edit.before.is_some(), edit.after.clone());
+        self.apply_edit(edit)?;
+        self.check_applied_edit(&file, existed, after.as_deref())
+            .await;
+        self.persist()
     }
 
     /// Explicit review is available between turns as well as at completion.

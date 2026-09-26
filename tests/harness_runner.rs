@@ -2504,6 +2504,167 @@ async fn one_inspect_returns_an_event_that_fits_the_next_prompt_whole() {
     assert!(runner.task.last_response.ends_with("END"));
 }
 
+fn diagnostics(errors: usize) -> moosedev::harness::runner::DiagnosticsSnapshot {
+    moosedev::harness::runner::DiagnosticsSnapshot {
+        servers: vec!["rust-analyzer".into()],
+        settled: true,
+        errors: (0..errors)
+            .map(|n| moosedev::harness::runner::Finding {
+                file: "code.txt".into(),
+                line: n as u32 + 1,
+                column: 1,
+                message: format!("mismatched types {n}"),
+            })
+            .collect(),
+        warnings: 0,
+        finish_refused: false,
+    }
+}
+
+#[tokio::test]
+async fn settled_language_server_errors_are_shown_and_send_finish_back_once() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    runner.task.diagnostics = Some(diagnostics(1));
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        prompt.contains("Language server (rust-analyzer) after your last edit: 1 error(s)"),
+        "the current errors are in the prompt"
+    );
+    assert!(prompt.contains("code.txt:1:1 error: mismatched types 0"));
+    assert!(
+        runner.task.last_response.starts_with("Not finished"),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(runner.task.phase, Phase::Working);
+
+    // The same errors again: the required checks decide.
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+}
+
+/// Real rust-analyzer behind a configured runner: an applied edit that
+/// breaks the crate settles to its error before the next prompt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires rust-analyzer and a functional OS sandbox; run explicitly"]
+async fn an_applied_edit_is_checked_by_rust_analyzer_before_the_next_step() {
+    let fixture = Fixture::new().await;
+    std::fs::create_dir_all(fixture.root.join("src")).unwrap();
+    std::fs::write(
+        fixture.root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.root.join("src/lib.rs"),
+        "pub fn one() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    let mut provider = moosedev::harness::startup::ProviderSettings::fallback();
+    provider.config = fixture.config();
+    provider.language = moosedev::harness::startup::LanguageSettings {
+        enabled: true,
+        settle_timeout: std::time::Duration::from_secs(60),
+    };
+    // The user's Cargo path overrides, which a project grants as standing reads.
+    provider.standing_read_paths = std::env::var_os("HOME")
+        .and_then(|home| {
+            std::fs::read_to_string(std::path::Path::new(&home).join(".cargo/config.toml")).ok()
+        })
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|table| {
+            table
+                .get("paths")
+                .and_then(|paths| paths.as_array())
+                .cloned()
+        })
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|path| path.as_str().map(str::to_owned))
+        .collect();
+    let mut runner = Runner::create(fixture.root.clone(), fixture.url.clone(), "Fix lib".into())
+        .await
+        .unwrap();
+    runner.configure_provider(&provider, None);
+    runner.enable_interactive().unwrap();
+    fixture.conversational(json!({"action":"read","file":"src/lib.rs"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(
+        json!({"action":"plan","summary":"Change one","files":["src/lib.rs"],"checks":["true"]}),
+    );
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(
+        json!({"action":"replace","file":"src/lib.rs","old_text":"{ 1 }","new_text":"{ \"one\" }"}),
+    );
+    runner.advance().await.unwrap();
+    let lsp = fixture
+        .root
+        .join(".moosedev/harness/lsp")
+        .join(&runner.task.id);
+    let log = std::fs::read_to_string(lsp.join("stderr.log")).unwrap_or_default();
+    let log: String = log
+        .lines()
+        .filter(|line| line.contains("ERROR") || line.contains("WARN") || line.contains("error"))
+        .take(20)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let diagnostics = runner
+        .task
+        .diagnostics
+        .clone()
+        .expect("the edit was checked");
+    assert!(diagnostics.settled, "{diagnostics:?}\n{log}");
+    assert!(
+        diagnostics
+            .errors
+            .iter()
+            .any(|e| e.file == "src/lib.rs" && e.line == 1),
+        "{diagnostics:?}\n{log}"
+    );
+    assert!(
+        lsp.join("source/src/lib.rs").exists(),
+        "the mirror is beside the scratch"
+    );
+    // The human sees the checker in the Activity feed.
+    let events: Vec<&str> = runner
+        .task
+        .events
+        .iter()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|m| m.starts_with("Language server rust-analyzer: started")),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|m| m
+            .starts_with("rust-analyzer: 1 error(s), 0 warning(s) after src/lib.rs (settled in")),
+        "{events:?}"
+    );
+    drop(runner);
+}
+
+#[tokio::test]
+async fn unsettled_diagnostics_never_gate_finish() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let mut snapshot = diagnostics(2);
+    snapshot.settled = false;
+    runner.task.diagnostics = Some(snapshot);
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("not settled in time"));
+}
+
 #[tokio::test]
 async fn a_failure_unchanged_by_an_edit_is_named_as_such() {
     // badciv 839ebeec rebuilt through four edits with the same three errors.

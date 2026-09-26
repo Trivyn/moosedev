@@ -76,6 +76,14 @@ model = "your-model-id"
 # [harness.sandbox]
 # read_paths = ["/Users/you/code/a-sibling-checkout"]
 
+# Language servers the harness runs as a checker after every applied edit
+# (rust-analyzer when a Rust project is present and it is installed). Each
+# runs confined like a command, over a mirror of the source, and gets the
+# standing read paths above too. MOOSEDEV_HARNESS_LSP=off switches them off.
+# [harness.lsp]
+# enabled = true
+# settle_timeout_secs = 30
+
 # The harness default; unset keys inherit [model]. Same keys as [model], plus:
 # [harness.model]
 # response_policy = "auto"     # auto | provider-default | reasoning-off

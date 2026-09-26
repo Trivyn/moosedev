@@ -307,6 +307,55 @@ provider buffers, so the same request would spend the same generation and meet
 the same bound. The error names the argument bytes received, because a buffered
 call leaves nothing in the journalled response.
 
+## Language servers
+
+A language server is a checker the harness runs, not a tool the model calls.
+After every applied edit (the model's, or one a human approved) the runner
+mirrors the change into `.moosedev/harness/lsp/<task>/source`, tells each
+concerned server (full-text `didOpen`/`didChange`, `didSave`, and a watched-file
+event), waits for it to settle, and stores what it reports as the task's
+`diagnostics`: errors with file, line and column, and a warning count.
+
+- **Settled or unknown.** A server has settled when it has said something since
+  the edit, then nothing for 800 ms, with no open progress and, for
+  rust-analyzer, `experimental/serverStatus` quiescent. That covers
+  `cargo check` on save, so borrow and lifetime errors arrive with the edit, not
+  only rust-analyzer's own analysis. The first settle, which indexes the
+  project, may take 120 s; later ones `settle_timeout_secs` (30). A result that
+  did not settle is shown as unknown, never as clean. (OpenCode on the same
+  badciv objective appended rust-analyzer errors to edit results without
+  settling; qwen called them stale and ran `cargo build` after about one edit
+  in three.)
+- **Current state, not history.** Every prompt shows the latest result in the
+  harness state ("Language server (rust-analyzer) after your last edit: N
+  error(s)…", errors only, at most 20 per file and 5 files, 3 KB), and files
+  with errors are ranked into full source after the latest touch and the files
+  a failed command names.
+- **What the human sees.** The header shows the last result beside the model
+  and phase (`rust-analyzer ✓`, `rust-analyzer: 2 error(s)`, or
+  `rust-analyzer ?` when it did not settle); each check adds an Activity line
+  ("rust-analyzer: 2 error(s), 1 warning(s) after src/lib.rs (settled in 3.1 s)"),
+  as do a server's start, absence or failure; and the status line reads
+  "Checking src/lib.rs with rust-analyzer…" while the harness waits.
+- **Finish.** A finish while settled errors remain is sent back once with them,
+  before any required check runs (`finish_refused_diagnostics`); a second
+  finish on the same errors goes on to the checks, which decide. Unknown never
+  blocks.
+- **Lifecycle.** Servers start on the first applied edit once the project has a
+  file of their language, restart when one of their project files
+  (`Cargo.toml`) is created or deleted, and stop at completion or cancellation.
+  A missing or failing server is journaled (`language_server`,
+  `language_server_error`) and the task carries on without one.
+- **Confinement.** Each server runs under the command sandbox's rules with its
+  own writable build, cargo home, home and temporary directories, no network,
+  the `[harness.sandbox]` read paths, and a read-only mirror whose Cargo
+  lockfile roots it may fill. The mirror is beside the command scratch, which
+  every command clears. macOS only so far; elsewhere the harness runs without
+  one.
+- **Configuration.** `[harness.lsp]` `enabled` (default true) and
+  `settle_timeout_secs`; `MOOSEDEV_HARNESS_LSP=off`. Study sessions run without
+  language servers, which would change their fixed conditions.
+
 ## Request usage accounting
 
 Task journals expose `token_usage`, with one current receipt per explicit client
@@ -590,7 +639,10 @@ holding a `Cargo.toml` (up to eight levels down, skipping `target/` and
 hidden directories) unless a manifest above it declares a `[workspace]`, whose
 root owns the lockfile instead; a manifest declaring its own `[workspace]` is
 always a root; a standalone crate in a subdirectory therefore
-builds as one at the top level does. A lockfile the project commits always
+builds as one at the top level does. The `Cargo.toml` files in the directories above
+the snapshot are readable too: Cargo searches upward for a workspace root and
+reads each manifest it meets, including the project's own above its scratch,
+so a single-package project could not build before. A lockfile the project commits always
 wins, and nothing is written back to the project. A `request_permission` write
 path may name a file that does not exist yet inside a directory that does; the
 command creates it.

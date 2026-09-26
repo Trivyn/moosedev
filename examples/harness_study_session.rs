@@ -76,6 +76,12 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
         // A study cell grants nothing standing: its capabilities are part of
         // the fixed conditions, not of the machine it happens to run on.
         standing_read_paths: Vec::new(),
+        // Nor a language server: a checker the study's arms never had would
+        // change what is measured.
+        language: moosedev::harness::startup::LanguageSettings {
+            enabled: false,
+            settle_timeout: std::time::Duration::from_secs(30),
+        },
     };
     provider.select(Some(endpoint), model)?;
     Ok(provider)

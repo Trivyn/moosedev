@@ -319,6 +319,10 @@ pub struct Task {
     /// not replay it as an assistant turn.
     #[serde(default)]
     pub last_response_observation: bool,
+    /// What the language servers reported after the last applied code edit:
+    /// current state every prompt shows and finish is gated on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<super::langserver::DiagnosticsSnapshot>,
     pub knowledge_revision: String,
     #[serde(default)]
     pub knowledge_turn_sequence: u64,

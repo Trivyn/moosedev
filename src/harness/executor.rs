@@ -5,6 +5,7 @@ mod fs_ops;
 mod output;
 mod sandbox;
 mod scratch;
+mod server;
 #[cfg(test)]
 mod tests;
 mod workspace;
@@ -20,6 +21,7 @@ pub use scratch::cleanup_task;
 #[cfg(unix)]
 use scratch::{prepare_cargo_home, FixedDirectoryCleanup, TaskScratch, TemporaryDirectory};
 use serde::{Deserialize, Serialize};
+pub use server::{resolve_program, ServerDirectory};
 use std::{
     ffi::CString,
     fs,
@@ -651,7 +653,14 @@ async fn run_command(
     }
     #[cfg(not(target_os = "macos"))]
     prepare_cargo_home(&cargo_home)?;
-    let mut process = confined_command(&source, scratch, &temporary.path, command, permissions)?;
+    let mut process = confined_command(
+        &root,
+        &source,
+        scratch,
+        &temporary.path,
+        command,
+        permissions,
+    )?;
     process
         .current_dir(&source)
         .env_clear()

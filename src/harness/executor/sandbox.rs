@@ -119,6 +119,36 @@ pub(super) fn secret_free_cargo_config(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+/// The `Cargo.toml` files in the directories above `source`. Cargo searches
+/// upward for a workspace root and reads every manifest it passes; macOS shows
+/// their metadata but denies their contents, so a single-package project's
+/// build failed with "failed searching for potential workspace", its snapshot
+/// lying under the project whose own manifest it met. These are the manifests
+/// Cargo reads when building the project outside the sandbox, and the
+/// project's own is already copied into the snapshot.
+///
+/// Only manifests inside `project` are granted: one above the project is
+/// outside the task and needs a permission like any other outside path.
+#[cfg(target_os = "macos")]
+fn ancestor_manifests(source: &Path, project: &Path) -> Vec<PathBuf> {
+    let project = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    source
+        .ancestors()
+        .skip(1)
+        .filter(|directory| directory.starts_with(&project))
+        .map(|directory| directory.join("Cargo.toml"))
+        // A regular file with one link, as the snapshot copies them: a
+        // symlink or a hard link may alias a file outside the project.
+        .filter(|manifest| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(manifest)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.nlink() == 1)
+        })
+        .collect()
+}
+
 fn sandbox_literal(path: &Path) -> Result<String> {
     let path = path.to_str().context("sandbox path must be UTF-8")?;
     anyhow::ensure!(
@@ -208,6 +238,7 @@ pub(super) fn shell_argv(command: &str) -> [String; 3] {
 
 #[cfg(target_os = "macos")]
 pub(super) fn confined_command(
+    project: &Path,
     source: &Path,
     scratch: &Path,
     temporary: &Path,
@@ -226,14 +257,18 @@ pub(super) fn confined_command(
             sandbox_literal(&path.canonicalize()?)?
         ));
     }
-    for path in readable_files().into_iter().chain([
-        // libignition opens / as an openat root during dyld bootstrap. This
-        // literal directory grant does not expose descendants.
-        PathBuf::from("/"),
-        PathBuf::from("/dev/null"),
-        PathBuf::from("/dev/urandom"),
-        PathBuf::from("/dev/random"),
-    ]) {
+    for path in readable_files()
+        .into_iter()
+        .chain(ancestor_manifests(source, project))
+        .chain([
+            // libignition opens / as an openat root during dyld bootstrap. This
+            // literal directory grant does not expose descendants.
+            PathBuf::from("/"),
+            PathBuf::from("/dev/null"),
+            PathBuf::from("/dev/urandom"),
+            PathBuf::from("/dev/random"),
+        ])
+    {
         profile.push_str(&format!(
             "(allow file-read* (literal {}))",
             sandbox_literal(&path)?
@@ -293,11 +328,78 @@ pub(super) fn confined_command(
     Ok(process)
 }
 
+/// The sandbox profile of a long-lived language server: the platform runtime
+/// and installed tools, the server's directory readable, writes only to its
+/// build, cargo home, home and temporary directories, and no network. Its
+/// source mirror is read-only; the runner updates it from outside.
+#[cfg(target_os = "macos")]
+pub(super) fn server_profile(
+    project: &Path,
+    directory: &Path,
+    mirror: &Path,
+    writable: &[PathBuf],
+    read_paths: &[PathBuf],
+) -> Result<String> {
+    let lockfiles = super::writable_snapshot_files(mirror);
+    let mut profile = String::from("(version 1)(deny default)(allow file-read-metadata)(allow process-fork)(allow sysctl-read)(allow signal (target same-sandbox))(allow ipc-posix-shm)(allow mach-lookup (global-name \"com.apple.FSEvents\"))");
+    for path in readable_directories()
+        .into_iter()
+        .chain([directory.to_path_buf()])
+    {
+        profile.push_str(&format!(
+            "(allow file-read* process-exec (subpath {}))",
+            sandbox_literal(&path.canonicalize()?)?
+        ));
+    }
+    for path in readable_files()
+        .into_iter()
+        .chain(ancestor_manifests(mirror, project))
+        .chain([
+            PathBuf::from("/"),
+            PathBuf::from("/dev/null"),
+            PathBuf::from("/dev/urandom"),
+            PathBuf::from("/dev/random"),
+        ])
+    {
+        profile.push_str(&format!(
+            "(allow file-read* (literal {}))",
+            sandbox_literal(&path)?
+        ));
+    }
+    for path in read_paths {
+        let selector = if path.is_dir() { "subpath" } else { "literal" };
+        profile.push_str(&format!(
+            "(allow file-read* process-exec ({selector} {}))",
+            sandbox_literal(path)?
+        ));
+    }
+    for path in writable {
+        profile.push_str(&format!(
+            "(allow file-write* (subpath {}))",
+            sandbox_literal(&path.canonicalize()?)?
+        ));
+    }
+    profile.push_str(&format!(
+        "(deny file-write-flags)(deny file-write* (subpath {}))(allow file-write-data (literal \"/dev/null\"))",
+        sandbox_literal(&mirror.canonicalize()?)?
+    ));
+    // After the mirror deny, so the later rule wins: the toolchain may fill
+    // each lockfile root's lockfile, as a command may in its snapshot.
+    for file in lockfiles {
+        profile.push_str(&format!(
+            "(allow file-read* file-write* (literal {}))",
+            sandbox_literal(&file.canonicalize()?)?
+        ));
+    }
+    Ok(profile)
+}
+
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub(super) fn confined_command(
+    _project: &Path,
     source: &Path,
     scratch: &Path,
     temporary: &Path,
@@ -431,6 +533,7 @@ pub(super) fn confined_command(
     )
 )))]
 pub(super) fn confined_command(
+    _project: &Path,
     _source: &Path,
     _scratch: &Path,
     _temporary: &Path,

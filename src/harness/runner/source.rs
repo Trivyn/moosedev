@@ -319,6 +319,14 @@ impl Runner {
                 push(&mut ranked, &file, "failed_output");
             }
         }
+        // Files the language server reports errors in, after its last settle.
+        if let Some(diagnostics) = self.task.diagnostics.as_ref().filter(|d| d.settled) {
+            for finding in &diagnostics.errors {
+                if source.contains_key(&finding.file) {
+                    push(&mut ranked, &finding.file, "diagnostics");
+                }
+            }
+        }
         for file in self.task.source_recency.iter().rev().filter(present) {
             push(&mut ranked, file, "recency");
         }
