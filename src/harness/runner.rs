@@ -48,7 +48,7 @@ mod tools;
 mod transport;
 mod usage;
 use actions::Step;
-pub use langserver::{DiagnosticsSnapshot, Finding};
+pub use langserver::{DiagnosticsSnapshot, Finding, FixEdit, OfferedFix};
 pub use links::IntentEvent;
 use model::{action_schema, conversational_schema, ModelOutput, ReplyThen, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};

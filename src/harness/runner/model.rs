@@ -57,6 +57,9 @@ const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
 const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message,then), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A reply's then is wait when it answers the human and the turn should end, and continue when you are about to act and want your next action requested. A plan lists explicit permitted files and required shell verification commands; its summary may be as long as the work needs, and each later step is shown the parts of it relevant to that step. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; source supplied in full below counts as already read, and a file listed only under Source outlines must be read before it is edited. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
+/// Shown with `apply_fix` in the schema, while the task has a language-server
+/// result.
+const FIX_MEANING: &str = "apply_fix(fix) applies a quick fix the language server offered, by the number listed under an error or lint (\"fix 3: …\"): the harness makes the edit, so there is no text to copy. It is refused when the file has changed since the fix was offered.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
 /// execution and finishing wait for approval, and a replan while planning changes nothing.
@@ -64,6 +67,15 @@ const PLAN_MODE_ACTION_NAMES: [&str; 6] =
     ["read", "search", "inspect", "question", "reply", "plan"];
 const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, question, reply, plan. Editing and execution require human plan approval.";
 const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied in full. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
+
+/// [`AUTO_MODE_ACTIONS`], listing `apply_fix` when the schema offers it.
+fn auto_mode_actions(fixes: bool) -> String {
+    if fixes {
+        AUTO_MODE_ACTIONS.replacen("write, ", "write, apply_fix, ", 1)
+    } else {
+        AUTO_MODE_ACTIONS.to_owned()
+    }
+}
 
 /// The governing rules the daemon delivered, each with its `via:` line and claim.
 /// A rule the daemon named without its claim (past its kind's claim limit) is
@@ -771,6 +783,10 @@ impl Runner {
             (ActionContract::JsonSchema, false) => SINGLE_ACTION_OUTPUT,
         });
         prompt.push_str(ACTION_MEANINGS);
+        let fixes = self.fixes_offerable();
+        if fixes {
+            prompt.push_str(FIX_MEANING);
+        }
         prompt.push_str(JOB);
         let dossiers = serde_json::to_string(&context.files)?;
         prompt.push_str(&format!(
@@ -807,9 +823,9 @@ impl Runner {
             "Required check results (indices into plan checks): {}\n",
             serde_json::to_string(&checks)?
         ));
-        state.push_str(match self.task.mode {
-            Mode::Plan => PLAN_MODE_ACTIONS,
-            Mode::Auto => AUTO_MODE_ACTIONS,
+        state.push_str(&match self.task.mode {
+            Mode::Plan => PLAN_MODE_ACTIONS.to_owned(),
+            Mode::Auto => auto_mode_actions(fixes),
         });
         if self.task.mode == Mode::Plan {
             state.push_str(&plan_rule_echo(&context.governing_rules));
@@ -1117,6 +1133,10 @@ pub(super) enum Action {
         file: String,
         content: Option<String>,
     },
+    /// A quick fix the language server offered, by its number.
+    ApplyFix {
+        fix: usize,
+    },
     Command {
         command: String,
     },
@@ -1280,8 +1300,8 @@ fn navigation_context(files: &[String], budget: usize) -> String {
     preview
 }
 
-pub(super) fn conversational_schema(mode: Mode) -> Value {
-    let mut actions = action_schema(mode);
+pub(super) fn conversational_schema(mode: Mode, fixes: bool) -> Value {
+    let mut actions = action_schema(mode, fixes);
     if mode == Mode::Auto {
         retain_actions(&mut actions, |name| name != "plan");
     }
@@ -1297,7 +1317,10 @@ fn retain_actions(actions: &mut Value, keep: impl Fn(&str) -> bool) {
 
 /// The single-action schema for `mode`. Plan mode offers only the planning actions;
 /// the runner still refuses anything else from a provider that ignores the schema.
-pub(super) fn action_schema(mode: Mode) -> Value {
+/// `apply_fix` is offered with `fixes`: while the task has a language-server
+/// result, whether or not that result has fixes, so the schema, and the
+/// prompt prefix it heads, changes once rather than with every result.
+pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
     fn variant(name: &str, fields: &[(&str, Value)]) -> Value {
         let mut props = serde_json::Map::new();
         props.insert("action".into(), json!({"type":"string", "const":name}));
@@ -1310,9 +1333,12 @@ pub(super) fn action_schema(mode: Mode) -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
+    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("apply_fix",&[("fix",json!({"type":"integer","minimum":1}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
     if mode == Mode::Plan {
         retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
+    }
+    if !fixes {
+        retain_actions(&mut actions, |name| name != "apply_fix");
     }
     actions
 }
@@ -1660,21 +1686,23 @@ mod tests {
 
     #[test]
     fn plan_mode_schemas_offer_only_planning_actions() {
-        assert_eq!(
-            sorted(variant_names(&action_schema(Mode::Plan))),
-            sorted(PLANNING)
-        );
-        let conversational = conversational_schema(Mode::Plan);
-        assert_eq!(
-            sorted(variant_names(&conversational["properties"]["action"])),
-            sorted(PLANNING)
-        );
+        for fixes in [false, true] {
+            assert_eq!(
+                sorted(variant_names(&action_schema(Mode::Plan, fixes))),
+                sorted(PLANNING)
+            );
+            let conversational = conversational_schema(Mode::Plan, fixes);
+            assert_eq!(
+                sorted(variant_names(&conversational["properties"]["action"])),
+                sorted(PLANNING)
+            );
+        }
     }
 
     #[test]
-    fn auto_mode_schemas_keep_every_action() {
+    fn auto_mode_schemas_keep_every_action_and_offer_fixes_once_a_server_reported() {
         assert_eq!(
-            variant_names(&action_schema(Mode::Auto)),
+            variant_names(&action_schema(Mode::Auto, false)),
             vec![
                 "inspect",
                 "reply",
@@ -1690,7 +1718,7 @@ mod tests {
                 "finish"
             ]
         );
-        let conversational = conversational_schema(Mode::Auto);
+        let conversational = conversational_schema(Mode::Auto, true);
         assert_eq!(
             variant_names(&conversational["properties"]["action"]),
             vec![
@@ -1700,6 +1728,7 @@ mod tests {
                 "search",
                 "replace",
                 "write",
+                "apply_fix",
                 "command",
                 "request_permission",
                 "question",
@@ -1715,21 +1744,22 @@ mod tests {
         assert_eq!(listed(PLAN_MODE_ACTIONS), sorted(PLANNING));
         assert_eq!(
             listed(PLAN_MODE_ACTIONS),
-            sorted(variant_names(&action_schema(Mode::Plan)))
+            sorted(variant_names(&action_schema(Mode::Plan, false)))
         );
-        assert_eq!(
-            listed(AUTO_MODE_ACTIONS),
-            sorted(variant_names(
-                &conversational_schema(Mode::Auto)["properties"]["action"]
-            ))
-        );
-        // The single-action path also accepts plan in Auto; the text never
-        // promises an action that schema lacks.
-        let direct_schema = action_schema(Mode::Auto);
-        let direct = variant_names(&direct_schema);
-        assert!(listed(AUTO_MODE_ACTIONS)
-            .iter()
-            .all(|name| direct.contains(name)));
+        for fixes in [false, true] {
+            let text = auto_mode_actions(fixes);
+            assert_eq!(
+                listed(&text),
+                sorted(variant_names(
+                    &conversational_schema(Mode::Auto, fixes)["properties"]["action"]
+                ))
+            );
+            // The single-action path also accepts plan in Auto; the text never
+            // promises an action that schema lacks.
+            let direct_schema = action_schema(Mode::Auto, fixes);
+            let direct = variant_names(&direct_schema);
+            assert!(listed(&text).iter().all(|name| direct.contains(name)));
+        }
     }
 
     #[test]

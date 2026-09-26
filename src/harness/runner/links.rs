@@ -49,11 +49,18 @@ impl Runner {
     }
 
     pub(super) fn action_schema(&self) -> Value {
+        let fixes = self.fixes_offerable();
         if self.task.batch_capture {
-            conversational_schema(self.task.mode)
+            conversational_schema(self.task.mode, fixes)
         } else {
-            action_schema(self.task.mode)
+            action_schema(self.task.mode, fixes)
         }
+    }
+
+    /// Whether `apply_fix` is offered: the task has a language-server result
+    /// (settled or not), so a server is running that could offer a fix.
+    pub(super) fn fixes_offerable(&self) -> bool {
+        self.task.mode == Mode::Auto && self.task.diagnostics.is_some()
     }
 
     /// Post the frozen link request and turn its receipt into one review item.

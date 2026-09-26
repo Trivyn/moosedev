@@ -2516,6 +2516,7 @@ fn diagnostics(errors: usize) -> moosedev::harness::runner::DiagnosticsSnapshot 
                 message: format!("mismatched types {n}"),
                 detail: None,
                 definition: None,
+                fixes: vec![],
             })
             .collect(),
         warnings: 0,
@@ -2549,6 +2550,61 @@ async fn settled_language_server_errors_are_shown_and_send_finish_back_once() {
     fixture.conversational(json!({"action":"finish","summary":"Done."}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Verifying);
+}
+
+#[tokio::test]
+async fn an_offered_fix_is_applied_as_an_ordinary_edit_and_refused_once_stale() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let mut snapshot = diagnostics(1);
+    snapshot.errors[0].fixes = vec![moosedev::harness::runner::OfferedFix {
+        id: 1,
+        title: "Replace with changed".into(),
+        file: "code.txt".into(),
+        base: moosedev::harness::digest::sha256_hex("original\n"),
+        edits: vec![moosedev::harness::runner::FixEdit {
+            start: 0,
+            end: 8,
+            text: "changed".into(),
+        }],
+    }];
+    runner.task.diagnostics = Some(snapshot);
+    fixture.conversational(json!({"action":"apply_fix","fix":1}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("apply_fix(fix)"), "the action is explained");
+    assert!(
+        prompt.contains("code.txt:1:1 error: mismatched types 0\n  fix 1: Replace with changed\n"),
+        "the fix is listed under its error"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(runner.task.edits.len(), 1, "applied through the edit path");
+    runner.advance().await.unwrap(); // the edit's capture checkpoint
+
+    // The file has changed since the fix was offered: refused, not misapplied.
+    fixture.conversational(json!({"action":"apply_fix","fix":1}));
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert!(
+        fixture
+            .last_model_prompt("harness_action")
+            .contains("fix 1 no longer applies: code.txt has changed since it was offered"),
+        "the refusal goes back to the model"
+    );
+    // A number never offered is refused the same way.
+    fixture.conversational(json!({"action":"apply_fix","fix":9}));
+    fixture.conversational(json!({"action":"reply","message":"No such fix."}));
+    runner.advance().await.unwrap();
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("no fix 9 is offered now"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "changed\n"
+    );
 }
 
 /// Real rust-analyzer behind a configured runner: an applied edit that

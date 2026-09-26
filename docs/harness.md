@@ -335,6 +335,25 @@ event), waits for it to settle, and stores what it reports as the task's
   fails it), then the linter's findings with their suggestion. Files with
   errors are ranked into full source after the latest touch and the files a
   failed command names.
+- **Quick fixes, as numbered choices.** For the first five errors and five
+  lints of a settled result, the harness asks the server for its quick fixes
+  (`textDocument/codeAction`, `only: quickfix`, resolved when sent without an
+  edit), also at each error's related locations: rustc's missing `mut` is a
+  hint on the `let`, not on the failed borrow. It keeps at most three per
+  finding, and only those it can apply as one ordinary edit: text edits to a
+  single plan file that change it. Each is listed under its finding
+  (`fix 3: consider changing this to be mutable`). The Auto schema offers
+  `apply_fix(fix)` while the task has a language-server result, from the first
+  checked edit on, whether or not that result has fixes, so the prompt prefix
+  changes once rather than with every result; a server that stops takes it
+  away, since nothing could then offer a fix. A fix computed for another
+  document version, or one the server marks disabled, is never offered. The harness makes the edit from the stored byte
+  ranges and refuses it when the file is no longer the text the fix was
+  offered for (a SHA-256 of that text travels with the fix). An applied fix is
+  an ordinary edit: approval, grounding, policy, the plan's file scope (an
+  out-of-scope fix is a scope-escape replan) and the next check. Not every
+  error has a fix: rustc explains a lifetime error without suggesting a
+  replacement, so none is offered for it.
 - **A linter, first class.** Each language names its linter: for Rust, clippy,
   run as rust-analyzer's on-save check so its lints arrive through the same
   settled path. At start the harness runs the linter's probe

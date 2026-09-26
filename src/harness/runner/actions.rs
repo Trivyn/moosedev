@@ -78,6 +78,30 @@ impl Runner {
                     "edit is outside approved file scope; return to Plan"
                 );
             }
+            Action::ApplyFix { fix } => {
+                ensure!(
+                    self.task.mode == Mode::Auto,
+                    "Plan mode cannot edit code; human plan approval is required"
+                );
+                // An unknown number is the model's mistake, refused as it
+                // materializes. A fix outside the plan became a scope-escape
+                // replan before this, as any edit does; this is the backstop.
+                if let Some(offered) = self
+                    .task
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.fix(*fix))
+                {
+                    ensure!(
+                        self.task
+                            .plan
+                            .as_ref()
+                            .is_some_and(|p| p.files.contains(&offered.file)),
+                        "fix {fix} edits {}, outside approved file scope; return to Plan",
+                        offered.file
+                    );
+                }
+            }
             Action::Command { .. } | Action::RequestPermission { .. } | Action::Finish { .. } => {
                 ensure!(
                     self.task.mode == Mode::Auto,
@@ -229,6 +253,7 @@ impl Runner {
             Action::Question { question } => return Ok(Step::Question { question }),
             Action::Replan { reason } => return Ok(Step::Replan { reason }),
             Action::Finish { summary } => return Ok(Step::Finish { summary }),
+            Action::ApplyFix { fix } => return self.materialize_fix(fix),
         };
         if !self.task.read_files.contains(file) {
             // The next generation receives the source and dossier. Never apply a
@@ -338,6 +363,46 @@ impl Runner {
             file,
             before,
             after,
+        })
+    }
+}
+
+impl Runner {
+    /// The edit a numbered quick fix makes to the current source: an ordinary
+    /// whole-file edit, so it goes through the same approval, grounding,
+    /// policy and checking as one the model wrote.
+    fn materialize_fix(&mut self, id: usize) -> Result<Step> {
+        let fix = self
+            .task
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.fix(id))
+            .cloned()
+            .with_context(|| format!("no fix {id} is offered now; name a fix listed under an error or lint in the language server block"))?;
+        let file = fix.file.clone();
+        if !self.task.read_files.contains(&file) || self.task.source_outlined.contains(&file) {
+            // As for any edit: never change a file whose source and dossier
+            // the model has not been shown in full.
+            self.event(format!(
+                "Fix guard: showing {file} in full first; fix {id} will not execute."
+            ));
+            return Ok(Step::Read { file });
+        }
+        let before = self
+            .task
+            .source
+            .get(&file)
+            .cloned()
+            .flatten()
+            .context("source snapshot missing; read the target before applying a fix")?;
+        let after = fix.apply(&before).with_context(|| {
+            format!("fix {id} no longer applies: {file} has changed since it was offered; make the change with replace")
+        })?;
+        self.event(format!("Applying fix {id} to {file}: {}", fix.title));
+        Ok(Step::Edit {
+            file,
+            before: Some(before),
+            after: Some(after),
         })
     }
 }

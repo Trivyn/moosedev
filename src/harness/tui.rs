@@ -2169,6 +2169,7 @@ mod tests {
                     message: "mismatched types".into(),
                     detail: None,
                     definition: None,
+                    fixes: vec![],
                 })
                 .collect(),
             warnings: 0,

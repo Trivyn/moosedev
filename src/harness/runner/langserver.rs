@@ -8,7 +8,12 @@
 //! ignore them (OpenCode on badciv: qwen called its rust-analyzer errors
 //! stale and ran `cargo build` after about one edit in three). A result the
 //! harness could not settle is shown as unknown, never as clean.
+//!
+//! What the server can do beyond reporting is offered as choices, not tools:
+//! its quick fixes are numbered under their findings, and `apply_fix` turns
+//! one into an ordinary edit.
 use crate::code::substrate::lang::{language_servers, LinterSpec, ServerSpec};
+use crate::harness::digest::sha256_hex;
 use crate::harness::executor::{resolve_program, ServerDirectory};
 use anyhow::{Context, Result};
 use lsp_server::{Message, Notification, Request, RequestId, Response};
@@ -67,6 +72,107 @@ pub struct Finding {
     /// project: "file:line: <that line>".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// Quick fixes the server offers for it, numbered for `apply_fix`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<OfferedFix>,
+}
+
+/// A quick fix a server offered, ready to apply: text edits to one file,
+/// valid only for the exact text they were computed against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferedFix {
+    /// Unique within one snapshot; what `apply_fix` names.
+    pub id: usize,
+    pub title: String,
+    pub file: String,
+    /// SHA-256 of the text the edits apply to.
+    pub base: String,
+    pub edits: Vec<FixEdit>,
+}
+
+/// One replacement, in byte offsets into the fix's base text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixEdit {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
+impl OfferedFix {
+    /// `text` with the fix applied; None when `text` is not the text the fix
+    /// was offered for, or the edits do not fit it.
+    pub(super) fn apply(&self, text: &str) -> Option<String> {
+        if sha256_hex(text) != self.base {
+            return None;
+        }
+        splice(text, &self.edits)
+    }
+}
+
+/// `text` with `edits` (sorted, non-overlapping byte ranges) applied.
+fn splice(text: &str, edits: &[FixEdit]) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for edit in edits {
+        if edit.start < at
+            || edit.end < edit.start
+            || !text.is_char_boundary(edit.start)
+            || !text.is_char_boundary(edit.end)
+        {
+            return None;
+        }
+        out.push_str(&text[at..edit.start]);
+        out.push_str(&edit.text);
+        at = edit.end;
+    }
+    out.push_str(&text[at..]);
+    Some(out)
+}
+
+/// The byte offset of an LSP position (UTF-16 units, the default encoding)
+/// in `text`; None when it lies outside the text. Strict: a fix whose
+/// positions do not fit is dropped, never clamped into a different edit.
+fn byte_offset(text: &str, line: u32, character: u32) -> Option<usize> {
+    let mut start = 0;
+    for _ in 0..line {
+        start += text[start..].find('\n')? + 1;
+    }
+    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+    let mut units = 0;
+    for (index, ch) in text[start..end].char_indices() {
+        if units == character {
+            return Some(start + index);
+        }
+        units += ch.len_utf16() as u32;
+        if units > character {
+            return None;
+        }
+    }
+    (units == character).then_some(end)
+}
+
+/// The byte edits of LSP `TextEdit`s over `text`, sorted by position with
+/// equal positions kept in their given order; None when any does not fit.
+fn fix_edits(text: &str, edits: &[Value]) -> Option<Vec<FixEdit>> {
+    let mut out = Vec::new();
+    for edit in edits {
+        let range = &edit["range"];
+        let offset = |end: &str| {
+            byte_offset(
+                text,
+                range[end]["line"].as_u64()?.try_into().ok()?,
+                range[end]["character"].as_u64()?.try_into().ok()?,
+            )
+        };
+        out.push(FixEdit {
+            start: offset("start")?,
+            end: offset("end")?,
+            text: edit["newText"].as_str()?.to_owned(),
+        });
+    }
+    out.sort_by_key(|edit| edit.start);
+    splice(text, &out)?;
+    Some(out)
 }
 
 impl Finding {
@@ -78,6 +184,14 @@ impl Finding {
             self.column,
             self.message.lines().next().unwrap_or_default()
         )
+    }
+
+    /// One line per offered fix, for under the finding.
+    fn fix_lines(&self) -> String {
+        self.fixes
+            .iter()
+            .map(|fix| format!("  fix {}: {}\n", fix.id, fix.title))
+            .collect()
     }
 }
 
@@ -103,6 +217,15 @@ pub struct DiagnosticsSnapshot {
 }
 
 impl DiagnosticsSnapshot {
+    /// The offered fix numbered `id`.
+    pub(super) fn fix(&self, id: usize) -> Option<&OfferedFix> {
+        self.errors
+            .iter()
+            .chain(&self.lints)
+            .flat_map(|finding| &finding.fixes)
+            .find(|fix| fix.id == id)
+    }
+
     /// Whether finish is sent back: settled, with errors or lints, and not
     /// already sent back for this result.
     pub(super) fn blocks_finish(&self) -> bool {
@@ -111,7 +234,8 @@ impl DiagnosticsSnapshot {
 
     /// The prompt block, within `budget` bytes: errors first, each with the
     /// compiler's full text while it fits and one line after that, then the
-    /// linter's findings, one line each.
+    /// linter's findings, one line each; every finding with its numbered
+    /// fixes.
     ///
     /// `full_budget` must leave room for the one-line heading: at least
     /// [`MIN_BLOCK_BYTES`].
@@ -160,6 +284,7 @@ impl DiagnosticsSnapshot {
                 Some(definition) => format!("{chosen}  defined at {definition}\n"),
                 None => chosen,
             };
+            let chosen = chosen + &finding.fix_lines();
             if out.len() + chosen.len() > budget {
                 break;
             }
@@ -186,6 +311,7 @@ impl DiagnosticsSnapshot {
                 {
                     line.push_str(&format!("  {}\n", &help[help.find("help:").unwrap_or(0)..]));
                 }
+                line.push_str(&finding.fix_lines());
                 if out.len() + line.len() > budget {
                     break;
                 }
@@ -291,6 +417,13 @@ impl LanguageServer {
                     "textDocument": {
                         "synchronization": {"didSave": true},
                         "publishDiagnostics": {"versionSupport": true, "relatedInformation": true},
+                        // Literal actions, so a quick fix arrives with its
+                        // edit (or resolves to one) rather than as a command.
+                        "codeAction": {
+                            "codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix"]}},
+                            "resolveSupport": {"properties": ["edit"]},
+                            "dataSupport": true,
+                        },
                     },
                     "window": {"workDoneProgress": true},
                     "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": false}, "configuration": true, "workspaceFolders": true},
@@ -496,7 +629,6 @@ impl LanguageServer {
         }
     }
 
-    /// Current errors and the warning count.
     /// Where the symbol at `line`/`column` (1-based, server units) of `file`
     /// is defined, when that lies in the mirror: "file:line: <that line>".
     /// Bounded; any failure is no answer.
@@ -558,6 +690,136 @@ impl LanguageServer {
         (!shown.is_empty()).then(|| shown.join("; "))
     }
 
+    /// The quick fixes the server offers for `finding`, at most
+    /// [`FIXES_PER_FINDING`], with ids still to assign. Only fixes the harness
+    /// can apply as one ordinary edit are kept: text edits to a single file
+    /// among `editable` that change it. Any failure is no fixes.
+    async fn fixes(
+        &mut self,
+        finding: &Finding,
+        editable: &[String],
+        timeout: Duration,
+    ) -> Vec<OfferedFix> {
+        let deadline = Instant::now() + timeout;
+        let mut fixes: Vec<OfferedFix> = Vec::new();
+        for (file, diagnostic) in self.fix_targets(finding) {
+            let Ok(uri) = uri(&self.mirror.join(&file)) else {
+                continue;
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Ok(id) = self.request(
+                "textDocument/codeAction",
+                json!({"textDocument": {"uri": uri}, "range": diagnostic.range, "context": {"diagnostics": [diagnostic], "only": ["quickfix"]}}),
+            ) else {
+                return fixes;
+            };
+            let Ok(Value::Array(actions)) = self.response(id, left).await else {
+                continue;
+            };
+            for action in actions {
+                if fixes.len() == FIXES_PER_FINDING || Instant::now() >= deadline {
+                    return fixes;
+                }
+                // The same fix arrives for the error and for its related
+                // hint; distinct fixes may share a title.
+                if let Some(fix) = self.offered(action, editable, deadline).await {
+                    if !fixes
+                        .iter()
+                        .any(|known| known.file == fix.file && known.edits == fix.edits)
+                    {
+                        fixes.push(fix);
+                    }
+                }
+            }
+        }
+        fixes
+    }
+
+    /// One code action as a fix the harness can apply, resolving its edit
+    /// when the server sends it without one.
+    async fn offered(
+        &mut self,
+        action: Value,
+        editable: &[String],
+        deadline: Instant,
+    ) -> Option<OfferedFix> {
+        // A bare Command (its `command` a string) is only runnable by the
+        // server's own client. A CodeAction's follow-up command, when it has
+        // one, is left unrun: the edit is the fix.
+        let title = action["title"].as_str()?.to_owned();
+        if action["command"].is_string()
+            || action.get("disabled").is_some()
+            || action["kind"]
+                .as_str()
+                .is_some_and(|kind| !kind.starts_with("quickfix"))
+        {
+            return None;
+        }
+        let edit = if action["edit"].is_object() {
+            action["edit"].clone()
+        } else if action.get("data").is_some() {
+            let id = self.request("codeAction/resolve", action).ok()?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            self.response(id, left).await.ok()?["edit"].clone()
+        } else {
+            return None;
+        };
+        let (target, version, edits) = single_file_edits(&edit)?;
+        let file = relative(&target, &self.mirror).filter(|file| editable.contains(file))?;
+        // An edit for another version of the document than the one sent last
+        // would land on the wrong bytes of this one.
+        if version.is_some_and(|version| self.versions.get(&file) != Some(&version)) {
+            return None;
+        }
+        let text = read_in_mirror(&self.mirror, &file)?;
+        let edits = fix_edits(&text, &edits)?;
+        if splice(&text, &edits)? == text {
+            return None;
+        }
+        Some(OfferedFix {
+            id: 0,
+            title,
+            file,
+            base: sha256_hex(&text),
+            edits,
+        })
+    }
+
+    /// The server's diagnostics to ask for fixes of `finding`: its own, then
+    /// those at its related locations. A compiler suggestion often sits
+    /// away from the error (rustc's `mut` goes on the `let`, not the borrow),
+    /// and rust-analyzer publishes it there as a hint carrying the fix.
+    fn fix_targets(&self, finding: &Finding) -> Vec<(String, lsp_types::Diagnostic)> {
+        let Ok(seen) = self.seen.lock() else {
+            return Vec::new();
+        };
+        let Some(own) = seen.diagnostics.get(&finding.file).and_then(|diagnostics| {
+            diagnostics.iter().find(|diagnostic| {
+                diagnostic.range.start.line + 1 == finding.line
+                    && diagnostic.range.start.character + 1 == finding.column
+                    && diagnostic.message == finding.message
+            })
+        }) else {
+            return Vec::new();
+        };
+        let mut targets = vec![(finding.file.clone(), own.clone())];
+        for related in own.related_information.iter().flatten().take(3) {
+            let Some(file) = relative(related.location.uri.as_str(), &self.mirror) else {
+                continue;
+            };
+            let at = seen
+                .diagnostics
+                .get(&file)
+                .into_iter()
+                .flatten()
+                .filter(|diagnostic| diagnostic.range == related.location.range);
+            for diagnostic in at.take(2) {
+                targets.push((file.clone(), diagnostic.clone()));
+            }
+        }
+        targets
+    }
+
     /// Current errors, the linter's findings, and the other warnings' count.
     pub(super) fn findings(&self) -> Findings {
         let mut found = Findings::default();
@@ -575,6 +837,7 @@ impl LanguageServer {
                     message: diagnostic.message.clone(),
                     detail: detail(diagnostic, &self.mirror),
                     definition: None,
+                    fixes: Vec::new(),
                 };
                 let lint = self
                     .linter
@@ -604,6 +867,37 @@ pub(super) struct Findings {
     pub errors: Vec<Finding>,
     pub lints: Vec<Finding>,
     pub warnings: usize,
+}
+
+/// The one file a `WorkspaceEdit` changes, the document version it was
+/// computed for when it says, and its text edits; None when it changes
+/// several files or creates, renames or deletes one.
+fn single_file_edits(edit: &Value) -> Option<(String, Option<i32>, Vec<Value>)> {
+    let mut files: Vec<(String, Option<i32>, Vec<Value>)> = Vec::new();
+    if let Some(changes) = edit["documentChanges"].as_array() {
+        for change in changes {
+            // A resource operation (create, rename, delete) has a `kind`.
+            if change.get("kind").is_some() {
+                return None;
+            }
+            let document = &change["textDocument"];
+            files.push((
+                document["uri"].as_str()?.to_owned(),
+                document["version"]
+                    .as_i64()
+                    .and_then(|version| i32::try_from(version).ok()),
+                change["edits"].as_array()?.clone(),
+            ));
+        }
+    } else {
+        for (uri, edits) in edit["changes"].as_object()? {
+            files.push((uri.clone(), None, edits.as_array()?.clone()));
+        }
+    }
+    match <[_; 1]>::try_from(files) {
+        Ok([only]) => Some(only),
+        Err(_) => None,
+    }
 }
 
 /// The compiler's full text of a diagnostic, bounded; else its related spans.
@@ -933,12 +1227,16 @@ impl LanguageServers {
 
     /// Mirror one applied edit, tell each concerned server, wait for them to
     /// settle and return what they report. None when no server concerns it.
+    ///
+    /// Quick fixes are kept only for `editable` files, the ones an edit may
+    /// change now.
     pub(super) async fn after_edit(
         &mut self,
         file: &str,
         existed: bool,
         text: Option<&str>,
         timeout: Duration,
+        editable: &[String],
     ) -> Result<Option<DiagnosticsSnapshot>> {
         self.directory.mirror_edit(file, text)?;
         if self.servers.is_empty() {
@@ -979,6 +1277,21 @@ impl LanguageServers {
                     .definition(&error.file, error.line, error.column, left)
                     .await;
             }
+            // The fixes the server offers for the first errors and lints,
+            // within their own deadline.
+            let deadline = Instant::now() + FIX_TIME;
+            for finding in found
+                .errors
+                .iter_mut()
+                .take(FIXED_FINDINGS)
+                .chain(found.lints.iter_mut().take(FIXED_FINDINGS))
+            {
+                if !settled || Instant::now() >= deadline {
+                    break;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                finding.fixes = server.fixes(finding, editable, left).await;
+            }
             snapshot.errors.extend(found.errors);
             snapshot.lints.extend(found.lints);
             snapshot.warnings += found.warnings;
@@ -987,6 +1300,15 @@ impl LanguageServers {
                     .linter
                     .get_or_insert_with(|| linter.name.to_owned());
             }
+        }
+        // Numbered in the order the block lists them.
+        let offered = snapshot
+            .errors
+            .iter_mut()
+            .chain(snapshot.lints.iter_mut())
+            .flat_map(|finding| finding.fixes.iter_mut());
+        for (id, fix) in offered.enumerate() {
+            fix.id = id + 1;
         }
         Ok(Some(snapshot))
     }
@@ -1000,6 +1322,12 @@ impl LanguageServers {
 const DEFINED_ERRORS: usize = 5;
 /// All definition lookups of one result share this deadline.
 const DEFINITION_TIME: Duration = Duration::from_secs(4);
+/// Errors, and separately lints, per result whose quick fixes are asked for.
+const FIXED_FINDINGS: usize = 5;
+/// Quick fixes kept per finding.
+const FIXES_PER_FINDING: usize = 3;
+/// All quick-fix requests of one result share this deadline.
+const FIX_TIME: Duration = Duration::from_secs(4);
 
 /// Whether this runner has language servers.
 #[derive(Default)]
@@ -1107,11 +1435,20 @@ impl super::Runner {
             .collect::<Vec<_>>()
             .join(", ");
         self.show_status(&format!("Checking {file} with {names}…"));
+        let editable = self
+            .task
+            .plan
+            .as_ref()
+            .map(|plan| plan.files.clone())
+            .unwrap_or_default();
         let LanguageState::Running(servers) = &mut self.language else {
             return Ok(());
         };
         let started = Instant::now();
-        if let Some(snapshot) = servers.after_edit(file, existed, after, timeout).await? {
+        if let Some(snapshot) = servers
+            .after_edit(file, existed, after, timeout, &editable)
+            .await?
+        {
             let elapsed = started.elapsed().as_secs_f32();
             self.event(if snapshot.settled {
                 let lints = snapshot
@@ -1211,10 +1548,17 @@ mod tests {
             .unwrap();
         assert!(!servers.is_empty(), "{notes:?}");
 
+        let editable = ["src/lib.rs".to_owned()];
         let broken = "pub fn one() -> u32 { \"one\" }\n";
         std::fs::write(project.join("src/lib.rs"), broken).unwrap();
         let snapshot = servers
-            .after_edit("src/lib.rs", true, Some(broken), Duration::from_secs(60))
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(broken),
+                Duration::from_secs(60),
+                &editable,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1231,7 +1575,13 @@ mod tests {
         // loop): settling must wait for the check, not only the analysis.
         let lifetime = "pub struct E {\n    pub section: &'static str,\n}\npub fn make(section: &str) -> E {\n    E { section }\n}\npub fn one() -> u32 { 1 }\n";
         let snapshot = servers
-            .after_edit("src/lib.rs", true, Some(lifetime), Duration::from_secs(60))
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(lifetime),
+                Duration::from_secs(60),
+                &editable,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1254,7 +1604,6 @@ mod tests {
             "{snapshot:?}"
         );
 
-        // The definition behind the error is attached.
         // The definitions behind it: the `&str` binding and the field that
         // needs `&'static str`.
         assert!(
@@ -1269,7 +1618,13 @@ mod tests {
         let linted =
             "pub fn first(v: &[u8]) -> Option<&u8> { v.get(0) }\npub fn one() -> u32 { 1 }\n";
         let snapshot = servers
-            .after_edit("src/lib.rs", true, Some(linted), Duration::from_secs(60))
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(linted),
+                Duration::from_secs(60),
+                &editable,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1283,9 +1638,83 @@ mod tests {
             "{snapshot:?}"
         );
 
-        let fixed = "pub fn one() -> u32 { 1 }\n";
+        // Its suggestion is offered as a fix, and applying it clears the lint.
+        let fix = snapshot.fix(1).expect("clippy's suggestion is offered");
+        assert!(fix.title.contains("v.first()"), "{fix:?}");
+        let fixed = fix.apply(linted).unwrap();
+        assert!(
+            fix.apply(&fixed).is_none(),
+            "a fix applies only to its text"
+        );
+        std::fs::write(project.join("src/lib.rs"), &fixed).unwrap();
         let snapshot = servers
-            .after_edit("src/lib.rs", true, Some(fixed), Duration::from_secs(60))
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(&fixed),
+                Duration::from_secs(60),
+                &editable,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.settled, "{snapshot:?}");
+        assert!(
+            snapshot.errors.is_empty() && snapshot.lints.is_empty(),
+            "{snapshot:?}"
+        );
+
+        // A compiler error whose suggestion is an edit: the missing `mut`.
+        // (The lifetime error above has none: rustc explains it, but
+        // suggests no replacement, so no fix is offered.)
+        let immutable =
+            "pub fn made() -> Vec<u32> {\n    let v = Vec::new();\n    v.push(1);\n    v\n}\n";
+        std::fs::write(project.join("src/lib.rs"), immutable).unwrap();
+        let snapshot = servers
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(immutable),
+                Duration::from_secs(60),
+                &editable,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.settled, "{snapshot:?}");
+        let fix = snapshot
+            .errors
+            .iter()
+            .flat_map(|error| &error.fixes)
+            .next()
+            .unwrap_or_else(|| panic!("the missing mut is offered as a fix: {snapshot:?}"));
+        let fixed = fix.apply(immutable).unwrap();
+        assert!(fixed.contains("let mut v"), "{fixed}");
+        // Outside the editable files, nothing is offered.
+        let snapshot = servers
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(immutable),
+                Duration::from_secs(60),
+                &[],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot.errors.iter().all(|error| error.fixes.is_empty()),
+            "{snapshot:?}"
+        );
+        std::fs::write(project.join("src/lib.rs"), &fixed).unwrap();
+        let snapshot = servers
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(&fixed),
+                Duration::from_secs(60),
+                &editable,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1319,6 +1748,7 @@ mod tests {
             message: "mismatched types\nexpected `u8`".into(),
             detail: None,
             definition: None,
+            fixes: vec![],
         };
         let snapshot = DiagnosticsSnapshot {
             servers: vec!["rust-analyzer".into()],
@@ -1360,6 +1790,7 @@ mod tests {
                 "warning: accessing first element\n  |     ^^^^ help: try: `v.first()`".into(),
             ),
             definition: None,
+            fixes: vec![],
         }];
         let block = rich.render(3_000);
         assert!(
@@ -1403,5 +1834,115 @@ mod tests {
             let block = many.render(budget);
             assert!(block.len() <= budget, "{budget}: {}", block.len());
         }
+    }
+
+    #[test]
+    fn positions_are_utf16_and_strict() {
+        let text = "a😀b\nsecond\n";
+        assert_eq!(byte_offset(text, 0, 0), Some(0));
+        // The emoji is two UTF-16 units and four bytes.
+        assert_eq!(byte_offset(text, 0, 3), Some(5));
+        assert_eq!(byte_offset(text, 0, 2), None, "inside a surrogate pair");
+        assert_eq!(byte_offset(text, 0, 4), Some(6), "the line's end");
+        assert_eq!(byte_offset(text, 0, 5), None, "past the line's end");
+        assert_eq!(byte_offset(text, 1, 6), Some(13));
+        assert_eq!(byte_offset(text, 2, 0), Some(text.len()));
+        assert_eq!(byte_offset(text, 3, 0), None);
+    }
+
+    #[test]
+    fn a_fix_applies_only_to_the_text_it_was_offered_for() {
+        let edit = |line, from, to, text: &str| json!({"range": {"start": {"line": line, "character": from}, "end": {"line": line, "character": to}}, "newText": text});
+        let text = "let v = x.get(0);\nlet w = 1;\n";
+        // Out of order, with two inserts at one point kept in their order.
+        let edits = fix_edits(
+            text,
+            &[
+                edit(1, 4, 4, "mut "),
+                edit(0, 8, 16, "x.first()"),
+                edit(0, 0, 0, "// a\n"),
+                edit(0, 0, 0, "// b\n"),
+            ],
+        )
+        .unwrap();
+        let fix = OfferedFix {
+            id: 1,
+            title: "try".into(),
+            file: "src/lib.rs".into(),
+            base: sha256_hex(text),
+            edits,
+        };
+        let after = fix.apply(text).unwrap();
+        assert_eq!(after, "// a\n// b\nlet v = x.first();\nlet mut w = 1;\n");
+        assert_eq!(fix.apply(&after), None, "stale: the text has changed");
+        // Overlapping edits and positions past the text are never offered.
+        assert!(fix_edits(text, &[edit(0, 0, 5, "a"), edit(0, 3, 6, "b")]).is_none());
+        assert!(fix_edits(text, &[edit(0, 0, 40, "a")]).is_none());
+    }
+
+    #[test]
+    fn only_a_single_file_text_edit_is_a_fix() {
+        let edits = json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "newText": "x"}]);
+        let (uri, version, found) =
+            single_file_edits(&json!({"changes": {"file:///m/src/lib.rs": edits}})).unwrap();
+        assert_eq!(
+            (uri.as_str(), version, found.len()),
+            ("file:///m/src/lib.rs", None, 1)
+        );
+        let (_, version, _) = single_file_edits(&json!({"documentChanges": [{"textDocument": {"uri": "file:///m/a.rs", "version": 4}, "edits": edits}]})).unwrap();
+        assert_eq!(version, Some(4), "checked against the version sent last");
+        assert!(single_file_edits(
+            &json!({"changes": {"file:///m/a.rs": edits, "file:///m/b.rs": edits}})
+        )
+        .is_none());
+        assert!(single_file_edits(
+            &json!({"documentChanges": [{"kind": "create", "uri": "file:///m/new.rs"}]})
+        )
+        .is_none());
+        assert!(single_file_edits(&json!({})).is_none());
+    }
+
+    #[test]
+    fn the_block_numbers_each_offered_fix_under_its_finding() {
+        let fix = |id, title: &str| OfferedFix {
+            id,
+            title: title.into(),
+            file: "src/lib.rs".into(),
+            base: String::new(),
+            edits: vec![],
+        };
+        let finding = |line, fixes| Finding {
+            file: "src/lib.rs".into(),
+            line,
+            column: 1,
+            message: "problem".into(),
+            detail: None,
+            definition: None,
+            fixes,
+        };
+        let snapshot = DiagnosticsSnapshot {
+            servers: vec!["rust-analyzer".into()],
+            settled: true,
+            errors: vec![finding(
+                3,
+                vec![fix(1, "consider changing this to be mutable")],
+            )],
+            lints: vec![finding(7, vec![fix(2, "try: `v.first()`")])],
+            linter: Some("clippy".into()),
+            ..Default::default()
+        };
+        let block = snapshot.render(4_000);
+        assert!(
+            block.contains(
+                "src/lib.rs:3:1 error: problem\n  fix 1: consider changing this to be mutable\n"
+            ),
+            "{block}"
+        );
+        assert!(
+            block.contains("src/lib.rs:7:1 lint: problem\n  fix 2: try: `v.first()`\n"),
+            "{block}"
+        );
+        assert_eq!(snapshot.fix(2).unwrap().title, "try: `v.first()`");
+        assert!(snapshot.fix(3).is_none());
     }
 }

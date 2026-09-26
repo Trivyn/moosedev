@@ -63,6 +63,17 @@ impl Runner {
             Action::Edit { file, .. }
             | Action::Replace { file, .. }
             | Action::Write { file, .. } => file.clone(),
+            // An offered fix edits the file it was offered for; an unknown
+            // number is refused later, as it materializes.
+            Action::ApplyFix { fix } => match self
+                .task
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.fix(*fix))
+            {
+                Some(offered) => offered.file.clone(),
+                None => return Ok(Some(action)),
+            },
             _ => return Ok(Some(action)),
         };
         let plan_files = self
