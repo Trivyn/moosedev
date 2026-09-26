@@ -2519,7 +2519,7 @@ fn diagnostics(errors: usize) -> moosedev::harness::runner::DiagnosticsSnapshot 
                 fixes: vec![],
             })
             .collect(),
-        warnings: 0,
+        warnings: vec![],
         lints: vec![],
         linter: None,
         finish_refused: false,

@@ -210,41 +210,68 @@ pub struct DiagnosticsSnapshot {
     /// The linter that ran, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linter: Option<String>,
-    pub warnings: usize,
+    /// Warnings that are not the linter's: the compiler's own (unused
+    /// imports and variables).
+    #[serde(
+        default,
+        deserialize_with = "findings_or_count",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub warnings: Vec<Finding>,
     /// The model was already sent back from finish for exactly these errors.
     #[serde(default)]
     pub finish_refused: bool,
 }
 
+/// Journals written before warnings were listed kept only their count. That
+/// result is replaced by the next check, so the count is dropped.
+fn findings_or_count<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Finding>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Listed(Vec<Finding>),
+        Counted(#[allow(dead_code)] usize),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Listed(findings) => findings,
+        Stored::Counted(_) => Vec::new(),
+    })
+}
+
 impl DiagnosticsSnapshot {
+    /// Every finding, in the order the block lists them: errors, warnings,
+    /// lints.
+    fn findings(&self) -> impl Iterator<Item = &Finding> {
+        self.errors.iter().chain(&self.warnings).chain(&self.lints)
+    }
+
     /// The offered fix numbered `id`.
     pub(super) fn fix(&self, id: usize) -> Option<&OfferedFix> {
-        self.errors
-            .iter()
-            .chain(&self.lints)
+        self.findings()
             .flat_map(|finding| &finding.fixes)
             .find(|fix| fix.id == id)
     }
 
-    /// Whether finish is sent back: settled, with errors or lints, and not
+    /// Whether finish is sent back: settled, with any finding, and not
     /// already sent back for this result.
     pub(super) fn blocks_finish(&self) -> bool {
-        self.settled && (!self.errors.is_empty() || !self.lints.is_empty()) && !self.finish_refused
+        self.settled && self.findings().next().is_some() && !self.finish_refused
     }
 
     /// The prompt block, within `budget` bytes: errors first, each with the
     /// compiler's full text while it fits and one line after that, then the
-    /// linter's findings, one line each; every finding with its numbered
-    /// fixes.
+    /// warnings and the linter's findings, one line each; every finding with
+    /// its numbered fixes.
     ///
     /// `full_budget` must leave room for the one-line heading: at least
     /// [`MIN_BLOCK_BYTES`].
     pub(super) fn render(&self, full_budget: usize) -> String {
         debug_assert!(full_budget >= MIN_BLOCK_BYTES);
-        const LINTS: usize = 10;
-        // Room held back for the omission counts and the lint heading, so
+        // Room held back for the omission counts and the list headings, so
         // the block never passes `full_budget`.
-        const FOOTERS: usize = 160;
+        const FOOTERS: usize = 220;
         let budget = full_budget.saturating_sub(FOOTERS);
         let servers = self.servers.join(", ");
         if !self.settled {
@@ -257,16 +284,15 @@ impl DiagnosticsSnapshot {
             .as_deref()
             .map(|linter| format!(", {} lint(s) from {linter}", self.lints.len()))
             .unwrap_or_else(|| ", no linter".to_owned());
-        if self.errors.is_empty() && self.lints.is_empty() {
+        if self.findings().next().is_none() {
             return format!(
-                "Language server ({servers}) after your last edit: no errors{linter} ({} other warning(s)).\n",
-                self.warnings
+                "Language server ({servers}) after your last edit: no errors, no warnings{linter}.\n"
             );
         }
         let mut out = format!(
-            "Language server ({servers}) after your last edit: {} error(s){linter}, {} other warning(s). These are current; fix them before finish.\n",
+            "Language server ({servers}) after your last edit: {} error(s), {} warning(s){linter}. These are current; fix them before finish.\n",
             self.errors.len(),
-            self.warnings
+            self.warnings.len()
         );
         let mut shown = 0;
         for finding in &self.errors {
@@ -291,41 +317,62 @@ impl DiagnosticsSnapshot {
             out.push_str(&chosen);
             shown += 1;
         }
-        if shown < self.errors.len() {
-            out.push_str(&format!(
-                "[{} more error(s) not listed; a build command prints them all]\n",
-                self.errors.len() - shown
-            ));
+        let rest = format!(
+            "[{} more error(s) not listed; a build command prints them all]\n",
+            self.errors.len() - shown
+        );
+        if shown < self.errors.len() && out.len() + rest.len() <= full_budget {
+            out.push_str(&rest);
         }
-        if let (Some(linter), false) = (&self.linter, self.lints.is_empty()) {
-            out.push_str(&format!("Lints ({linter}):\n"));
-            let mut listed = 0;
-            for finding in self.lints.iter().take(LINTS) {
-                let mut line = finding.line("lint");
-                // The suggestion is the useful part of a lint: keep its
-                // first `help:` line.
-                if let Some(help) = finding
-                    .detail
-                    .as_deref()
-                    .and_then(|detail| detail.lines().find(|l| l.contains("help:")))
-                {
-                    line.push_str(&format!("  {}\n", &help[help.find("help:").unwrap_or(0)..]));
-                }
-                line.push_str(&finding.fix_lines());
-                if out.len() + line.len() > budget {
-                    break;
-                }
-                out.push_str(&line);
-                listed += 1;
-            }
-            if listed < self.lints.len() {
-                out.push_str(&format!(
-                    "[{} more lint(s) not listed]\n",
-                    self.lints.len() - listed
-                ));
-            }
+        let budgets = (budget, full_budget);
+        list(&mut out, "Warnings:\n", "warning", &self.warnings, budgets);
+        if let Some(linter) = &self.linter {
+            list(
+                &mut out,
+                &format!("Lints ({linter}):\n"),
+                "lint",
+                &self.lints,
+                budgets,
+            );
         }
         out
+    }
+}
+
+/// `findings` under `heading`, one line each with its first `help:` line
+/// (the suggestion is the useful part of a warning) and its fixes: at most
+/// ten within `budget`, the heading only above a listed line, and a count of
+/// the rest when it fits `full_budget`.
+fn list(
+    out: &mut String,
+    heading: &str,
+    kind: &str,
+    findings: &[Finding],
+    (budget, full_budget): (usize, usize),
+) {
+    const LISTED: usize = 10;
+    let mut listed = 0;
+    for finding in findings.iter().take(LISTED) {
+        let mut line = finding.line(kind);
+        if let Some(help) = finding
+            .detail
+            .as_deref()
+            .and_then(|detail| detail.lines().find(|l| l.contains("help:")))
+        {
+            line.push_str(&format!("  {}\n", &help[help.find("help:").unwrap_or(0)..]));
+        }
+        line.push_str(&finding.fix_lines());
+        let heading = if listed == 0 { heading } else { "" };
+        if out.len() + heading.len() + line.len() > budget {
+            break;
+        }
+        out.push_str(heading);
+        out.push_str(&line);
+        listed += 1;
+    }
+    let rest = format!("[{} more {kind}(s) not listed]\n", findings.len() - listed);
+    if listed < findings.len() && out.len() + rest.len() <= full_budget {
+        out.push_str(&rest);
     }
 }
 
@@ -820,7 +867,7 @@ impl LanguageServer {
         targets
     }
 
-    /// Current errors, the linter's findings, and the other warnings' count.
+    /// Current errors, other warnings, and the linter's findings.
     pub(super) fn findings(&self) -> Findings {
         let mut found = Findings::default();
         let Ok(seen) = self.seen.lock() else {
@@ -849,12 +896,12 @@ impl LanguageServer {
                     Some(lsp_types::DiagnosticSeverity::WARNING) if lint => {
                         found.lints.push(finding())
                     }
-                    Some(lsp_types::DiagnosticSeverity::WARNING) => found.warnings += 1,
+                    Some(lsp_types::DiagnosticSeverity::WARNING) => found.warnings.push(finding()),
                     _ => {}
                 }
             }
         }
-        for list in [&mut found.errors, &mut found.lints] {
+        for list in [&mut found.errors, &mut found.warnings, &mut found.lints] {
             list.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
             list.dedup();
         }
@@ -865,8 +912,8 @@ impl LanguageServer {
 #[derive(Default)]
 pub(super) struct Findings {
     pub errors: Vec<Finding>,
+    pub warnings: Vec<Finding>,
     pub lints: Vec<Finding>,
-    pub warnings: usize,
 }
 
 /// The one file a `WorkspaceEdit` changes, the document version it was
@@ -1277,13 +1324,14 @@ impl LanguageServers {
                     .definition(&error.file, error.line, error.column, left)
                     .await;
             }
-            // The fixes the server offers for the first errors and lints,
-            // within their own deadline.
+            // The fixes the server offers for the first errors, warnings
+            // and lints, within their own deadline.
             let deadline = Instant::now() + FIX_TIME;
             for finding in found
                 .errors
                 .iter_mut()
                 .take(FIXED_FINDINGS)
+                .chain(found.warnings.iter_mut().take(FIXED_FINDINGS))
                 .chain(found.lints.iter_mut().take(FIXED_FINDINGS))
             {
                 if !settled || Instant::now() >= deadline {
@@ -1294,7 +1342,7 @@ impl LanguageServers {
             }
             snapshot.errors.extend(found.errors);
             snapshot.lints.extend(found.lints);
-            snapshot.warnings += found.warnings;
+            snapshot.warnings.extend(found.warnings);
             if let Some(linter) = server.linter {
                 snapshot
                     .linter
@@ -1305,6 +1353,7 @@ impl LanguageServers {
         let offered = snapshot
             .errors
             .iter_mut()
+            .chain(snapshot.warnings.iter_mut())
             .chain(snapshot.lints.iter_mut())
             .flat_map(|finding| finding.fixes.iter_mut());
         for (id, fix) in offered.enumerate() {
@@ -1322,7 +1371,8 @@ impl LanguageServers {
 const DEFINED_ERRORS: usize = 5;
 /// All definition lookups of one result share this deadline.
 const DEFINITION_TIME: Duration = Duration::from_secs(4);
-/// Errors, and separately lints, per result whose quick fixes are asked for.
+/// Errors, warnings and lints, each, per result whose quick fixes are asked
+/// for.
 const FIXED_FINDINGS: usize = 5;
 /// Quick fixes kept per finding.
 const FIXES_PER_FINDING: usize = 3;
@@ -1457,10 +1507,10 @@ impl super::Runner {
                     .map(|linter| format!(", {} lint(s) from {linter}", snapshot.lints.len()))
                     .unwrap_or_default();
                 format!(
-                    "{}: {} error(s){lints}, {} other warning(s) after {file} (settled in {elapsed:.1} s).",
+                    "{}: {} error(s), {} warning(s){lints} after {file} (settled in {elapsed:.1} s).",
                     snapshot.servers.join(", "),
                     snapshot.errors.len(),
-                    snapshot.warnings
+                    snapshot.warnings.len()
                 )
             } else {
                 format!(
@@ -1471,10 +1521,11 @@ impl super::Runner {
             self.intent_event(
                 "language_server_diagnostics",
                 &format!(
-                    "{}: {} error(s), {} warning(s), {} after {} ms",
+                    "{}: {} error(s), {} warning(s), {} lint(s), {} after {} ms",
                     snapshot.servers.join(", "),
                     snapshot.errors.len(),
-                    snapshot.warnings,
+                    snapshot.warnings.len(),
+                    snapshot.lints.len(),
                     if snapshot.settled {
                         "settled"
                     } else {
@@ -1720,6 +1771,38 @@ mod tests {
             .unwrap();
         assert!(snapshot.settled, "{snapshot:?}");
         assert!(snapshot.errors.is_empty(), "{snapshot:?}");
+
+        // A compiler warning is listed, not only counted, with its fix: the
+        // unused `key` badciv edc914f6 finished with.
+        let unused =
+            "pub fn parse_u32(key: &str, value: &str) -> u32 {\n    value.len() as u32\n}\n";
+        std::fs::write(project.join("src/lib.rs"), unused).unwrap();
+        let snapshot = servers
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(unused),
+                Duration::from_secs(60),
+                &editable,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.settled && snapshot.blocks_finish(), "{snapshot:?}");
+        let warning = snapshot
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("unused variable"))
+            .unwrap_or_else(|| panic!("the unused variable is listed: {snapshot:?}"));
+        let titles: Vec<&str> = warning.fixes.iter().map(|fix| fix.title.as_str()).collect();
+        assert!(
+            warning
+                .fixes
+                .iter()
+                .filter_map(|fix| fix.apply(unused))
+                .any(|fixed| fixed.contains("_key: &str")),
+            "rustc's `_key` is among the fixes: {titles:?}"
+        );
         drop(servers);
         let _ = std::fs::remove_dir_all(&project);
         let _ = std::fs::remove_dir_all(&directory);
@@ -1754,14 +1837,14 @@ mod tests {
             servers: vec!["rust-analyzer".into()],
             settled: true,
             errors: vec![finding("src/a.rs", 3), finding("src/b.rs", 9)],
-            warnings: 2,
+            warnings: vec![],
             lints: vec![],
             linter: None,
             finish_refused: false,
         };
         let block = snapshot.render(3_000);
         assert!(
-            block.contains("2 error(s), no linter, 2 other warning(s)"),
+            block.contains("2 error(s), 0 warning(s), no linter."),
             "{block}"
         );
         assert!(
@@ -1794,7 +1877,7 @@ mod tests {
         }];
         let block = rich.render(3_000);
         assert!(
-            block.contains("2 error(s), 1 lint(s) from clippy"),
+            block.contains("2 error(s), 0 warning(s), 1 lint(s) from clippy"),
             "{block}"
         );
         assert!(block.contains("= help: try `1u8`"), "{block}");
@@ -1817,6 +1900,46 @@ mod tests {
             lints_only.blocks_finish(),
             "lints alone send finish back once"
         );
+        // The compiler's warnings are listed with their suggestion, before
+        // the lints, and send finish back once too.
+        let warned = DiagnosticsSnapshot {
+            errors: vec![],
+            lints: vec![],
+            warnings: vec![Finding {
+                file: "src/c.rs".into(),
+                line: 3,
+                column: 29,
+                message: "unused import: `Terrain`".into(),
+                detail: Some(
+                    "warning: unused import: `Terrain`\nhelp: remove the unused import".into(),
+                ),
+                definition: None,
+                fixes: vec![],
+            }],
+            ..rich.clone()
+        };
+        let block = warned.render(3_000);
+        assert!(
+            block.contains("0 error(s), 1 warning(s), 0 lint(s) from clippy"),
+            "{block}"
+        );
+        assert!(
+            block.contains("Warnings:\nsrc/c.rs:3:29 warning: unused import: `Terrain`\n  help: remove the unused import\n"),
+            "{block}"
+        );
+        assert!(warned.blocks_finish(), "warnings send finish back once");
+        let clean = DiagnosticsSnapshot {
+            warnings: vec![],
+            ..warned
+        };
+        assert!(!clean.blocks_finish());
+        assert!(
+            clean
+                .render(3_000)
+                .contains("no errors, no warnings, 0 lint(s)"),
+            "{}",
+            clean.render(3_000)
+        );
         let unknown = DiagnosticsSnapshot {
             settled: false,
             ..snapshot
@@ -1827,6 +1950,7 @@ mod tests {
         // Any mix of errors and lints stays within the budget.
         let many = DiagnosticsSnapshot {
             errors: (0..40).map(|n| finding("src/c.rs", n)).collect(),
+            warnings: (0..40).map(|n| finding("src/e.rs", n)).collect(),
             lints: (0..40).map(|n| finding("src/d.rs", n)).collect(),
             ..rich.clone()
         };
@@ -1834,6 +1958,25 @@ mod tests {
             let block = many.render(budget);
             assert!(block.len() <= budget, "{budget}: {}", block.len());
         }
+        // A long heading line leaves no room for a list: still within budget.
+        let crowded_heading = DiagnosticsSnapshot {
+            servers: vec!["s".repeat(250)],
+            ..many
+        };
+        let block = crowded_heading.render(MIN_BLOCK_BYTES);
+        assert!(block.len() <= MIN_BLOCK_BYTES, "{}", block.len());
+    }
+
+    #[test]
+    fn a_journal_that_kept_only_the_warning_count_still_loads() {
+        let stored = json!({"servers": ["rust-analyzer"], "settled": true, "errors": [], "warnings": 6, "finish_refused": false});
+        let snapshot: DiagnosticsSnapshot = serde_json::from_value(stored).unwrap();
+        assert!(snapshot.warnings.is_empty());
+        let round = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DiagnosticsSnapshot>(round).unwrap(),
+            snapshot
+        );
     }
 
     #[test]

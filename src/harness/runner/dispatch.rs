@@ -648,20 +648,21 @@ impl Runner {
                         diagnostics.finish_refused = true;
                         (
                             diagnostics.render(DIAGNOSTICS_BYTES),
-                            diagnostics.errors.len(),
-                            diagnostics.lints.len(),
+                            format!(
+                                "{} error(s), {} warning(s), {} lint(s)",
+                                diagnostics.errors.len(),
+                                diagnostics.warnings.len(),
+                                diagnostics.lints.len()
+                            ),
                         )
                     });
-                if let Some((block, errors, lints)) = refusal {
-                    self.intent_event(
-                        "finish_refused_diagnostics",
-                        &format!("{errors} error(s), {lints} lint(s)"),
-                    );
+                if let Some((block, counts)) = refusal {
+                    self.intent_event("finish_refused_diagnostics", &counts);
                     self.event(format!(
-                        "Finish refused: the language server reports {errors} error(s) and {lints} lint(s) in the current source."
+                        "Finish refused: the language server reports {counts} in the current source."
                     ));
                     self.task.last_response = format!(
-                        "Not finished: the language server reports problems in the current source. Errors fail the required checks; fix them, and fix the lints too unless they are wrong for this code, then finish.\n{block}"
+                        "Not finished: the language server reports problems in the current source. Errors fail the required checks; fix them, and fix the warnings and lints too unless they are wrong for this code, then finish.\n{block}"
                     );
                     return self.persist();
                 }

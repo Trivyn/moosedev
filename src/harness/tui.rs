@@ -323,26 +323,26 @@ struct View {
 fn checker_span(task: &Task) -> Option<Span<'static>> {
     let diagnostics = task.diagnostics.as_ref()?;
     let servers = diagnostics.servers.join(", ");
-    let lints = diagnostics.lints.len();
+    let counts: Vec<String> = [
+        (diagnostics.errors.len(), "error"),
+        (diagnostics.warnings.len(), "warning"),
+        (diagnostics.lints.len(), "lint"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, kind)| format!("{count} {kind}(s)"))
+    .collect();
     let (text, color) = if !diagnostics.settled {
         (format!(" · {servers} ?"), Color::Yellow)
-    } else if diagnostics.errors.is_empty() && lints == 0 {
+    } else if counts.is_empty() {
         (format!(" · {servers} ✓"), Color::Green)
-    } else if diagnostics.errors.is_empty() {
-        (format!(" · {servers}: {lints} lint(s)"), Color::Yellow)
-    } else if lints == 0 {
-        (
-            format!(" · {servers}: {} error(s)", diagnostics.errors.len()),
-            Color::Red,
-        )
     } else {
-        (
-            format!(
-                " · {servers}: {} error(s), {lints} lint(s)",
-                diagnostics.errors.len()
-            ),
-            Color::Red,
-        )
+        let color = if diagnostics.errors.is_empty() {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+        (format!(" · {servers}: {}", counts.join(", ")), color)
     };
     Some(Span::styled(visible(&text), Style::default().fg(color)))
 }
@@ -2172,7 +2172,7 @@ mod tests {
                     fixes: vec![],
                 })
                 .collect(),
-            warnings: 0,
+            warnings: vec![],
             lints: vec![],
             linter: None,
             finish_refused: false,
@@ -2192,6 +2192,14 @@ mod tests {
         assert_eq!(
             checker_span(&task).unwrap().content,
             " · rust-analyzer: 3 lint(s)"
+        );
+        // The compiler's warnings count too: not green while any remain.
+        let mut warned = snapshot(true, 1);
+        warned.warnings = snapshot(true, 6).errors;
+        task.diagnostics = Some(warned);
+        assert_eq!(
+            checker_span(&task).unwrap().content,
+            " · rust-analyzer: 1 error(s), 6 warning(s)"
         );
     }
 

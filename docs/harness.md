@@ -314,7 +314,8 @@ After every applied edit (the model's, or one a human approved) the runner
 mirrors the change into `.moosedev/harness/lsp/<task>/source`, tells each
 concerned server (full-text `didOpen`/`didChange`, `didSave`, and a watched-file
 event), waits for it to settle, and stores what it reports as the task's
-`diagnostics`: errors with file, line and column, and a warning count.
+`diagnostics`: errors, warnings and the linter's findings, each with file,
+line and column.
 
 - **Settled or unknown.** A server has settled when it has said something since
   the edit, then nothing for 800 ms, with no open progress and, for
@@ -332,11 +333,13 @@ event), waits for it to settle, and stores what it reports as the task's
   `help:` lines, up to 800 bytes each, else its related spans) and the
   definition behind it ("defined at file:line: …", at most two targets, for the
   first five errors: a field's `&'static str` next to the `&str` binding that
-  fails it), then the linter's findings with their suggestion. Files with
+  fails it), then the compiler's warnings and the linter's findings, each with its
+  suggestion (warnings were once only counted, and qwen ran `cargo build` to
+  read them). Files with
   errors are ranked into full source after the latest touch and the files a
   failed command names.
-- **Quick fixes, as numbered choices.** For the first five errors and five
-  lints of a settled result, the harness asks the server for its quick fixes
+- **Quick fixes, as numbered choices.** For the first five errors, five
+  warnings and five lints of a settled result, the harness asks the server for its quick fixes
   (`textDocument/codeAction`, `only: quickfix`, resolved when sent without an
   edit), also at each error's related locations: rustc's missing `mut` is a
   hint on the `let`, not on the failed borrow. It keeps at most three per
@@ -362,12 +365,14 @@ event), waits for it to settle, and stores what it reports as the task's
   add clippy); rust-analyzer checks without it.", `language_linter_missing`)
   and the checker runs `cargo check`. Nothing stops.
 - **What the human sees.** The header shows the last result beside the model
-  and phase (`rust-analyzer ✓`, `rust-analyzer: 2 error(s)`, or
-  `rust-analyzer ?` when it did not settle); each check adds an Activity line
-  ("rust-analyzer: 2 error(s), 1 warning(s) after src/lib.rs (settled in 3.1 s)"),
+  and phase (`rust-analyzer ✓` only with no errors, warnings or lints;
+  `rust-analyzer: 2 error(s), 1 warning(s)` in red with errors, yellow
+  without; `rust-analyzer ?` when it did not settle); each check adds an
+  Activity line ("rust-analyzer: 2 error(s), 1 warning(s), 0 lint(s) from
+  clippy after src/lib.rs (settled in 3.1 s)"),
   as do a server's start, absence or failure; and the status line reads
   "Checking src/lib.rs with rust-analyzer…" while the harness waits.
-- **Finish.** A finish while settled errors or lints remain is sent back once with them,
+- **Finish.** A finish while settled errors, warnings or lints remain is sent back once with them,
   before any required check runs (`finish_refused_diagnostics`); a second
   finish on the same errors goes on to the checks, which decide. Unknown never
   blocks.
