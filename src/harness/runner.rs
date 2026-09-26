@@ -101,6 +101,10 @@ pub struct Runner {
     progress: Option<ProgressSender>,
     streaming: Option<Arc<Mutex<StreamedMessage>>>,
     last_saved: Mutex<Option<[u8; 32]>>,
+    /// Set for the rest of a step whose prompt overflowed with rule claims
+    /// past the daemon's fixed floor: its refreshes ask for the floor alone
+    /// and retrieved claims are not filled in. Cleared at every advance.
+    rule_claims_floor_only: bool,
 }
 
 pub use crate::harness::{DEFAULT_GUIDANCE, GUIDANCE_FILE};
@@ -387,6 +391,7 @@ impl Runner {
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
+            rule_claims_floor_only: false,
         };
         let context = runner.refresh(&[]).await?;
         Self::validate_daemon_contracts(&context)?;
@@ -437,6 +442,7 @@ impl Runner {
             progress: None,
             streaming: None,
             last_saved: Mutex::new(None),
+            rule_claims_floor_only: false,
         };
         if missing_guidance {
             // A journal from before the guidance file gets the compiled default.

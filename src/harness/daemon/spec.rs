@@ -873,11 +873,31 @@ fn marker_components(state: &AppState, marker_iri: &str) -> Vec<String> {
 }
 
 /// The components the current approvals of the spec files among `files`
-/// recorded as governed by their records.
+/// govern as a whole: of the components each approval recorded, the outermost
+/// ones, not covered by another of them. Reading `crate.md` delivers the rules
+/// of `crate/`; reading a whole-project spec delivers the project's own rules,
+/// not every part's (badciv 839ebeec: reading `spec.md` added the sim and tui
+/// parts' rules to a map task). A part's rules still reach files under it by
+/// path.
 pub(super) fn spec_components_for_files(
     state: &AppState,
     files: &[String],
 ) -> anyhow::Result<Vec<String>> {
+    let catalog = graph::load_components(state)?;
+    let covers = |iri: &str| {
+        catalog
+            .iter()
+            .find(|entry| entry.iri.as_deref() == Some(iri))
+            .map(|entry| entry.covers_paths.clone())
+            .unwrap_or_default()
+    };
+    // `outer` strictly encloses `inner`: the whole project, or a directory
+    // that the other path lies beneath.
+    let encloses = |outer: &str, inner: &str| {
+        outer != inner
+            && (outer == graph::COVERS_WHOLE_PROJECT
+                || (outer.ends_with('/') && inner.starts_with(outer)))
+    };
     let same = |a: &str, b: &str| {
         std::path::Path::new(a)
             .components()
@@ -886,9 +906,18 @@ pub(super) fn spec_components_for_files(
     let mut components = Vec::new();
     for (path, marker) in current_approval_markers(state)? {
         if files.iter().any(|file| same(file, &path)) {
-            for component in marker_components(state, &marker.iri) {
-                if !components.contains(&component) {
-                    components.push(component);
+            let recorded = marker_components(state, &marker.iri);
+            for component in &recorded {
+                let own = covers(component);
+                let inside_another = !own.is_empty()
+                    && own.iter().all(|inner| {
+                        recorded
+                            .iter()
+                            .filter(|other| *other != component)
+                            .any(|other| covers(other).iter().any(|outer| encloses(outer, inner)))
+                    });
+                if !inside_another && !components.contains(component) {
+                    components.push(component.clone());
                 }
             }
         }
@@ -2412,6 +2441,64 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_spec_with_parts_delivers_its_own_component_not_every_part() {
+        // badciv 839ebeec: reading the whole-project spec added the sim and
+        // tui parts' rules to a task about the map crate.
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.0.join("game/sim")).unwrap();
+        let hash =
+            fixture.write_spec("# Game\nThe game is written in Rust.\nThe sim runs turns.\n");
+        let state = fixture.state();
+        let mut request = prepare_request(
+            "spec-game",
+            hash,
+            accepted_revision(&state).unwrap(),
+            vec![
+                draft("Constraint", "Rust only", "The game is written in Rust.", 2),
+                draft("Requirement", "Sim runs turns", "The sim runs turns.", 3),
+            ],
+        );
+        request.covers = vec!["game/".into()];
+        request.parts = vec![SpecPartDraft {
+            name: "sim".into(),
+            path: "game/sim/".into(),
+            stated_by: 1,
+            records: vec![1],
+        }];
+        prepare_operation(&state, request).unwrap();
+        approve_operation(
+            &state,
+            SpecApproveRequest {
+                operation_id: "spec-game".into(),
+                owner_id: "spec-test".into(),
+            },
+        )
+        .unwrap();
+        let rules = |file: &str| {
+            let mut labels = crate::harness::daemon::context_snapshot(
+                &state,
+                &ContextRequest {
+                    topic: "game".into(),
+                    files: vec![file.into()],
+                    evidence_only: false,
+                    max_bytes: None,
+                    rule_files: Vec::new(),
+                    rule_claim_bytes: None,
+                },
+            )
+            .unwrap()
+            .governing_rules
+            .into_iter()
+            .map(|rule| rule.label)
+            .collect::<Vec<_>>();
+            labels.sort();
+            labels
+        };
+        assert_eq!(rules("docs/spec.md"), ["Rust only"]);
+        assert_eq!(rules("game/sim/turns.rs"), ["Rust only", "Sim runs turns"]);
+    }
+
+    #[test]
     fn reading_an_approved_spec_delivers_the_rules_of_the_components_it_governs() {
         // badciv 3ba41310: the plan was written from the crate's spec at the
         // project root, before any file under the crate existed, so none of
@@ -2450,6 +2537,7 @@ mod tests {
                     evidence_only: false,
                     max_bytes: None,
                     rule_files: Vec::new(),
+                    rule_claim_bytes: None,
                 },
             )
             .unwrap()
@@ -2469,6 +2557,7 @@ mod tests {
                 evidence_only: false,
                 max_bytes: None,
                 rule_files: vec!["crate/src/lib.rs".into()],
+                rule_claim_bytes: None,
             },
         )
         .unwrap();
@@ -2515,6 +2604,7 @@ mod tests {
                     evidence_only: false,
                     max_bytes: None,
                     rule_files: Vec::new(),
+                    rule_claim_bytes: None,
                 },
             )
             .unwrap()

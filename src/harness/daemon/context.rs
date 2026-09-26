@@ -84,7 +84,7 @@ pub fn context_snapshot(
         let governed = super::spec::spec_components_for_files(state, &walked)?;
         let linked = graph::linked_evidence(state, &walked, &governed)?;
         file_record_iris.extend(linked.excluded.iter().cloned());
-        governing_rules = graph::governing_rules(&linked)
+        governing_rules = graph::governing_rules(&linked, request.rule_claim_bytes)
             .into_iter()
             .map(|rule| GoverningRule {
                 via: rule.hop.via(&rule.source),
@@ -302,7 +302,7 @@ pub fn context_snapshot(
         delivery_receipt,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
-        context_contracts: vec![1],
+        context_contracts: vec![1, 2],
         governing_rules,
     })
 }

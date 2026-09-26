@@ -481,6 +481,7 @@ async fn evidence_only_context_returns_topic_claims_without_inventory_or_dossier
         evidence_only,
         max_bytes: None,
         rule_files: Vec::new(),
+        rule_claim_bytes: None,
     };
     let full =
         daemon::context_snapshot(&state, &request("coding constraint", false, vec![])).unwrap();
@@ -598,6 +599,7 @@ fn evidence_budget_degrades_whole_records_and_receipts_every_selected_record() {
         evidence_only: true,
         max_bytes,
         rule_files: Vec::new(),
+        rule_claim_bytes: None,
     };
 
     let unbounded = daemon::context_snapshot(&state, &request(None)).unwrap();
@@ -725,6 +727,7 @@ async fn file_dossier_carries_the_topic_evidence_claim_body() {
         evidence_only,
         max_bytes: None,
         rule_files: Vec::new(),
+        rule_claim_bytes: None,
     };
 
     let evidence = daemon::context_snapshot(&state, &request(true, vec![])).unwrap();
@@ -783,6 +786,7 @@ fn linked_context(state: &AppState, topic: &str, files: &[&str]) -> ContextRespo
             evidence_only: false,
             max_bytes: None,
             rule_files: Vec::new(),
+            rule_claim_bytes: None,
         },
     )
     .unwrap()
@@ -1373,6 +1377,7 @@ async fn harness_claims_are_compact_while_push_keeps_full_claims() {
             evidence_only: true,
             max_bytes: None,
             rule_files: Vec::new(),
+            rule_claim_bytes: None,
         },
     )
     .unwrap();
@@ -1470,6 +1475,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
         evidence_only: false,
         max_bytes: None,
         rule_files: Vec::new(),
+        rule_claim_bytes: None,
     };
     let before = server.post("/api/v1/harness/context").json(&body).await;
     before.assert_status_ok();
@@ -1486,6 +1492,7 @@ async fn http_capture_all_kinds_is_proposed_and_review_is_explicit() {
             evidence_only: false,
             max_bytes: None,
             rule_files: Vec::new(),
+            rule_claim_bytes: None,
         },
     )
     .unwrap();
@@ -1634,6 +1641,7 @@ fn supersession_and_retraction_leave_predecessor_current_until_review() {
         evidence_only: false,
         max_bytes: None,
         rule_files: Vec::new(),
+        rule_claim_bytes: None,
     };
     assert!(daemon::context_snapshot(&state, &context)
         .unwrap()
@@ -2120,6 +2128,7 @@ async fn simple_review_attests_its_revision_transition_and_retries_keep_that_pai
             evidence_only: false,
             max_bytes: None,
             rule_files: Vec::new(),
+            rule_claim_bytes: None,
         },
     )
     .unwrap()
@@ -2192,6 +2201,7 @@ fn review_base(state: &AppState) -> String {
             evidence_only: false,
             max_bytes: None,
             rule_files: Vec::new(),
+            rule_claim_bytes: None,
         },
     )
     .unwrap()

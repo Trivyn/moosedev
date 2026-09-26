@@ -35,6 +35,9 @@ pub(super) struct Script {
     pub(super) governing_rules: Vec<GoverningRule>,
     /// Records the context route returns, with the claims it supplied.
     pub(super) context_records: Vec<ContextRecord>,
+    /// Governing-rule claims come only with a rule-claim budget, as claims
+    /// past the daemon's fixed floor do.
+    pub(super) rule_claims_need_budget: bool,
     /// Rules the full context adds only when its request names the file.
     pub(super) file_rules: Vec<(String, GoverningRule)>,
     /// Approved specs the full context reports.
@@ -266,7 +269,7 @@ pub(super) async fn context(
             Json(ContextResponse {
                 capture_contracts: vec![2, 3],
                 intent_contracts: vec![2],
-                context_contracts: vec![1],
+                context_contracts: vec![1, 2],
                 project_root: script.root.to_string_lossy().into_owned(),
                 revision: script.revision.clone(),
                 evidence_iris: knowledge
@@ -284,7 +287,7 @@ pub(super) async fn context(
     }
     script
         .requests
-        .push(json!({"kind":"context","files":request.files,"rule_files":request.rule_files}));
+        .push(json!({"kind":"context","files":request.files,"rule_files":request.rule_files,"rule_claim_bytes":request.rule_claim_bytes}));
     let status = if script.fail_context {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -295,7 +298,7 @@ pub(super) async fn context(
         Json(ContextResponse {
             capture_contracts: vec![2, 3],
             intent_contracts: vec![2],
-            context_contracts: vec![1],
+            context_contracts: vec![1, 2],
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             evidence_iris: vec![],
@@ -305,6 +308,12 @@ pub(super) async fn context(
                 .governing_rules
                 .iter()
                 .cloned()
+                .map(|mut rule| {
+                    if script.rule_claims_need_budget && request.rule_claim_bytes.is_none() {
+                        rule.claim.clear();
+                    }
+                    rule
+                })
                 .chain(
                     script
                         .file_rules

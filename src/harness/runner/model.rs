@@ -23,6 +23,9 @@ const OPTIONAL_RESERVE: usize = 20_000;
 /// The observations block renders no smaller than its previous fixed cap and no
 /// larger than the ceiling; between them it scales with what the prompt has
 /// left, so a big window is spent rather than left idle.
+/// Governing-rule claims may take up to this fraction (1/N) of the prompt
+/// budget; see [`Runner::rule_claim_budget`].
+const RULE_CLAIM_SHARE: usize = 4;
 const OBSERVATION_FLOOR: usize = 8_000;
 const OBSERVATION_CEILING: usize = 48_000;
 /// The last result renders no smaller than its previous fixed budget.
@@ -369,6 +372,53 @@ impl Runner {
         Ok(prepared.client)
     }
 
+    /// The governing rules with the claims the model already retrieved: a
+    /// rule named without its claim takes the claim a search of this task
+    /// returned for it, while all claims fit the rule-claim budget. A search
+    /// for a titled rule then fills its place in the rules block for good,
+    /// instead of producing a Last result the next observation replaces
+    /// (badciv 1e4acf2a flipped between two such results until parked).
+    pub(super) fn rules_with_retrieved_claims(
+        &self,
+        rules: &[GoverningRule],
+    ) -> Vec<GoverningRule> {
+        let mut rules = rules.to_vec();
+        let Some(budget) = self
+            .rule_claim_budget()
+            .filter(|_| !self.rule_claims_floor_only)
+        else {
+            return rules;
+        };
+        let mut used: usize = rules.iter().map(|rule| rule.claim.len()).sum();
+        for rule in rules.iter_mut().filter(|rule| rule.claim.trim().is_empty()) {
+            let retrieved = self
+                .task
+                .knowledge_searches
+                .iter()
+                .rev()
+                .flat_map(|search| &search.records)
+                .find(|record| record.iri == rule.iri && !record.claim.trim().is_empty());
+            if let Some(record) = retrieved {
+                if used + record.claim.len() <= budget {
+                    used += record.claim.len();
+                    rule.claim = record.claim.clone();
+                }
+            }
+        }
+        rules
+    }
+
+    /// Bytes of governing-rule claims the daemon may deliver: a share of the
+    /// prompt budget, so a wide window shows every rule's claim instead of
+    /// sending the model to search for them one at a time (badciv 1e4acf2a:
+    /// 11 of 57 rules named without claims in a 43 KB prompt of a 99 KB
+    /// budget). The daemon's fixed per-kind limits remain the floor.
+    pub(super) fn rule_claim_budget(&self) -> Option<usize> {
+        self.prompt_budget()
+            .ok()
+            .map(|budget| budget / RULE_CLAIM_SHARE)
+    }
+
     pub(super) fn prompt_budget(&self) -> Result<usize> {
         let config = self.active_config()?;
         Ok(MAX_CONTEXT
@@ -711,7 +761,7 @@ impl Runner {
             prompt.push('\n');
         }
         prompt.push_str(ROLE_BOUNDARY);
-        let rules = project_rules(&context.governing_rules);
+        let rules = project_rules(&self.rules_with_retrieved_claims(&context.governing_rules));
         prompt.push_str(&rules);
         let contract = self.action_contract();
         prompt.push_str(match (contract, self.task.batch_capture) {
@@ -1376,6 +1426,46 @@ mod tests {
         let cut = observation_preview(&unicode, 300);
         assert!(cut.len() <= 300);
         assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_claim_the_model_retrieved_stays_in_the_rules_block() {
+        let project = Project::new("retrieved-claims");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Plan".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        let mut context = runner.context.clone().unwrap();
+        context.governing_rules = vec![GoverningRule {
+            iri: "urn:rule:rivers".into(),
+            label: "River placement restrictions".into(),
+            kind: "Constraint".into(),
+            claim: String::new(),
+            via: "via: component map".into(),
+        }];
+        let (before, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(before.contains("1 project rule(s) named without their claim"));
+        runner.task.knowledge_searches.push(KnowledgeSearchResult {
+            query: "River placement restrictions".into(),
+            revision: "r1".into(),
+            context: String::new(),
+            evidence_iris: vec!["urn:rule:rivers".into()],
+            records: vec![crate::harness::protocol::ContextRecord {
+                iri: "urn:rule:rivers".into(),
+                kind: "Constraint".into(),
+                title: "River placement restrictions".into(),
+                claim: "hasDescription: Rivers never cross ocean tiles.".into(),
+                provenance: vec![],
+            }],
+            delivery_receipt: None,
+        });
+        let (after, _) = runner.prompt(&context, &[]).unwrap();
+        let rules = after.split("Project rules (").nth(1).unwrap();
+        let rules = rules.split("\nAction meanings").next().unwrap();
+        assert!(rules.contains("Rivers never cross ocean tiles."), "{rules}");
+        assert!(!rules.contains("named without their claim"), "{rules}");
+        server.abort();
     }
 
     #[tokio::test]

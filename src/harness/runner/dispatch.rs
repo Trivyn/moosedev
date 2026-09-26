@@ -49,13 +49,7 @@ impl Runner {
             .context("no approved plan")?
             .files
             .clone();
-        let read = self.task.read_files.clone();
-        let unread: Vec<String> = files
-            .iter()
-            .filter(|file| !read.contains(file))
-            .cloned()
-            .collect();
-        let context = self.refresh_with_rules(&read, &unread).await?;
+        let context = self.refresh_approved_scope().await?;
         let sources = self.snapshot(&files)?;
         if self.task.approved_revision.as_deref() != Some(&context.revision)
             || sources != self.task.snapshots
@@ -78,6 +72,25 @@ impl Runner {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// The approved step's context: dossiers for the files read, governing
+    /// rules for those and the plan's other files.
+    async fn refresh_approved_scope(&mut self) -> Result<ContextResponse> {
+        let files = self
+            .task
+            .plan
+            .as_ref()
+            .context("no approved plan")?
+            .files
+            .clone();
+        let read = self.task.read_files.clone();
+        let unread: Vec<String> = files
+            .iter()
+            .filter(|file| !read.contains(file))
+            .cloned()
+            .collect();
+        self.refresh_with_rules(&read, &unread).await
     }
 
     /// Read a file into the working set: refresh its governing knowledge, record
@@ -172,6 +185,9 @@ impl Runner {
         self.task.last_error_kind = None;
         // Set again only by the path that leaves an observation this advance.
         self.task.last_response_observation = false;
+        // A floor fallback holds for the step it happened in, however that
+        // step ended.
+        self.rule_claims_floor_only = false;
         let result = loop {
             match self.advance_inner().await {
                 Err(error) if self.repair_candidate(&error)? => continue,
@@ -260,7 +276,32 @@ impl Runner {
                 .insert(file.clone(), self.workspace.read(file)?);
         }
         let files = self.workspace.files()?;
-        let (prompt, source) = self.prompt(&context, &files)?;
+        let (context, (prompt, source)) = match self.prompt(&context, &files) {
+            // Rule claims past the daemon's fixed floor are the first thing a
+            // crowded prompt gives up: ask again for the floor alone, so the
+            // budget share never stops a step that fitted before it.
+            Err(error)
+                if error.is::<model::PromptOverflow>()
+                    && self.claim_budget_accepted()
+                    && self.rule_claim_budget().is_some() =>
+            {
+                // For the rest of this step, so its later refreshes and the
+                // retrieved-claim fill stay at the floor too.
+                self.rule_claims_floor_only = true;
+                let floor = if self.task.mode == Mode::Auto {
+                    self.refresh_approved_scope().await?
+                } else {
+                    self.refresh(&targets).await?
+                };
+                self.intent_event(
+                    "rule_claims_floor",
+                    "prompt overflowed with the rule-claim budget; rebuilt with the fixed floor",
+                );
+                let built = self.prompt(&floor, &files)?;
+                (floor, built)
+            }
+            built => (context, built?),
+        };
         if !source.swapped.is_empty() {
             let total: usize = self.task.source.values().flatten().map(String::len).sum();
             self.intent_event(

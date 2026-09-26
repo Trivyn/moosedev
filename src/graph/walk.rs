@@ -364,10 +364,16 @@ pub fn render_linked_evidence(records: &[LinkedRecord]) -> String {
 ///
 /// Every rule is named. A claim is carried while its kind is within
 /// [`RULE_CLAIM_LIMIT`] and the shared [`RULE_CLAIM_BYTES`] budget still holds
-/// it; otherwise the claim is empty and the rule keeps its place. Constraints
-/// are ordered first, so neither bound can take a Constraint's claim to make
-/// room for a Requirement (Constraint 212a2026).
-pub fn governing_rules(evidence: &LinkedEvidence) -> Vec<LinkedRecord> {
+/// it, or, beyond those, while all claims so far fit `claim_budget`, the
+/// caller's room for rule claims (the harness passes a share of its prompt
+/// budget); otherwise the claim is empty and the rule keeps its place.
+/// Constraints are ordered first, so no bound can take a Constraint's claim to
+/// make room for a Requirement (Constraint 212a2026). The fixed limits are a
+/// floor: a budget only ever adds claims.
+pub fn governing_rules(
+    evidence: &LinkedEvidence,
+    claim_budget: Option<usize>,
+) -> Vec<LinkedRecord> {
     let mut rules: Vec<LinkedRecord> = evidence
         .direct_rules
         .iter()
@@ -394,7 +400,9 @@ pub fn governing_rules(evidence: &LinkedEvidence) -> Vec<LinkedRecord> {
         // sees what is genuinely left.
         let within_bytes =
             rule.kind == "Constraint" || claim_bytes + rule.claim.len() <= RULE_CLAIM_BYTES;
-        let fits = *rendered <= RULE_CLAIM_LIMIT && within_bytes;
+        let within_budget =
+            claim_budget.is_some_and(|budget| claim_bytes + rule.claim.len() <= budget);
+        let fits = (*rendered <= RULE_CLAIM_LIMIT && within_bytes) || within_budget;
         if fits {
             claim_bytes += rule.claim.len();
         } else {
@@ -599,7 +607,7 @@ mod tests {
         evidence
             .records
             .push(candidate("urn:l", "Lesson", Hop::Lesson, "Decision"));
-        let rules = governing_rules(&evidence);
+        let rules = governing_rules(&evidence, None);
         assert_eq!(rules.len(), 27, "every Constraint named, no Lesson");
         assert_eq!(rules[0].iri, "urn:d");
         assert_eq!(rules[1].iri, "urn:c00");
@@ -642,7 +650,7 @@ mod tests {
                 "Uploads",
             ));
         }
-        let rules = governing_rules(&evidence);
+        let rules = governing_rules(&evidence, None);
         let kinds: Vec<&str> = rules.iter().map(|rule| rule.kind.as_str()).collect();
         assert_eq!(
             kinds.iter().filter(|kind| **kind == "Constraint").count(),
@@ -672,6 +680,43 @@ mod tests {
         );
     }
 
+    /// A caller's claim budget carries claims past the fixed limits while
+    /// they fit, and never takes one the limits already give.
+    #[test]
+    fn a_claim_budget_extends_the_fixed_limits_and_never_narrows_them() {
+        let mut evidence = LinkedEvidence::default();
+        for n in 0..30 {
+            evidence.records.push(candidate(
+                &format!("urn:c{n:02}"),
+                "Constraint",
+                Hop::Component,
+                "Uploads",
+            ));
+        }
+        let with_claims =
+            |rules: &[LinkedRecord]| rules.iter().filter(|rule| !rule.claim.is_empty()).count();
+        let claim = evidence.records[0].claim.len();
+        assert_eq!(
+            with_claims(&governing_rules(&evidence, None)),
+            RULE_CLAIM_LIMIT
+        );
+        // Room for every claim: all 30 carry theirs.
+        assert_eq!(
+            with_claims(&governing_rules(&evidence, Some(claim * 30))),
+            30
+        );
+        // Room for 27: the three past the limit that fit.
+        assert_eq!(
+            with_claims(&governing_rules(&evidence, Some(claim * 27))),
+            27
+        );
+        // A budget smaller than the floor narrows nothing.
+        assert_eq!(
+            with_claims(&governing_rules(&evidence, Some(claim))),
+            RULE_CLAIM_LIMIT
+        );
+    }
+
     /// The byte budget bounds Requirements but never costs a Constraint its
     /// claim, which Constraint 927d5176 rule 4 guarantees.
     #[test]
@@ -691,7 +736,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let rules = governing_rules(&evidence);
+        let rules = governing_rules(&evidence, None);
         let carried: Vec<(&str, bool)> = rules
             .iter()
             .map(|rule| (rule.iri.as_str(), !rule.claim.is_empty()))

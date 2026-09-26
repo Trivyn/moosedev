@@ -766,11 +766,20 @@ contract 3 and intent contract 2.
   its kind. Constraints are ordered ahead of Requirements, so no budget can
   take a Constraint's claim to make room for a Requirement. A rule carries its
   claim while its kind is within the first 24 and the shared 16 KB claim budget
-  still holds it; past either it is named with an empty claim, never dropped.
+  still holds it, or, beyond those, while all claims fit the runner's rule-claim
+  budget (a quarter of its prompt budget, sent as `rule_claim_bytes`; context
+  contract 2); past that it is named with an empty claim, never dropped. A rule
+  named without its claim takes the claim a search of the task returned for it,
+  within the same budget, so a searched rule stays filled in the block. The
+  budget is sent only to a daemon known to advertise the contract, and a step
+  whose prompt overflows with it is rebuilt once from the fixed floor alone
+  (`rule_claims_floor`), so it never stops a step that fitted before.
   Topic fallback contributes none. An approved spec file in the request's
-  files brings the components its approval marker records (`spec-component:`
-  lines) into the walk, so reading `crate.md` while planning delivers the
-  rules of `crate/` before any file under it exists. The runner prints them after the guidance,
+  files brings the outermost of the components its approval marker records
+  (`spec-component:` lines) into the walk, so reading `crate.md` while planning
+  delivers the rules of `crate/` before any file under it exists, and reading a
+  whole-project spec delivers the project's own rules, not every part's (a
+  part's rules reach files under it by path). The runner prints them after the guidance,
   before the output rule, under "Project rules (hard requirements; your plan
   must satisfy each or say why it does not apply, and list the ones it
   implements in addresses):", and Plan mode ends with a

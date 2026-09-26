@@ -24,6 +24,11 @@ pub struct ContextRequest {
     /// `files`; only `files` get a dossier and a policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule_files: Vec<String>,
+    /// Bytes the caller has for governing-rule claims. Rules past the fixed
+    /// per-kind limits carry their claims while all claims fit it; `None`
+    /// keeps the fixed limits alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_claim_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +144,8 @@ pub struct ContextResponse {
     /// Supported deterministic intent-discovery contracts.
     #[serde(default)]
     pub intent_contracts: Vec<u32>,
-    /// Supported context-request contracts: 1 accepts `rule_files`.
+    /// Supported context-request contracts: 1 accepts `rule_files`, 2
+    /// `rule_claim_bytes`.
     #[serde(default)]
     pub context_contracts: Vec<u32>,
     /// The governing rules of the requested files, direct rules first and

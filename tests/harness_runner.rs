@@ -2658,6 +2658,62 @@ async fn an_event_shown_as_the_last_result_is_not_previewed_again() {
 }
 
 #[tokio::test]
+async fn a_prompt_crowded_by_budgeted_rule_claims_is_rebuilt_with_the_floor() {
+    let fixture = Fixture::new().await;
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.rule_claims_need_budget = true;
+        script.governing_rules = vec![GoverningRule {
+            iri: "urn:rule:huge".into(),
+            label: "A rule with a long claim".into(),
+            kind: "Requirement".into(),
+            claim: format!("hasDescription: {}\n", "x".repeat(120_000)),
+            via: "via: component Uploads".into(),
+        }];
+    }
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_error.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "rule_claims_floor"));
+    // A budgeted request overflowed, and the floor-only request followed it.
+    let requests = requests_of_kind(&fixture, "context");
+    let budgeted = requests
+        .iter()
+        .position(|r| r["rule_claim_bytes"].is_u64())
+        .unwrap();
+    assert!(requests[budgeted + 1]["rule_claim_bytes"].is_null());
+}
+
+#[tokio::test]
+async fn a_resumed_runner_sends_no_claim_budget_before_it_knows_the_daemon() {
+    let fixture = Fixture::new().await;
+    let runner = fixture.interactive().await;
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    runner.enable_interactive().unwrap();
+    let before = requests_of_kind(&fixture, "context").len();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let requests = requests_of_kind(&fixture, "context");
+    assert!(
+        requests[before]["rule_claim_bytes"].is_null(),
+        "{}",
+        requests[before]
+    );
+}
+
+#[tokio::test]
 async fn an_approved_step_refreshes_read_and_plan_files_once() {
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
@@ -2683,6 +2739,12 @@ async fn an_approved_step_refreshes_read_and_plan_files_once() {
         request["rule_files"],
         json!(["notes.txt"]),
         "rules only for the plan's other files"
+    );
+    assert!(
+        request["rule_claim_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 10_000),
+        "rule claims get a share of the prompt budget: {request}"
     );
     let prompt = fixture.last_model_prompt("harness_action");
     assert!(prompt.contains("COMPLETE_DOSSIER_FOR_code.txt"));

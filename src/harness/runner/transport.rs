@@ -159,6 +159,13 @@ impl Runner {
                     .is_none_or(|context| context.context_contracts.contains(&1)),
             "project daemon does not advertise context contract v1; restart it with an updated moosedev binary"
         );
+        // Rule claims get a share of this runner's prompt budget, from a
+        // daemon known to take one (context contract 2): an older daemon
+        // rejects the field, and a resumed runner has not seen the daemon's
+        // contracts before its first refresh.
+        let rule_claim_bytes = (!self.rule_claims_floor_only && self.claim_budget_accepted())
+            .then(|| self.rule_claim_budget())
+            .flatten();
         let topic = format!("{} {}", self.task.objective, self.task.guidance)
             .trim()
             .to_owned();
@@ -171,6 +178,7 @@ impl Runner {
                     evidence_only: false,
                     max_bytes: None,
                     rule_files: rule_files.to_vec(),
+                    rule_claim_bytes,
                 },
             )
             .await?;
@@ -256,6 +264,13 @@ impl Runner {
         Ok(response)
     }
 
+    /// Whether the daemon last seen takes a rule-claim budget.
+    pub(super) fn claim_budget_accepted(&self) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|context| context.context_contracts.contains(&2))
+    }
+
     /// Whether `file` carries a current spec approval, per the last context.
     pub(super) fn is_approved_spec(&self, file: &str) -> bool {
         self.context
@@ -294,6 +309,7 @@ impl Runner {
                     evidence_only: true,
                     max_bytes,
                     rule_files: Vec::new(),
+                    rule_claim_bytes: None,
                 },
             )
             .await?;

@@ -18,7 +18,9 @@ impl Runner {
         summary: &str,
         context: &ContextResponse,
     ) -> bool {
-        let rules = &context.governing_rules;
+        // The rules as the prompt showed them, with any claim the model
+        // retrieved, so the check reads the same wording the plan answered.
+        let rules = &self.rules_with_retrieved_claims(&context.governing_rules);
         if rules.is_empty() {
             self.symbolic_state_mut().coverage_returns = 0;
             return false;
