@@ -8,6 +8,7 @@
 //! ignore them (OpenCode on badciv: qwen called its rust-analyzer errors
 //! stale and ran `cargo build` after about one edit in three). A result the
 //! harness could not settle is shown as unknown, never as clean.
+use crate::code::substrate::lang::{language_servers, LinterSpec, ServerSpec};
 use crate::harness::executor::{resolve_program, ServerDirectory};
 use anyhow::{Context, Result};
 use lsp_server::{Message, Notification, Request, RequestId, Response};
@@ -20,36 +21,6 @@ use std::process::{Child, ChildStdin};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-/// One language the harness can check, and the server that checks it.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ServerSpec {
-    /// Shown in prompts and the journal.
-    pub name: &'static str,
-    /// Candidate commands, first found on the trusted PATH wins.
-    pub commands: &'static [&'static [&'static str]],
-    /// File extensions and the language id each is opened with.
-    pub languages: &'static [(&'static str, &'static str)],
-    /// Files whose creation or deletion changes the project's shape; the
-    /// server restarts so it rediscovers the project.
-    pub project_files: &'static [&'static str],
-    /// The server reports `experimental/serverStatus` (rust-analyzer), whose
-    /// `quiescent` flag says when indexing and checking are done.
-    pub server_status: bool,
-    /// Sent as `initializationOptions`.
-    pub options: fn() -> Value,
-}
-
-pub(super) const SERVERS: &[ServerSpec] = &[ServerSpec {
-    name: "rust-analyzer",
-    commands: &[&["rust-analyzer"]],
-    languages: &[("rs", "rust")],
-    project_files: &["Cargo.toml"],
-    server_status: true,
-    // Check with `cargo check` on save, so borrow and lifetime errors arrive
-    // too, not only rust-analyzer's own analysis.
-    options: || json!({"checkOnSave": true, "check": {"command": "check"}}),
-}];
 
 impl ServerSpec {
     fn language_of(&self, file: &str) -> Option<&'static str> {
@@ -87,6 +58,27 @@ pub struct Finding {
     /// 1-based, in the server's position units.
     pub column: u32,
     pub message: String,
+    /// The compiler's full text when the server passes it on (rust-analyzer's
+    /// `data.rendered`: the source excerpt, `note:` and `help:` lines with a
+    /// suggested fix), else the related spans as `note:` lines; bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Where the symbol at the error is defined, when that is in the
+    /// project: "file:line: <that line>".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+}
+
+impl Finding {
+    fn line(&self, kind: &str) -> String {
+        format!(
+            "{}:{}:{} {kind}: {}\n",
+            self.file,
+            self.line,
+            self.column,
+            self.message.lines().next().unwrap_or_default()
+        )
+    }
 }
 
 /// What the language servers said after the last applied edit.
@@ -97,6 +89,13 @@ pub struct DiagnosticsSnapshot {
     /// may be incomplete or stale and nothing may be concluded from them.
     pub settled: bool,
     pub errors: Vec<Finding>,
+    /// The linter's findings (clippy through rust-analyzer), apart from the
+    /// other warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lints: Vec<Finding>,
+    /// The linter that ran, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linter: Option<String>,
     pub warnings: usize,
     /// The model was already sent back from finish for exactly these errors.
     #[serde(default)]
@@ -104,55 +103,68 @@ pub struct DiagnosticsSnapshot {
 }
 
 impl DiagnosticsSnapshot {
-    /// The prompt block, bounded: errors only, at most `PER_FILE` per file
-    /// and `FILES` files, within `budget` bytes.
-    pub(super) fn render(&self, budget: usize) -> String {
-        const PER_FILE: usize = 20;
-        const FILES: usize = 5;
+    /// Whether finish is sent back: settled, with errors or lints, and not
+    /// already sent back for this result.
+    pub(super) fn blocks_finish(&self) -> bool {
+        self.settled && (!self.errors.is_empty() || !self.lints.is_empty()) && !self.finish_refused
+    }
+
+    /// The prompt block, within `budget` bytes: errors first, each with the
+    /// compiler's full text while it fits and one line after that, then the
+    /// linter's findings, one line each.
+    ///
+    /// `full_budget` must leave room for the one-line heading: at least
+    /// [`MIN_BLOCK_BYTES`].
+    pub(super) fn render(&self, full_budget: usize) -> String {
+        debug_assert!(full_budget >= MIN_BLOCK_BYTES);
+        const LINTS: usize = 10;
+        // Room held back for the omission counts and the lint heading, so
+        // the block never passes `full_budget`.
+        const FOOTERS: usize = 160;
+        let budget = full_budget.saturating_sub(FOOTERS);
         let servers = self.servers.join(", ");
         if !self.settled {
             return format!(
                 "Language server ({servers}) after your last edit: not settled in time; its errors are unknown, so rely on commands and required checks.\n"
             );
         }
-        if self.errors.is_empty() {
+        let linter = self
+            .linter
+            .as_deref()
+            .map(|linter| format!(", {} lint(s) from {linter}", self.lints.len()))
+            .unwrap_or_else(|| ", no linter".to_owned());
+        if self.errors.is_empty() && self.lints.is_empty() {
             return format!(
-                "Language server ({servers}) after your last edit: no errors ({} warning(s)).\n",
+                "Language server ({servers}) after your last edit: no errors{linter} ({} other warning(s)).\n",
                 self.warnings
             );
         }
         let mut out = format!(
-            "Language server ({servers}) after your last edit: {} error(s), {} warning(s). These are current; fix them before finish.\n",
+            "Language server ({servers}) after your last edit: {} error(s){linter}, {} other warning(s). These are current; fix them before finish.\n",
             self.errors.len(),
             self.warnings
         );
-        let mut files: Vec<&str> = Vec::new();
-        for finding in &self.errors {
-            if !files.contains(&finding.file.as_str()) {
-                files.push(&finding.file);
-            }
-        }
         let mut shown = 0;
-        for file in files.iter().take(FILES) {
-            for finding in self
-                .errors
-                .iter()
-                .filter(|f| f.file == *file)
-                .take(PER_FILE)
-            {
-                let line = format!(
-                    "{}:{}:{} error: {}\n",
-                    finding.file,
-                    finding.line,
-                    finding.column,
-                    finding.message.replace('\n', " ")
-                );
-                if out.len() + line.len() > budget {
-                    break;
-                }
-                out.push_str(&line);
-                shown += 1;
+        for finding in &self.errors {
+            let detailed = finding
+                .detail
+                .as_deref()
+                .map(|detail| format!("{}\n", detail.trim_end()));
+            let line = finding.line("error");
+            let chosen = match detailed {
+                // Leave room for a one-line form of what follows.
+                Some(detail) if out.len() + detail.len() + 400 <= budget => detail,
+                _ => line,
+            };
+            let chosen = match &finding.definition {
+                Some(definition) => format!("{chosen}  defined at {definition}\n"),
+                None => chosen,
+            };
+            if out.len() + chosen.len() > budget {
+                break;
             }
+            out.push_str(&chosen);
+            shown += 1;
         }
         if shown < self.errors.len() {
             out.push_str(&format!(
@@ -160,9 +172,39 @@ impl DiagnosticsSnapshot {
                 self.errors.len() - shown
             ));
         }
+        if let (Some(linter), false) = (&self.linter, self.lints.is_empty()) {
+            out.push_str(&format!("Lints ({linter}):\n"));
+            let mut listed = 0;
+            for finding in self.lints.iter().take(LINTS) {
+                let mut line = finding.line("lint");
+                // The suggestion is the useful part of a lint: keep its
+                // first `help:` line.
+                if let Some(help) = finding
+                    .detail
+                    .as_deref()
+                    .and_then(|detail| detail.lines().find(|l| l.contains("help:")))
+                {
+                    line.push_str(&format!("  {}\n", &help[help.find("help:").unwrap_or(0)..]));
+                }
+                if out.len() + line.len() > budget {
+                    break;
+                }
+                out.push_str(&line);
+                listed += 1;
+            }
+            if listed < self.lints.len() {
+                out.push_str(&format!(
+                    "[{} more lint(s) not listed]\n",
+                    self.lints.len() - listed
+                ));
+            }
+        }
         out
     }
 }
+
+/// The smallest budget [`DiagnosticsSnapshot::render`] is given.
+pub(super) const MIN_BLOCK_BYTES: usize = 400;
 
 /// What the reader thread has seen from the server.
 #[derive(Default)]
@@ -194,6 +236,8 @@ pub(super) struct LanguageServer {
     seen: Arc<Mutex<Seen>>,
     mirror: PathBuf,
     next_id: i32,
+    /// The linter this server runs, when one is installed.
+    linter: Option<LinterSpec>,
     /// The last version sent per document, kept after a close.
     versions: HashMap<String, i32>,
     open: HashSet<String>,
@@ -204,6 +248,7 @@ impl LanguageServer {
     /// Spawn `command`, run `initialize` and open nothing yet.
     pub(super) async fn start(
         spec: ServerSpec,
+        linter: Option<LinterSpec>,
         mut command: std::process::Command,
         mirror: &Path,
     ) -> Result<Self> {
@@ -229,6 +274,7 @@ impl LanguageServer {
             seen,
             mirror,
             next_id: 1,
+            linter,
             versions: HashMap::new(),
             open: HashSet::new(),
             settled_once: false,
@@ -240,7 +286,7 @@ impl LanguageServer {
                 "processId": std::process::id(),
                 "rootUri": root,
                 "workspaceFolders": [{"uri": root, "name": "project"}],
-                "initializationOptions": (spec.options)(),
+                "initializationOptions": linter.map_or(spec.options, |linter| linter.options)(),
                 "capabilities": {
                     "textDocument": {
                         "synchronization": {"didSave": true},
@@ -451,32 +497,163 @@ impl LanguageServer {
     }
 
     /// Current errors and the warning count.
-    pub(super) fn findings(&self) -> (Vec<Finding>, usize) {
-        let Ok(seen) = self.seen.lock() else {
-            return (Vec::new(), 0);
+    /// Where the symbol at `line`/`column` (1-based, server units) of `file`
+    /// is defined, when that lies in the mirror: "file:line: <that line>".
+    /// Bounded; any failure is no answer.
+    async fn definition(
+        &mut self,
+        file: &str,
+        line: u32,
+        column: u32,
+        timeout: Duration,
+    ) -> Option<String> {
+        let uri = uri(&self.mirror.join(file)).ok()?;
+        let id = self
+            .request(
+                "textDocument/definition",
+                json!({"textDocument": {"uri": uri}, "position": {"line": line - 1, "character": column - 1}}),
+            )
+            .ok()?;
+        let result = self.response(id, timeout).await.ok()?;
+        let items = match result {
+            Value::Array(items) => items,
+            Value::Null => return None,
+            single => vec![single],
         };
-        let mut errors = Vec::new();
-        let mut warnings = 0;
+        // Shorthand like `E { section }` names both a binding and a field;
+        // show each distinct target, at most two.
+        let mut shown: Vec<String> = Vec::new();
+        for item in items.iter().take(4) {
+            // A Location has `uri`/`range`; a LocationLink `targetUri` and
+            // `targetSelectionRange`.
+            let Some(target) = item["uri"].as_str().or(item["targetUri"].as_str()) else {
+                continue;
+            };
+            let range = if item["range"].is_object() {
+                &item["range"]
+            } else {
+                &item["targetSelectionRange"]
+            };
+            let Some(target_line) = range["start"]["line"].as_u64().map(|l| l as usize) else {
+                continue;
+            };
+            let Some(target_file) = relative(target, &self.mirror) else {
+                continue;
+            };
+            if target_file == file && target_line + 1 == line as usize {
+                continue;
+            }
+            let Some(text) = read_in_mirror(&self.mirror, &target_file) else {
+                continue;
+            };
+            let Some(source) = text.lines().nth(target_line) else {
+                continue;
+            };
+            let source: String = source.trim().chars().take(160).collect();
+            let entry = format!("{target_file}:{}: {source}", target_line + 1);
+            if !shown.contains(&entry) && shown.len() < 2 {
+                shown.push(entry);
+            }
+        }
+        (!shown.is_empty()).then(|| shown.join("; "))
+    }
+
+    /// Current errors, the linter's findings, and the other warnings' count.
+    pub(super) fn findings(&self) -> Findings {
+        let mut found = Findings::default();
+        let Ok(seen) = self.seen.lock() else {
+            return found;
+        };
         let files: BTreeMap<&String, &Vec<lsp_types::Diagnostic>> =
             seen.diagnostics.iter().collect();
         for (file, diagnostics) in files {
             for diagnostic in diagnostics {
+                let finding = || Finding {
+                    file: file.clone(),
+                    line: diagnostic.range.start.line + 1,
+                    column: diagnostic.range.start.character + 1,
+                    message: diagnostic.message.clone(),
+                    detail: detail(diagnostic, &self.mirror),
+                    definition: None,
+                };
+                let lint = self
+                    .linter
+                    .is_some_and(|linter| diagnostic.source.as_deref() == Some(linter.source));
                 match diagnostic.severity {
-                    Some(lsp_types::DiagnosticSeverity::ERROR) | None => errors.push(Finding {
-                        file: file.clone(),
-                        line: diagnostic.range.start.line + 1,
-                        column: diagnostic.range.start.character + 1,
-                        message: diagnostic.message.clone(),
-                    }),
-                    Some(lsp_types::DiagnosticSeverity::WARNING) => warnings += 1,
+                    Some(lsp_types::DiagnosticSeverity::ERROR) | None => {
+                        found.errors.push(finding())
+                    }
+                    Some(lsp_types::DiagnosticSeverity::WARNING) if lint => {
+                        found.lints.push(finding())
+                    }
+                    Some(lsp_types::DiagnosticSeverity::WARNING) => found.warnings += 1,
                     _ => {}
                 }
             }
         }
-        errors.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
-        errors.dedup();
-        (errors, warnings)
+        for list in [&mut found.errors, &mut found.lints] {
+            list.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
+            list.dedup();
+        }
+        found
     }
+}
+
+#[derive(Default)]
+pub(super) struct Findings {
+    pub errors: Vec<Finding>,
+    pub lints: Vec<Finding>,
+    pub warnings: usize,
+}
+
+/// The compiler's full text of a diagnostic, bounded; else its related spans.
+fn detail(diagnostic: &lsp_types::Diagnostic, mirror: &Path) -> Option<String> {
+    if let Some(rendered) = diagnostic
+        .data
+        .as_ref()
+        .and_then(|data| data["rendered"].as_str())
+        .filter(|rendered| !rendered.trim().is_empty())
+    {
+        return Some(bounded_detail(rendered));
+    }
+    let notes: Vec<String> = diagnostic
+        .related_information
+        .iter()
+        .flatten()
+        .take(3)
+        .map(|related| {
+            let file = relative(related.location.uri.as_str(), mirror)
+                .unwrap_or_else(|| "(outside the project)".to_owned());
+            format!(
+                "  note: {file}:{}: {}",
+                related.location.range.start.line + 1,
+                related.message
+            )
+        })
+        .collect();
+    (!notes.is_empty()).then(|| {
+        bounded_detail(&format!(
+            "{}\n{}",
+            diagnostic.message.lines().next().unwrap_or_default(),
+            notes.join("\n")
+        ))
+    })
+}
+
+/// Bytes of compiler text one finding keeps.
+const DETAIL_BYTES: usize = 800;
+
+/// `text` within [`DETAIL_BYTES`], cut at a character with a marker.
+fn bounded_detail(text: &str) -> String {
+    let text = text.trim_end();
+    if text.len() <= DETAIL_BYTES {
+        return text.to_owned();
+    }
+    let mut end = DETAIL_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} […]", &text[..end])
 }
 
 impl Drop for LanguageServer {
@@ -536,10 +713,24 @@ fn relative(uri: &str, mirror: &Path) -> Option<String> {
     let mirror = mirror
         .canonicalize()
         .unwrap_or_else(|_| mirror.to_path_buf());
-    path.strip_prefix(&mirror)
-        .ok()
-        .and_then(|relative| relative.to_str())
-        .map(str::to_owned)
+    let relative = path.strip_prefix(&mirror).ok()?;
+    // Only plain names: a `..` or `.` in what the server sent must not lead
+    // the harness, which reads these files unconfined, out of the mirror.
+    relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+        .then(|| relative.to_str().map(str::to_owned))
+        .flatten()
+}
+
+/// The text of a mirror file the server named, read only when it resolves
+/// inside the mirror (no symlink out of it).
+fn read_in_mirror(mirror: &Path, file: &str) -> Option<String> {
+    let root = mirror.canonicalize().ok()?;
+    let path = root.join(file).canonicalize().ok()?;
+    path.starts_with(&root)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
 }
 
 fn write_loop(stdin: ChildStdin, inbox: std::sync::mpsc::Receiver<Message>) {
@@ -624,6 +815,49 @@ fn read_loop(
     }
 }
 
+/// Whether `linter` is installed: its probe succeeds under the server's
+/// sandbox, where it will run.
+async fn linter_installed(
+    directory: &ServerDirectory,
+    linter: LinterSpec,
+    read_paths: &[PathBuf],
+) -> bool {
+    let Some(program) = resolve_program(linter.probe[0]) else {
+        return false;
+    };
+    let argv: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
+        .chain(linter.probe[1..].iter().map(|arg| arg.to_string()))
+        .collect();
+    let Ok(mut command) = directory.command(&argv, read_paths) else {
+        return false;
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            _ => {
+                // A hung probe takes its whole process group with it.
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 /// The servers of one task, over one mirror.
 pub(super) struct LanguageServers {
     pub directory: ServerDirectory,
@@ -639,11 +873,11 @@ impl LanguageServers {
         directory: &Path,
         read_paths: &[PathBuf],
         files: &[String],
-    ) -> Result<(Self, Vec<String>)> {
+    ) -> Result<(Self, Vec<(&'static str, String)>)> {
         let directory = ServerDirectory::prepare(project, directory)?;
         let mut servers = Vec::new();
         let mut notes = Vec::new();
-        for spec in SERVERS {
+        for spec in language_servers() {
             if !files
                 .iter()
                 .any(|file| spec.language_of(file).is_some() || spec.is_project_file(file))
@@ -651,16 +885,47 @@ impl LanguageServers {
                 continue;
             }
             let Some(argv) = spec.argv() else {
-                notes.push(format!("{}: not installed", spec.name));
+                notes.push((
+                    "language_server",
+                    format!("Language server {}: not installed.", spec.name),
+                ));
                 continue;
             };
+            let linter = match spec.linter {
+                Some(linter) if linter_installed(&directory, linter, read_paths).await => {
+                    Some(linter)
+                }
+                Some(linter) => {
+                    notes.push((
+                        "language_linter_missing",
+                        format!(
+                            "No linter for {}: {} is not installed ({}); {} checks without it.",
+                            spec.language, linter.name, linter.install_hint, spec.name
+                        ),
+                    ));
+                    None
+                }
+                None => None,
+            };
             let command = directory.command(&argv, read_paths)?;
-            match LanguageServer::start(*spec, command, &directory.mirror()).await {
+            match LanguageServer::start(*spec, linter, command, &directory.mirror()).await {
                 Ok(server) => {
-                    notes.push(format!("{}: started ({})", spec.name, argv[0]));
+                    let with = linter
+                        .map(|l| format!(" with {}", l.name))
+                        .unwrap_or_default();
+                    notes.push((
+                        "language_server",
+                        format!(
+                            "Language server {}: started{with} ({}).",
+                            spec.name, argv[0]
+                        ),
+                    ));
                     servers.push(server);
                 }
-                Err(error) => notes.push(format!("{}: failed to start: {error:#}", spec.name)),
+                Err(error) => notes.push((
+                    "language_server",
+                    format!("Language server {}: failed to start: {error:#}.", spec.name),
+                )),
             }
         }
         Ok((Self { directory, servers }, notes))
@@ -699,10 +964,29 @@ impl LanguageServers {
             settled,
             ..Default::default()
         };
-        for server in &self.servers {
-            let (errors, warnings) = server.findings();
-            snapshot.errors.extend(errors);
-            snapshot.warnings += warnings;
+        for server in &mut self.servers {
+            let mut found = server.findings();
+            // The definition behind each of the first errors: what a type or
+            // lifetime error is measured against, without a model step.
+            // Only for a settled result, and within one deadline for all.
+            let deadline = Instant::now() + DEFINITION_TIME;
+            for error in found.errors.iter_mut().take(DEFINED_ERRORS) {
+                if !settled || Instant::now() >= deadline {
+                    break;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                error.definition = server
+                    .definition(&error.file, error.line, error.column, left)
+                    .await;
+            }
+            snapshot.errors.extend(found.errors);
+            snapshot.lints.extend(found.lints);
+            snapshot.warnings += found.warnings;
+            if let Some(linter) = server.linter {
+                snapshot
+                    .linter
+                    .get_or_insert_with(|| linter.name.to_owned());
+            }
         }
         Ok(Some(snapshot))
     }
@@ -711,6 +995,11 @@ impl LanguageServers {
         self.servers.is_empty()
     }
 }
+
+/// Errors per result that get their definition looked up.
+const DEFINED_ERRORS: usize = 5;
+/// All definition lookups of one result share this deadline.
+const DEFINITION_TIME: Duration = Duration::from_secs(4);
 
 /// Whether this runner has language servers.
 #[derive(Default)]
@@ -770,7 +1059,7 @@ impl super::Runner {
         timeout: Duration,
     ) -> Result<()> {
         let reshaped =
-            SERVERS.iter().any(|spec| spec.is_project_file(file)) && existed != after.is_some();
+            language_servers().any(|spec| spec.is_project_file(file)) && existed != after.is_some();
         if reshaped {
             // A manifest came or went: start again so the servers
             // rediscover the project, and retry an unavailable language.
@@ -780,7 +1069,7 @@ impl super::Runner {
         }
         if matches!(self.language, LanguageState::Idle) {
             let files = self.workspace.files()?;
-            let concerned = SERVERS.iter().any(|spec| {
+            let concerned = language_servers().any(|spec| {
                 files
                     .iter()
                     .any(|file| spec.language_of(file).is_some() || spec.is_project_file(file))
@@ -798,9 +1087,9 @@ impl super::Runner {
             let root = self.workspace.root().to_path_buf();
             let (servers, notes) =
                 LanguageServers::start(&root, &directory, &read_paths, &files).await?;
-            for note in notes {
-                self.intent_event("language_server", &note);
-                self.event(format!("Language server {note}."));
+            for (kind, note) in notes {
+                self.intent_event(kind, &note);
+                self.event(note);
             }
             self.language = if servers.is_empty() {
                 LanguageState::Unavailable
@@ -825,8 +1114,13 @@ impl super::Runner {
         if let Some(snapshot) = servers.after_edit(file, existed, after, timeout).await? {
             let elapsed = started.elapsed().as_secs_f32();
             self.event(if snapshot.settled {
+                let lints = snapshot
+                    .linter
+                    .as_deref()
+                    .map(|linter| format!(", {} lint(s) from {linter}", snapshot.lints.len()))
+                    .unwrap_or_default();
                 format!(
-                    "{}: {} error(s), {} warning(s) after {file} (settled in {elapsed:.1} s).",
+                    "{}: {} error(s){lints}, {} other warning(s) after {file} (settled in {elapsed:.1} s).",
                     snapshot.servers.join(", "),
                     snapshot.errors.len(),
                     snapshot.warnings
@@ -935,7 +1229,7 @@ mod tests {
 
         // A lifetime error comes only from `cargo check` (badciv 839ebeec's
         // loop): settling must wait for the check, not only the analysis.
-        let lifetime = "pub struct E { pub section: &'static str }\npub fn make(section: &str) -> E { E { section } }\npub fn one() -> u32 { 1 }\n";
+        let lifetime = "pub struct E {\n    pub section: &'static str,\n}\npub fn make(section: &str) -> E {\n    E { section }\n}\npub fn one() -> u32 { 1 }\n";
         let snapshot = servers
             .after_edit("src/lib.rs", true, Some(lifetime), Duration::from_secs(60))
             .await
@@ -946,7 +1240,46 @@ mod tests {
             snapshot
                 .errors
                 .iter()
-                .any(|e| e.line == 2 && e.message.contains("lifetime")),
+                .any(|e| e.line == 5 && e.message.contains("lifetime")),
+            "{snapshot:?}"
+        );
+
+        // The compiler's full text rides along: the related line qwen
+        // ran `cargo build` to see in badciv 4ab49399.
+        assert!(
+            snapshot.errors.iter().any(|e| e
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("let's call the lifetime"))),
+            "{snapshot:?}"
+        );
+
+        // The definition behind the error is attached.
+        // The definitions behind it: the `&str` binding and the field that
+        // needs `&'static str`.
+        assert!(
+            snapshot.errors.iter().any(|e| e
+                .definition
+                .as_deref()
+                .is_some_and(|d| d.contains("pub section: &'static str"))),
+            "{snapshot:?}"
+        );
+
+        // Clippy runs as the check: a lint arrives with its suggestion.
+        let linted =
+            "pub fn first(v: &[u8]) -> Option<&u8> { v.get(0) }\npub fn one() -> u32 { 1 }\n";
+        let snapshot = servers
+            .after_edit("src/lib.rs", true, Some(linted), Duration::from_secs(60))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.settled, "{snapshot:?}");
+        assert_eq!(snapshot.linter.as_deref(), Some("clippy"), "{snapshot:?}");
+        assert!(
+            snapshot
+                .lints
+                .iter()
+                .any(|l| l.detail.as_deref().is_some_and(|d| d.contains("v.first()"))),
             "{snapshot:?}"
         );
 
@@ -970,6 +1303,11 @@ mod tests {
         assert_eq!(uri, "file:///tmp/x%20y/source/src/a%20b.rs");
         assert_eq!(relative(&uri, mirror).as_deref(), Some("src/a b.rs"));
         assert_eq!(relative("file:///elsewhere/a.rs", mirror), None);
+        // What the server sends never leads out of the mirror.
+        assert_eq!(
+            relative("file:///tmp/x%20y/source/../../etc/passwd", mirror),
+            None
+        );
     }
 
     #[test]
@@ -979,26 +1317,91 @@ mod tests {
             line,
             column: 1,
             message: "mismatched types\nexpected `u8`".into(),
+            detail: None,
+            definition: None,
         };
         let snapshot = DiagnosticsSnapshot {
             servers: vec!["rust-analyzer".into()],
             settled: true,
             errors: vec![finding("src/a.rs", 3), finding("src/b.rs", 9)],
             warnings: 2,
+            lints: vec![],
+            linter: None,
             finish_refused: false,
         };
         let block = snapshot.render(3_000);
-        assert!(block.contains("2 error(s), 2 warning(s)"), "{block}");
         assert!(
-            block.contains("src/a.rs:3:1 error: mismatched types expected `u8`"),
+            block.contains("2 error(s), no linter, 2 other warning(s)"),
             "{block}"
         );
-        let tight = snapshot.render(150);
+        assert!(
+            block.contains("src/a.rs:3:1 error: mismatched types\n"),
+            "{block}"
+        );
+        let crowded = DiagnosticsSnapshot {
+            errors: (0..20).map(|n| finding("src/c.rs", n)).collect(),
+            ..snapshot.clone()
+        };
+        let tight = crowded.render(MIN_BLOCK_BYTES);
         assert!(tight.contains("more error(s) not listed"), "{tight}");
+        // The compiler's full text replaces the one line while it fits, and a
+        // lint keeps its suggestion.
+        let mut rich = snapshot.clone();
+        rich.errors[0].detail =
+            Some("error[E0308]: mismatched types\n --> src/a.rs:3:1\n  = help: try `1u8`".into());
+        rich.errors[1].definition = Some("src/b.rs:2: pub section: &'static str,".into());
+        rich.linter = Some("clippy".into());
+        rich.lints = vec![Finding {
+            file: "src/b.rs".into(),
+            line: 1,
+            column: 41,
+            message: "accessing first element with `v.get(0)`\nmore".into(),
+            detail: Some(
+                "warning: accessing first element\n  |     ^^^^ help: try: `v.first()`".into(),
+            ),
+            definition: None,
+        }];
+        let block = rich.render(3_000);
+        assert!(
+            block.contains("2 error(s), 1 lint(s) from clippy"),
+            "{block}"
+        );
+        assert!(block.contains("= help: try `1u8`"), "{block}");
+        assert!(
+            block.contains(
+                "error: mismatched types\n  defined at src/b.rs:2: pub section: &'static str,"
+            ),
+            "{block}"
+        );
+        assert!(
+            block.contains("Lints (clippy):\nsrc/b.rs:1:41 lint: accessing first element with `v.get(0)`\n  help: try: `v.first()`"),
+            "{block}"
+        );
+        assert!(rich.blocks_finish());
+        let lints_only = DiagnosticsSnapshot {
+            errors: vec![],
+            ..rich.clone()
+        };
+        assert!(
+            lints_only.blocks_finish(),
+            "lints alone send finish back once"
+        );
         let unknown = DiagnosticsSnapshot {
             settled: false,
             ..snapshot
         };
         assert!(unknown.render(3_000).contains("not settled in time"));
+        assert!(!unknown.blocks_finish());
+
+        // Any mix of errors and lints stays within the budget.
+        let many = DiagnosticsSnapshot {
+            errors: (0..40).map(|n| finding("src/c.rs", n)).collect(),
+            lints: (0..40).map(|n| finding("src/d.rs", n)).collect(),
+            ..rich.clone()
+        };
+        for budget in [400, 1_000, 4_000] {
+            let block = many.render(budget);
+            assert!(block.len() <= budget, "{budget}: {}", block.len());
+        }
     }
 }

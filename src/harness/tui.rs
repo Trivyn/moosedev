@@ -323,13 +323,24 @@ struct View {
 fn checker_span(task: &Task) -> Option<Span<'static>> {
     let diagnostics = task.diagnostics.as_ref()?;
     let servers = diagnostics.servers.join(", ");
+    let lints = diagnostics.lints.len();
     let (text, color) = if !diagnostics.settled {
         (format!(" · {servers} ?"), Color::Yellow)
-    } else if diagnostics.errors.is_empty() {
+    } else if diagnostics.errors.is_empty() && lints == 0 {
         (format!(" · {servers} ✓"), Color::Green)
-    } else {
+    } else if diagnostics.errors.is_empty() {
+        (format!(" · {servers}: {lints} lint(s)"), Color::Yellow)
+    } else if lints == 0 {
         (
             format!(" · {servers}: {} error(s)", diagnostics.errors.len()),
+            Color::Red,
+        )
+    } else {
+        (
+            format!(
+                " · {servers}: {} error(s), {lints} lint(s)",
+                diagnostics.errors.len()
+            ),
             Color::Red,
         )
     };
@@ -2156,9 +2167,13 @@ mod tests {
                     line: line as u32 + 1,
                     column: 1,
                     message: "mismatched types".into(),
+                    detail: None,
+                    definition: None,
                 })
                 .collect(),
             warnings: 0,
+            lints: vec![],
+            linter: None,
             finish_refused: false,
         };
         for (settled, errors, shown) in [
@@ -2169,6 +2184,14 @@ mod tests {
             task.diagnostics = Some(snapshot(settled, errors));
             assert_eq!(checker_span(&task).unwrap().content, shown);
         }
+        let mut linted = snapshot(true, 0);
+        linted.linter = Some("clippy".into());
+        linted.lints = snapshot(true, 3).errors;
+        task.diagnostics = Some(linted);
+        assert_eq!(
+            checker_span(&task).unwrap().content,
+            " · rust-analyzer: 3 lint(s)"
+        );
     }
 
     fn symbolic_task() -> Task {

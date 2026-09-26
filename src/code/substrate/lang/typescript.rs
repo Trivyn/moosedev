@@ -31,6 +31,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     // real substrate surface, not over-claiming.
     zed_languages: &["TypeScript", "TSX", "JavaScript"],
     is_test_path: Some(is_test_path),
+    server: None,
 };
 
 /// The `*.test.*` / `*.spec.*` infix every JS test runner recognizes. A JS

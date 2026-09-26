@@ -636,30 +636,32 @@ impl Runner {
                 self.task.after_review = Phase::Planning;
             }
             Step::Finish { summary } => {
-                // Settled language-server errors would fail the required
-                // checks: send the model back once with them, before any
-                // check runs. A repeat finish on the same errors goes on to
-                // the checks, which decide.
+                // Settled language-server errors or lints: send the model
+                // back once with them, before any check runs. A repeat finish
+                // on the same result goes on to the checks, which decide.
                 let refusal = self
                     .task
                     .diagnostics
                     .as_mut()
-                    .filter(|d| d.settled && !d.errors.is_empty() && !d.finish_refused)
+                    .filter(|d| d.blocks_finish())
                     .map(|diagnostics| {
                         diagnostics.finish_refused = true;
                         (
                             diagnostics.render(DIAGNOSTICS_BYTES),
                             diagnostics.errors.len(),
+                            diagnostics.lints.len(),
                         )
                     });
-                if let Some((block, errors)) = refusal {
-                    self.intent_event("finish_refused_diagnostics", &format!("{errors} error(s)"));
-                    self.event(
-                        "Finish refused: the language server reports errors in the current source."
-                            .to_owned(),
+                if let Some((block, errors, lints)) = refusal {
+                    self.intent_event(
+                        "finish_refused_diagnostics",
+                        &format!("{errors} error(s), {lints} lint(s)"),
                     );
+                    self.event(format!(
+                        "Finish refused: the language server reports {errors} error(s) and {lints} lint(s) in the current source."
+                    ));
                     self.task.last_response = format!(
-                        "Not finished: the language server reports errors in the current source, which the required checks would fail on. Fix them, then finish.\n{block}"
+                        "Not finished: the language server reports problems in the current source. Errors fail the required checks; fix them, and fix the lints too unless they are wrong for this code, then finish.\n{block}"
                     );
                     return self.persist();
                 }
@@ -1027,7 +1029,8 @@ fn error_lines(output: &str) -> std::collections::BTreeSet<&str> {
 }
 
 /// Bytes the language-server block may take in a prompt or a refusal.
-pub(super) const DIAGNOSTICS_BYTES: usize = 3_000;
+/// Room for about three errors with the compiler's full text, and the lints.
+pub(super) const DIAGNOSTICS_BYTES: usize = 4_000;
 
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";

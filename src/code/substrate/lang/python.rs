@@ -36,6 +36,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     zed_languages: &["Python"],
     is_test_path: Some(is_test_path),
+    server: None,
 };
 
 /// pytest's default discovery: `test_*.py` and `*_test.py`, plus the `conftest`

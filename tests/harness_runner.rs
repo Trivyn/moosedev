@@ -2514,9 +2514,13 @@ fn diagnostics(errors: usize) -> moosedev::harness::runner::DiagnosticsSnapshot 
                 line: n as u32 + 1,
                 column: 1,
                 message: format!("mismatched types {n}"),
+                detail: None,
+                definition: None,
             })
             .collect(),
         warnings: 0,
+        lints: vec![],
+        linter: None,
         finish_refused: false,
     }
 }
@@ -2644,8 +2648,10 @@ async fn an_applied_edit_is_checked_by_rust_analyzer_before_the_next_step() {
         "{events:?}"
     );
     assert!(
-        events.iter().any(|m| m
-            .starts_with("rust-analyzer: 1 error(s), 0 warning(s) after src/lib.rs (settled in")),
+        events
+            .iter()
+            .any(|m| m.starts_with("rust-analyzer: 1 error(s)")
+                && m.contains("after src/lib.rs (settled in")),
         "{events:?}"
     );
     drop(runner);

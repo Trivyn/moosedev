@@ -3,9 +3,11 @@
 //! Everything language-specific lives in one module per language: the SCIP
 //! producer registration and its idiom hooks (visibility contract, symbol
 //! canonicalization, signature fence) plus the tree-sitter fallback grammar
-//! and its node tables. The rest of the substrate dispatches through this
-//! registry, so adding a language is one new module here plus one row in
-//! `LANGUAGES` — no edits to producer/resolver/scip/treesitter.
+//! and its node tables, and the language server and linter the harness checks
+//! edits with. The rest of the substrate, and the harness's checker, dispatch
+//! through this registry, so adding a language is one new module here plus one
+//! row in `LANGUAGES` — no edits to producer/resolver/scip/treesitter or to the
+//! language-server client.
 
 pub(crate) mod python;
 pub(crate) mod rust;
@@ -14,6 +16,8 @@ pub(crate) mod typescript;
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
+
+use serde_json::Value;
 
 use super::producer::{ProducerSpec, ProducerTarget};
 use super::scip::SymbolData;
@@ -35,6 +39,49 @@ pub(crate) struct LanguageSpec {
     /// Rust's `tests.rs`. `None` when the language adds nothing to the shared
     /// directory conventions.
     pub is_test_path: Option<fn(&str) -> bool>,
+    /// The language server the harness checks edits with; None when the
+    /// harness has none for this language yet.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub server: Option<ServerSpec>,
+}
+
+/// A language server the harness runs as a deterministic checker.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ServerSpec {
+    /// Shown in prompts and the journal.
+    pub name: &'static str,
+    /// The language, for the human ("No linter for Rust").
+    pub language: &'static str,
+    /// Candidate commands, first found on the trusted PATH wins.
+    pub commands: &'static [&'static [&'static str]],
+    /// File extensions and the language id each is opened with.
+    pub languages: &'static [(&'static str, &'static str)],
+    /// Files whose creation or deletion changes the project's shape; the
+    /// server restarts so it rediscovers the project.
+    pub project_files: &'static [&'static str],
+    /// The server reports `experimental/serverStatus` (rust-analyzer), whose
+    /// `quiescent` flag says when indexing and checking are done.
+    pub server_status: bool,
+    /// Sent as `initializationOptions` when the language has no linter.
+    pub options: fn() -> Value,
+    /// The language's linter, run through the server when installed.
+    pub linter: Option<LinterSpec>,
+}
+
+/// A linter the server runs for the harness. A missing one is reported to the
+/// human and the checker runs without it; nothing stops.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LinterSpec {
+    pub name: &'static str,
+    /// The `source` its diagnostics carry.
+    pub source: &'static str,
+    /// A command that succeeds only when it is installed.
+    pub probe: &'static [&'static str],
+    pub install_hint: &'static str,
+    /// `initializationOptions` that run it.
+    pub options: fn() -> Value,
 }
 
 pub(crate) struct ProducerHooks {
@@ -79,6 +126,14 @@ pub(crate) fn producer_registry() -> &'static [ProducerSpec] {
             .map(|hooks| hooks.spec)
             .collect()
     })
+}
+
+/// The language servers in `LANGUAGES` order.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn language_servers() -> impl Iterator<Item = &'static ServerSpec> {
+    LANGUAGES
+        .iter()
+        .filter_map(|language| language.server.as_ref())
 }
 
 pub(crate) fn producer_hooks(producer_name: &str) -> Option<&'static ProducerHooks> {

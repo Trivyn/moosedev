@@ -8,9 +8,11 @@ Say what the change does to satisfy each rule, in terms of the code you will wri
 
 Give the command that will prove each step. Prefer a check that fails before the change and passes after it: a check that would pass either way proves nothing.
 
+List the tests the change needs: one for each behaviour a project rule requires, including each input it must reject. Include the test files in the plan's files; the plan's checks run them.
+
 ## Implement
 
-A check that runs no tests has verified nothing. If the required checks pass without exercising what you changed, add a test that does.
+Write each test with the code it covers. A check that runs no tests has verified nothing. If the required checks pass without exercising what you changed, add a test that does.
 
 Change one file per action, and leave lines you did not come to change as they are.
 

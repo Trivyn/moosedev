@@ -327,17 +327,28 @@ event), waits for it to settle, and stores what it reports as the task's
   settling; qwen called them stale and ran `cargo build` after about one edit
   in three.)
 - **Current state, not history.** Every prompt shows the latest result in the
-  harness state ("Language server (rust-analyzer) after your last edit: N
-  error(s)…", errors only, at most 20 per file and 5 files, 3 KB), and files
-  with errors are ranked into full source after the latest touch and the files
-  a failed command names.
+  harness state (4 KB): the errors, each with the compiler's full text while it
+  fits (rust-analyzer's `data.rendered`: the source excerpt and the `note:` and
+  `help:` lines, up to 800 bytes each, else its related spans) and the
+  definition behind it ("defined at file:line: …", at most two targets, for the
+  first five errors: a field's `&'static str` next to the `&str` binding that
+  fails it), then the linter's findings with their suggestion. Files with
+  errors are ranked into full source after the latest touch and the files a
+  failed command names.
+- **A linter, first class.** Each language names its linter: for Rust, clippy,
+  run as rust-analyzer's on-save check so its lints arrive through the same
+  settled path. At start the harness runs the linter's probe
+  (`cargo clippy --version`) under the server's sandbox; a missing linter is an
+  Activity line ("No linter for Rust: clippy is not installed (rustup component
+  add clippy); rust-analyzer checks without it.", `language_linter_missing`)
+  and the checker runs `cargo check`. Nothing stops.
 - **What the human sees.** The header shows the last result beside the model
   and phase (`rust-analyzer ✓`, `rust-analyzer: 2 error(s)`, or
   `rust-analyzer ?` when it did not settle); each check adds an Activity line
   ("rust-analyzer: 2 error(s), 1 warning(s) after src/lib.rs (settled in 3.1 s)"),
   as do a server's start, absence or failure; and the status line reads
   "Checking src/lib.rs with rust-analyzer…" while the harness waits.
-- **Finish.** A finish while settled errors remain is sent back once with them,
+- **Finish.** A finish while settled errors or lints remain is sent back once with them,
   before any required check runs (`finish_refused_diagnostics`); a second
   finish on the same errors goes on to the checks, which decide. Unknown never
   blocks.
@@ -352,6 +363,11 @@ event), waits for it to settle, and stores what it reports as the task's
   lockfile roots it may fill. The mirror is beside the command scratch, which
   every command clears. macOS only so far; elsewhere the harness runs without
   one.
+- **Languages.** Each language's server and linter are a row in the language
+  registry (`src/code/substrate/lang/`), beside its SCIP producer and
+  tree-sitter grammar: commands, file extensions with their language ids,
+  project files, initialization options, and the linter's probe and install
+  hint. Only Rust has one so far; adding a language adds no client code.
 - **Configuration.** `[harness.lsp]` `enabled` (default true) and
   `settle_timeout_secs`; `MOOSEDEV_HARNESS_LSP=off`. Study sessions run without
   language servers, which would change their fixed conditions.

@@ -4,10 +4,11 @@ use std::path::Path;
 use std::process::Command;
 
 use super::file_name;
-use super::{FallbackSpec, LanguageSpec, ProducerHooks};
+use super::{FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::treesitter::node_text;
+use serde_json::json;
 
 pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     producer: Some(ProducerHooks {
@@ -34,6 +35,26 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     zed_languages: &["Rust"],
     is_test_path: Some(is_test_path),
+    server: Some(ServerSpec {
+        name: "rust-analyzer",
+        language: "Rust",
+        commands: &[&["rust-analyzer"]],
+        languages: &[("rs", "rust")],
+        project_files: &["Cargo.toml"],
+        server_status: true,
+        // Check with `cargo check` on save, so borrow and lifetime errors
+        // arrive too, not only rust-analyzer's own analysis.
+        options: || json!({"checkOnSave": true, "check": {"command": "check"}}),
+        // Clippy as the on-save check: its lints arrive through the same
+        // settled path as the compiler's errors, which it reports too.
+        linter: Some(LinterSpec {
+            name: "clippy",
+            source: "clippy",
+            probe: &["cargo", "clippy", "--version"],
+            install_hint: "rustup component add clippy",
+            options: || json!({"checkOnSave": true, "check": {"command": "clippy"}}),
+        }),
+    }),
 };
 
 /// A `mod tests;` broken out into its own file. The inline `#[cfg(test)] mod
