@@ -231,6 +231,23 @@ source by edit age raises reuse to 65%, or 27 KB to prefill per step. The
 observations and state, about 7 KB, change every step by design.
 `python3 -m bench.harness_study prefix-reuse <task journal>` measures a run.
 
+The first rerun with this order (badciv `f2fe1f61`, same model and objective)
+measured 92.8% reuse, 6.4 KB to prefill per step, and a median action latency
+of 6.2 s against 66.8 s. That run then looped on `inspect`, and its reuse is
+flattered by the loop's near-identical steps; the next clean run is the
+measurement to quote.
+
+## The plan, bounded where it is shown
+
+The plan is harness state, and it is bounded like source: at injection, not
+where it is written. A 4,000-byte cap on the plan summary existed only because
+the whole plan was repeated in every step's state. Once all 57 of a spec's
+rules reached planning (badciv `e948c9c7`), qwen's plans came to 5.7, 5.1 and
+4.0 KB, each refused, and the task parked before writing code. The model now
+writes the plan the work needs; each step sees a 4 KB view focused on the files
+it is about, with the complete file and check lists and a pointer to the whole
+plan in the journal.
+
 ## Open questions, to settle with measurement not argument
 
 - **Does scope-narrowing lose deciding knowledge?** Re-run the crowded-probe

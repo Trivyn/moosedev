@@ -293,7 +293,7 @@ impl Runner {
     /// The order in which files are shown in full, each with why: the file
     /// the model read or edited last, the files the latest failed command
     /// names, then the rest, most recently read or edited first.
-    fn source_ranking(&self) -> Vec<(String, &'static str)> {
+    pub(super) fn source_ranking(&self) -> Vec<(String, &'static str)> {
         fn push(ranked: &mut Vec<(String, &'static str)>, file: &str, reason: &'static str) {
             if !ranked.iter().any(|(seen, _)| seen == file) {
                 ranked.push((file.to_string(), reason));

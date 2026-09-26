@@ -27,11 +27,18 @@ const OBSERVATION_FLOOR: usize = 8_000;
 const OBSERVATION_CEILING: usize = 48_000;
 /// The last result renders no smaller than its previous fixed budget.
 const LAST_RESULT_FLOOR: usize = 3_000;
-/// Maximum growth of the observations header when dispatch journals one search.
-/// `observation_preview` contributes at most 800 bytes; JSON can expand every
-/// byte to a six-byte `\u00xx` escape. The remainder covers the event prefix,
-/// separators and the delivered-evidence counters, including `usize::MAX`.
-const PENDING_SEARCH_PREFIX_RESERVE: usize = 5_500;
+/// The recent-observations list in the observations header never takes more
+/// than this: its six previews shrink together to fit. A page or search
+/// result is budgeted against the whole cap, so the list growing back (a new
+/// event, a collapsed one previewed again) can never clip it. In a crowded
+/// prompt the block sits at its 8 KB floor; uncapped, six escaped 800-byte
+/// previews left inspect pages of a few hundred bytes (badciv f2fe1f61).
+const RECENT_OBSERVATIONS_BYTES: usize = 3_000;
+/// Longest preview of one recent event, when the list has room.
+const RECENT_PREVIEW_BYTES: usize = 800;
+/// Growth of the rest of the header when dispatch journals one search: the
+/// delivered-evidence sentence appears or its counters grow.
+const PENDING_SEARCH_PREFIX_RESERVE: usize = 256;
 const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
 const SOURCE_HEADER: &str = "\nCurrent source, refreshed before this action:\n";
 
@@ -46,7 +53,7 @@ const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief 
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
-const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message,then), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A reply's then is wait when it answers the human and the turn should end, and continue when you are about to act and want your next action requested. A plan lists explicit permitted files and required shell verification commands; its summary must fit 4000 UTF-8 bytes. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; source supplied in full below counts as already read, and a file listed only under Source outlines must be read before it is edited. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
+const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message,then), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A reply's then is wait when it answers the human and the turn should end, and continue when you are about to act and want your next action requested. A plan lists explicit permitted files and required shell verification commands; its summary may be as long as the work needs, and each later step is shown the parts of it relevant to that step. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; source supplied in full below counts as already read, and a file listed only under Source outlines must be read before it is edited. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
 /// execution and finishing wait for approval, and a replan while planning changes nothing.
@@ -731,10 +738,16 @@ impl Runner {
         // The step prompt places this state after source, navigation and
         // conversation: it changes on most steps, and everything before the
         // first changed byte is reused from the model server's prefix cache.
+        // The plan with its summary as this step is shown it; files, checks
+        // and addresses are always complete.
+        let plan = self.task.plan.clone().map(|mut plan| {
+            plan.summary = self.plan_summary_view().unwrap_or_default();
+            plan
+        });
         let mut state = format!(
             "\nCurrent human guidance: {}\nCurrent harness state (observed results; earlier assistant intentions may be obsolete):\nMode: {:?}\nPhase: {:?}\nPlan: {}\nFiles already read with dossiers: {}\nEdits already applied to: {}\n",
             self.task.guidance, self.task.mode, self.task.phase,
-            serde_json::to_string(&self.task.plan)?,
+            serde_json::to_string(&plan)?,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
         );
         state.push_str(&format!(
@@ -829,8 +842,17 @@ impl Runner {
         Ok(needed.min(OBSERVATION_FLOOR))
     }
 
-    fn observations_prefix(&self) -> Result<String> {
-        let mut recent: Vec<String> = self
+    /// The recent events as the observations header lists them, serialized,
+    /// within [`RECENT_OBSERVATIONS_BYTES`]. Only the latest copy of the Last
+    /// result is collapsed to a marker: a preview invites paging what is
+    /// already in view.
+    fn recent_observations(&self) -> Result<String> {
+        let shown = self
+            .task
+            .events
+            .iter()
+            .rposition(|e| !e.message.is_empty() && e.message == self.task.last_response);
+        let mut recent: Vec<(usize, &str)> = self
             .task
             .events
             .iter()
@@ -838,9 +860,30 @@ impl Runner {
             .rev()
             .filter(|(_, e)| e.message != format!("Human response: {}", self.task.guidance))
             .take(6)
-            .map(|(i, e)| format!("Event {i}: {}", observation_preview(&e.message, 800)))
+            .map(|(i, e)| (i, e.message.as_str()))
             .collect();
         recent.reverse();
+        let mut limit = RECENT_PREVIEW_BYTES;
+        loop {
+            let list: Vec<String> = recent
+                .iter()
+                .map(|(i, message)| {
+                    if Some(*i) == shown {
+                        format!("Event {i}: [shown as the Last result below]")
+                    } else {
+                        format!("Event {i}: {}", observation_preview(message, limit))
+                    }
+                })
+                .collect();
+            let json = serde_json::to_string(&list)?;
+            if json.len() <= RECENT_OBSERVATIONS_BYTES || limit == 0 {
+                return Ok(json);
+            }
+            limit = limit * RECENT_OBSERVATIONS_BYTES / json.len() * 9 / 10;
+        }
+    }
+
+    fn observations_prefix(&self) -> Result<String> {
         let outputs: Vec<_> = self
             .task
             .check_results
@@ -850,7 +893,7 @@ impl Runner {
             .collect();
         Ok(format!("{}Recent observations (complete outputs remain in journal events; use inspect(event,offset) to page them):\n{}\nCheck output previews:\n{}\nLast result:\n",
             delivered_evidence(&self.task.knowledge_searches),
-            serde_json::to_string(&recent)?, outputs.join("\n")))
+            self.recent_observations()?, outputs.join("\n")))
     }
 
     /// Bytes the next prompt can show from `last_response` without invoking
@@ -860,10 +903,22 @@ impl Runner {
         // Dispatch journals the search response after this preflight. That
         // adds one 800-byte recent-event preview plus the delivered-evidence
         // sentence and JSON quoting to the next observations header.
+        self.last_result_budget(context, PENDING_SEARCH_PREFIX_RESERVE)
+    }
+
+    /// The same for an `inspect` page, which journals nothing new.
+    pub(super) fn next_inspect_budget(&self, context: &ContextResponse) -> Result<usize> {
+        self.last_result_budget(context, 0)
+    }
+
+    /// The observation block less the header, with the recent-observations
+    /// list counted at its cap, less `growth` for the rest of the header.
+    fn last_result_budget(&self, context: &ContextResponse, growth: usize) -> Result<usize> {
         let remaining = self.mandatory_prompt(context, OBSERVATION_FLOOR)?.remaining;
+        let header = self.observations_prefix()?.len() - self.recent_observations()?.len();
         Ok(observation_budget(remaining)
-            .saturating_sub(self.observations_prefix()?.len())
-            .saturating_sub(PENDING_SEARCH_PREFIX_RESERVE)
+            .saturating_sub(header + RECENT_OBSERVATIONS_BYTES)
+            .saturating_sub(growth)
             .saturating_sub(1))
     }
 
@@ -1324,6 +1379,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_crowded_header_still_leaves_an_inspect_page_room_to_be_shown_whole() {
+        // badciv f2fe1f61: six escaped previews crowded the 8 KB observations
+        // floor and pages shrank to a few hundred bytes.
+        let project = Project::new("inspect-capacity");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Read the log".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        let context = runner.context.clone().unwrap();
+        for _ in 0..6 {
+            runner.task.events.push(super::super::task::Event {
+                message: "\u{0001}".repeat(800),
+            });
+        }
+        assert!(runner.recent_observations().unwrap().len() <= RECENT_OBSERVATIONS_BYTES);
+        let inspect = runner.next_inspect_budget(&context).unwrap();
+        assert!(inspect > runner.next_last_result_budget(&context).unwrap());
+        assert!(
+            inspect >= OBSERVATION_FLOOR - RECENT_OBSERVATIONS_BYTES - 1_000,
+            "{inspect}"
+        );
+        let fits = |runner: &Runner, page: &str| {
+            let (prompt, _) = runner.prompt(&context, &[]).unwrap();
+            let last = prompt.rsplit_once("Last result:\n").unwrap().1.to_owned();
+            last.starts_with(page) && !last.contains("[observation shortened;")
+        };
+        let page = "p".repeat(inspect);
+        runner.task.last_response = page.clone();
+        assert!(fits(&runner, &page));
+
+        // A page taken while the last event is collapsed as the Last result
+        // still fits once that event is previewed again.
+        runner.task.last_response = runner.task.events.last().unwrap().message.clone();
+        let page = "q".repeat(runner.next_inspect_budget(&context).unwrap());
+        runner.task.last_response = page.clone();
+        assert!(fits(&runner, &page));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn advertised_search_capacity_reaches_the_next_prompt_without_byte_clipping() {
         let project = Project::new("search-capacity");
         let (daemon, server) = serve(context_router(), &project).await;
@@ -1362,7 +1458,8 @@ mod tests {
         // If a refreshed mandatory context consumes the preflight capacity,
         // graph evidence fails loudly instead of falling through the generic
         // head/tail observation preview.
-        let oversized = "x".repeat(budget + PENDING_SEARCH_PREFIX_RESERVE + 1);
+        let oversized =
+            "x".repeat(budget + PENDING_SEARCH_PREFIX_RESERVE + RECENT_OBSERVATIONS_BYTES + 1);
         runner.task.last_response = oversized.clone();
         let event = *runner.task.knowledge_events.last().unwrap();
         runner.task.events[event].message = oversized;

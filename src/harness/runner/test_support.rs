@@ -40,6 +40,7 @@ async fn context(State(root): State<Arc<PathBuf>>) -> Json<ContextResponse> {
     Json(ContextResponse {
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
+        context_contracts: vec![1],
         project_root: root.to_string_lossy().into_owned(),
         revision: "fixture".into(),
         context: String::new(),

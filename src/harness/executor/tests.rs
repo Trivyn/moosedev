@@ -1476,6 +1476,104 @@ fn a_generated_lockfile_is_carried_between_snapshots_until_the_project_has_one()
     );
 }
 
+/// Every lockfile root gets a writable lockfile, not only the top level: a
+/// standalone crate in a subdirectory, and not a workspace member, whose
+/// workspace root owns the lockfile. badciv f2fe1f61 built a crate in
+/// `badciv-map/` with no root manifest and every build was denied.
+#[test]
+fn every_cargo_lockfile_root_gets_a_writable_carried_lockfile() {
+    let scratch = Fixture::new();
+    let previous = scratch.0.join("source");
+    let staged = scratch.0.join("staged");
+    let manifest = |dir: &Path, text: &str| {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("Cargo.toml"), text).unwrap();
+    };
+    fs::create_dir_all(&previous).unwrap();
+    fs::create_dir_all(scratch.0.join("build")).unwrap();
+    // A standalone crate beside a workspace with a member, and build output
+    // and hidden directories that are never walked.
+    manifest(&staged.join("tool"), "[package]\nname = \"tool\"\n");
+    manifest(&staged.join("game"), "[workspace]\nmembers = [\"core\"]\n");
+    manifest(&staged.join("game/core"), "[package]\nname = \"core\"\n");
+    // A workspace of its own inside another's tree owns its lockfile.
+    manifest(
+        &staged.join("game/tools"),
+        "[workspace]\n[package]\nname = \"tools\"\n",
+    );
+    manifest(&staged.join("target/debug/x"), "[package]\nname = \"x\"\n");
+    manifest(&staged.join(".hidden"), "[package]\nname = \"h\"\n");
+    assert_eq!(
+        cargo_lockfile_roots(&staged),
+        vec![
+            PathBuf::from("game"),
+            PathBuf::from("game/tools"),
+            PathBuf::from("tool")
+        ]
+    );
+
+    fs::create_dir_all(previous.join("tool")).unwrap();
+    fs::write(previous.join("tool/Cargo.lock"), "version = 4\n# tool\n").unwrap();
+    carry_generated_lockfile(&scratch.0, &previous, &staged).unwrap();
+    assert_eq!(
+        fs::read_to_string(staged.join("tool/Cargo.lock")).unwrap(),
+        "version = 4\n# tool\n"
+    );
+    assert_eq!(fs::read(staged.join("game/Cargo.lock")).unwrap(), b"");
+    assert!(!staged.join("game/core/Cargo.lock").exists());
+    assert!(!staged.join("Cargo.lock").exists());
+    assert_eq!(
+        writable_snapshot_files(&staged),
+        vec![
+            staged.join("game/Cargo.lock"),
+            staged.join("game/tools/Cargo.lock"),
+            staged.join("tool/Cargo.lock")
+        ]
+    );
+    // A nested root's build-side copy has a path of its own.
+    assert_eq!(
+        lockfile_backing(&scratch.0, Path::new("tool")),
+        scratch.0.join("build/lockfiles/tool/Cargo.lock")
+    );
+    assert_eq!(
+        lockfile_backing(&scratch.0, Path::new("")),
+        scratch.0.join("build/Cargo.lock")
+    );
+}
+
+/// Must run outside a parent sandbox which forbids installing OS sandboxes.
+#[tokio::test]
+#[ignore = "requires Rust toolchain and functional OS sandbox; run explicitly"]
+async fn confinement_builds_a_crate_in_a_subdirectory_without_a_lockfile() {
+    let fixture = Fixture::new();
+    let scratch = Fixture::new();
+    fs::create_dir_all(fixture.0.join("nested")).unwrap();
+    fs::write(fixture.0.join("nested/Cargo.toml"), "[package]\nname = \"nested-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    fs::write(
+        fixture.0.join("nested/lib.rs"),
+        "#[test]\nfn arithmetic() { assert_eq!(2 + 2, 4); }\n",
+    )
+    .unwrap();
+    let result = command(&fixture.0, &scratch.0, "cd nested && cargo test --offline")
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("1 passed"), "{}", result.output);
+    assert!(
+        !fixture.0.join("nested/Cargo.lock").exists(),
+        "live tree untouched"
+    );
+    // The generated lockfile is carried, so the next command can be locked.
+    let locked = command(
+        &fixture.0,
+        &scratch.0,
+        "cd nested && cargo test --offline --locked",
+    )
+    .await
+    .unwrap();
+    assert!(locked.success, "{}", locked.output);
+}
+
 /// A write grant may name a file that does not exist yet in a directory that
 /// does; a read grant, or a write into a missing directory, still must exist.
 #[test]

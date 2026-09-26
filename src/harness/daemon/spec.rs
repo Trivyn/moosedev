@@ -872,6 +872,30 @@ fn marker_components(state: &AppState, marker_iri: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The components the current approvals of the spec files among `files`
+/// recorded as governed by their records.
+pub(super) fn spec_components_for_files(
+    state: &AppState,
+    files: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let same = |a: &str, b: &str| {
+        std::path::Path::new(a)
+            .components()
+            .eq(std::path::Path::new(b).components())
+    };
+    let mut components = Vec::new();
+    for (path, marker) in current_approval_markers(state)? {
+        if files.iter().any(|file| same(file, &path)) {
+            for component in marker_components(state, &marker.iri) {
+                if !components.contains(&component) {
+                    components.push(component);
+                }
+            }
+        }
+    }
+    Ok(components)
+}
+
 /// Every component whose `concerns` edges from this approval's records the
 /// approval manages: the ones it plans and the ones the approval it replaces
 /// recorded (a part dropped since then must lose its edges too).
@@ -2388,6 +2412,75 @@ mod tests {
     }
 
     #[test]
+    fn reading_an_approved_spec_delivers_the_rules_of_the_components_it_governs() {
+        // badciv 3ba41310: the plan was written from the crate's spec at the
+        // project root, before any file under the crate existed, so none of
+        // the crate's 54 rules reached the planning prompt.
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.0.join("crate")).unwrap();
+        let hash = fixture.write_spec("# Crate\nThe crate parses maps.\n");
+        let state = fixture.state();
+        let mut request = prepare_request(
+            "spec-crate",
+            hash,
+            accepted_revision(&state).unwrap(),
+            vec![draft(
+                "Requirement",
+                "Crate parses maps",
+                "The crate parses map files.",
+                2,
+            )],
+        );
+        request.covers = vec!["crate/".into()];
+        prepare_operation(&state, request).unwrap();
+        approve_operation(
+            &state,
+            SpecApproveRequest {
+                operation_id: "spec-crate".into(),
+                owner_id: "spec-test".into(),
+            },
+        )
+        .unwrap();
+        let rules = |files: Vec<String>| {
+            crate::harness::daemon::context_snapshot(
+                &state,
+                &ContextRequest {
+                    topic: "maps".into(),
+                    files,
+                    evidence_only: false,
+                    max_bytes: None,
+                    rule_files: Vec::new(),
+                },
+            )
+            .unwrap()
+            .governing_rules
+            .into_iter()
+            .map(|rule| rule.label)
+            .collect::<Vec<_>>()
+        };
+        assert!(rules(vec!["README.md".into()]).is_empty());
+        assert_eq!(rules(vec!["docs/spec.md".into()]), ["Crate parses maps"]);
+        // A plan file not yet read contributes its rules without a dossier.
+        let scoped = crate::harness::daemon::context_snapshot(
+            &state,
+            &ContextRequest {
+                topic: "maps".into(),
+                files: vec![],
+                evidence_only: false,
+                max_bytes: None,
+                rule_files: vec!["crate/src/lib.rs".into()],
+            },
+        )
+        .unwrap();
+        assert!(scoped.files.is_empty());
+        assert_eq!(scoped.governing_rules.len(), 1);
+        assert_eq!(
+            rules(vec!["crate/src/lib.rs".into()]),
+            ["Crate parses maps"]
+        );
+    }
+
+    #[test]
     fn context_reports_an_approved_spec_whose_file_changed() {
         let fixture = Fixture::new();
         let hash = fixture.write_spec("# Spec\nThe harness accepts specs.\n");
@@ -2421,6 +2514,7 @@ mod tests {
                     files: vec![],
                     evidence_only: false,
                     max_bytes: None,
+                    rule_files: Vec::new(),
                 },
             )
             .unwrap()

@@ -31,6 +31,7 @@ mod index;
 mod links;
 mod model;
 mod permissions;
+mod plan_view;
 mod recovery;
 mod review;
 mod scope;
@@ -67,7 +68,11 @@ pub const SCHEMA: u32 = 2;
 
 const MAX_STEPS: usize = 256;
 const MAX_FILES: usize = 100;
-const MAX_PLAN_SUMMARY: usize = 4000;
+/// A guard against runaway output, not a design limit: a plan may be as long
+/// as the work needs. Each step's prompt shows a bounded view of it
+/// (`plan_view`); badciv e948c9c7 parked after three plans of 5.7, 5.1 and
+/// 4.0 KB were refused by a 4,000-byte cap that existed only for that prompt.
+const MAX_PLAN_SUMMARY: usize = 64_000;
 
 pub struct Runner {
     pub task: Task,

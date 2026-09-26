@@ -36,6 +36,11 @@ impl Runner {
         hits
     }
 
+    /// Whether the approved plan still stands: accepted knowledge and the
+    /// plan's files unchanged since approval. The one refresh is the step's
+    /// context: dossiers for the files already read, and governing rules for
+    /// those and the plan's other files too, so a plan file's rules are in
+    /// view before its first write and the step needs no second refresh.
     pub(super) async fn fresh_approval(&mut self) -> Result<bool> {
         let files = self
             .task
@@ -44,7 +49,13 @@ impl Runner {
             .context("no approved plan")?
             .files
             .clone();
-        let context = self.refresh(&files).await?;
+        let read = self.task.read_files.clone();
+        let unread: Vec<String> = files
+            .iter()
+            .filter(|file| !read.contains(file))
+            .cloned()
+            .collect();
+        let context = self.refresh_with_rules(&read, &unread).await?;
         let sources = self.snapshot(&files)?;
         if self.task.approved_revision.as_deref() != Some(&context.revision)
             || sources != self.task.snapshots
@@ -229,7 +240,19 @@ impl Runner {
             "task reached {MAX_STEPS} model steps; inspect and provide new guidance"
         );
         let targets = self.task.read_files.clone();
-        let context = self.refresh(&targets).await?;
+        // An approved step's context was refreshed by `fresh_approval` above
+        // for exactly the files read.
+        let reuse = self.context.as_ref().filter(|context| {
+            self.task.mode == Mode::Auto
+                && context.files.len() == targets.len()
+                && targets
+                    .iter()
+                    .all(|file| context.files.iter().any(|entry| &entry.file == file))
+        });
+        let context = match reuse {
+            Some(context) => context.clone(),
+            None => self.refresh(&targets).await?,
+        };
         // A previously read file may have changed through another client.
         for file in &targets {
             self.task
@@ -299,18 +322,36 @@ impl Runner {
         );
         match step {
             Step::Inspect { event, offset } => {
+                if self.refuse_repeated_inspect(event, offset) {
+                    return self.persist();
+                }
+                // A page is as large as the next prompt can show unclipped, so
+                // an event that fits arrives whole in one step. A fixed 2 KB
+                // page overwrote itself: badciv 3ba41310 paged one 13.9 KB
+                // search result thirteen times.
+                let page = self
+                    .next_inspect_budget(&context)?
+                    .saturating_sub(INSPECT_HEADER_RESERVE)
+                    .max(1);
                 let observation = self
                     .task
                     .events
                     .get(event)
                     .context("unknown journal event")?;
-                let mut end = offset.saturating_add(2000).min(observation.message.len());
+                let size = observation.message.len();
+                let mut end = offset.saturating_add(page).min(size);
                 while !observation.message.is_char_boundary(end) {
                     end -= 1;
                 }
+                // Always at least one character, so paging advances.
+                if end == offset && end < size {
+                    end += 1;
+                    while !observation.message.is_char_boundary(end) {
+                        end += 1;
+                    }
+                }
                 self.task.last_response = format!(
-                    "Journal event {event}, bytes {offset}..{end} of {}:\n{}",
-                    observation.message.len(),
+                    "Journal event {event}, bytes {offset}..{end} of {size}:\n{}",
                     &observation.message[offset..end]
                 );
             }
@@ -860,6 +901,10 @@ fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
 /// Vacuous-check returns per task before the task is allowed to finish anyway.
 /// One, matching the plan-coverage return limit: the nudge is worth sending
 /// once, and a project that genuinely has no tests must not be trapped.
+/// How a refused repeat inspect begins, in the journal and the Last result.
+const INSPECT_REFUSED: &str = "Not shown again: inspect of";
+/// Room for the "Journal event N, bytes a..b of c:" line above a page.
+const INSPECT_HEADER_RESERVE: usize = 96;
 const VACUOUS_RETURN_LIMIT: usize = 1;
 
 const VACUOUS_CHECKS: [&str; 6] = [
@@ -1100,6 +1145,66 @@ impl Runner {
                 || message.starts_with("Task permission")
         });
         (!changed).then_some(last)
+    }
+
+    /// The journal index of an earlier `inspect` of the same page within the
+    /// current run of inspects: back to the last other model action or human
+    /// message. Journal events never change, so within such a run a second
+    /// request for a page the model already had can only be a loop.
+    fn repeated_inspect(&self, event: usize, offset: usize) -> Option<usize> {
+        let action = format!(
+            "Model action: {}",
+            serde_json::to_string(&Step::Inspect { event, offset }).ok()?
+        );
+        // The last event is this step's own journaled action.
+        let before = self.task.events.len().checked_sub(1)?;
+        for (index, earlier) in self.task.events[..before].iter().enumerate().rev() {
+            let message = earlier.message.as_str();
+            if message == action {
+                return Some(index);
+            }
+            if message.starts_with("Human ")
+                || (message.starts_with("Model action: ")
+                    && !message.starts_with("Model action: {\"action\":\"inspect\""))
+            {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Refuse an inspect of a page already delivered in this run of inspects.
+    /// A second refusal in the run parks the task for the human, as a
+    /// repeated command does. True when the page must not be shown again.
+    /// badciv f2fe1f61: qwen alternated two pages of one event 132 times.
+    fn refuse_repeated_inspect(&mut self, event: usize, offset: usize) -> bool {
+        let Some(earlier) = self.repeated_inspect(event, offset) else {
+            return false;
+        };
+        let refused_before = self.task.events[earlier + 1..]
+            .iter()
+            .any(|later| later.message.starts_with(INSPECT_REFUSED));
+        self.intent_event(
+            "inspect_repeat_refused",
+            &format!("event {event} offset {offset}, first at event {earlier}"),
+        );
+        if refused_before {
+            self.event(format!(
+                "{INSPECT_REFUSED} parked for guidance (event {event}, offset {offset})."
+            ));
+            self.task.last_response = format!(
+                "The model keeps asking for pages of journal event {event} it already had, without acting on them. Guidance is needed: say what to do next, or /plan to change the approach."
+            );
+            self.task.phase = Phase::AwaitingInput;
+            self.task.turn_finished = true;
+            return true;
+        }
+        let message = format!(
+            "{INSPECT_REFUSED} event {event} at offset {offset} was already shown at event {earlier}, and journal events never change. Take a different step: edit, run a command, search, or ask the human with question. The current source of every file you read or edited is already in this prompt; an Applied edit event only repeats it."
+        );
+        self.event(message.clone());
+        self.task.last_response = message;
+        true
     }
 
     /// Refuse an exact repeat of a command whose output cannot have changed,

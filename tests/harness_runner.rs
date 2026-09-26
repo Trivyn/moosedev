@@ -647,7 +647,7 @@ async fn task_permissions_expire_durably_at_completion() {
 /// as seen for all of its work. A rule that arrives after approval holds the
 /// write until it is proposed again with the rule in view.
 #[tokio::test]
-async fn a_new_file_is_written_at_once_unless_its_read_brings_new_rules() {
+async fn a_new_file_is_written_at_once_when_its_rules_were_in_view() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
     let rule = |iri: &str, label: &str| GoverningRule {
@@ -732,29 +732,28 @@ async fn a_new_file_is_written_at_once_unless_its_read_brings_new_rules() {
         vec!["fresh.txt".to_string(), "governed.txt".to_string()]
     );
 
-    fixture.reply(
-        "harness_action",
-        json!({"action":"write","file":"late.txt","content":"body\n"}),
-    );
-    consume(&fixture, &mut runner).await;
-    assert!(
-        !fixture.root.join("late.txt").exists(),
-        "a rule the proposal never saw holds the write"
-    );
-    assert!(runner.task.events.iter().any(|event| event
-        .message
-        .contains("late.txt does not exist yet, but it is governed by 1 record(s)")));
+    // Each approved step refreshes the read files and the plan's files
+    // together, so a rule governing a plan file is in view in the step that
+    // proposes its first write, and the write applies at once.
     fixture.reply(
         "harness_action",
         json!({"action":"write","file":"late.txt","content":"LOG\nbody\n"}),
     );
     consume(&fixture, &mut runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("Late files are logged"));
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("late.txt")).unwrap(),
         "LOG\nbody\n"
     );
-    let prompt = fixture.last_model_prompt("harness_action");
-    assert!(prompt.contains("Late files are logged"));
+    assert_eq!(
+        intent_details(&runner, "first_edit_satisfied_absent"),
+        vec![
+            "fresh.txt".to_string(),
+            "governed.txt".to_string(),
+            "late.txt".to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -916,6 +915,48 @@ fn coverage_rules() -> Vec<GoverningRule> {
             via: "via: linked to code.txt".into(),
         },
     ]
+}
+
+#[tokio::test]
+async fn a_coverage_return_carries_the_claim_of_a_rule_listed_by_title() {
+    // A rule past the rules block's claim cap arrives as a title; the note
+    // that asks the plan to address it carries its claim.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut rules = coverage_rules();
+    let claim = rules[1].claim.clone();
+    rules[1].claim.clear();
+    {
+        let mut script = fixture.shared.lock().unwrap();
+        script.governing_rules = rules;
+        script.context_records = vec![ContextRecord {
+            iri: "urn:rule:audit".into(),
+            kind: "Requirement".into(),
+            title: "Every transfer writes an audit entry".into(),
+            claim: claim.clone(),
+            provenance: vec![],
+        }];
+    }
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Repair code.txt".into(),
+    )
+    .await
+    .unwrap();
+    runner.configure(fixture.config(), None);
+    fixture.reply(
+        "harness_action",
+        json!({"action":"plan","summary":"Edit code.txt to repair the output","files":["code.txt"],"checks":["true"]}),
+    );
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_none());
+    let note = &runner.task.last_response;
+    assert!(
+        note.contains(&format!("(urn:rule:audit)\n{claim}")),
+        "{note}"
+    );
+    assert!(!note.contains("named without their claim"), "{note}");
 }
 
 fn coverage_events(runner: &Runner, kind: &str) -> Vec<String> {
@@ -2441,6 +2482,211 @@ async fn inspect_pages_complete_journal_observations_without_replaying_actions()
         std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
         "original\n"
     );
+}
+
+#[tokio::test]
+async fn one_inspect_returns_an_event_that_fits_the_next_prompt_whole() {
+    // badciv 3ba41310 paged a 13.9 KB search result 2 KB at a time, thirteen
+    // times, each page replacing the last.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let index = runner.task.events.len();
+    let message = format!("START{}END", "y".repeat(13_900));
+    runner.task.events.push(moosedev::harness::runner::Event {
+        message: message.clone(),
+    });
+    fixture.conversational(json!({"action":"inspect","event":index,"offset":0}));
+    runner.advance().await.unwrap();
+    let size = message.len();
+    assert!(runner.task.last_response.starts_with(&format!(
+        "Journal event {index}, bytes 0..{size} of {size}:"
+    )));
+    assert!(runner.task.last_response.ends_with("END"));
+}
+
+#[tokio::test]
+async fn a_long_plan_is_accepted_and_each_step_sees_the_part_it_needs() {
+    // badciv e948c9c7: plans of 5.7, 5.1 and 4.0 KB were refused by a
+    // 4,000-byte cap that existed only to bound later prompts.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let summary = [
+        "Repair the output of code.txt.".to_string(),
+        format!("notes.txt: record the reasoning. {}", "n".repeat(2_500)),
+        format!("code.txt: fix the output line. {}", "c".repeat(2_500)),
+        format!("Verification: run the check. {}", "v".repeat(1_500)),
+    ]
+    .join("\n\n");
+    assert!(summary.len() > 6_000);
+    fixture.conversational(json!({"action":"plan","summary":summary,"files":["code.txt","notes.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingPlan,
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(runner.task.plan.as_ref().unwrap().summary, summary);
+    runner.approve_plan().await.unwrap();
+
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    let plan = prompt.split("\nPlan: ").nth(1).unwrap();
+    let plan = plan.split("\nFiles already read").next().unwrap();
+    assert!(plan.contains("Repair the output of code.txt."), "{plan}");
+    assert!(plan.contains("code.txt: fix the output line."), "{plan}");
+    assert!(plan.contains("[Plan shown in part:"), "{plan}");
+    assert!(plan.contains("inspect("), "{plan}");
+    assert!(
+        plan.contains("\"files\":[\"code.txt\",\"notes.txt\"]"),
+        "{plan}"
+    );
+    assert!(plan.len() < 5_000, "{}", plan.len());
+    // The route names the event that holds the whole plan.
+    let event: usize = plan
+        .split("journal event ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(runner.task.events[event]
+        .message
+        .contains("Verification: run the check."));
+}
+
+#[tokio::test]
+async fn a_plan_over_the_output_bound_is_refused_with_its_size() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let summary = "x".repeat(70_000);
+    for _ in 0..3 {
+        fixture.conversational(
+            json!({"action":"plan","summary":summary,"files":["code.txt"],"checks":["true"]}),
+        );
+    }
+    runner.advance().await.ok();
+    let error = runner.task.last_error.clone().unwrap_or_default();
+    assert!(
+        error.contains("plan summary is 70000 bytes; the bound is 64000"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn alternating_inspects_of_the_same_pages_are_refused_then_parked() {
+    // badciv f2fe1f61: qwen alternated inspect(137, 0) and inspect(137, 1776)
+    // 132 times; journal events never change, so a repeat is a loop.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let index = runner.task.events.len();
+    runner.task.events.push(moosedev::harness::runner::Event {
+        message: "z".repeat(200_000),
+    });
+    let inspect = |offset: usize| json!({"action":"inspect","event":index,"offset":offset});
+    fixture.conversational(inspect(0));
+    runner.advance().await.unwrap();
+    let second = runner
+        .task
+        .last_response
+        .split_once("..")
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(end, _)| end.parse::<usize>().unwrap())
+        .unwrap();
+    fixture.conversational(inspect(second));
+    runner.advance().await.unwrap();
+    assert!(runner.task.last_response.starts_with("Journal event"));
+
+    fixture.conversational(inspect(0));
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_response.starts_with("Not shown again"),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(runner.task.phase, Phase::Planning);
+
+    fixture.conversational(inspect(second));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner.task.last_response.contains("Guidance is needed"));
+}
+
+#[tokio::test]
+async fn a_page_may_be_inspected_again_after_another_action() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let index = runner.task.events.len();
+    runner.task.events.push(moosedev::harness::runner::Event {
+        message: "journal detail".into(),
+    });
+    let inspect = json!({"action":"inspect","event":index,"offset":0});
+    fixture.conversational(inspect.clone());
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(inspect);
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_response.starts_with("Journal event"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
+#[tokio::test]
+async fn an_event_shown_as_the_last_result_is_not_previewed_again() {
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().search_knowledge =
+        Some("[Constraint] Uploads resume (urn:rule:resume)\nhasDescription: resume.\n".into());
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"search","query":"uploads"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"reply","message":"Noted.","then":"wait"}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    let recent = prompt.split("Recent observations").nth(1).unwrap();
+    let recent = recent.split("Last result:").next().unwrap();
+    assert!(
+        recent.contains("[shown as the Last result below]"),
+        "{recent}"
+    );
+    assert!(!recent.contains("hasDescription: resume."), "{recent}");
+}
+
+#[tokio::test]
+async fn an_approved_step_refreshes_read_and_plan_files_once() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Repair code.txt and add notes.txt","files":["code.txt","notes.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+
+    let before = requests_of_kind(&fixture, "context").len();
+    fixture.conversational(json!({"action":"search","query":"notes"}));
+    runner.advance().await.unwrap();
+    let requests = requests_of_kind(&fixture, "context");
+    assert_eq!(requests.len(), before + 1, "one context refresh per step");
+    let request = requests.last().unwrap();
+    assert_eq!(
+        request["files"],
+        json!(["code.txt"]),
+        "dossiers for files read"
+    );
+    assert_eq!(
+        request["rule_files"],
+        json!(["notes.txt"]),
+        "rules only for the plan's other files"
+    );
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("COMPLETE_DOSSIER_FOR_code.txt"));
+    assert!(!prompt.contains("COMPLETE_DOSSIER_FOR_notes.txt"));
 }
 
 #[tokio::test]

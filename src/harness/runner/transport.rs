@@ -139,6 +139,26 @@ impl Runner {
     }
 
     pub(super) async fn refresh(&mut self, files: &[String]) -> Result<ContextResponse> {
+        self.refresh_with_rules(files, &[]).await
+    }
+
+    /// Refresh with `files` read and `rule_files` contributing only their
+    /// governing rules (no dossier, no policy).
+    pub(super) async fn refresh_with_rules(
+        &mut self,
+        files: &[String],
+        rule_files: &[String],
+    ) -> Result<ContextResponse> {
+        // A task resumed against a daemon from before `rule_files` would have
+        // the field rejected; say what to do instead.
+        anyhow::ensure!(
+            rule_files.is_empty()
+                || self
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| context.context_contracts.contains(&1)),
+            "project daemon does not advertise context contract v1; restart it with an updated moosedev binary"
+        );
         let topic = format!("{} {}", self.task.objective, self.task.guidance)
             .trim()
             .to_owned();
@@ -150,6 +170,7 @@ impl Runner {
                     files: files.to_vec(),
                     evidence_only: false,
                     max_bytes: None,
+                    rule_files: rule_files.to_vec(),
                 },
             )
             .await?;
@@ -272,6 +293,7 @@ impl Runner {
                     files: vec![],
                     evidence_only: true,
                     max_bytes,
+                    rule_files: Vec::new(),
                 },
             )
             .await?;

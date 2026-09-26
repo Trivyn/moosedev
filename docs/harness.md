@@ -577,11 +577,16 @@ Dependencies must be available in that view. Sibling path dependencies, includin
 this repository's `../moose`, are not automatically exposed. Source snapshots
 fail explicitly above 512 MiB total, 100,000 entries, or 64 directory levels. Source
 edits use a separately gated action; policy-gated edits require human approval.
-The one file a command may write in the snapshot is a Cargo project's
+The one kind of file a command may write in the snapshot is a Cargo
 `Cargo.lock`: Cargo cannot build a project that has no lockfile unless it can
-create one, so the snapshot of a project without `Cargo.lock` carries an empty
-one the toolchain may fill, and the generated lockfile is carried into the next
-command's snapshot for the rest of the task. A lockfile the project commits always
+create one, so each lockfile root without `Cargo.lock` carries an empty one the
+toolchain may fill, and the generated lockfile is carried into the next
+command's snapshot for the rest of the task. A lockfile root is any directory
+holding a `Cargo.toml` (up to eight levels down, skipping `target/` and
+hidden directories) unless a manifest above it declares a `[workspace]`, whose
+root owns the lockfile instead; a manifest declaring its own `[workspace]` is
+always a root; a standalone crate in a subdirectory therefore
+builds as one at the top level does. A lockfile the project commits always
 wins, and nothing is written back to the project. A `request_permission` write
 path may name a file that does not exist yet inside a directory that does; the
 command creates it.
@@ -640,7 +645,15 @@ Action observations use bounded previews whose budget scales with what the
 prompt has left after its governing knowledge and output schema, so a wide
 window is spent on the evidence the model just retrieved instead of left idle;
 `inspect(event,offset)` lets the model read detailed journal output without
-repeating a command. Each prompt states how many distinct records the graph has
+repeating a command. An inspect page is as large as the next prompt can show
+unclipped, so an event that fits arrives whole in one step; the
+recent-observations list marks the latest event shown as the Last result
+instead of previewing it again, and its six previews shrink together to stay
+within 3 KB, so a crowded prompt still leaves a page several KB. A page the
+model already had in the current run of inspects (back to its last other
+action or a human message) is not shown again: the first repeat is refused
+with a note, and the second parks the task for guidance
+(`inspect_repeat_refused`). Each prompt states how many distinct records the graph has
 delivered so far. A byte-identical repeat of an earlier query is answered from
 the stored result without re-running it, and consecutive searches matching
 nothing are counted: the second states that the channel is exhausted and names
@@ -649,7 +662,17 @@ consumes the whole journal since the last checkpoint in one note; the checkpoint
 position persists across interruption. The Journal view displays a compact
 index; complete requests and observations remain in the task JSON. Unchanged checkpoints skip redundant
 file rewrites; changed checkpoints retain atomic publication and fsync.
-Plan summaries are limited to 4000 UTF-8 bytes. If the required context leaves
+A plan summary may be as long as the work needs (64 KB guards only against
+runaway output). The task keeps the whole plan; each step's prompt shows a
+4 KB view of it: the first paragraph, then the paragraphs naming the file the
+step is about, the files the latest failed command names and the plan files not
+yet edited, then the rest while they fit, in the plan's order, with a closing
+line counting what was left out and naming the journal event that holds the
+whole plan. Files, checks and addresses are always shown complete. The
+capture note carries the same view; a captured record's "Approved plan:" line
+and the typing sensor's prompt carry the plan's first 4 KB, which keeps the
+first paragraph (the reconciliation key) whole. If the required
+context leaves
 no room for the note question, increase the configured model window and retry.
 
 The daemon rejects untrusted browser origins and non-address Host headers across
@@ -744,7 +767,10 @@ contract 3 and intent contract 2.
   take a Constraint's claim to make room for a Requirement. A rule carries its
   claim while its kind is within the first 24 and the shared 16 KB claim budget
   still holds it; past either it is named with an empty claim, never dropped.
-  Topic fallback contributes none. The runner prints them after the guidance,
+  Topic fallback contributes none. An approved spec file in the request's
+  files brings the components its approval marker records (`spec-component:`
+  lines) into the walk, so reading `crate.md` while planning delivers the
+  rules of `crate/` before any file under it exists. The runner prints them after the guidance,
   before the output rule, under "Project rules (hard requirements; your plan
   must satisfy each or say why it does not apply, and list the ones it
   implements in addresses):", and Plan mode ends with a
@@ -770,7 +796,9 @@ contract 3 and intent contract 2.
   `MOOSEDEV_COVERAGE_CLAIM_MIN` (2) distinctive claim tokens (fewer when the
   rule has fewer), or when the rule has none. One `constraint_coverage` receipt
   per rule records the matches and thresholds. An unaddressed rule returns the
-  plan with one note naming every unaddressed rule and its claim: nothing is
+  plan with one note naming every unaddressed rule and its claim, taken from the
+  context records when the rules block named the rule by title only (at most
+  8 KB of claims, then a counted retrieval line): nothing is
   stored, no repair attempt is spent, and snapshots and read files are
   untouched. Returns per planning cycle are limited by
   `MOOSEDEV_COVERAGE_RETURN_LIMIT` (1, at most 2); after that the plan is
@@ -821,7 +849,10 @@ contract 3 and intent contract 2.
   no governing rule or linked record the proposal's prompt did not already
   carry, the edit proceeds (`first_edit_satisfied_absent`) instead of costing
   a turn. When it brings something new, the write is held and the model
-  proposes again with it in view.
+  proposes again with it in view. In Auto mode each step makes one context refresh:
+  dossiers for the files read, and governing rules (`rule_files`, no dossier)
+  for the approved plan's other files too, so the rules of a plan file are in
+  view before its first write without its dossier growing every prompt.
 - Source bounded by scope. The task keeps the full text of every working-set
   file, but a prompt shows it in full only within a source budget: two fifths
   of the prompt budget, which follows the role's `context_window_tokens`, and

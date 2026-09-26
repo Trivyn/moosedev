@@ -214,6 +214,7 @@ async fn verify_daemon(url: &str, root: &Path, data_dir: &Path) -> Result<()> {
             files: vec![],
             evidence_only: true,
             max_bytes: Some(BOUNDED_CONTEXT_PROBE_BYTES),
+            rule_files: Vec::new(),
         })
         .send()
         .await?;

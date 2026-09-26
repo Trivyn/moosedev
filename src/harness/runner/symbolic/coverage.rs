@@ -8,6 +8,9 @@ use super::super::{ContextResponse, Runner};
 use crate::harness::coverage::{assess, CoverageThresholds};
 use crate::harness::protocol::{spec_title_key, GoverningRule};
 
+/// Claim bytes a coverage return may carry for the rules it names.
+const COVERAGE_NOTE_CLAIM_BYTES: usize = 8_000;
+
 impl Runner {
     /// True when the plan was returned; the caller stores nothing.
     pub(in crate::harness::runner) fn plan_coverage_return(
@@ -71,10 +74,37 @@ impl Runner {
         let mut note = String::from(
             "Plan not stored: its summary does not say how the change satisfies these project rules, or why they do not apply. Propose the plan again with a summary that addresses each one (this checks the summary\'s wording only; required checks judge the code).\n",
         );
+        // A rule past the rules block's claim cap arrives there as a title.
+        // The plan cannot address wording it never saw, so the note carries
+        // each unmet rule's claim from the context records, within a bound.
+        let mut claim_bytes = 0;
+        let mut untold = 0;
         for rule in &unmet {
+            let claim = if rule.claim.is_empty() {
+                context
+                    .records
+                    .iter()
+                    .find(|record| record.iri == rule.iri)
+                    .map_or("", |record| record.claim.as_str())
+            } else {
+                rule.claim.as_str()
+            };
+            let claim =
+                if !claim.is_empty() && claim_bytes + claim.len() <= COVERAGE_NOTE_CLAIM_BYTES {
+                    claim_bytes += claim.len();
+                    claim
+                } else {
+                    untold += 1;
+                    ""
+                };
             note.push_str(&format!(
                 "\n[{}] {} ({})\n{}",
-                rule.kind, rule.label, rule.iri, rule.claim
+                rule.kind, rule.label, rule.iri, claim
+            ));
+        }
+        if untold > 0 {
+            note.push_str(&format!(
+                "\n{untold} rule(s) above are named without their claim; search project knowledge for their claims\n"
             ));
         }
         self.event(format!(

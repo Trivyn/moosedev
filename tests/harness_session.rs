@@ -59,6 +59,7 @@ async fn context(
     Json(ContextResponse {
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
+        context_contracts: vec![1],
         project_root: state.root.to_string_lossy().into_owned(),
         revision: "accepted-v1".into(),
         evidence_iris: vec![],

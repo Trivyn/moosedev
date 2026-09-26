@@ -352,10 +352,14 @@ pub(super) fn confined_command(
     // bound over the read-only snapshot; `carry_generated_lockfile` reads it
     // back for the next command.
     for file in super::writable_snapshot_files(source) {
-        let backing = scratch.join("build").join(
-            file.file_name()
-                .context("writable snapshot file has a name")?,
-        );
+        let root = file
+            .parent()
+            .and_then(|directory| directory.strip_prefix(source).ok())
+            .context("writable snapshot file lies in the snapshot")?;
+        let backing = super::lockfile_backing(scratch, root);
+        if let Some(parent) = backing.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::copy(&file, &backing)?;
         process.arg("--bind").arg(&backing).arg(&file);
     }

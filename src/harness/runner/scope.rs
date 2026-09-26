@@ -32,6 +32,10 @@ impl Runner {
             context.intent_contracts.contains(&2),
             "project daemon does not advertise intent contract v2; upgrade the daemon before creating a new harness task"
         );
+        anyhow::ensure!(
+            context.context_contracts.contains(&1),
+            "project daemon does not advertise context contract v1; upgrade the daemon before creating a new harness task"
+        );
         Ok(())
     }
 }
@@ -348,6 +352,7 @@ mod tests {
             delivery_receipt: None,
             capture_contracts,
             intent_contracts: vec![2],
+            context_contracts: vec![1],
             governing_rules: vec![],
             approved_specs: vec![],
         };
@@ -356,5 +361,12 @@ mod tests {
             .to_string();
         assert!(error.contains("capture contract v3"), "{error}");
         Runner::validate_daemon_contracts(&context(vec![2, 3])).unwrap();
+        // A daemon from before `rule_files` is refused before any task starts.
+        let mut old = context(vec![2, 3]);
+        old.context_contracts.clear();
+        let error = Runner::validate_daemon_contracts(&old)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("context contract v1"), "{error}");
     }
 }

@@ -101,8 +101,20 @@ impl Runner {
                 checks,
                 ..
             } => {
-                ensure!(!summary.trim().is_empty() && summary.len() <= MAX_PLAN_SUMMARY && !files.is_empty() && files.len() <= MAX_FILES,
-                    "plan requires a nonempty summary of at most 4000 bytes and 1..100 explicit file paths");
+                ensure!(
+                    !summary.trim().is_empty(),
+                    "plan requires a nonempty summary"
+                );
+                ensure!(
+                    summary.len() <= MAX_PLAN_SUMMARY,
+                    "plan summary is {} bytes; the bound is {MAX_PLAN_SUMMARY}",
+                    summary.len()
+                );
+                ensure!(
+                    !files.is_empty() && files.len() <= MAX_FILES,
+                    "plan lists {} file paths; it requires 1..{MAX_FILES} explicit file paths",
+                    files.len()
+                );
                 ensure!(
                     !checks.is_empty()
                         && checks.len() <= 20

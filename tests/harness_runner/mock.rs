@@ -33,6 +33,8 @@ pub(super) struct Script {
     pub(super) context: Option<String>,
     /// Governing rules the full context returns.
     pub(super) governing_rules: Vec<GoverningRule>,
+    /// Records the context route returns, with the claims it supplied.
+    pub(super) context_records: Vec<ContextRecord>,
     /// Rules the full context adds only when its request names the file.
     pub(super) file_rules: Vec<(String, GoverningRule)>,
     /// Approved specs the full context reports.
@@ -264,6 +266,7 @@ pub(super) async fn context(
             Json(ContextResponse {
                 capture_contracts: vec![2, 3],
                 intent_contracts: vec![2],
+                context_contracts: vec![1],
                 project_root: script.root.to_string_lossy().into_owned(),
                 revision: script.revision.clone(),
                 evidence_iris: knowledge
@@ -281,7 +284,7 @@ pub(super) async fn context(
     }
     script
         .requests
-        .push(json!({"kind":"context","files":request.files}));
+        .push(json!({"kind":"context","files":request.files,"rule_files":request.rule_files}));
     let status = if script.fail_context {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -292,11 +295,12 @@ pub(super) async fn context(
         Json(ContextResponse {
             capture_contracts: vec![2, 3],
             intent_contracts: vec![2],
+            context_contracts: vec![1],
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             evidence_iris: vec![],
             delivery_receipt: None,
-            records: vec![],
+            records: script.context_records.clone(),
             governing_rules: script
                 .governing_rules
                 .iter()
@@ -305,7 +309,9 @@ pub(super) async fn context(
                     script
                         .file_rules
                         .iter()
-                        .filter(|(file, _)| request.files.contains(file))
+                        .filter(|(file, _)| {
+                            request.files.contains(file) || request.rule_files.contains(file)
+                        })
                         .map(|(_, rule)| rule.clone()),
                 )
                 .collect(),

@@ -19,6 +19,11 @@ pub struct ContextRequest {
     /// file-context requests use their established dossier claim bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
+    /// Files whose governing rules are wanted without their dossiers: an
+    /// approved plan's files not yet read. The walk starts from them as from
+    /// `files`; only `files` get a dossier and a policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +139,9 @@ pub struct ContextResponse {
     /// Supported deterministic intent-discovery contracts.
     #[serde(default)]
     pub intent_contracts: Vec<u32>,
+    /// Supported context-request contracts: 1 accepts `rule_files`.
+    #[serde(default)]
+    pub context_contracts: Vec<u32>,
     /// The governing rules of the requested files, direct rules first and
     /// Constraints ahead of Requirements. The runner renders them as Project
     /// rules; linked evidence points there.

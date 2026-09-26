@@ -134,14 +134,20 @@ pub struct LinkedEvidence {
 /// Direct records are the dossier's: every record linked to the files' code
 /// entities (whole-file module and definitions). Components are the union of
 /// what the entities realize, what the files' paths are declared under, and the
-/// components the direct records concern or constrain.
-pub fn linked_evidence(state: &AppState, files: &[String]) -> anyhow::Result<LinkedEvidence> {
+/// components the direct records concern or constrain, plus `governed`:
+/// components the caller knows the files are about although no path places
+/// them there, such as the components an approved spec's records govern.
+pub fn linked_evidence(
+    state: &AppState,
+    files: &[String],
+    governed: &[String],
+) -> anyhow::Result<LinkedEvidence> {
     let terms = CodeTerms::resolve(state)?;
     let pairs = LinkPairs::resolve(state)?;
     let catalog = load_components(state)?;
     let mut direct: BTreeMap<String, RecordSummary> = BTreeMap::new();
     let mut direct_file: BTreeMap<String, String> = BTreeMap::new();
-    let mut components: BTreeSet<String> = BTreeSet::new();
+    let mut components: BTreeSet<String> = governed.iter().cloned().collect();
     for file in files {
         for entity in file_entity_iris(state, file)? {
             for record in direct_records_for_entity(state, &entity)? {

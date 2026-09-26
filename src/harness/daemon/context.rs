@@ -33,7 +33,11 @@ pub fn context_snapshot(
         "at most 100 files per context request"
     );
     anyhow::ensure!(
-        !request.evidence_only || request.files.is_empty(),
+        request.rule_files.len() <= 100,
+        "at most 100 rule files per context request"
+    );
+    anyhow::ensure!(
+        !request.evidence_only || (request.files.is_empty() && request.rule_files.is_empty()),
         "an evidence-only context request takes no files"
     );
     state.try_ensure_enriched()?;
@@ -65,7 +69,20 @@ pub fn context_snapshot(
         // Linked evidence leads (AD 85da8700): the walk from the files' code
         // replaces similarity-ranked topic recall, which remains only as a
         // fallback when nothing is linked beyond what the dossiers print.
-        let linked = graph::linked_evidence(state, &request.files)?;
+        // An approved spec in the working set is about the components its
+        // records govern, wherever those live: reading `crate.md` at the
+        // project root delivers the rules of `crate/` while planning, before
+        // any file under it exists.
+        let mut walked = request.files.clone();
+        walked.extend(
+            request
+                .rule_files
+                .iter()
+                .filter(|file| !request.files.contains(file))
+                .cloned(),
+        );
+        let governed = super::spec::spec_components_for_files(state, &walked)?;
+        let linked = graph::linked_evidence(state, &walked, &governed)?;
         file_record_iris.extend(linked.excluded.iter().cloned());
         governing_rules = graph::governing_rules(&linked)
             .into_iter()
@@ -285,6 +302,7 @@ pub fn context_snapshot(
         delivery_receipt,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
+        context_contracts: vec![1],
         governing_rules,
     })
 }

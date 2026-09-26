@@ -120,7 +120,9 @@ impl Runner {
         };
         self.symbolic_state_mut().plan_grounded = true;
         let request = PlanGroundRequest {
-            text: format!("{}\n{reason}", plan.summary),
+            // The reason first: the daemon scans a bounded window, and a
+            // plan may be long.
+            text: format!("{reason}\n{}", plan.summary),
             files: plan.files,
         };
         let response = match self.ground_plan(&request).await {

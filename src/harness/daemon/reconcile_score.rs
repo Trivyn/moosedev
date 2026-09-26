@@ -146,9 +146,39 @@ fn normalize_title(text: &str) -> String {
 
 const APPROVED_PLAN_MARKER: &str = "Approved plan: ";
 
+/// Bytes of an approved plan a record or a sensor prompt carries. A plan may
+/// be as long as the work needs; the task journal keeps all of it.
+const PLAN_EXCERPT_BYTES: usize = 4_000;
+
+/// The start of an approved plan, within [`PLAN_EXCERPT_BYTES`]. Its first
+/// paragraph, which [`reconcile_key`] reads, is kept whole whenever it fits,
+/// so plans that always fitted keep the key they had.
+pub fn plan_excerpt(plan_summary: &str) -> String {
+    // The marker is a paragraph of its own, so it never joins the first
+    // paragraph the key reads.
+    const MARKER: &str = "\n\n[…]";
+    let plan = plan_summary.trim();
+    if plan.len() <= PLAN_EXCERPT_BYTES {
+        return plan.to_owned();
+    }
+    let mut end = PLAN_EXCERPT_BYTES - MARKER.len();
+    while !plan.is_char_boundary(end) {
+        end -= 1;
+    }
+    // A first paragraph that fits the bound is never cut for the marker's
+    // sake: the excerpt may then pass the bound by the marker alone.
+    if let Some(first) = plan
+        .find("\n\n")
+        .filter(|&first| first <= PLAN_EXCERPT_BYTES)
+    {
+        end = end.max(first);
+    }
+    format!("{}{MARKER}", plan[..end].trim_end())
+}
+
 /// The description paragraph that carries a symbolic decision's approved plan.
 pub fn approved_plan_line(plan_summary: &str) -> String {
-    format!("{APPROVED_PLAN_MARKER}{}", plan_summary.trim())
+    format!("{APPROVED_PLAN_MARKER}{}", plan_excerpt(plan_summary))
 }
 
 /// The text that stands for a record in the title term of the score: the
@@ -334,7 +364,34 @@ pub fn load_receipt(state: &AppState, id: &str) -> anyhow::Result<Option<ScoreRe
 
 #[cfg(test)]
 mod tests {
-    use super::{approved_plan_line, reconcile_key};
+    use super::{approved_plan_line, plan_excerpt, reconcile_key, PLAN_EXCERPT_BYTES};
+
+    #[test]
+    fn a_long_plan_keeps_the_key_it_would_have_had_whole() {
+        let key = |plan: &str| {
+            reconcile_key(
+                "title",
+                &format!(
+                    "Note.\n\n{}\n\nFiles changed: a.rs.",
+                    approved_plan_line(plan)
+                ),
+            )
+        };
+        // Cuts landing after, inside and just past the first paragraph's
+        // closing blank line all keep the first paragraph whole.
+        for first in [
+            3_000,
+            PLAN_EXCERPT_BYTES - 8,
+            PLAN_EXCERPT_BYTES - 7,
+            PLAN_EXCERPT_BYTES - 6,
+            PLAN_EXCERPT_BYTES,
+        ] {
+            let intent = "i".repeat(first);
+            let plan = format!("{intent}\n\n{}", "r".repeat(10_000));
+            assert!(plan_excerpt(&plan).len() <= PLAN_EXCERPT_BYTES + 8);
+            assert_eq!(key(&plan), key(&intent), "first paragraph of {first} bytes");
+        }
+    }
 
     #[test]
     fn the_key_is_the_approved_plan_when_the_description_carries_one() {

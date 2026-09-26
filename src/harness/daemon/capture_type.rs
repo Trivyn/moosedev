@@ -405,7 +405,10 @@ async fn type_note(
     let mut raw: Vec<(KnowledgeProposal, ProposalOrigin)> = Vec::new();
     let mut evidence = request.note_evidence.clone();
     if evidence.is_empty() {
-        evidence.push(format!("approved plan: {}", request.plan_summary));
+        evidence.push(format!(
+            "approved plan: {}",
+            super::reconcile_score::plan_excerpt(&request.plan_summary)
+        ));
     }
     // A check that failed, then passed after an edit, is how the change was
     // verified. That is evidence for the decision, not a Lesson of its own: a
@@ -863,7 +866,7 @@ async fn sensor_typing(
 ) -> anyhow::Result<(SensorTyping, Option<JsonRecovery>)> {
     let prompt = format!(
         "You type one engineer's note into durable software-project knowledge. Use only what the note and the listed facts state; do not invent.\n\nObjective of the approved plan: {}\nFiles changed: {}\nChecks: {}\n\nThings that went wrong or were corrected in this task (cite by number):\n{}\n\nNote:\n{}\n\nReturn up to {MAX_SENSOR_PROPOSALS} proposals. Kinds: ArchitecturalDecision (a choice and why), Lesson (a non-obvious gotcha this task ran into), AntiPattern (something that failed here and should be avoided). A Lesson or AntiPattern must list in support the numbers of the events above that it was learned from; with none, it is not a lesson of this project. Hard rules and requirements come from the human or the spec, not from this note, so never propose them. Titles are short names under 100 characters; descriptions state the claim in one or two sentences.\n\nNot knowledge, so never propose it: a plan to do something later, or a choice to postpone a requirement or constraint; and general programming, language or tool knowledge any competent engineer already has (how a compiler, build tool or type system behaves, calling a function with the right types). A Lesson is something about this project that someone new to it would get wrong. Return an empty list rather than a generic claim, and when the note carries no durable claim.",
-        request.plan_summary.trim(),
+        super::reconcile_score::plan_excerpt(&request.plan_summary),
         if request.changed_files.is_empty() { "none".to_string() } else { request.changed_files.join(", ") },
         request
             .check_history

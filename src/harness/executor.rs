@@ -230,49 +230,122 @@ fn canonical_or_absolute(path: &Path) -> Result<PathBuf> {
     }
 }
 
-/// The toolchain's lockfile is the one file a command may write in its
+/// A Cargo lockfile is the one kind of file a command may write in its
 /// read-only source snapshot: Cargo refuses to build a project that has no
-/// `Cargo.lock` unless it can create one. A lockfile the toolchain generated
-/// in the previous snapshot is carried into the next, so a project that has
-/// not committed one is resolved once per task, not once per command. A
-/// project lockfile always wins; the empty file stands for "none yet", which
-/// Cargo treats as no lockfile.
+/// `Cargo.lock` unless it can create one. Every lockfile root the snapshot
+/// holds gets one (see [`cargo_lockfile_roots`]), not only the top level, so
+/// a standalone crate in a subdirectory builds too. A lockfile the toolchain
+/// generated in the previous snapshot is carried into the next, so a project
+/// that has not committed one is resolved once per task, not once per
+/// command. A project lockfile always wins; the empty file stands for "none
+/// yet", which Cargo treats as no lockfile.
 fn carry_generated_lockfile(scratch: &Path, previous: &Path, staged: &Path) -> Result<()> {
-    if !staged.join("Cargo.toml").is_file() || staged.join("Cargo.lock").exists() {
-        return Ok(());
-    }
-    let destination = staged.join("Cargo.lock");
-    // Linux binds a build-side copy over the snapshot, so the generated
-    // content lives there; macOS writes the snapshot file itself.
-    let carried = [
-        scratch.join("build/Cargo.lock"),
-        previous.join("Cargo.lock"),
-    ]
-    .into_iter()
-    .find(|path| {
-        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-    });
-    match carried {
-        Some(path) => {
-            fs::copy(&path, &destination)?;
+    for root in cargo_lockfile_roots(staged) {
+        let destination = staged.join(&root).join("Cargo.lock");
+        if destination.exists() {
+            continue;
         }
-        None => {
-            fs::File::create(&destination)?;
+        // Linux binds a build-side copy over the snapshot, so the generated
+        // content lives there; macOS writes the snapshot file itself.
+        let carried = [
+            lockfile_backing(scratch, &root),
+            previous.join(&root).join("Cargo.lock"),
+        ]
+        .into_iter()
+        .find(|path| {
+            fs::symlink_metadata(path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        });
+        match carried {
+            Some(path) => {
+                fs::copy(&path, &destination)?;
+            }
+            None => {
+                fs::File::create(&destination)?;
+            }
         }
     }
     Ok(())
 }
 
-/// The snapshot files a confined command may write. Today that is only the
-/// Cargo lockfile of a Cargo project, and only when the snapshot carries one
-/// the toolchain may fill (see `carry_generated_lockfile`).
-pub(super) fn writable_snapshot_files(source: &Path) -> Vec<PathBuf> {
-    let lockfile = source.join("Cargo.lock");
-    if source.join("Cargo.toml").is_file() && lockfile.is_file() {
-        vec![lockfile]
+/// Where Linux keeps the writable copy of the lockfile at `root` (relative
+/// to the snapshot): `build/Cargo.lock` for the top level, and a path of its
+/// own under `build/lockfiles/` for a nested root, so two roots never share
+/// one copy.
+pub(super) fn lockfile_backing(scratch: &Path, root: &Path) -> PathBuf {
+    if root.as_os_str().is_empty() {
+        scratch.join("build/Cargo.lock")
     } else {
-        Vec::new()
+        scratch
+            .join("build/lockfiles")
+            .join(root)
+            .join("Cargo.lock")
     }
+}
+
+/// Directories of the snapshot, relative to it, where Cargo keeps a lockfile:
+/// each one holding a `Cargo.toml`, unless a manifest above it declares a
+/// `[workspace]`, whose root then owns the lockfile; a manifest that declares
+/// its own `[workspace]` is always a root. Build output and hidden
+/// directories are skipped, and the walk is bounded in depth and count.
+fn cargo_lockfile_roots(source: &Path) -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 8;
+    const MAX_ROOTS: usize = 256;
+    let declares_workspace = |dir: &Path| {
+        fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|manifest| {
+            manifest
+                .lines()
+                .any(|line| line.trim_start().starts_with("[workspace"))
+        })
+    };
+    let mut roots = Vec::new();
+    // (relative directory, whether a manifest above declares a workspace)
+    let mut pending = vec![(PathBuf::new(), false)];
+    while let Some((relative, in_workspace)) = pending.pop() {
+        let directory = source.join(&relative);
+        let manifest = directory.join("Cargo.toml").is_file();
+        let workspace = manifest && declares_workspace(&directory);
+        // A workspace of its own owns its lockfile even inside another
+        // workspace's tree (an excluded tool, say).
+        if manifest && (!in_workspace || workspace) {
+            roots.push(relative.clone());
+            if roots.len() == MAX_ROOTS {
+                break;
+            }
+        }
+        let below = in_workspace || workspace;
+        if relative.components().count() == MAX_DEPTH {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut children: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                !name.starts_with('.') && name != "target" && name != "node_modules"
+            })
+            .map(|name| relative.join(name))
+            .collect();
+        children.sort();
+        pending.extend(children.into_iter().rev().map(|child| (child, below)));
+    }
+    roots.sort();
+    roots
+}
+
+/// The snapshot files a confined command may write: the Cargo lockfile of
+/// each lockfile root, when the snapshot carries one the toolchain may fill
+/// (see `carry_generated_lockfile`).
+pub(super) fn writable_snapshot_files(source: &Path) -> Vec<PathBuf> {
+    cargo_lockfile_roots(source)
+        .into_iter()
+        .map(|root| source.join(root).join("Cargo.lock"))
+        .filter(|lockfile| lockfile.is_file())
+        .collect()
 }
 
 fn validated_permission_paths(

@@ -2,6 +2,7 @@
 //! retyped under fresh ids when the daemon rejects the typing, and
 //! invalidated when the evidence it was typed against changes.
 use super::super::model::observation_preview;
+use super::super::plan_view::{plan_view, PLAN_VIEW_BYTES};
 use super::super::scope::changed_files;
 use super::super::source::failed_command_output;
 use super::super::{ApprovedPlan, Phase, Runner};
@@ -11,6 +12,12 @@ use crate::harness::protocol::{
     SupportEvent, TypedDisposition,
 };
 use anyhow::{bail, Context, Result};
+
+/// Where the whole of a plan shown in part can be read, for a reader that
+/// cannot page the journal.
+const JOURNAL_ROUTE: &str = "the whole plan is kept in the task journal";
+/// The smallest share of the note's plan room one approved plan is given.
+const MIN_PLAN_SHARE: usize = 800;
 use serde_json::json;
 
 impl Runner {
@@ -89,6 +96,8 @@ impl Runner {
                     operation_id: state.operation_id.clone(),
                     note: state.note.clone(),
                     note_evidence: vec![format!("Event {}: capture note", state.note_event)],
+                    // The daemon bounds it where it writes it, keeping the
+                    // first paragraph its reconciliation key reads.
                     plan_summary: plan.summary.clone(),
                     changed_files: self.changed_file_names(),
                     check_history: self
@@ -401,7 +410,8 @@ impl Runner {
     /// Every plan approved in this task with the edits made under it, oldest
     /// first. A replan replaces `task.plan`, and the earlier plan's work is
     /// often the decision worth recording, so the note is asked about all of
-    /// it. Edit previews shrink to fit the budget; plan summaries are kept.
+    /// it. Each plan summary is shown within its share of the plan view,
+    /// and edit previews shrink to fit what is left.
     fn capture_note_work(&self) -> String {
         const BUDGET: usize = 8_000;
         let current;
@@ -423,7 +433,27 @@ impl Runner {
         } else {
             &self.task.approved_plans
         };
-        let summaries: usize = plans.iter().map(|plan| plan.summary.len() + 32).sum();
+        // Each plan as the note is shown it: within its share of the
+        // summary room, focused on the files its edits changed.
+        // Room enough for each plan's intent and closing line, even when
+        // many plans together pass the shared view size.
+        let share = (PLAN_VIEW_BYTES / plans.len().max(1)).max(MIN_PLAN_SHARE);
+        let views: Vec<String> = plans
+            .iter()
+            .enumerate()
+            .map(|(index, plan)| {
+                let end = plans
+                    .get(index + 1)
+                    .map_or(self.task.edits.len(), |next| next.edit_start)
+                    .min(self.task.edits.len());
+                let edited: Vec<String> = self.task.edits[plan.edit_start.min(end)..end]
+                    .iter()
+                    .map(|edit| edit.file.clone())
+                    .collect();
+                plan_view(&plan.summary, &edited, share, JOURNAL_ROUTE)
+            })
+            .collect();
+        let summaries: usize = views.iter().map(|view| view.len() + 32).sum();
         let edit_count = self.task.edits.len().max(1);
         let per_edit = (BUDGET.saturating_sub(summaries) / edit_count).clamp(0, 600);
         let mut out = String::new();
@@ -436,7 +466,7 @@ impl Runner {
                 "Approved plan {} of {}:\n{}\n",
                 index + 1,
                 plans.len(),
-                plan.summary.trim()
+                views[index].trim()
             ));
             let start = plan.edit_start.min(end);
             for edit in &self.task.edits[start..end] {
