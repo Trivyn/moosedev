@@ -34,6 +34,7 @@ class PortTests(unittest.TestCase):
         self.assertTrue(receipt["covered"])
         self.assertFalse(any("example" in token for token in receipt["claim_matched"]))
         self.assertTrue(check("Retry limit only. The acknowledged-chunk resume rule does not apply here.")["covered"])
+        self.assertTrue(check("Retry limit only. The acknowledged-chunk resume rule is deferred: it lies outside this objective.")["covered"])
         receipt = check("Wrap send() in a loop with attempt counter max_attempts = 5 and backoff.")
         self.assertFalse(receipt["covered"])
         self.assertTrue(receipt["label_distinctive"] >= 2 and receipt["claim_distinctive"] >= 2)

@@ -25,6 +25,15 @@ pub(super) enum Step {
     Read {
         file: String,
     },
+    /// A model read of a file whose current text the prompt already covers.
+    /// It journals as the read the model proposed; dispatch refuses it
+    /// instead of rotating the source tiers (badciv 40cef4a5).
+    #[serde(rename = "read")]
+    ReadRefused {
+        file: String,
+        #[serde(skip)]
+        reason: String,
+    },
     Search {
         query: String,
     },
@@ -233,7 +242,12 @@ impl Runner {
             | Action::Edit { ref file, .. } => file,
             Action::Inspect { event, offset } => return Ok(Step::Inspect { event, offset }),
             Action::Reply { message, then } => return Ok(Step::Reply { message, then }),
-            Action::Read { file } => return Ok(Step::Read { file }),
+            Action::Read { file } => {
+                return Ok(match self.redundant_read(&file) {
+                    Some(reason) => Step::ReadRefused { file, reason },
+                    None => Step::Read { file },
+                })
+            }
             Action::Search { query } => return Ok(Step::Search { query }),
             Action::Plan {
                 summary,
@@ -382,6 +396,46 @@ impl Runner {
             before,
             after,
         })
+    }
+}
+
+impl Runner {
+    /// Why a model read of `file` would add nothing, or `None` when it
+    /// should run. The prompt that produced the read already showed the
+    /// file's current text in full, or it outlined the file only for space
+    /// and the model's earlier read of it is still current. Reading it
+    /// again would push the next file out of the budget: with more source
+    /// than fits, a model reading each file in turn evicts exactly the file
+    /// it reads next (badciv 40cef4a5, Lesson f5d2b5f9). Reads the guards
+    /// make are never judged here.
+    fn redundant_read(&self, file: &str) -> Option<String> {
+        let read = self.task.read_files.iter().any(|known| known == file);
+        if read && self.task.source_full.contains(file) {
+            return Some(format!(
+                "{file} is shown in full under Source and is current, so it was not read again."
+            ));
+        }
+        if !self.task.source_outlined.contains(file) || !self.read_is_current(file) {
+            return None;
+        }
+        let prefix = format!("Read {file}: ");
+        let event = self
+            .task
+            .events
+            .iter()
+            .rposition(|event| event.message.starts_with(&prefix))?;
+        let budget = self
+            .source_budget
+            .map(|bytes| format!(" of {bytes} bytes"))
+            .unwrap_or_default();
+        let next = if self.task.mode == Mode::Plan {
+            format!("Plan from its outline, which lists its declarations with line numbers, or inspect event {event}.")
+        } else {
+            format!("Inspect event {event}, or propose the edit and the harness shows its full source first.")
+        };
+        Some(format!(
+            "{file} is outlined only because the working set is larger than the source budget{budget}; its full text at event {event} is unchanged, so it was not read again. {next}"
+        ))
     }
 }
 

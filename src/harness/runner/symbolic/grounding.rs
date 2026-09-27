@@ -203,7 +203,7 @@ impl Runner {
     /// True when the model read `file` earlier in this task and its content is
     /// unchanged since that read, even if a stored plan has since narrowed the
     /// working set.
-    fn read_is_current(&self, file: &str) -> bool {
+    pub(in crate::harness::runner) fn read_is_current(&self, file: &str) -> bool {
         let Some(read) = self
             .task
             .symbolic

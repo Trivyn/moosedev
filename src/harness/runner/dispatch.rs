@@ -361,7 +361,10 @@ impl Runner {
         self.persist()?;
         self.task.last_response_observation = matches!(
             step,
-            Step::Inspect { .. } | Step::Read { .. } | Step::Search { .. }
+            Step::Inspect { .. }
+                | Step::Read { .. }
+                | Step::ReadRefused { .. }
+                | Step::Search { .. }
         );
         match step {
             Step::Inspect { event, offset } => {
@@ -401,6 +404,9 @@ impl Runner {
             Step::Read { file } => {
                 self.read_into_working_set(&file).await?;
                 self.task.last_response = format!("Read {file} with its governing knowledge.");
+            }
+            Step::ReadRefused { file, reason } => {
+                self.refuse_read(&file, &reason);
             }
             Step::Search { query } => {
                 // A query already asked in this task returns the same records;
@@ -1037,6 +1043,7 @@ pub(super) const DIAGNOSTICS_BYTES: usize = 4_000;
 
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";
+const READ_REFUSED: &str = "Not read again:";
 /// Room for the "Journal event N, bytes a..b of c:" line above a page.
 const INSPECT_HEADER_RESERVE: usize = 96;
 const VACUOUS_RETURN_LIMIT: usize = 1;
@@ -1339,6 +1346,52 @@ impl Runner {
         self.event(message.clone());
         self.task.last_response = message;
         true
+    }
+
+    /// Refuse a read whose file the prompt already covers, leaving the source
+    /// tiers as they were. A second refusal while the model is only looking
+    /// (reads, inspects and searches since the last human message, edit or
+    /// other action) parks the task for the human, so refusals cannot become
+    /// the next loop.
+    fn refuse_read(&mut self, file: &str, reason: &str) {
+        // The last event is this step's own journaled action.
+        let before = self.task.events.len().saturating_sub(1);
+        let mut refused_before = false;
+        for earlier in self.task.events[..before].iter().rev() {
+            let message = earlier.message.as_str();
+            if message.starts_with(READ_REFUSED) {
+                refused_before = true;
+                break;
+            }
+            let looking = ["read", "inspect", "search"]
+                .iter()
+                .any(|kind| message.starts_with(&format!("Model action: {{\"action\":\"{kind}\"")));
+            // An edit a guard turned into a read journals as a read, after
+            // its guard's event: that attempt is progress, not looking.
+            let guarded_edit = ["First-edit guard:", "Edit guard:", "Fix guard:"]
+                .iter()
+                .any(|guard| message.starts_with(guard));
+            if message.starts_with("Human ")
+                || message.starts_with("Applied edit")
+                || guarded_edit
+                || (message.starts_with("Model action: ") && !looking)
+            {
+                break;
+            }
+        }
+        self.intent_event("read_repeat_refused", &format!("{file}: {reason}"));
+        if refused_before {
+            self.event(format!("{READ_REFUSED} parked for guidance ({file})."));
+            self.task.last_response = format!(
+                "The model keeps asking to read files whose current text it already has ({file} last), without planning or editing. Guidance is needed: say what to do next, or /plan to change the approach."
+            );
+            self.task.phase = Phase::AwaitingInput;
+            self.task.turn_finished = true;
+            return;
+        }
+        let message = format!("{READ_REFUSED} {reason}");
+        self.event(message.clone());
+        self.task.last_response = message;
     }
 
     /// Refuse an exact repeat of a command whose output cannot have changed,

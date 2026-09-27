@@ -571,7 +571,10 @@ inside other work leaves that work's objective alone. If the source file or grap
 harness rejects the stale preview and requires `/approve-spec <path>` again.
 
 `/plan` returns to planning, `/continue` resumes interrupted work, and `/new`
-begins a conversation. When the task is waiting on the human instead — a
+begins a conversation. Guidance and `/plan` keep what the model has read: the
+files stay in the working set and are re-read from disk before the next
+prompt. Only a task stopped because its prompt outgrew the budget starts its
+next plan with an empty working set. When the task is waiting on the human instead — a
 question, a spent repair budget, or an interrupted action with an unknown
 outcome — the gate shows the request itself, and `/continue` repeats it rather
 than retrying: only new guidance re-arms a repair. `/resume` lists saved
@@ -904,9 +907,11 @@ contract 3 and intent contract 2.
   delivers the rules of `crate/` before any file under it exists, and reading a
   whole-project spec delivers the project's own rules, not every part's (a
   part's rules reach files under it by path). The runner prints them after the guidance,
-  before the output rule, under "Project rules (hard requirements; your plan
-  must satisfy each or say why it does not apply, and list the ones it
-  implements in addresses):", and Plan mode ends with a
+  before the output rule, under "Project rules (hard requirements for any
+  change that touches them; for each, your plan says it implements the rule,
+  that the rule does not apply to this change, or that it is deferred because
+  it lies outside this objective; list only the ones it implements in
+  addresses):", and Plan mode ends with a
   line naming each rule's title. A rule named without its claim is counted in
   a closing line naming the kinds and the search route. With no governing
   rules there is no block. Each rule is listed once: linked evidence leaves
@@ -944,9 +949,12 @@ contract 3 and intent contract 2.
   compared case- and whitespace-insensitively, a leading `[Kind]` tolerated);
   resolved entries are journaled as `plan_addresses`, and one naming no such
   rule is dropped and journaled as `plan_addresses_unresolved`, never returned
-  to the model. Coverage still reads the summary, so "does not apply" satisfies
-  coverage, but only `addresses` becomes a knowledge edge: a rule the summary
-  merely mentions is never recorded as implemented. Each approved plan is kept
+  to the model. Coverage still reads the summary, so "does not apply" or "deferred"
+  satisfies coverage, but only `addresses` becomes a knowledge edge: a rule
+  the summary merely mentions, or defers because the objective does not reach
+  it, is never recorded as implemented and stays open in spec progress. (One
+  exception predates this: when a plan addresses no rule, capture typing may
+  still link its change to the single rule governing the plan files.) Each approved plan is kept
   in `approved_plans` with its addresses, the rules delivered at its approval
   and where its edits begin; a replan replaces the current plan but not this
   history, and a new objective clears it.
@@ -1024,6 +1032,19 @@ contract 3 and intent contract 2.
   model reading its files in
   a cycle through a budget one file short (badciv 7e0c50eb) is told it is
   swapping, rather than finding out one read at a time.
+- Redundant reads. A model `read` of a file the producing prompt already
+  covers is refused without touching the tiers: a file shown there in full,
+  or a file outlined only for space whose earlier read is still current (its
+  `Read` event is named, and the next step is mode-aware: plan from the
+  outline, inspect that event, or propose the edit so the edit guard shows it
+  in full). A changed file is read as before, and reads the guards make are
+  never judged. The refusal is journaled as `Not read again:` with
+  `read_repeat_refused`. A second refusal while the model is only looking
+  (reads, inspects and searches since the last human message, applied edit,
+  guarded edit attempt or other action) parks the task for guidance. With more
+  source than the budget holds, recency ranking outlines exactly the file a
+  model reads next; badciv 40cef4a5 rotated six files that way for about 40
+  planning steps.
 - Edit guard for outlined files. An edit to a file the producing prompt showed
   only as an outline is not applied: an edit written from an outline would
   guess the text it replaces. The step becomes a read, which makes the file the
@@ -1115,8 +1136,8 @@ contract 3 and intent contract 2.
   values is a mismatch. The edit is held only on a mismatch or when a key is
   defined in a file the task has not read. A file read earlier in the task
   still counts as read after a stored plan narrows the working set, as long as
-  its content is unchanged since that read (`read_snapshots`, cleared when the
-  human restarts planning). On a hold, up to two defining files join the
+  its content is unchanged since that read (`read_snapshots`, cleared only when a
+  task stopped for context overflow is resumed). On a hold, up to two defining files join the
   working set, the note lists the definitions, previews and mismatches, and
   `edit_grounding` is journaled. The same file and keys proposed again apply,
   also after a replan. A grounding route error is journaled and the edit

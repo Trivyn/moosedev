@@ -201,11 +201,10 @@ impl Runner {
         self.task.final_capture = false;
         self.task.mode = Mode::Plan;
         self.task.after_review = Phase::Planning;
-        self.task.read_files.clear();
-        self.task.source.clear();
-        self.clear_source_order();
-        if let Some(state) = self.task.symbolic.as_mut() {
-            state.read_snapshots.clear();
+        // What the model read stays: guidance is about the plan, and source
+        // is re-read from disk before every prompt.
+        if self.overflowed() {
+            self.clear_working_set();
         }
         if self.task.phase == Phase::AwaitingReview {
             self.task.review_continuation = Some(Phase::Planning);
@@ -214,6 +213,23 @@ impl Runner {
         }
         // Existing uncertain capture requests remain frozen for idempotent retry.
         self.persist()
+    }
+
+    /// The task stopped because its prompt outgrew the budget.
+    fn overflowed(&self) -> bool {
+        self.task.last_error_kind.as_deref() == Some("context_overflow")
+    }
+
+    /// Empty what the model has read. Only an overflow stop does this: its
+    /// working set would rebuild the same prompt, and the stop message says
+    /// the working set is cleared.
+    fn clear_working_set(&mut self) {
+        self.task.read_files.clear();
+        self.task.source.clear();
+        self.clear_source_order();
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.read_snapshots.clear();
+        }
     }
 
     pub(super) fn discard_pending_edit(&mut self, reason: &str) -> Result<()> {
@@ -251,11 +267,8 @@ impl Runner {
         self.task.final_capture = false;
         self.task.check_results.clear();
         self.task.after_review = Phase::Planning;
-        self.task.read_files.clear();
-        self.task.source.clear();
-        self.clear_source_order();
-        if let Some(state) = self.task.symbolic.as_mut() {
-            state.read_snapshots.clear();
+        if self.overflowed() {
+            self.clear_working_set();
         }
         self.task.steps = 0;
         self.forget_failure();
@@ -280,19 +293,14 @@ impl Runner {
         // A task stopped because its prompt outgrew the budget would build the
         // same prompt again: the answer returns it to Plan with an empty
         // working set, as the stop message says.
-        let overflow = self.task.last_error_kind.as_deref() == Some("context_overflow");
+        let overflow = self.overflowed();
         if self.task.intent.take().is_some() || overflow {
             self.task.mode = Mode::Plan;
             self.task.approved_revision = None;
             self.task.check_results.clear();
         }
         if overflow {
-            self.task.read_files.clear();
-            self.task.source.clear();
-            self.clear_source_order();
-            if let Some(state) = self.task.symbolic.as_mut() {
-                state.read_snapshots.clear();
-            }
+            self.clear_working_set();
         }
         self.task.phase = if self.task.mode == Mode::Plan {
             Phase::Planning

@@ -74,7 +74,7 @@ impl Runner {
         }
         self.symbolic_state_mut().coverage_returns = returns + 1;
         let mut note = String::from(
-            "Plan not stored: its summary does not say how the change satisfies these project rules, or why they do not apply. Propose the plan again with a summary that addresses each one (this checks the summary\'s wording only; required checks judge the code).\n",
+            "Plan not stored: its summary does not say how the change satisfies these project rules, why they do not apply, or that they are deferred as outside this objective. Propose the plan again with a summary that addresses each one (this checks the summary\'s wording only; required checks judge the code).\n",
         );
         // A rule past the rules block's claim cap arrives there as a title.
         // The plan cannot address wording it never saw, so the note carries

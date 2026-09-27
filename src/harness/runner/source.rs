@@ -155,7 +155,7 @@ pub(super) fn protected_source(blocks: &[SourceBlock]) -> usize {
 /// result and a retry renders it identically.
 fn swap_notice(swapped: &[String], files: usize, total: usize, budget: usize) -> String {
     format!(
-        "Newly shown only as {} to fit the source budget: {}. The {files} files in the working set hold {total} bytes; {budget} bytes of source fit in full. Read a file again only when you need its full text to edit it.\n",
+        "Newly shown only as {} to fit the source budget: {}. The {files} files in the working set hold {total} bytes; {budget} bytes of source fit in full. A file read before and unchanged is not read again: inspect the event of its last read, or propose the edit and the harness shows it in full first.\n",
         if swapped.len() == 1 { "an outline" } else { "outlines" },
         swapped.join(", ")
     )

@@ -234,6 +234,14 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_deferring_the_rule_passes() {
+        let receipt = check(
+            "Retry limit only. The acknowledged-chunk resume rule is deferred: it lies outside this objective.",
+        );
+        assert!(receipt.covered, "{receipt:?}");
+    }
+
+    #[test]
     fn a_plan_in_unrelated_code_vocabulary_still_returns() {
         let receipt =
             check("Wrap send() in a loop with attempt counter max_attempts = 5 and backoff.");
