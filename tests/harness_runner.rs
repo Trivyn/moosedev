@@ -2553,6 +2553,33 @@ async fn settled_language_server_errors_are_shown_and_send_finish_back_once() {
 }
 
 #[tokio::test]
+async fn a_cd_into_an_invented_project_root_is_dropped_and_the_command_runs() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"command","command":"cd /home/user/project-that-is-not-here && test -f code.txt"}));
+    runner.advance().await.unwrap();
+    let events: Vec<&str> = runner
+        .task
+        .events
+        .iter()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| e
+                .starts_with("Command repair: dropped `cd /home/user/project-that-is-not-here`")),
+        "{events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.starts_with("Command: test -f code.txt") && e.contains("Success: true")),
+        "ran in the project root: {events:#?}"
+    );
+}
+
+#[tokio::test]
 async fn an_offered_fix_is_applied_as_an_ordinary_edit_and_refused_once_stale() {
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;

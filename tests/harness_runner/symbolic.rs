@@ -539,6 +539,39 @@ async fn symbolic_scope_escapes_are_bounded_per_task_and_park_for_guidance() {
 }
 
 #[tokio::test]
+async fn symbolic_noop_edit_is_repaired_while_the_language_server_reports_errors() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let mut snapshot = diagnostics(2);
+    snapshot.errors[0].file = "labels.py".into();
+    runner.task.diagnostics = Some(snapshot);
+    for _ in 0..3 {
+        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+    }
+    let error = runner.advance().await.unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("the language server reports 2 error(s) in the current source, the first at labels.py:1: mismatched types 0"),
+        "{rendered}"
+    );
+    assert!(intent_details(&runner, "noop_edit_continuation").is_empty());
+    assert_ne!(runner.task.phase, Phase::Verifying, "not treated as done");
+
+    // An unsettled result proves nothing: the no-op runs the checks.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let mut unsettled = diagnostics(2);
+    unsettled.settled = false;
+    runner.task.diagnostics = Some(unsettled);
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+}
+
+#[tokio::test]
 async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;

@@ -595,6 +595,13 @@ file changes still invalidate approval or fail the executor's exact comparison.
 Deletion continues to require human approval. Legacy whole-file edit requests
 remain readable with their original strict semantics.
 
+A command that begins `cd <absolute path> &&` into a path that does not exist
+has that `cd` dropped: commands already run in the project root, and a small
+model invents one (`cd /home/user/project && cargo test`). The rest runs in
+the root, journaled as `command_cd_repair` with an event naming the dropped
+path. Anything the shell must interpret is left to it: a path with `$`, `~`,
+globs or escapes, a rest containing `||`, or `&&` on a later line.
+
 At the final checkpoint the model answers one plain question about what it
 learned; the daemon types that note into proposals (see "How the harness
 decides"). Existing knowledge is not contemporaneous evidence, and a typed
@@ -1031,7 +1038,10 @@ contract 3 and intent contract 2.
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). A no-op edit (the result equals
   the current source) runs the required checks instead of consuming the repair
-  budget (`noop_edit_continuation`). Neither a no-op edit nor a finish reruns
+  budget (`noop_edit_continuation`), unless the language server has settled
+  errors in that source: then the edit is repaired with their count and the
+  first one, since the source is not done whatever the restated file says.
+  Neither a no-op edit nor a finish reruns
   the required checks while the last failed required check ran against exactly
   this source (no edit since): the rerun would only repeat the result, so the
   action is repaired with the check named (`finish_retest_refused`), a

@@ -227,8 +227,9 @@ impl Runner {
 
     /// A no-op edit says the source is the way the model wants it, so the
     /// required checks run instead of spending the repair budget -- unless
-    /// exactly this source already failed a required check, in which case
-    /// nothing has changed to test and the edit is repaired with that fact.
+    /// exactly this source already failed a required check, or the language
+    /// server has settled errors in it, in which case the edit is repaired
+    /// with that fact.
     /// A model near the floor often ends a repair by restating the file
     /// (Lesson c60cc811); the harness can tell whether that file is untested,
     /// so it decides rather than asking (Constraint cd9f1a96).
@@ -243,6 +244,24 @@ impl Runner {
             return Err(error.context(format!(
                 "the file already reads this way and `{}` failed against exactly this source; make an edit that changes the file to address that failure",
                 failure.command
+            )));
+        }
+        // The language server's settled errors are about exactly this source
+        // too: it is not done, whatever the restated file says (badciv
+        // b443836f: a no-op with 3 errors current became a finish).
+        if let Some(diagnostics) = self
+            .task
+            .diagnostics
+            .as_ref()
+            .filter(|diagnostics| diagnostics.settled && !diagnostics.errors.is_empty())
+        {
+            let first = &diagnostics.errors[0];
+            return Err(error.context(format!(
+                "the file already reads this way, and the language server reports {} error(s) in the current source, the first at {}:{}: {}; make an edit that fixes them",
+                diagnostics.errors.len(),
+                first.file,
+                first.line,
+                first.message.lines().next().unwrap_or_default()
             )));
         }
         let state = self.symbolic_state_mut();

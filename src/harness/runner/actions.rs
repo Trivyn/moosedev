@@ -234,7 +234,11 @@ impl Runner {
                     addresses,
                 })
             }
-            Action::Command { command } => return Ok(Step::Command { command }),
+            Action::Command { command } => {
+                return Ok(Step::Command {
+                    command: self.without_missing_cd(command),
+                })
+            }
             Action::RequestPermission {
                 command,
                 justification,
@@ -368,6 +372,24 @@ impl Runner {
 }
 
 impl Runner {
+    /// `command` without a leading `cd` into an absolute path that does not
+    /// exist. Commands already run in the project root, and a small model
+    /// invents one (`cd /home/user/project && cargo test`: four times over
+    /// badciv runs 7 and 8), which only fails and costs a step.
+    fn without_missing_cd(&mut self, command: String) -> String {
+        let Some((path, rest)) = missing_cd(&command, |path| path.exists()) else {
+            return command;
+        };
+        let detail = format!(
+            "dropped `cd {path}` (no such directory); `{rest}` runs in the project root instead"
+        );
+        self.intent_event("command_cd_repair", &detail);
+        self.event(format!(
+            "Command repair: {detail}. Commands already run in the project root."
+        ));
+        rest
+    }
+
     /// The edit a numbered quick fix makes to the current source: an ordinary
     /// whole-file edit, so it goes through the same approval, grounding,
     /// policy and checking as one the model wrote.
@@ -405,6 +427,49 @@ impl Runner {
             after: Some(after),
         })
     }
+}
+
+/// The path of a leading `cd` into an absolute path that does not exist, and
+/// the command it guards: `cd /home/user/project && cargo test` gives
+/// `("/home/user/project", "cargo test")`. None for anything else, so the
+/// shell decides: a relative or existing path; one the shell would expand
+/// (`$`, `~`, globs, escapes), whose real meaning only it knows; a `cd` alone,
+/// or one followed by `;`, after which the rest runs in the project root
+/// anyway; a rest with `||`, whose fallback dropping the `cd` would skip; and
+/// `&&` on another line, which the shell rejects.
+fn missing_cd(
+    command: &str,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<(String, String)> {
+    let rest = command.trim_start().strip_prefix("cd")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (path, after) = match rest.chars().next()? {
+        quote @ ('\'' | '"') => {
+            let end = rest[1..].find(quote)? + 1;
+            (&rest[1..end], &rest[end + 1..])
+        }
+        _ => {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ';' || c == '&')
+                .unwrap_or(rest.len());
+            rest.split_at(end)
+        }
+    };
+    if !path.starts_with('/')
+        || path.contains(['$', '`', '~', '*', '?', '[', '{', '\\'])
+        || exists(std::path::Path::new(path))
+    {
+        return None;
+    }
+    let remainder = after
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix("&&")?
+        .trim_start();
+    (!remainder.is_empty() && !remainder.contains("||"))
+        .then(|| (path.to_owned(), remainder.to_owned()))
 }
 
 /// Files below this are small enough that resending one costs nothing worth
@@ -654,6 +719,47 @@ pub(super) fn strip_same_junk(text: &str, repair: &SpanRepair) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// badciv b443836f and edc914f6: invented project roots before `&&`.
+    #[test]
+    fn a_cd_into_a_missing_absolute_path_is_dropped() {
+        let missing = |_: &std::path::Path| false;
+        assert_eq!(
+            missing_cd(
+                "cd /home/ryan/src/moosedev && cargo test --workspace 2>&1 | tail -30",
+                missing
+            ),
+            Some((
+                "/home/ryan/src/moosedev".into(),
+                "cargo test --workspace 2>&1 | tail -30".into()
+            ))
+        );
+        assert_eq!(
+            missing_cd("  cd '/home/my project'&&cargo build", missing),
+            Some(("/home/my project".into(), "cargo build".into()))
+        );
+        // Everything else is left to the shell.
+        for command in [
+            "cd badciv-map && cargo test",
+            "cd /home/x; cargo test",
+            "cd /home/x",
+            "cd /home/x &&",
+            "cdx /home/x && ls",
+            "echo cd /home/x && ls",
+            "cd /home/my\\ dir && ls",
+            "cd \"/home/$USER/project\" && ls",
+            "cd ~/project && ls",
+            "cd /home/x && true || echo fallback",
+            "cd /home/x\n&& cargo clean",
+        ] {
+            assert_eq!(missing_cd(command, missing), None, "{command}");
+        }
+        assert_eq!(
+            missing_cd("cd /tmp && ls", |_: &std::path::Path| true),
+            None,
+            "an existing directory is the model's choice"
+        );
+    }
 
     /// badciv-map's shape: nine replaces whose old_text was the whole file,
     /// the last six changing 12 to 308 bytes of about 16 KB.
