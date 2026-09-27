@@ -163,6 +163,20 @@ impl Runner {
                             index + 1
                         );
                     }
+                    // A check whose tool finds its project by a manifest the
+                    // project lacks and the plan does not create fails at
+                    // finish, where the fix is outside the approved files.
+                    if let Some(reason) = crate::harness::executor::missing_project_reason(
+                        self.workspace.root(),
+                        check,
+                        files,
+                    ) {
+                        self.intent_event(
+                            "plan_check_rejected",
+                            &format!("check {}: {reason}", index + 1),
+                        );
+                        anyhow::bail!("plan check {} cannot find its project: {reason}", index + 1);
+                    }
                 }
             }
             Action::Inspect { event, offset } => {

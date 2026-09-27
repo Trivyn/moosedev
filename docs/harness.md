@@ -1124,7 +1124,19 @@ contract 3 and intent contract 2.
 - Checks. Plan checks run verbatim through `/bin/sh`, so each must start with
   an installed program, a shell builtin or a project file. A description in
   place of a command is rejected before plan approval and costs a repair
-  attempt (`plan_check_rejected`). A check the shell cannot start at run time
+  attempt (`plan_check_rejected`). So is a check that could not find its
+  project: a tool the language registry names (`cargo`, `npm`) finds its
+  project by a manifest at or above where it runs, and a check whose
+  manifest neither exists nor is among the plan's files could only fail at
+  finish, with the fix outside the approved files (badciv 4a6d9bed:
+  `cargo test -p badciv-map` from a root with no `Cargo.toml`). The repair
+  names both fixes, planning the manifest or pointing the check at one
+  (`--manifest-path`), and decides neither. Only a command it can read is
+  judged: an optional `cd dir &&`, then one tool running a subcommand that
+  needs the project (`cargo test`, `npm run`), with at most a pipe after it.
+  A further command, an option that runs the tool elsewhere (`-C`,
+  `--prefix`), or quoting passes as before, so a valid plan is never sent
+  back on a guess. A check the shell cannot start at run time
   (exit 126 or 127) is reported as an invalid check, not a failed test
   (`check_unrunnable`). A replan after any check result is a real replan,
   since replanning is how checks change.

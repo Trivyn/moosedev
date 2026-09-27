@@ -43,6 +43,28 @@ pub(crate) struct LanguageSpec {
     /// harness has none for this language yet.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub server: Option<ServerSpec>,
+    /// Programs a verification check runs that find their project by a
+    /// manifest, searching upward from where they run.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub checks: &'static [CheckTool],
+}
+
+/// A program a check runs that finds its project by a manifest at or above
+/// the directory it runs in (`cargo` by `Cargo.toml`). A plan whose check
+/// could find none, on disk or among the plan's files, is sent back.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CheckTool {
+    pub program: &'static str,
+    pub manifest: &'static str,
+    /// The option that names a manifest file instead (`--manifest-path`).
+    pub manifest_option: Option<&'static str>,
+    /// Subcommands that need the project; any other is not judged
+    /// (`cargo --version` needs none).
+    pub subcommands: &'static [&'static str],
+    /// Options that make it run elsewhere (`cargo -C`, `npm --prefix`); a
+    /// check with one is not judged.
+    pub directory_options: &'static [&'static str],
 }
 
 /// A language server the harness runs as a deterministic checker.
@@ -126,6 +148,12 @@ pub(crate) fn producer_registry() -> &'static [ProducerSpec] {
             .map(|hooks| hooks.spec)
             .collect()
     })
+}
+
+/// The check tools of every language, in `LANGUAGES` order.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn check_tools() -> impl Iterator<Item = &'static CheckTool> {
+    LANGUAGES.iter().flat_map(|language| language.checks.iter())
 }
 
 /// The language servers in `LANGUAGES` order.

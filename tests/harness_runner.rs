@@ -3866,6 +3866,45 @@ async fn prose_plan_checks_are_repaired_before_plan_approval() {
     assert!(runner.task.recovery.is_none());
 }
 
+/// badciv 4a6d9bed: the plan's check ran `cargo test -p` from a root with
+/// no Cargo.toml that the plan did not create, so it could only fail at
+/// finish, where the fix lay outside the approved files.
+#[tokio::test]
+async fn a_plan_check_that_cannot_find_its_project_is_repaired_before_approval() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Add the crate","files":["code.txt","map/Cargo.toml","map/src/lib.rs"],"checks":["cargo test -p map"]}));
+    fixture.conversational(json!({"action":"plan","summary":"Add the crate in a workspace","files":["code.txt","Cargo.toml","map/Cargo.toml","map/src/lib.rs"],"checks":["cargo test -p map"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner
+        .task
+        .plan
+        .as_ref()
+        .unwrap()
+        .files
+        .contains(&"Cargo.toml".to_string()));
+    let rejected = intent_details(&runner, "plan_check_rejected");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert!(
+        rejected[0].contains("no Cargo.toml there or above it and none among the plan's files"),
+        "{rejected:?}"
+    );
+    assert!(
+        rejected[0].contains("--manifest-path map/Cargo.toml"),
+        "both fixes are named: {rejected:?}"
+    );
+    assert!(
+        runner.task.events.iter().any(|event| event
+            .message
+            .starts_with("Correcting action, attempt 2 of 3")
+            && event.message.contains("cannot find its project")),
+        "the repair feedback names the check"
+    );
+}
+
 #[tokio::test]
 async fn accepted_governing_capture_is_not_retyped_after_approval_invalidation() {
     // Symbolic campaign v2, cell 7: accepting the final note's governing

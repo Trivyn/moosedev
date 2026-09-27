@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::file_name;
-use super::{FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec};
+use super::{CheckTool, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::treesitter::node_text;
@@ -55,6 +55,15 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
             options: || json!({"checkOnSave": true, "check": {"command": "clippy"}}),
         }),
     }),
+    checks: &[CheckTool {
+        program: "cargo",
+        manifest: "Cargo.toml",
+        manifest_option: Some("--manifest-path"),
+        subcommands: &[
+            "build", "check", "test", "run", "clippy", "bench", "doc", "fmt", "metadata", "tree",
+        ],
+        directory_options: &["-C"],
+    }],
 };
 
 /// A `mod tests;` broken out into its own file. The inline `#[cfg(test)] mod

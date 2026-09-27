@@ -12,7 +12,7 @@ mod workspace;
 
 use super::progress::ProgressSender;
 use anyhow::{Context, Result};
-pub use command_line::unrunnable_reason;
+pub use command_line::{missing_project_reason, unrunnable_reason};
 
 /// Whether confined commands can run on this machine: a real `true` through
 /// the path every command takes (snapshot, environment, confinement,
