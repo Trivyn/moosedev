@@ -7,6 +7,7 @@ prompt-order change can be judged from a run's evidence rather than from
 timings alone.
 """
 import json
+import re
 from pathlib import Path
 
 PURPOSE = "harness_action"
@@ -20,8 +21,10 @@ SECTIONS = (
     ("action meanings", "\nAction meanings:"),
     ("objective", "\nConfigured model ID:"),
     ("accepted knowledge", "Current accepted knowledge:"),
+    ("plan", "\nPlan: "),
     ("entity dossiers", "\nEntity dossiers:"),
     ("source", "Current source, refreshed"),
+    ("human guidance", "\nCurrent human guidance:"),
     ("harness state", "\nCurrent harness state"),
     ("check results", "Required check results"),
     ("observations", "Recent observations ("),
@@ -68,11 +71,23 @@ def section_at(prompt, position):
     return best
 
 
-def line_start(prompt, marker):
+# The parts of the harness state, searched for only after its own heading so
+# text elsewhere in the prompt is never taken for one.
+STATE_SECTIONS = (
+    ("state: mode and phase", "\nMode: "),
+    ("state: files read", "\nFiles already read with dossiers: "),
+    ("state: edits applied", "\nEdits already applied to: "),
+    ("state: diagnostics", "Language server ("),
+    ("allowed actions", "\nThe displayed plan is approved."),
+    ("allowed actions", "\nAllowed actions now:"),
+)
+
+
+def line_start(prompt, marker, start=0):
     """The first place `marker` begins a line of `prompt`, or -1. Full source
     is one JSON line with no raw newlines, so a marker quoted inside a file
     never counts as a section boundary."""
-    at = prompt.find(marker)
+    at = prompt.find(marker, start)
     while at > 0 and not marker.startswith("\n") and prompt[at - 1] != "\n":
         at = prompt.find(marker, at + 1)
     return at
@@ -86,6 +101,12 @@ def sections(prompt):
         for name, marker in SECTIONS
         if (at := line_start(prompt, marker)) >= 0
     )
+    state = line_start(prompt, "\nCurrent harness state")
+    if state >= 0:
+        found = sorted(found + [
+            (at, name) for name, marker in STATE_SECTIONS
+            if (at := line_start(prompt, marker, state)) >= 0
+        ])
     if not found or found[0][0] > 0:
         found.insert(0, (0, "preamble"))
     return [
@@ -161,16 +182,25 @@ def full_source(request):
         return frozenset()
 
 
+def working_set(request):
+    """Every file an action prompt showed, in full or as an outline."""
+    return full_source(request) | frozenset(request.get("source_outlined") or [])
+
+
 def flips(task):
-    """Steps whose full-source set changed from the previous action prompt,
-    the costliest change a prompt makes (every file after the flipped one is
-    resent), and, where the journal records budgets, how many came with a
-    budget change."""
+    """Steps on which a file in the working set both times changed tier (full
+    text to outline or back) from the previous action prompt, the costliest
+    change a prompt makes (every file after it is resent), and, where the
+    journal records budgets, how many came with a budget change."""
     actions = [r for r in task.get("model_requests", [])
                if r.get("purpose") == PURPOSE and isinstance(r.get("prompt"), str)]
     changed = with_budget_change = 0
     for previous, current in zip(actions, actions[1:]):
-        if full_source(previous) != full_source(current):
+        # Only files in the working set both times: a file read or created
+        # for the first time, or dropped by a new plan, is not a flip.
+        before, after = full_source(previous), full_source(current)
+        present = working_set(previous) & working_set(current)
+        if (before & present) != (after & present):
             changed += 1
             budgets = (previous.get("source_budget"), current.get("source_budget"))
             if None not in budgets and budgets[0] != budgets[1]:
@@ -279,6 +309,147 @@ def report(task, move=None):
         "mean_prompt_bytes": round(total / len(pairs)) if pairs else None,
         "first_divergence": dict(sorted(diverged.items(), key=lambda item: -item[1])),
     }
+
+
+# Sections a ledger rebuilds for when they change: they head the prompt or
+# are knowledge the model must not see two versions of.
+LEDGER_REBUILD_SECTIONS = ("preamble", "role and guidance", "project rules", "action meanings",
+                           "objective", "accepted knowledge", "entity dossiers")
+SOURCE_HEADER = "Current source, refreshed before this action:\n"
+
+
+def source_parts(text):
+    """The source section as ({file: full text}, outlines text); None when the
+    section is not in the shape the harness writes."""
+    if not text.startswith(SOURCE_HEADER):
+        return None
+    line, _, outlines = text[len(SOURCE_HEADER):].partition("\n")
+    try:
+        full = json.loads(line)
+    except ValueError:
+        return None
+    return full, outlines
+
+
+def new_lines(before, after):
+    """The lines of `after` not in `before`, joined: the delta a ledger
+    appends for a section that grew or changed in place."""
+    seen = set((before or "").splitlines())
+    return "\n".join(line for line in (after or "").splitlines() if line not in seen)
+
+
+def ledger_replay(task, limit=98_976, cap=0.25, max_age=8):
+    """Offline estimate of an append-when-safe ledger over a run's own
+    prompts: each step either appends what changed after the prompt sent
+    before, or rebuilds (today's prompt) when appending would leave something
+    the model must not see twice. Uncached bytes are counted as the server
+    sees them: from the first byte that differs from the request before, and
+    the whole prompt after a request of another purpose or server."""
+    requests = [r for r in task.get("model_requests", []) if isinstance(r.get("prompt"), str)]
+    cap_bytes = int(limit * cap)
+    today = ledger = 0
+    steps = rebuilds = appends = peak = stale_peak = 0
+    stale_total = 0
+    reasons = {}
+    sent = None          # the ledger's last sent action prompt
+    known = {}           # file -> text the model last saw for it
+    superseded = set()   # files with a stale copy above
+    parts_base = None    # sections of the last rebuild
+    last_parts = None    # sections of the last desired prompt
+    appended = age = 0
+    previous_request, previous_desired = None, None
+    for request in requests:
+        server = (request.get("endpoint"), request.get("model"))
+        if request.get("purpose") != PURPOSE:
+            previous_request = (server, None)
+            continue
+        desired = request["prompt"]
+        warm = previous_request is not None and previous_request[0] == server and previous_request[1] is not None
+        # Today: rebuilt every step.
+        today += len(desired.encode()) - (common_prefix(previous_desired.encode(), desired.encode())
+                                          if warm and previous_desired is not None else 0)
+        previous_desired = desired
+        steps += 1
+        parts = dict(sections(desired))
+        reason = None
+        if sent is None:
+            reason = "first"
+        elif not warm:
+            reason = "cache flushed"
+        elif any(parts.get(name) != last_parts.get(name) for name in LEDGER_REBUILD_SECTIONS):
+            reason = "head or knowledge changed"
+        elif age >= max_age:
+            reason = "age"
+        delta = []
+        if reason is None:
+            now, then = source_parts(parts.get("source", "")), source_parts(last_parts.get("source", ""))
+            if now is None or then is None:
+                reason = "source unparsed"
+            else:
+                full_now, outlines_now = now
+                full_then, _ = then
+                if set(full_then) - set(full_now) - set(known):
+                    pass
+                # A tier change or a file leaving the working set: rebuild.
+                outlined_now = set(re.findall(r"^(\S+) \(", outlines_now, re.M))
+                if (set(full_then) & outlined_now) or (set(full_then) - set(full_now) - outlined_now):
+                    reason = "tier or working set changed"
+                else:
+                    for file, text in full_now.items():
+                        if file not in known:
+                            delta.append(f"{file} (new in the working set):\n{json.dumps(text)}\n")
+                        elif known[file] != text:
+                            if file in superseded:
+                                reason = "second supersede"
+                                break
+                            delta.append(f"{file} as it now reads; this supersedes its copy above:\n{json.dumps(text)}\n")
+                    if reason is None:
+                        added_outlines = new_lines(then[1], outlines_now)
+                        if added_outlines:
+                            delta.append(added_outlines + "\n")
+        if reason is None:
+            for name in ("repository paths", "conversation", "harness state", "check results"):
+                changed = new_lines(last_parts.get(name), parts.get(name))
+                if changed:
+                    delta.append(f"[{name}, changed lines]\n{changed}\n")
+            delta.append((parts.get("observations") or "") + (parts.get("last result") or ""))
+            text = "".join(delta)
+            if appended + len(text.encode()) > cap_bytes or len((sent + text).encode()) > limit:
+                reason = "cap"
+        if reason is None:
+            for chunk in delta:
+                pass
+            for file, text in source_parts(parts["source"])[0].items():
+                if file in known and known[file] != text:
+                    superseded.add(file)
+                known[file] = text
+            new = sent + text
+            cost = len(text.encode())
+            appended += cost
+            age += 1
+            appends += 1
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
+            if reason != "first":
+                rebuilds += 1
+            new = desired
+            cost = len(new.encode()) - (common_prefix(sent.encode(), new.encode()) if warm and sent else 0)
+            full = source_parts(parts.get("source", ""))
+            known = dict(full[0]) if full else {}
+            superseded, appended, age = set(), 0, 0
+        ledger += cost
+        sent, last_parts = new, parts
+        previous_request = (server, new)
+        peak = max(peak, len(new.encode()))
+        stale_peak = max(stale_peak, len(superseded))
+        stale_total += len(superseded)
+    per = lambda value: round(value / steps / 1000, 1) if steps else None
+    return {"steps": steps, "today_uncached_kb_per_step": per(today),
+            "ledger_uncached_kb_per_step": per(ledger), "appends": appends, "rebuilds": rebuilds,
+            "rebuild_reasons": dict(sorted(reasons.items(), key=lambda item: -item[1])),
+            "peak_prompt_kb": round(peak / 1000, 1), "stale_files_peak": stale_peak,
+            "stale_files_mean": round(stale_total / steps, 2) if steps else None,
+            "settings": {"cap": cap, "max_age": max_age, "limit": limit}}
 
 
 def report_file(path, move=None, details=False):

@@ -120,19 +120,25 @@ class PrefixReuseTest(unittest.TestCase):
         self.assertAlmostEqual(report["seconds_per_completion_token"], 0.05, delta=0.001)
 
     def test_flips_count_changes_of_the_full_source_set(self):
-        def action(full, budget=None):
+        def action(full, budget=None, outlined=()):
             prompt = "You are the coding sensor.\nCurrent source, refreshed x\n" + json.dumps(
                 {name: "text" for name in full}) + "\n"
             entry = request(prompt)
+            entry["source_outlined"] = list(outlined)
             if budget is not None:
                 entry.update({"source_full": sorted(full), "source_budget": budget})
             return entry
         # From the prompts alone (older journals): one flip in two pairs.
-        old = prefix_reuse.flips(journal(action(["a", "b"]), action(["a", "b"]), action(["a"])))
+        old = prefix_reuse.flips(journal(action(["a", "b"]), action(["a", "b"]),
+                                         action(["a"], outlined=["b"])))
         self.assertEqual(old, {"steps": 2, "flips": 1, "flips_with_budget_change": None})
         # From the journal's records, with the budget behind each flip.
-        new = prefix_reuse.flips(journal(action(["a", "b"], 100), action(["a"], 90), action(["b"], 90)))
+        new = prefix_reuse.flips(journal(action(["a", "b"], 100), action(["a"], 90, ["b"]),
+                                         action(["b"], 90, ["a"])))
         self.assertEqual(new, {"steps": 2, "flips": 2, "flips_with_budget_change": 1})
+        # A file joining or leaving the working set is not a flip.
+        grown = prefix_reuse.flips(journal(action(["a"]), action(["a", "b"]), action(["b"])))
+        self.assertEqual(grown["flips"], 0)
 
 
 if __name__ == "__main__":

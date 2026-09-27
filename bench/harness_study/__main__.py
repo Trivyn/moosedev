@@ -144,6 +144,13 @@ def main(argv=None):
                          help="reorder every prompt first, e.g. --move 'entity dossiers' source")
     command.add_argument("--details", action="store_true",
                          help="add per-section churn and the prefill/generation latency fit")
+    command = sub.add_parser("prefill-probe", help="time a live model server's prefill on two consecutive journaled prompts, sent as the harness sends them")
+    command.add_argument("journal", type=Path, help="a .moosedev/harness/tasks/<id>.json task journal")
+    command.add_argument("--tools", type=Path, required=True, help="the action tool definitions as the harness sends them (JSON)")
+    command.add_argument("--pair", type=int, default=None, help="which consecutive action pair (default: the median-cost one)")
+    command.add_argument("--repeat", type=int, default=2, help="measurements per variant; the fastest is kept")
+    command.add_argument("--endpoint", default=None, help="override the journal's endpoint")
+    command.add_argument("--model", default=None, help="override the journal's model")
     command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
     command.add_argument("runs", type=Path, nargs="+")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -261,6 +268,11 @@ def main(argv=None):
         from .prefix_reuse import report_file
         move = tuple(args.move) if args.move else None
         print(json.dumps(report_file(args.journal, move, args.details), indent=2))
+        return 0
+    elif args.command == "prefill-probe":
+        from .prefill_probe import probe_file
+        print(json.dumps(probe_file(args.journal, args.tools, pair=args.pair, repeat=args.repeat,
+                                    endpoint=args.endpoint, model=args.model), indent=2))
         return 0
     elif args.command == "crowding-report":
         from .crowding import report as crowding_report
