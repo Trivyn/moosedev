@@ -13,6 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// after step and holds prefill time down (Lesson af16b95e).
 const SOURCE_SHARE_NUMERATOR: usize = 2;
 const SOURCE_SHARE_DENOMINATOR: usize = 5;
+/// Room held back when spare budget is filled with more files in full, so a
+/// small dip in the budget next step does not push them back out (at most an
+/// eighth of the budget).
+const FILL_MARGIN: usize = 2_048;
 /// An outline line longer than this is cut at a character boundary.
 const OUTLINE_LINE_BYTES: usize = 160;
 pub(super) const OUTLINES_HEADER: &str = "Source outlines (these files are in the working set but not shown in full; read one to see it in full before editing it):\n";
@@ -71,6 +75,15 @@ pub(super) struct SourceView {
 }
 
 impl SourceView {
+    /// Files this prompt showed in full.
+    pub fn full(&self) -> BTreeSet<String> {
+        self.placed
+            .iter()
+            .filter(|placed| placed.tier == Tier::Full)
+            .map(|placed| placed.file.clone())
+            .collect()
+    }
+
     /// Files this prompt did not show in full.
     pub fn outlined(&self) -> BTreeSet<String> {
         self.placed
@@ -158,6 +171,7 @@ fn swap_notice_bound(blocks: &[SourceBlock]) -> usize {
 /// The file too large to show in full, when the one the model just read does
 /// not fit the source budget: showing its outline would only have it read
 /// again.
+#[derive(Debug)]
 pub(super) struct Oversized {
     pub file: String,
     pub bytes: usize,
@@ -257,6 +271,7 @@ impl Runner {
         self.task.source_recency.clear();
         self.task.source_outlined.clear();
         self.task.source_outlined_seen.clear();
+        self.task.source_full.clear();
     }
 
     /// The model acted on the last prompt, so it has seen that prompt's
@@ -360,10 +375,17 @@ impl Runner {
         (edited, read, file.to_owned())
     }
 
-    /// Choose each file's tier within `budget` bytes of full source. A file
-    /// that does not fit is shown as its outline and the next one is tried.
-    /// Errs when the file the model just read or edited cannot fit even
-    /// alone.
+    /// Choose each file's tier within `budget` bytes of full source.
+    ///
+    /// Tiers are sticky, because a file that changes tier resends every file
+    /// after it (badciv e461d8ee: flips on 33 of 54 steps were 75% of all
+    /// prefill). The files a step needs (the latest read or edit, those the
+    /// last failure names, those with errors) are shown in full; so are the
+    /// files the last prompt showed in full, while they fit. Over budget,
+    /// the lowest-ranked file that is not needed goes first. Spare room is
+    /// filled in rank order with a margin held back, so a small dip in the
+    /// budget does not undo it. Errs when the file the model just read or
+    /// edited cannot fit even alone.
     pub(super) fn source_view(
         &self,
         blocks: &[SourceBlock],
@@ -373,53 +395,94 @@ impl Runner {
             .iter()
             .map(|block| (block.file.as_str(), block))
             .collect();
-        let mut left = budget;
-        let mut full: Vec<(&str, &Option<String>)> = Vec::new();
-        let mut placed = Vec::new();
-        let mut outlined: Vec<&SourceBlock> = Vec::new();
-        for (file, reason) in self.source_ranking() {
-            let Some(block) = by_file.get(file.as_str()) else {
-                continue;
-            };
-            let text = &self.task.source[&file];
-            let bytes = text.as_ref().map_or(0, String::len);
-            // An absent file is always shown, and its `null` is counted with
-            // the protected part, not against the source budget.
-            if block.short_tier == Tier::Full {
-                full.push((block.file.as_str(), text));
-                placed.push(Placed {
-                    file,
-                    tier: Tier::Full,
-                    bytes,
-                    reason,
-                });
-                continue;
-            }
-            if block.full_cost <= left {
-                left -= block.full_cost;
-                full.push((block.file.as_str(), text));
-                placed.push(Placed {
-                    file,
-                    tier: Tier::Full,
-                    bytes,
-                    reason,
-                });
-                continue;
-            }
-            if reason == "latest" {
+        let ranking: Vec<(String, &'static str, &SourceBlock)> = self
+            .source_ranking()
+            .into_iter()
+            .filter_map(|(file, reason)| {
+                let block = *by_file.get(file.as_str())?;
+                Some((file, reason, block))
+            })
+            .collect();
+        let needed = |reason: &str| matches!(reason, "latest" | "failed_output" | "diagnostics");
+        // An absent file is always shown, and its `null` is counted with the
+        // protected part, not against the source budget.
+        let absent = |block: &SourceBlock| block.short_tier == Tier::Full;
+        if let Some((file, _, block)) = ranking
+            .iter()
+            .find(|(_, reason, block)| *reason == "latest" && !absent(block))
+        {
+            if block.full_cost > budget {
                 return Err(Oversized {
-                    file,
-                    bytes,
+                    file: file.clone(),
+                    bytes: self.task.source[file].as_ref().map_or(0, String::len),
                     budget,
                 });
             }
-            outlined.push(block);
-            placed.push(Placed {
-                file,
-                tier: block.short_tier,
-                bytes,
-                reason: "over_budget",
-            });
+        }
+        let mut chosen: Vec<bool> = ranking
+            .iter()
+            .map(|(file, reason, block)| {
+                absent(block) || needed(reason) || self.task.source_full.contains(file)
+            })
+            .collect();
+        let mut used: usize = ranking
+            .iter()
+            .zip(&chosen)
+            .filter(|((_, _, block), keep)| **keep && !absent(block))
+            .map(|((_, _, block), _)| block.full_cost)
+            .sum();
+        // Over budget: drop from the lowest rank up, files the step does not
+        // need first, then, if it must be, needed ones but the latest.
+        let passes: [&dyn Fn(&str) -> bool; 2] =
+            [&|reason| !needed(reason), &|reason| reason != "latest"];
+        for droppable in passes {
+            for i in (0..ranking.len()).rev() {
+                if used <= budget {
+                    break;
+                }
+                let (_, reason, block) = &ranking[i];
+                if chosen[i] && !absent(block) && droppable(reason) {
+                    chosen[i] = false;
+                    used -= block.full_cost;
+                }
+            }
+        }
+        // Spare room, in rank order, with a margin held back.
+        let fill_limit = budget.saturating_sub(FILL_MARGIN.min(budget / 8));
+        for (i, (_, _, block)) in ranking.iter().enumerate() {
+            if !chosen[i] && used + block.full_cost <= fill_limit {
+                chosen[i] = true;
+                used += block.full_cost;
+            }
+        }
+        let mut full: Vec<(&str, &Option<String>)> = Vec::new();
+        let mut placed = Vec::new();
+        let mut outlined: Vec<&SourceBlock> = Vec::new();
+        for ((file, reason, block), keep) in ranking.iter().zip(&chosen) {
+            let text = &self.task.source[file];
+            let bytes = text.as_ref().map_or(0, String::len);
+            if *keep {
+                full.push((block.file.as_str(), text));
+                let reason = if needed(reason) || !self.task.source_full.contains(file) {
+                    *reason
+                } else {
+                    "kept"
+                };
+                placed.push(Placed {
+                    file: file.clone(),
+                    tier: Tier::Full,
+                    bytes,
+                    reason,
+                });
+            } else {
+                outlined.push(block);
+                placed.push(Placed {
+                    file: file.clone(),
+                    tier: block.short_tier,
+                    bytes,
+                    reason: "over_budget",
+                });
+            }
         }
         let swapped: Vec<String> = placed
             .iter()
@@ -902,5 +965,80 @@ mod tests {
             Vec::<String>::new(),
             "a path must start at a boundary"
         );
+    }
+
+    /// Tiers stay put unless something forces them (badciv e461d8ee: the
+    /// full set changed on 33 of 54 steps, 75% of all prefill).
+    #[tokio::test]
+    async fn tiers_stay_put_unless_something_forces_them() {
+        let project = Project::new("source-sticky");
+        let (big, small) = (module(50), module(8));
+        let (mut runner, server) = runner_with(
+            &project,
+            &[
+                ("a.rs", big.clone()),
+                ("b.rs", big.clone()),
+                ("c.rs", small.clone()),
+                ("d.rs", small.clone()),
+            ],
+        )
+        .await;
+        for file in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            runner.touch_source(file);
+        }
+        let blocks = runner.source_blocks();
+        let cost = |file: &str| {
+            blocks
+                .iter()
+                .find(|block| block.file == file)
+                .unwrap()
+                .full_cost
+        };
+        let full = |view: &SourceView| view.full().into_iter().collect::<Vec<_>>();
+        // Room for one big and both small files, with the margin to spare.
+        let budget = cost("b.rs") + cost("c.rs") + cost("d.rs") + FILL_MARGIN + 100;
+
+        // First prompt: the latest touch, then rank order; a above the
+        // budget is outlined.
+        let view = runner.source_view(&blocks, budget).unwrap();
+        assert_eq!(full(&view), ["b.rs", "c.rs", "d.rs"]);
+        runner.task.source_full = view.full();
+
+        // A dip smaller than the margin, and a reorder of the ranking with
+        // nothing needed: the set holds, although a.rs now outranks b.rs.
+        runner.touch_source("a.rs");
+        runner.touch_source("d.rs");
+        let view = runner.source_view(&blocks, budget - FILL_MARGIN).unwrap();
+        assert_eq!(full(&view), ["b.rs", "c.rs", "d.rs"]);
+        assert!(
+            view.receipt().unwrap().contains("full b.rs"),
+            "{:?}",
+            view.receipt()
+        );
+        assert!(
+            view.placed
+                .iter()
+                .any(|placed| placed.file == "b.rs" && placed.reason == "kept"),
+            "{:?}",
+            view.placed
+        );
+
+        // A needed file comes in and the lowest-ranked kept file gives way.
+        runner.touch_source("a.rs");
+        let view = runner.source_view(&blocks, budget).unwrap();
+        assert_eq!(full(&view), ["a.rs", "c.rs", "d.rs"]);
+        runner.task.source_full = view.full();
+
+        // Spare room fills only with the margin held back: at a budget that
+        // fits b.rs exactly, it stays outlined, so a dip cannot flip it.
+        let exact = cost("a.rs") + cost("b.rs") + cost("c.rs") + cost("d.rs");
+        let view = runner.source_view(&blocks, exact).unwrap();
+        assert_eq!(full(&view), ["a.rs", "c.rs", "d.rs"]);
+        let view = runner.source_view(&blocks, exact + FILL_MARGIN).unwrap();
+        assert_eq!(full(&view), ["a.rs", "b.rs", "c.rs", "d.rs"]);
+
+        // The latest touch that cannot fit alone still stops the prompt.
+        assert!(runner.source_view(&blocks, cost("a.rs") - 1).is_err());
+        server.abort();
     }
 }

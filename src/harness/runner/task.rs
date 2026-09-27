@@ -389,6 +389,10 @@ pub struct Task {
     /// a repair prompt, rebuilt after a rejected action, names it again.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub(super) source_outlined_seen: std::collections::BTreeSet<String>,
+    /// The files the last prompt showed in full. They stay in full while
+    /// they fit: a file that changes tier resends the prompt after it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(super) source_full: std::collections::BTreeSet<String>,
     /// The standing guidance this task was created with, replayed verbatim on
     /// resume. `None` only in journals written before the guidance file.
     #[serde(default, skip_serializing_if = "Option::is_none")]

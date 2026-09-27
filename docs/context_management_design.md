@@ -253,6 +253,27 @@ authoritative state, so it stays. What remains is structural: an edit resends
 the edited file and everything after it, and the conversation, state and
 observations (about 15 KB) change on most steps.
 
+Run 9 (`e461d8ee`) then showed what the average hid: reuse fell to 54% with
+37 KB to prefill per step, though the dossiers no longer moved. Files were
+changing tier. The ranking that picks which files are shown in full changes on
+nearly every step, the greedy fill let small files come and go through leftover
+space, and the budget itself moves with the harness state and observations
+(more than 1 KB on about half of all steps, while the full source sat at the
+39.6 KB cap). A file that changes tier resends every file after it: flip steps
+cost a median 47 KB in run 8 and 57 KB in run 9, against 19 KB for a steady
+step, and made 49% and 75% of all prefill. Of the flips the delivery receipts
+record, 22 of 24 involved no file the step needed.
+
+Tiers are therefore sticky. The files a step needs (the latest read or edit,
+those the last failure names, those with errors) are shown in full, and so are
+the files the last prompt showed in full while they fit; over budget, the
+lowest-ranked file that is not needed goes first. Spare room is filled in rank
+order with 2 KB held back, so a small dip in the budget does not undo it. The
+file just read or edited, too large alone, still stops the task. Each action
+request now journals `source_full` and `source_budget`, and
+`prefix-reuse --details` counts flips per run and how many came with a budget
+change.
+
 ## The plan, bounded where it is shown
 
 The plan is harness state, and it is bounded like source: at injection, not

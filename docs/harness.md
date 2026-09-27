@@ -1002,10 +1002,17 @@ contract 3 and intent contract 2.
   outlines` as its declarations with line numbers, taken from the in-memory
   text with the tree-sitter grammars the syntactic fallback uses, or as its
   name, size and line count when its type has no grammar. Every file appears
-  on some tier. The `Current source` line keeps its JSON-object form and holds
-  only the files shown in full. A step that shortened anything journals
-  `source_delivery` with each file's tier, size and reason, and the model
-  request records `source_outlined`.
+  on some tier. Tiers are sticky: a file shown in full stays in full while it
+  fits, and over budget the lowest-ranked file the step does not need (it is
+  not the latest touch, named by the last failure, or holding errors) goes
+  first; spare room is filled in rank order with 2 KB held back. A file that
+  changes tier resends every file after it, so this is what keeps the source
+  cached (badciv e461d8ee: flips were 75% of all prefill). The `Current
+  source` line keeps its JSON-object form and holds only the files shown in
+  full. A step that shortened anything journals `source_delivery` with each
+  file's tier, size and reason (`kept` for a file held from the last prompt),
+  and the model request records `source_outlined`, `source_full` and
+  `source_budget`.
 - Source swap notice. When a prompt shows as an outline a file the previous
   prompt showed in full, the outlines section opens by naming it, with the
   working set's size and the source budget, and `source_swap` is journaled.

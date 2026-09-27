@@ -145,6 +145,41 @@ def churn(task):
     }
 
 
+def full_source(request):
+    """The files an action prompt showed in full: from the journal when it
+    records them, else from the prompt's `Current source` JSON line."""
+    if isinstance(request.get("source_full"), list):
+        return frozenset(request["source_full"])
+    prompt = request.get("prompt") or ""
+    at = prompt.find("Current source, refreshed")
+    if at < 0:
+        return frozenset()
+    line = prompt[at:].split("\n", 2)[1] if prompt[at:].count("\n") >= 1 else ""
+    try:
+        return frozenset(json.loads(line))
+    except ValueError:
+        return frozenset()
+
+
+def flips(task):
+    """Steps whose full-source set changed from the previous action prompt,
+    the costliest change a prompt makes (every file after the flipped one is
+    resent), and, where the journal records budgets, how many came with a
+    budget change."""
+    actions = [r for r in task.get("model_requests", [])
+               if r.get("purpose") == PURPOSE and isinstance(r.get("prompt"), str)]
+    changed = with_budget_change = 0
+    for previous, current in zip(actions, actions[1:]):
+        if full_source(previous) != full_source(current):
+            changed += 1
+            budgets = (previous.get("source_budget"), current.get("source_budget"))
+            if None not in budgets and budgets[0] != budgets[1]:
+                with_budget_change += 1
+    recorded = any(r.get("source_budget") is not None for r in actions)
+    return {"steps": max(len(actions) - 1, 0), "flips": changed,
+            "flips_with_budget_change": with_budget_change if recorded else None}
+
+
 def latency(task, receipts):
     """How step time splits between prefill and generation, from the usage
     receipts: elapsed seconds fitted to a + b * uncached KB + c * completion
@@ -251,6 +286,7 @@ def report_file(path, move=None, details=False):
     result = report(task, move)
     if details:
         result["churn"] = churn(task)
+        result["flips"] = flips(task)
         usage = Path(str(path).removesuffix(".json") + ".usage.jsonl")
         if usage.exists():
             receipts = {}

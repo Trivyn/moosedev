@@ -1,4 +1,5 @@
 """Prefix-cache reuse report, on a scripted journal only."""
+import json
 import unittest
 
 from bench.harness_study import prefix_reuse
@@ -117,6 +118,21 @@ class PrefixReuseTest(unittest.TestCase):
         self.assertAlmostEqual(report["seconds_fixed_per_step"], 2, delta=0.05)
         self.assertAlmostEqual(report["seconds_per_uncached_kb"], 1, delta=0.01)
         self.assertAlmostEqual(report["seconds_per_completion_token"], 0.05, delta=0.001)
+
+    def test_flips_count_changes_of_the_full_source_set(self):
+        def action(full, budget=None):
+            prompt = "You are the coding sensor.\nCurrent source, refreshed x\n" + json.dumps(
+                {name: "text" for name in full}) + "\n"
+            entry = request(prompt)
+            if budget is not None:
+                entry.update({"source_full": sorted(full), "source_budget": budget})
+            return entry
+        # From the prompts alone (older journals): one flip in two pairs.
+        old = prefix_reuse.flips(journal(action(["a", "b"]), action(["a", "b"]), action(["a"])))
+        self.assertEqual(old, {"steps": 2, "flips": 1, "flips_with_budget_change": None})
+        # From the journal's records, with the budget behind each flip.
+        new = prefix_reuse.flips(journal(action(["a", "b"], 100), action(["a"], 90), action(["b"], 90)))
+        self.assertEqual(new, {"steps": 2, "flips": 2, "flips_with_budget_change": 1})
 
 
 if __name__ == "__main__":

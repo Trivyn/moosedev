@@ -315,6 +315,8 @@ impl Runner {
             );
         }
         self.task.source_outlined = source.outlined();
+        self.task.source_full = source.full();
+        self.source_budget = Some(source.budget);
         if let Some(receipt) = source.receipt() {
             self.intent_event("source_delivery", &receipt);
         }

@@ -111,6 +111,8 @@ pub struct Runner {
     /// language server.
     language_settings: Option<crate::harness::startup::LanguageSettings>,
     language: langserver::LanguageState,
+    /// The source budget of the prompt being sent, for its journal entry.
+    source_budget: Option<usize>,
 }
 
 pub use crate::harness::{DEFAULT_GUIDANCE, GUIDANCE_FILE};
@@ -376,6 +378,7 @@ impl Runner {
             source_recency: Vec::new(),
             source_outlined: Default::default(),
             source_outlined_seen: Default::default(),
+            source_full: Default::default(),
             standing_guidance: Some(standing_guidance),
         };
         let mut runner = Self {
@@ -401,6 +404,7 @@ impl Runner {
             rule_claims_floor_only: false,
             language_settings: None,
             language: Default::default(),
+            source_budget: None,
         };
         let context = runner.refresh(&[]).await?;
         Self::validate_daemon_contracts(&context)?;
@@ -454,6 +458,7 @@ impl Runner {
             rule_claims_floor_only: false,
             language_settings: None,
             language: Default::default(),
+            source_budget: None,
         };
         if missing_guidance {
             // A journal from before the guidance file gets the compiled default.
