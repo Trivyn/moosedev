@@ -411,8 +411,15 @@ impl Runner {
     fn redundant_read(&self, file: &str) -> Option<String> {
         let read = self.task.read_files.iter().any(|known| known == file);
         if read && self.task.source_full.contains(file) {
+            // badciv 1e6cd3e7: without a next step, a planner that wanted to
+            // "verify" read the same file again and parked.
+            let next = if self.task.mode == Mode::Plan {
+                "In Plan mode the next action is plan: propose it from the source shown."
+            } else {
+                "Edit it, run a check, or finish if the work is done."
+            };
             return Some(format!(
-                "{file} is shown in full under Source and is current, so it was not read again."
+                "{file} is shown in full under Source and is current, so it was not read again. {next}"
             ));
         }
         if !self.task.source_outlined.contains(file) || !self.read_is_current(file) {

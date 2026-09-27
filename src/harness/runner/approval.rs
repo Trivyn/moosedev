@@ -148,20 +148,65 @@ impl Runner {
         }
         if self.task.intent.is_some() {
             self.reconcile()?;
-            if self.task.intent.is_some() {
-                anyhow::ensure!(
-                    self.task.phase == Phase::AwaitingInput,
-                    "reconcile interrupted action first"
-                );
-                // Record identity with the same journal write as the acknowledgment.
-                if let Some(id) = id {
-                    self.task.delivered_messages.push(id.to_owned());
-                }
-                self.task.guidance = text.clone();
-                self.answer(text).await?;
-                self.task.turn_finished = false;
-                return self.persist();
+            anyhow::ensure!(
+                self.task.intent.is_none() || self.task.phase == Phase::AwaitingInput,
+                "reconcile interrupted action first"
+            );
+        }
+        let interrupted = self.task.phase == Phase::AwaitingInput && self.task.intent.is_some();
+        // When the model itself handed approved work back (a reply or a
+        // question), the harness judges the message against the approved plan
+        // (Disposition). Treating every message as new guidance returned the
+        // task to Plan, so "continue with the plan" in badciv 1e6cd3e7 cost a
+        // replan and its approval. A harness park (scope escapes, a check
+        // nothing can grant) still replans, as does /plan; in Plan a message
+        // is guidance as before.
+        let judged = self.task.phase == Phase::AwaitingInput
+            && self.task.mode == Mode::Auto
+            && self.task.handed_back
+            && !self.task.objective_pending;
+        if judged && self.context.is_none() {
+            // A reloaded task has no delivered rules yet; fetch them as resume
+            // does. Unreachable knowledge leaves the rule check out, and an
+            // unclear message is still announced.
+            let files = self.task.read_files.clone();
+            let _ = self.refresh(&files).await;
+        }
+        let disposition = judged.then(|| self.message_disposition(&text));
+        let continues = matches!(
+            disposition,
+            Some(Disposition::Continue | Disposition::Unclear)
+        );
+        if interrupted || continues {
+            // Record identity with the same journal write as the acknowledgment.
+            if let Some(id) = id {
+                self.task.delivered_messages.push(id.to_owned());
             }
+            self.task.guidance = text.clone();
+            self.answer(text.clone()).await?;
+            self.task.turn_finished = false;
+            match disposition {
+                Some(Disposition::Continue) => {
+                    self.intent_event("message_disposition", "continue");
+                }
+                Some(Disposition::Unclear) => {
+                    self.intent_event("message_disposition", "unclear");
+                    self.event(
+                        "Continuing under the approved plan. If your message changes what the plan does, /plan replans.",
+                    );
+                    // In the last result, which the next action replaces, so it
+                    // does not outlive the approval it describes.
+                    self.task.last_response = format!(
+                        "{text}\n\n(The approved plan stays in force. If this message changes what the plan does, use replan.)"
+                    );
+                }
+                _ => {}
+            }
+            return self.persist();
+        }
+        if let Some(Disposition::Replan(reason)) = &disposition {
+            self.intent_event("message_disposition", &format!("replan: {reason}"));
+            self.event(format!("Returning to Plan: {reason}"));
         }
         self.abandon_pending_intent("new human guidance").await?;
         if self.task.pending_spec.take().is_some() {
@@ -188,6 +233,7 @@ impl Runner {
         self.task.recovery = None;
         self.task.last_response = text;
         self.task.turn_finished = false;
+        self.task.handed_back = false;
         self.task.steps = 0;
         // Guidance leads to a new plan, so the old plan's failed check no
         // longer says anything about what a rerun would test.
@@ -213,6 +259,64 @@ impl Runner {
         }
         // Existing uncertain capture requests remain frozen for idempotent retry.
         self.persist()
+    }
+
+    /// How a message answering handed-back approved work relates to the
+    /// plan, judged from the plan's files, the rules it implements and the
+    /// repository, never by a model.
+    fn message_disposition(&self, text: &str) -> Disposition {
+        let words: Vec<String> = text
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|word| !word.is_empty())
+            .map(|word| word.to_lowercase().replace('\'', ""))
+            .collect();
+        let Some(plan) = self.task.plan.as_ref() else {
+            return Disposition::Unclear;
+        };
+        for token in text.split_whitespace() {
+            if let Some(path) = named_path(token) {
+                let covered = plan.files.iter().any(|file| {
+                    file == &path
+                        || file
+                            .strip_prefix(path.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                });
+                if !covered {
+                    return Disposition::Replan(format!(
+                        "your message names {path}, which the approved plan does not cover."
+                    ));
+                }
+            }
+        }
+        if let Some(rule) = self.context.as_ref().and_then(|context| {
+            context
+                .governing_rules
+                .iter()
+                .find(|rule| !plan.addresses.contains(&rule.iri) && names_label(text, &rule.label))
+        }) {
+            return Disposition::Replan(format!(
+                "your message names the rule \"{}\", which the approved plan does not implement.",
+                rule.label
+            ));
+        }
+        // Stopping or changing course is never read as carrying on.
+        if let Some(word) = words
+            .iter()
+            .find(|word| STOP_WORDS.contains(&word.as_str()))
+        {
+            return Disposition::Replan(format!(
+                "your message says \"{word}\", which may change or stop the approved work."
+            ));
+        }
+        if !words.is_empty()
+            && words.len() <= 8
+            && words
+                .iter()
+                .all(|word| CONTINUE_WORDS.contains(&word.as_str()))
+        {
+            return Disposition::Continue;
+        }
+        Disposition::Unclear
     }
 
     /// The task stopped because its prompt outgrew the budget.
@@ -289,6 +393,7 @@ impl Runner {
         self.task.guidance = text.clone();
         self.task.recovery = None;
         self.task.last_response = text;
+        self.task.handed_back = false;
         self.task.steps = 0;
         // A task stopped because its prompt outgrew the budget would build the
         // same prompt again: the answer returns it to Plan with an empty
@@ -342,6 +447,126 @@ impl Runner {
                 };
                 self.task.approved_plans.push(entry);
             }
+        }
+    }
+}
+
+/// How a message answering handed-back approved work relates to the plan.
+enum Disposition {
+    /// Only a request to carry on: the approval stands.
+    Continue,
+    /// It names a file or rule outside the approved plan: replan.
+    Replan(String),
+    /// Anything else: continue under the approval, and say so.
+    Unclear,
+}
+
+/// A path a message token names: `src/x.rs`, `x.rs`, `src\\x.rs` or
+/// `src/x.rs:42`, but not a URL, a version, a ratio or an abbreviation.
+fn named_path(token: &str) -> Option<String> {
+    let token = token
+        .trim_matches(|c: char| "`'\"()[]{}<>,;!?".contains(c))
+        .trim_end_matches(['.', ':'])
+        .replace('\\', "/");
+    if token.contains("://") {
+        return None;
+    }
+    // A line or anchor suffix (`:42`, `:42:7`, `#L42`) names the same file.
+    let token = token.split('#').next().unwrap_or_default();
+    let mut path = token;
+    while let Some((head, tail)) = path.rsplit_once(':') {
+        if tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit()) {
+            break;
+        }
+        path = head;
+    }
+    let slashed = path.contains('/');
+    let path = path.trim_start_matches("./").trim_end_matches('/');
+    let lettered = |part: &str| part.chars().any(|c| c.is_alphabetic());
+    let segments_ok = !path.is_empty() && path.split('/').all(lettered);
+    let has_extension = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(stem, extension)| {
+            lettered(stem)
+                && stem.len() > 1
+                && (1..=8).contains(&extension.len())
+                && extension.chars().all(|c| c.is_ascii_alphanumeric())
+                && lettered(extension)
+        });
+    (segments_ok && (slashed || has_extension)).then(|| path.to_string())
+}
+
+/// Whether `text` names `label` as whole words, case-insensitively, so a short
+/// label ("NP-7") counts and does not match inside a longer word.
+fn names_label(text: &str, label: &str) -> bool {
+    let (text, label) = (text.to_lowercase(), label.trim().to_lowercase());
+    if label.is_empty() {
+        return false;
+    }
+    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+    text.match_indices(label.as_str()).any(|(start, found)| {
+        boundary(text[..start].chars().next_back())
+            && boundary(text[start + found.len()..].chars().next())
+    })
+}
+
+/// Words that stop or change course: a message holding one is never read as
+/// carrying on.
+const STOP_WORDS: &[&str] = &[
+    "no", "not", "dont", "stop", "wait", "halt", "hold", "cancel", "abort", "instead", "undo",
+    "revert", "rather", "never", "skip",
+];
+
+/// Words a message made only of means "carry on with the approved plan".
+const CONTINUE_WORDS: &[&str] = &[
+    "continue", "go", "on", "ahead", "yes", "yep", "y", "ok", "okay", "sure", "proceed", "carry",
+    "with", "the", "plan", "please", "resume", "keep", "going", "do", "it", "that", "sounds",
+    "good", "fine", "approved",
+];
+
+#[cfg(test)]
+mod disposition_tests {
+    use super::{named_path, names_label, STOP_WORDS};
+
+    #[test]
+    fn paths_are_named_with_suffixes_and_backslashes_but_not_versions_or_ratios() {
+        assert_eq!(
+            named_path("`src/code.txt:42`,").as_deref(),
+            Some("src/code.txt")
+        );
+        assert_eq!(named_path("src\\other.rs").as_deref(), Some("src/other.rs"));
+        assert_eq!(named_path("other.rs.").as_deref(), Some("other.rs"));
+        assert_eq!(named_path("badciv-sim/").as_deref(), Some("badciv-sim"));
+        assert_eq!(named_path("src/a.rs#L10").as_deref(), Some("src/a.rs"));
+        for not_a_path in [
+            "3/4",
+            "v1.2",
+            "e.g.",
+            "i.e.",
+            "https://x.io/a.rs",
+            "ok",
+            "1.5x",
+        ] {
+            assert_eq!(named_path(not_a_path), None, "{not_a_path}");
+        }
+    }
+
+    #[test]
+    fn rule_labels_match_as_whole_words_short_ones_included() {
+        assert!(names_label("Apply NP-7 here.", "NP-7"));
+        assert!(!names_label("Apply NP-70 here.", "NP-7"));
+        assert!(names_label(
+            "make sure retries stop at the configured limit",
+            "Retries stop at the configured limit"
+        ));
+    }
+
+    #[test]
+    fn stop_words_cover_refusals() {
+        for word in ["no", "stop", "dont", "instead", "wait"] {
+            assert!(STOP_WORDS.contains(&word), "{word}");
         }
     }
 }

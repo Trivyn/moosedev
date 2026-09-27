@@ -342,6 +342,7 @@ impl Runner {
             token_usage: UsageLedger::new(&journal),
             last_response: String::new(),
             last_response_observation: false,
+            handed_back: false,
             diagnostics: None,
             knowledge_revision: String::new(),
             knowledge_turn_sequence: 0,

@@ -191,6 +191,10 @@ the turn ends, `continue` when the model is about to act. On `continue` the
 reply is shown with a note and the turn continues, asking for the plan in Plan
 mode or the next step (or `finish`) while working (`reply_continued`). This
 happens once per human message; a second continuing reply hands the turn back.
+While approved work is under way (Auto, Working), a reply that says `wait`
+continues the same way, once per human message: it asks the human nothing,
+which is what `question` is for (badciv 1e6cd3e7's a4b wrote "Let's fix
+badciv-sim/Cargo.toml first" and the turn ended).
 The field is typed because neither the reply's wording ("I have read the
 specifications. I will now begin…") nor the human's can tell an answer from a
 premature stop, while the model can. Replayed on the badciv prompt that stalled,
@@ -574,7 +578,23 @@ harness rejects the stale preview and requires `/approve-spec <path>` again.
 begins a conversation. Guidance and `/plan` keep what the model has read: the
 files stay in the working set and are re-read from disk before the next
 prompt. Only a task stopped because its prompt outgrew the budget starts its
-next plan with an empty working set. When the task is waiting on the human instead — a
+next plan with an empty working set. When the model itself handed approved
+work back with a `reply` or a `question` (`handed_back`, cleared by the next
+model action or human message), the harness judges the message against the
+approved plan, without a model (`message_disposition`):
+- only a request to carry on ("continue", "go ahead", "yes, proceed with the
+  plan"): the task continues in Auto with its approval;
+- it names a repository path the plan's files do not cover, or a delivered
+  rule the plan does not implement: the task returns to Plan, saying which
+  ("Returning to Plan: your message names …");
+- anything else: the task continues under the approval, the human is told
+  "Continuing under the approved plan. If your message changes what the plan
+  does, /plan replans.", and the model's guidance says to replan if the
+  message changes the plan. Edits stay within the plan's files either way.
+
+A harness park during approved work (scope escapes spent, a check nothing can
+grant) and any message in Plan are guidance and return the task to Plan, as
+`/plan` does. When the task is waiting on the human instead — a
 question, a spent repair budget, or an interrupted action with an unknown
 outcome — the gate shows the request itself, and `/continue` repeats it rather
 than retrying: only new guidance re-arms a repair. `/resume` lists saved
@@ -1033,8 +1053,9 @@ contract 3 and intent contract 2.
   a cycle through a budget one file short (badciv 7e0c50eb) is told it is
   swapping, rather than finding out one read at a time.
 - Redundant reads. A model `read` of a file the producing prompt already
-  covers is refused without touching the tiers: a file shown there in full,
-  or a file outlined only for space whose earlier read is still current (its
+  covers is refused without touching the tiers: a file shown there in full
+  (the refusal gives the next action: plan in Plan mode; edit, check or
+  finish while working), or a file outlined only for space whose earlier read is still current (its
   `Read` event is named, and the next step is mode-aware: plan from the
   outline, inspect that event, or propose the edit so the edit guard shows it
   in full). A changed file is read as before, and reads the guards make are

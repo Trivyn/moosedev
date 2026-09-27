@@ -3127,6 +3127,179 @@ async fn an_edit_attempt_between_refused_reads_does_not_park() {
 }
 
 #[tokio::test]
+async fn a_file_shown_in_full_is_not_read_again_and_the_planner_is_told_to_plan() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let read = json!({"action":"read","file":"code.txt"});
+    fixture.conversational(read.clone());
+    runner.advance().await.unwrap();
+    fixture.conversational(read);
+    runner.advance().await.unwrap();
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("Not read again: code.txt is shown in full"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner
+        .task
+        .last_response
+        .contains("the next action is plan"));
+}
+
+#[tokio::test]
+async fn a_reply_that_waits_mid_work_continues_once_and_an_answer_keeps_the_approval() {
+    // badciv 1e6cd3e7: a4b replied "Let's fix badciv-sim/Cargo.toml first"
+    // without `then: continue`, and the typed "continue with the plan" sent
+    // the approved task back to Plan.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let reply = json!({"action":"reply","message":"Let's fix code.txt first."});
+    fixture.conversational(reply.clone());
+    runner.advance().await.unwrap();
+    assert!(!runner.task.turn_finished);
+    assert!(runner.task.last_response.contains("(Continuing:"));
+    assert_eq!(intent_details(&runner, "reply_continued").len(), 1);
+
+    // Once per human message: a second waiting reply hands the turn back.
+    fixture.conversational(reply);
+    runner.advance().await.unwrap();
+    assert!(runner.task.turn_finished);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+
+    runner
+        .submit_message("Continue with the plan.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["continue"]
+    );
+    // The approval stands: the next edit applies without a new plan.
+    // (The answer's capture checkpoint journals first, without a model call.)
+    fixture.edit();
+    let calls = fixture.model_calls();
+    while fixture.model_calls() == calls {
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(runner.task.mode, Mode::Auto);
+}
+
+/// An approved task whose model has handed the turn back with a reply: its
+/// first waiting reply continues, the second hands back.
+async fn handed_back(fixture: &Fixture) -> moosedev::harness::runner::Runner {
+    let mut runner = fixture.approved_interactive().await;
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"reply","message":"Let's fix code.txt first."}));
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    runner
+}
+
+#[tokio::test]
+async fn a_message_naming_a_file_outside_the_plan_replans() {
+    let fixture = Fixture::new().await;
+    let mut runner = handed_back(&fixture).await;
+    runner
+        .submit_message("Also update src/other.rs to match.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["replan: your message names src/other.rs, which the approved plan does not cover."]
+    );
+}
+
+#[tokio::test]
+async fn a_message_naming_a_rule_the_plan_does_not_implement_replans() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    // Delivered after approval, so plan coverage never saw it.
+    fixture.shared.lock().unwrap().governing_rules = vec![GoverningRule {
+        iri: "urn:rule:retry".into(),
+        label: "Retries stop at the configured limit".into(),
+        kind: "Constraint".into(),
+        claim: "hasDescription: A retry loop stops after the configured attempt limit.\n".into(),
+        via: "via: component Transfers".into(),
+    }];
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"reply","message":"Let's fix code.txt first."}));
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    runner
+        .submit_message("Make sure retries stop at the configured limit.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    let details = intent_details(&runner, "message_disposition");
+    assert_eq!(details.len(), 1);
+    assert!(
+        details[0].starts_with("replan: your message names the rule"),
+        "{details:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unclear_message_continues_under_the_approval_with_a_warning() {
+    let fixture = Fixture::new().await;
+    let mut runner = handed_back(&fixture).await;
+    runner
+        .submit_message("Make the greeting friendlier.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["unclear"]
+    );
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .starts_with("Continuing under the approved plan.")));
+    // The model is told the same when it next acts.
+    fixture.edit();
+    let calls = fixture.model_calls();
+    while fixture.model_calls() == calls {
+        runner.advance().await.unwrap();
+    }
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("If this message changes what the plan does, use replan."));
+}
+
+#[tokio::test]
+async fn a_message_that_says_stop_replans() {
+    let fixture = Fixture::new().await;
+    let mut runner = handed_back(&fixture).await;
+    runner
+        .submit_message("No, don't continue.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+}
+
+#[tokio::test]
+async fn a_park_after_an_answered_handback_is_guidance() {
+    // Codex review: a harness park after the human answered a handback must
+    // not be taken for the handback itself.
+    let fixture = Fixture::new().await;
+    let mut runner = handed_back(&fixture).await;
+    runner.submit_message("continue".into()).await.unwrap();
+    assert!(!runner.task.handed_back);
+    runner.task.phase = Phase::AwaitingInput; // a harness park
+    runner.submit_message("continue".into()).await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+}
+
+#[tokio::test]
 async fn a_file_changed_since_its_read_may_be_read_again() {
     let fixture = Fixture::new().await;
     let big = |name: &str| {

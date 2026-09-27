@@ -357,6 +357,7 @@ impl Runner {
             self.event(format!("Assistant: {message}"));
         }
         self.task.steps += 1;
+        self.task.handed_back = false;
         self.event(format!("Model action: {}", serde_json::to_string(&step)?));
         self.persist()?;
         self.task.last_response_observation = matches!(
@@ -604,6 +605,7 @@ impl Runner {
                 self.event(format!("Assistant: {question}"));
                 self.task.last_response = question;
                 self.task.phase = Phase::AwaitingInput;
+                self.task.handed_back = true;
             }
             Step::Reply {
                 message: reply,
@@ -612,11 +614,18 @@ impl Runner {
                 if reply != message {
                     self.event(format!("Assistant: {reply}"));
                 }
-                if then == ReplyThen::Continue && self.continue_after_reply(&reply) {
+                // A reply that waits while approved work is under way asks the
+                // human nothing (that is what question is for): badciv
+                // 1e6cd3e7's a4b wrote "Let's fix badciv-sim/Cargo.toml first"
+                // and the turn ended. It continues like `then: continue`,
+                // once per human message.
+                let mid_work = self.task.mode == Mode::Auto && self.task.phase == Phase::Working;
+                if (then == ReplyThen::Continue || mid_work) && self.continue_after_reply(&reply) {
                     return self.persist();
                 }
                 self.task.last_response = reply;
                 self.task.turn_finished = true;
+                self.task.handed_back = true;
                 self.task.capture_due = true;
                 self.task.after_review = Phase::AwaitingInput;
                 self.capture().await?;

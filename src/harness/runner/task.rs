@@ -319,6 +319,11 @@ pub struct Task {
     /// not replay it as an assistant turn.
     #[serde(default)]
     pub last_response_observation: bool,
+    /// The model itself ended its turn with a reply or a question, and no
+    /// model action or human message has come since. A message then answers
+    /// the model, rather than following a harness park.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed_back: bool,
     /// What the language servers reported after the last applied code edit:
     /// current state every prompt shows and finish is gated on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
