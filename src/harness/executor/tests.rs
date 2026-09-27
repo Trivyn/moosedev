@@ -1626,7 +1626,13 @@ async fn confinement_lets_cargo_generate_a_lockfile_the_project_lacks() {
         !fixture.0.join("Cargo.lock").exists(),
         "the project is untouched"
     );
-    let generated = fs::read_to_string(scratch.0.join("source/Cargo.lock")).unwrap();
+    // macOS writes the snapshot's lockfile itself; Linux binds a build-side
+    // copy over it, so the generated content lives there.
+    #[cfg(target_os = "macos")]
+    let generated = scratch.0.join("source/Cargo.lock");
+    #[cfg(not(target_os = "macos"))]
+    let generated = super::lockfile_backing(&scratch.0, Path::new(""));
+    let generated = fs::read_to_string(generated).unwrap();
     assert!(generated.contains("greenfield"), "{generated}");
     // The next command sees the same lockfile without regenerating it.
     let again = command(&fixture.0, &scratch.0, "cat Cargo.lock")
@@ -1735,4 +1741,39 @@ async fn confinement_builds_a_single_package_project_whose_scratch_is_inside_it(
         .await
         .unwrap();
     assert!(result.success, "{}", result.output);
+}
+
+/// The AppArmor help is complete enough to paste: the profile for the bwrap
+/// that was found, the command that loads it, and the file it ships as.
+#[test]
+fn the_apparmor_help_is_a_profile_and_the_command_that_loads_it() {
+    let help = apparmor_help(
+        "/usr/bin/bwrap",
+        "bwrap: setting up uid map: Permission denied",
+    );
+    assert!(help.contains("bwrap: setting up uid map: Permission denied"));
+    assert!(help.contains("profile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,"));
+    assert!(help.contains("sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'\nabi <abi/4.0>,"));
+    assert!(help.contains("\nEOF\nsudo apparmor_parser -r /etc/apparmor.d/bwrap\n"));
+    // The shipped file holds the same profile.
+    let shipped = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/linux/apparmor/bwrap"),
+    )
+    .unwrap();
+    let profile = help
+        .split("<<'EOF'\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nEOF\n").next())
+        .unwrap();
+    assert!(shipped.ends_with(&format!("{profile}\n")), "{shipped}");
+}
+
+/// On a machine set up for the harness the sandbox starts; elsewhere the
+/// reason is what the startup check prints.
+#[tokio::test]
+#[ignore = "requires a functional OS sandbox; run explicitly outside nested sandbox"]
+async fn the_sandbox_is_ready_here() {
+    if let Err(problem) = super::sandbox_readiness().await {
+        panic!("{problem}");
+    }
 }

@@ -2,10 +2,11 @@
 #[cfg(unix)]
 use super::fs_ops::*;
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use std::io::{Read, Write};
 use std::{
     ffi::CString,
     fs::{self, File},
-    io::{Read, Write},
     path::{Component, Path, PathBuf},
     time::Duration,
 };

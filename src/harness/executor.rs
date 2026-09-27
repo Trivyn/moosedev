@@ -13,6 +13,48 @@ mod workspace;
 use super::progress::ProgressSender;
 use anyhow::{Context, Result};
 pub use command_line::unrunnable_reason;
+
+/// Whether confined commands can run on this machine: a real `true` through
+/// the path every command takes (snapshot, environment, confinement,
+/// seccomp), on a throwaway project. Otherwise what the human must do, as
+/// plain text for a terminal. Nothing runs unconfined, so a sandbox that
+/// cannot start is a setup problem to name once at startup, not a failure
+/// every command would show the model (on stock Ubuntu 24.04 each printed
+/// only "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted").
+pub async fn sandbox_readiness() -> std::result::Result<(), String> {
+    sandbox::preflight()?;
+    #[cfg(unix)]
+    {
+        let base =
+            std::env::temp_dir().join(format!("moosedev-sandbox-probe-{}", uuid::Uuid::new_v4()));
+        let (project, scratch) = (base.join("project"), base.join("scratch"));
+        let outcome = async {
+            fs::create_dir_all(&project)?;
+            fs::write(project.join("probe.txt"), "probe\n")?;
+            run_command(
+                &project,
+                &scratch,
+                "true",
+                Duration::from_secs(60),
+                &CommandPermissions::default(),
+                None,
+            )
+            .await
+        }
+        .await;
+        let _ = cleanup_task(&scratch);
+        let _ = fs::remove_dir_all(&base);
+        match outcome {
+            Ok(result) if result.success => Ok(()),
+            Ok(result) => Err(sandbox::diagnose(&result.output)),
+            Err(error) => Err(sandbox::diagnose(&format!("{error:#}"))),
+        }
+    }
+    #[cfg(not(unix))]
+    Err(sandbox::diagnose(
+        "command confinement is unsupported on this platform",
+    ))
+}
 #[cfg(unix)]
 use fs_ops::remove_child;
 use output::bounded_output_into;

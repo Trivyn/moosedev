@@ -1,0 +1,18 @@
+# AppArmor profile letting bubblewrap create unprivileged user namespaces.
+#
+# Ubuntu 24.04 and later restrict unprivileged user namespaces
+# (kernel.apparmor_restrict_unprivileged_userns = 1), which bubblewrap needs
+# to build the sandbox the MOOSEDev harness runs every model command in.
+# The profile applies to bwrap itself, not to the commands it confines.
+#
+# Install:
+#   sudo install -m 644 packaging/linux/apparmor/bwrap /etc/apparmor.d/bwrap
+#   sudo apparmor_parser -r /etc/apparmor.d/bwrap
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}

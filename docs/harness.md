@@ -670,7 +670,26 @@ ancestor directory's configuration and fails when it can see the file but not re
 it; a configuration that holds a `token` or `secret-key`, is a symlink, or does not
 parse stays blocked, and `credentials.toml` is never exposed. Confinement uses `sandbox-exec` on macOS and requires `bubblewrap` on
 Linux (x86-64 or ARM64); unsupported platforms cannot execute commands. Commands
-have no network, a clean environment, and bounded output. The default command
+have no network, a clean environment, and bounded output. Each command runs
+through the first shell whose `set -o pipefail` works (`/bin/sh` on macOS,
+`/bin/bash` where `/bin/sh` is dash, as on Debian and Ubuntu), so a failing
+stage before a filter (`cargo test | tail`) is a failure. On Linux the sandbox
+also exposes `/etc/alternatives`, through which Debian and Ubuntu reach `cc`.
+
+**Startup check.** Before a command that can advance a task, the harness starts
+one trivial confined command. If the sandbox cannot start, it exits with what to
+do, never running anything unconfined: install `bubblewrap`, or, where AppArmor
+restricts unprivileged user namespaces (Ubuntu 24.04 and later,
+`kernel.apparmor_restrict_unprivileged_userns = 1`), load the profile it prints,
+which ships as `packaging/linux/apparmor/bwrap`:
+
+    sudo install -m 644 packaging/linux/apparmor/bwrap /etc/apparmor.d/bwrap
+    sudo apparmor_parser -r /etc/apparmor.d/bwrap
+
+The profile applies to bubblewrap itself, not to the commands it confines; the
+Codex CLI and Claude Code document the same one. On macOS the check fails only
+when the harness itself runs inside another sandbox. `status`, `permissions`,
+`cancel` and the permission revocations work without the check. The default command
 timeout is 900 seconds; human configuration `MOOSEDEV_COMMAND_TIMEOUT_SECONDS`
 can set it to 1–86400 seconds, including through the project's `.env`.
 Dependencies must be available in that view. Sibling path dependencies, including

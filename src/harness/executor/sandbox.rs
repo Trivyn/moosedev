@@ -49,8 +49,17 @@ pub(super) fn readable_directories() -> Vec<PathBuf> {
         "/usr/local/lib",
         "/usr/local/share",
     ];
+    // Debian and Ubuntu reach `cc`, `c++` and friends through
+    // /etc/alternatives symlinks; without them rustc finds no linker.
     #[cfg(not(target_os = "macos"))]
-    let system = ["/bin", "/sbin", "/lib", "/lib64", "/usr"];
+    let system = [
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/usr",
+        "/etc/alternatives",
+    ];
     let mut paths: Vec<PathBuf> = system
         .into_iter()
         .map(PathBuf::from)
@@ -149,6 +158,7 @@ fn ancestor_manifests(source: &Path, project: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn sandbox_literal(path: &Path) -> Result<String> {
     let path = path.to_str().context("sandbox path must be UTF-8")?;
     anyhow::ensure!(
@@ -230,10 +240,32 @@ fn permitted_unix_sockets(permissions: &CommandPermissions) -> Result<Vec<PathBu
 /// leaves a `/bin/sh` that lacks the option running the command unchanged.
 pub(super) fn shell_argv(command: &str) -> [String; 3] {
     [
-        "/bin/sh".into(),
+        // Without one the startup check stops the harness; /bin/sh is only
+        // what a direct caller that skipped it gets.
+        pipefail_shell().unwrap_or("/bin/sh").into(),
         "-c".into(),
         format!("(set -o pipefail) 2>/dev/null && set -o pipefail\n{command}"),
     ]
+}
+
+/// The first shell whose `set -o pipefail` works, found once per process.
+/// Without it a failing stage before a filter reads as success: every
+/// `cargo test 2>&1 | tail -30` passes. macOS's /bin/sh (bash) and Alpine's
+/// ash have it; Debian and Ubuntu's dash (0.5.12 in 24.04) does not, so there
+/// bash runs the command.
+fn pipefail_shell() -> Option<&'static str> {
+    static SHELL: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *SHELL.get_or_init(|| {
+        ["/bin/sh", "/bin/bash"].into_iter().find(|shell| {
+            std::process::Command::new(shell)
+                .args(["-c", "set -o pipefail"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -394,6 +426,137 @@ pub(super) fn server_profile(
     Ok(profile)
 }
 
+/// The installed bubblewrap.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn bubblewrap() -> Option<&'static str> {
+    ["/usr/bin/bwrap", "/bin/bwrap"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+}
+
+/// What must hold before any confined command can run, as the human's fix:
+/// a shell whose `set -o pipefail` works, and on Linux bubblewrap itself.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+pub(super) fn preflight() -> std::result::Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if bubblewrap().is_none() {
+        return Err(BUBBLEWRAP_MISSING.to_owned());
+    }
+    if pipefail_shell().is_none() {
+        return Err("No shell here supports `set -o pipefail` (/bin/sh does not and /bin/bash is missing); without it a failing command before a filter reads as success. Install bash and start again.".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+pub(super) fn preflight() -> std::result::Result<(), String> {
+    Err("Command confinement is not supported on this platform, and the harness runs no command outside it.".to_owned())
+}
+
+/// Why a probe command failed to run confined, and what the human can do:
+/// user namespaces disabled outright, AppArmor restricting them (Ubuntu
+/// 24.04 and later), or bubblewrap's own words.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(super) fn diagnose(output: &str) -> String {
+    let error = output.trim();
+    let sysctl = |name: &str| {
+        fs::read_to_string(Path::new("/proc/sys").join(name))
+            .ok()
+            .map(|value| value.trim().to_owned())
+    };
+    if sysctl("user/max_user_namespaces").as_deref() == Some("0")
+        || sysctl("kernel/unprivileged_userns_clone").as_deref() == Some("0")
+    {
+        return format!(
+            "The command sandbox cannot start: unprivileged user namespaces are disabled on this system (`user.max_user_namespaces` or `kernel.unprivileged_userns_clone` is 0), and bubblewrap needs them. bubblewrap said: {error}\nEnabling them is a system-wide setting for the machine's administrator. The harness runs no command outside the sandbox."
+        );
+    }
+    if sysctl("kernel/apparmor_restrict_unprivileged_userns").as_deref() == Some("1") {
+        return apparmor_help(bubblewrap().unwrap_or("/usr/bin/bwrap"), error);
+    }
+    format!(
+        "The command sandbox cannot start: a confined `true` failed.\n{error}\nThe harness runs no command outside the sandbox."
+    )
+}
+
+/// On macOS `sandbox-exec` refuses to start inside another sandbox, which
+/// only a run from an ordinary terminal avoids.
+#[cfg(target_os = "macos")]
+pub(super) fn diagnose(output: &str) -> String {
+    format!(
+        "The command sandbox cannot start: a confined `true` failed ({}). This happens when the harness itself runs inside another sandbox; start it from an ordinary terminal. The harness runs no command outside the sandbox.",
+        output.trim()
+    )
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+pub(super) fn diagnose(output: &str) -> String {
+    output.trim().to_owned()
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const BUBBLEWRAP_MISSING: &str = "The command sandbox needs bubblewrap, which is not installed.\nInstall it (Debian and Ubuntu: `sudo apt install bubblewrap`; Fedora: `sudo dnf install bubblewrap`; Arch: `sudo pacman -S bubblewrap`) and start again. The harness runs no command outside the sandbox.";
+
+/// What to do where AppArmor restricts unprivileged user namespaces (Ubuntu
+/// 24.04 and later): a profile that lets bubblewrap create them. It applies
+/// to the bwrap binary, not to what runs inside the sandbox; Claude Code and
+/// the Codex CLI document the same one.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    test
+))]
+pub(super) fn apparmor_help(binary: &str, error: &str) -> String {
+    format!(
+        "The command sandbox cannot start: this system's AppArmor policy stops bubblewrap from creating the user namespaces it needs (kernel.apparmor_restrict_unprivileged_userns = 1, the Ubuntu 24.04 default). bubblewrap said: {error}
+
+Allow it once with an AppArmor profile for {binary}:
+
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap {binary} flags=(unconfined) {{
+  userns,
+
+  include if exists <local/bwrap>
+}}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+
+The profile applies to bubblewrap itself, not to the commands it confines. The same file is in packaging/linux/apparmor/bwrap. Then start the harness again; it runs no command outside the sandbox."
+    )
+}
+
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -407,10 +570,7 @@ pub(super) fn confined_command(
     permissions: &CommandPermissions,
 ) -> Result<tokio::process::Command> {
     use std::os::fd::AsRawFd;
-    let binary = ["/usr/bin/bwrap", "/bin/bwrap"]
-        .into_iter()
-        .find(|path| Path::new(path).is_file())
-        .context("bubblewrap is required for confined commands")?;
+    let binary = bubblewrap().context("bubblewrap is required for confined commands")?;
     let mut process = tokio::process::Command::new(binary);
     process.args([
         "--die-with-parent",

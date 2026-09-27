@@ -152,6 +152,14 @@ async fn run() -> Result<()> {
         .to_path_buf();
     // Match the daemon's explicit environment configuration without changing cwd.
     load_dotenv_file(&root.join(".env"))?;
+    // Every model command runs confined and none runs outside it: a sandbox
+    // that cannot start is named here, once, with what to do, as plain text.
+    if advances_tasks(&args.command) {
+        if let Err(problem) = moosedev::harness::executor::sandbox_readiness().await {
+            eprintln!("{problem}");
+            std::process::exit(1);
+        }
+    }
     if matches!(args.command.as_str(), "interactive" | "resume-session") {
         let launch = if args.command == "resume-session" {
             anyhow::ensure!(
@@ -239,6 +247,15 @@ async fn run() -> Result<()> {
     result
 }
 
+/// Commands that can run a model's commands or checks. Reading, listing,
+/// cancelling and revoking must work even where the sandbox cannot start.
+fn advances_tasks(command: &str) -> bool {
+    !matches!(
+        command,
+        "status" | "permissions" | "cancel" | "deny-permission" | "revoke-permission"
+    )
+}
+
 fn load_dotenv_file(path: &Path) -> Result<()> {
     match dotenvy::from_path(path) {
         Ok(()) => Ok(()),
@@ -250,6 +267,31 @@ fn load_dotenv_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_commands_that_can_advance_a_task_need_the_sandbox() {
+        for command in [
+            "interactive",
+            "resume-session",
+            "run",
+            "step",
+            "approve",
+            "answer",
+            "resume",
+            "tui",
+        ] {
+            assert!(advances_tasks(command), "{command}");
+        }
+        for command in [
+            "status",
+            "permissions",
+            "cancel",
+            "deny-permission",
+            "revoke-permission",
+        ] {
+            assert!(!advances_tasks(command), "{command}");
+        }
+    }
 
     #[test]
     fn dotenv_is_optional_but_malformed_configuration_is_an_error() {
