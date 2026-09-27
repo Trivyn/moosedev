@@ -121,6 +121,9 @@ USAGE:
                               launches the web UI in a browser once it is up
     moosedev --connect [SOCK] Proxy stdio to a backend; auto-spawn if needed
     moosedev lsp              Proxy editor stdio to the daemon Knowledge-LSP
+    moosedev code [COMMAND]   The coding harness: interactive by default; headless
+                              commands (new, run, status, approve, …) print JSON
+                              for scripts. `moosedev code --help` lists them
     moosedev --status [SOCK]  Report backend + web UI status (no store lock)
     moosedev ui [SOCK]        Open the backend's web UI in a browser (auto-spawn)
     moosedev export [PATH]    Export the graph; no running backend required
@@ -227,9 +230,21 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
             std::process::exit(0);
         }
         Some(other) => anyhow::bail!(
-            "unknown argument {other:?} — expected export, import, init, bootstrap, index, mint, resolve, skills, lsp, --serve, --connect, --status, ui, --version, --help, or no arguments (stdio)"
+            "unknown argument {other:?} — expected code, export, import, init, bootstrap, index, mint, resolve, skills, lsp, --serve, --connect, --status, ui, --version, --help, or no arguments (stdio)"
         ),
     }
+}
+
+#[cfg(feature = "harness")]
+async fn code(args: Vec<String>) -> anyhow::Result<()> {
+    moosedev::harness::cli::main(args).await
+}
+
+#[cfg(not(feature = "harness"))]
+async fn code(_args: Vec<String>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "this moosedev was built without the `harness` feature, so `moosedev code` is unavailable; build with the default features"
+    )
 }
 
 fn parse_no_args<'a>(mut iter: impl Iterator<Item = &'a String>, mode: &str) -> anyhow::Result<()> {
@@ -775,6 +790,14 @@ fn load_repo_dotenv() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `moosedev code` is the coding harness, with its own project, daemon and
+    // terminal handling: dispatched before this binary's stderr logging, which
+    // would draw over the TUI, and before the repo .env, since it loads the
+    // project's own.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("code") {
+        return code(args[1..].to_vec()).await;
+    }
     load_repo_dotenv()?;
 
     // Logs MUST go to stderr — stdout carries the MCP JSON-RPC framing.
@@ -798,7 +821,6 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("MOOSE_MODEL_DIR", dir);
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = parse_mode(&args)?;
 
     // Runtime data lives in a per-repo, gitignored `.moosedev/` dir by convention

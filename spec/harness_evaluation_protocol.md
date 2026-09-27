@@ -76,7 +76,7 @@ All MOOSEDev executables must originate from
 Use one release build of the pinned source revision with the `harness` feature:
 
 - Daemon and MCP proxy: `target/release/moosedev`.
-- Harness: `target/release/moosedev-harness`.
+- Harness: `target/release/moosedev code` (the daemon binary's `code` command since 2026-09-26; runs before then used the separate `target/release/moosedev-harness`).
 - Session-controller benchmark adapter: its release artifact under the same
   checkout's `target` directory.
 

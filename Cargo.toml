@@ -7,10 +7,6 @@ description = "MOOSEDev — a neurosymbolic MCP sidecar for structured, long-ter
 license = "Apache-2.0"
 default-run = "moosedev"
 
-[[bin]]
-name = "moosedev-harness"
-path = "src/bin/moosedev-harness.rs"
-required-features = ["harness"]
 
 [dependencies]
 # The closed-source MOOSE engine, consumed as a path dependency.
@@ -103,7 +99,7 @@ tokio = { version = "1", features = ["process"] }
 axum-test = "17"
 
 [features]
-default = ["embedded-frontend"]
+default = ["embedded-frontend", "harness"]
 embedded-frontend = ["dep:include_dir", "dep:mime_guess"]
 headless = []
 harness = ["dep:ratatui", "dep:crossterm", "dep:pulldown-cmark", "dep:unicode-width", "dep:fs2", "dep:libc", "dep:toml_edit", "dep:base64", "tokio/process"]

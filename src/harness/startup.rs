@@ -245,39 +245,24 @@ async fn verify_daemon(url: &str, root: &Path, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Explicit override, matching installed sibling, then PATH. Reject the client
-/// itself even through a symlink so auto-start can never recurse into its TUI.
+/// The executable that serves and initializes the project: `--daemon-exe`
+/// when given, else this one. The harness is `moosedev code`, so the running
+/// binary is the daemon of exactly this build, and it is started with
+/// `--serve` or `init`, never `code`, so starting it cannot recurse into the
+/// harness. (The separate harness binary had to find a `moosedev` beside it
+/// or on PATH and refuse itself.)
 pub fn resolve_daemon_executable(explicit: Option<&Path>) -> Result<PathBuf> {
-    let current = std::env::current_exe()?.canonicalize()?;
-    if let Some(path) = explicit {
-        return checked_executable(path, &current);
+    match explicit {
+        Some(path) => checked_executable(path),
+        None => Ok(std::env::current_exe()?.canonicalize()?),
     }
-    if let Some(parent) = current.parent() {
-        let sibling = parent.join("moosedev");
-        if sibling.is_file() {
-            return checked_executable(&sibling, &current);
-        }
-    }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join("moosedev");
-            if candidate.is_file() {
-                return checked_executable(&candidate, &current);
-            }
-        }
-    }
-    bail!("moosedev server executable not found; build/install both binaries or pass --daemon-exe PATH")
 }
 
-fn checked_executable(path: &Path, current: &Path) -> Result<PathBuf> {
+fn checked_executable(path: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = path
         .canonicalize()
         .context("resolve moosedev server executable")?;
-    ensure!(
-        path != current,
-        "daemon executable points to the harness itself"
-    );
     let metadata = path.metadata()?;
     ensure!(
         metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
@@ -700,8 +685,16 @@ mod tests {
 
     #[test]
     fn executable_and_endpoint_validation_prevent_recursion_and_secret_persistence() {
-        let exe = std::env::current_exe().unwrap();
-        assert!(resolve_daemon_executable(Some(&exe)).is_err());
+        // The daemon is this build itself unless overridden; an override must
+        // be an executable file.
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_eq!(resolve_daemon_executable(None).unwrap(), exe);
+        assert_eq!(resolve_daemon_executable(Some(&exe)).unwrap(), exe);
+        let not_executable =
+            std::env::temp_dir().join(format!("moosedev-not-executable-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&not_executable, "text").unwrap();
+        assert!(resolve_daemon_executable(Some(&not_executable)).is_err());
+        std::fs::remove_file(&not_executable).unwrap();
         assert!(daemon_base_url("http://127.0.0.1:42").is_ok());
         assert!(daemon_base_url("http://[::1]:42").is_ok());
         assert!(daemon_base_url("http://example.com").is_err());

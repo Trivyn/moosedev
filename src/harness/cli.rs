@@ -1,14 +1,17 @@
-//! Optional standalone client for the daemon-owned project-memory workflow.
-use anyhow::{bail, Context, Result};
-use moosedev::harness::{
+//! `moosedev code`: the coding harness, a client of the daemon-owned
+//! project-memory workflow. Interactive by default; every other command is
+//! headless, prints JSON and exits non-zero on error, for scripts and
+//! pipelines.
+use crate::harness::{
     runner::{default_daemon_url, Runner},
     startup::ProviderSettings,
     tui::{self, Action},
 };
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-const HELP: &str = "MOOSEDev harness
-Usage: moosedev-harness [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] [COMMAND]
+const HELP: &str = "moosedev code: the MOOSEDev coding harness
+Usage: moosedev code [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] [COMMAND]
 
   interactive              Reopen the newest conversation with unfinished work,
                             or open a new one (the default); --new always opens a new one
@@ -49,7 +52,7 @@ struct Args {
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut args = args.into_iter();
-    let mut root = moosedev::project::project_root();
+    let mut root = crate::project::project_root();
     let mut daemon = None;
     let mut daemon_exe = None;
     let mut fresh = false;
@@ -130,16 +133,18 @@ fn action(command: &str, args: &[String]) -> Result<Action> {
     })
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(error) = run().await {
+/// Run `moosedev code` with the arguments after `code`. An error is printed
+/// as `{"error": …}` and the process exits 1, as scripts expect.
+pub async fn main(args: Vec<String>) -> Result<()> {
+    if let Err(error) = run(args).await {
         eprintln!("{}", serde_json::json!({"error": format!("{error:#}")}));
         std::process::exit(1);
     }
+    Ok(())
 }
 
-async fn run() -> Result<()> {
-    let Some(args) = parse_args(std::env::args().skip(1))? else {
+async fn run(args: Vec<String>) -> Result<()> {
+    let Some(args) = parse_args(args)? else {
         print!("{HELP}");
         return Ok(());
     };
@@ -147,7 +152,7 @@ async fn run() -> Result<()> {
         .root
         .canonicalize()
         .context("resolve project directory")?;
-    let root = moosedev::project::project_root_from(&root)
+    let root = crate::project::project_root_from(&root)
         .unwrap_or(&root)
         .to_path_buf();
     // Match the daemon's explicit environment configuration without changing cwd.
@@ -155,7 +160,7 @@ async fn run() -> Result<()> {
     // Every model command runs confined and none runs outside it: a sandbox
     // that cannot start is named here, once, with what to do, as plain text.
     if advances_tasks(&args.command) {
-        if let Err(problem) = moosedev::harness::executor::sandbox_readiness().await {
+        if let Err(problem) = crate::harness::executor::sandbox_readiness().await {
             eprintln!("{problem}");
             std::process::exit(1);
         }
@@ -296,7 +301,7 @@ mod tests {
     #[test]
     fn dotenv_is_optional_but_malformed_configuration_is_an_error() {
         let root =
-            std::env::temp_dir().join(format!("moosedev-harness-dotenv-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("moosedev-code-dotenv-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let path = root.join(".env");
         load_dotenv_file(&path).unwrap();

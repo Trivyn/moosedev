@@ -193,7 +193,6 @@ class ConformanceTests(unittest.TestCase):
     def test_owned_daemon_and_session_adapter_without_generation(self):
         binaries = {
             "daemon": REPO / "target/release/moosedev",
-            "harness": REPO / "target/release/moosedev-harness",
             "session": REPO / "target/release/examples/harness_study_session",
         }
         identity = {}

@@ -5,11 +5,12 @@ as LM Studio. The daemon owns project memory and policy; the runner enforces
 reading, capture, review, and execution gates without asking the model to call MCP
 tools. Claude, Codex, and other clients can share the existing daemon.
 
-Build both executables, start your local model server, and launch the conversation:
+The harness is `moosedev code`, part of the default build. Build, start your
+local model server, and launch the conversation:
 
 ```sh
-cargo build --features harness --bins
-target/debug/moosedev-harness
+cargo build
+target/debug/moosedev code
 ```
 
 Use `--project DIR` to select another project. Launching from a subdirectory uses
@@ -111,7 +112,7 @@ first-chunk timeout covers a load.
 
 Each key is resolved separately, highest first, by the same rule in both processes:
 
-1. a variable set in the real environment (`MOOSEDEV_LLM_MODEL=x moosedev-harness`),
+1. a variable set in the real environment (`MOOSEDEV_LLM_MODEL=x moosedev code`),
    which overrides every role for that invocation;
 2. the most specific table, then its parents: the role's table, `[harness.model]`,
    `[model]` (for the daemon: `[daemon.model]`, `[model]`);
@@ -576,8 +577,8 @@ than retrying: only new guidance re-arms a repair. `/resume` lists saved
 conversations newest first with their objective and task standing; `/resume ID`
 opens one and `/resume last` opens the newest with unfinished work. `/connect`
 retries a failed daemon connection. `/quit` exits while preserving unfinished
-work. A bare `moosedev-harness` reopens the newest conversation whose task this
-build can continue (`--new` skips that); `moosedev-harness resume-session ID`
+work. A bare `moosedev code` reopens the newest conversation whose task this
+build can continue (`--new` skips that); `moosedev code resume-session ID`
 reopens a specific one.
 
 The runner retrieves project knowledge before planning and affected-file dossiers
@@ -1227,21 +1228,25 @@ Read-only conversations never reach the final checkpoint and therefore capture
 nothing: steering text is journaled and surfaces in the final note of the next
 completed plan.
 
-## Headless compatibility
+## Headless commands
 
-Existing headless commands remain available, return JSON, and require a running
-daemon. `tui ID` opens an existing task in the conversational interface:
+Every command other than the conversation (a bare `moosedev code`,
+`resume-session`, and `tui ID`) is headless, for scripts and pipelines: it
+prints JSON, exits non-zero on error, and requires a running daemon. `run` stops at each human gate (plan approval, a policy-gated edit, a
+permission request, knowledge review), so a pipeline drives those with the
+matching command. `tui ID` opens an existing task in the conversational
+interface:
 
 ```sh
-moosedev-harness new 'Fix the parser regression and verify the result'
-moosedev-harness status TASK_ID
-moosedev-harness run TASK_ID
-moosedev-harness approve TASK_ID
-moosedev-harness approve-permission TASK_ID
-moosedev-harness permissions TASK_ID
-moosedev-harness review TASK_ID accept
-moosedev-harness no-knowledge TASK_ID
-moosedev-harness tui TASK_ID
+moosedev code new 'Fix the parser regression and verify the result'
+moosedev code status TASK_ID
+moosedev code run TASK_ID
+moosedev code approve TASK_ID
+moosedev code approve-permission TASK_ID
+moosedev code permissions TASK_ID
+moosedev code review TASK_ID accept
+moosedev code no-knowledge TASK_ID
+moosedev code tui TASK_ID
 ```
 
 `step` advances once; `run` advances at most 32 steps and stops at human gates.

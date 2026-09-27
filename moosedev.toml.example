@@ -1,5 +1,5 @@
 # MOOSEDev local configuration — copy to `moosedev.toml` in the project root and
-# adjust. The daemon (`moosedev --serve`) and the harness (`moosedev-harness`)
+# adjust. The daemon (`moosedev --serve`) and the harness (`moosedev code`)
 # both read it. Keep it OUT of version control (`moosedev init` gitignores it):
 # model ids and endpoints belong to this machine. Every key is optional.
 #
@@ -57,7 +57,7 @@ model = "your-model-id"
 # endpoint = "http://other-host:1234/v1"
 # model = "google/gemma-4-26b-a4b"
 
-# --- [harness]: moosedev-harness ------------------------------------------------
+# --- [harness]: moosedev code ---------------------------------------------------
 [harness]
 # Whether the harness rebuilds the code index itself when a task finishes with
 # edits: auto (default: every producer that detects the project), frozen-python

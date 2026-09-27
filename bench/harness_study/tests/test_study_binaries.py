@@ -91,6 +91,21 @@ class BinaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.freeze()
 
+    def test_a_build_frozen_with_the_retired_harness_binary_still_verifies(self):
+        # Builds before `moosedev code` froze a separate moosedev-harness.
+        legacy = self.repo / "target/release/moosedev-harness"
+        legacy.write_bytes(b"fixture executable harness")
+        legacy.chmod(0o700)
+        with patch.dict(binaries.BINARIES, binaries.LEGACY_BINARIES):
+            frozen = self.freeze()
+        self.assertIn("harness", frozen["binaries"])
+        self.assertEqual(
+            binaries.verify_binaries(Path(frozen["directory"]) / "manifest.json", self.repo), frozen)
+        # A current role missing is still refused.
+        with patch.dict(binaries.BINARIES, {"indexer": "scip-indexer"}):
+            with self.assertRaisesRegex(ValueError, "every study executable"):
+                binaries.verify_binaries(Path(frozen["directory"]) / "manifest.json", self.repo)
+
     def test_detects_binary_manifest_and_unexpected_file_tampering(self):
         manifest = self.freeze()
         directory = Path(manifest["directory"])

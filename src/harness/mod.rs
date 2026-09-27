@@ -25,6 +25,8 @@ pub fn guidance_example() -> String {
 }
 
 #[cfg(feature = "harness")]
+pub mod cli;
+#[cfg(feature = "harness")]
 mod clipboard;
 #[cfg(feature = "harness")]
 pub mod config;

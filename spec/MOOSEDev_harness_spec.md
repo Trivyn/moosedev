@@ -29,7 +29,7 @@ knowledge interpretation in the daemon. OpenCode integration is outside scope.
 
 ## Conversational interface
 
-Launching `moosedev-harness` opens a full-screen conversation with a persistent
+Launching `moosedev code` opens a full-screen conversation with a persistent
 multiline composer. Users ask questions, request changes, and continue with
 follow-ups; no task ID or manual stepping is required. Stream assistant prose
 and command output, with readable plans, diffs, and knowledge-review cards.

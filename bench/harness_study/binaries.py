@@ -19,8 +19,10 @@ from .artifacts import (_directory, _publish, _regular_open, _sync_directory,
                         canonical_json, sha256_file)
 
 REPO = Path(__file__).resolve().parents[2]
-BINARIES = {"daemon": "moosedev", "harness": "moosedev-harness",
-            "session": "examples/harness_study_session"}
+# The harness is `moosedev code` inside the daemon binary since 2026-09-26.
+BINARIES = {"daemon": "moosedev", "session": "examples/harness_study_session"}
+# Roles earlier builds froze, still verifiable in their evidence.
+LEGACY_BINARIES = {"harness": "moosedev-harness"}
 IDENTITY_FIELDS = ("schema_version", "profile", "features", "source", "engine_source",
                    "binary_hashes", "build_receipt")
 
@@ -209,12 +211,15 @@ def verify_binaries(manifest_path: Path, repo: Path = REPO) -> dict:
         raise ValueError("build manifest identity mismatch")
     if directory.name != manifest["build_id"] or manifest_path != directory / "manifest.json":
         raise ValueError("build manifest location mismatch")
-    if set(manifest["binaries"]) != set(BINARIES) or set(manifest["binary_hashes"]) != set(BINARIES):
+    roles = set(manifest["binaries"])
+    if (roles != set(manifest["binary_hashes"]) or not set(BINARIES) <= roles
+            or not roles <= set(BINARIES) | set(LEGACY_BINARIES)):
         raise ValueError("build manifest must identify every study executable")
+    names = {**LEGACY_BINARIES, **BINARIES}
     expected_files = {"manifest.json"}
     for role, name in manifest["binaries"].items():
         path = Path(name)
-        expected = directory / Path(BINARIES[role]).name
+        expected = directory / Path(names[role]).name
         if path != expected or not stat.S_ISREG(path.lstat().st_mode) or not os.access(path, os.X_OK):
             raise ValueError("frozen executable path mismatch")
         if sha256_file(path) != manifest["binary_hashes"][role]:

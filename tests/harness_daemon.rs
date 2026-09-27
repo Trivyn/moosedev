@@ -14,7 +14,7 @@ use serde_json::json;
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("moosedev-harness-daemon-{}", uuid::Uuid::new_v4())))
+        Self(std::env::temp_dir().join(format!("moosedev-code-daemon-{}", uuid::Uuid::new_v4())))
     }
     fn state(&self) -> AppState {
         let cfg = LlmConfig {
