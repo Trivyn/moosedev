@@ -2552,6 +2552,32 @@ async fn settled_language_server_errors_are_shown_and_send_finish_back_once() {
     assert_eq!(runner.task.phase, Phase::Verifying);
 }
 
+/// The approved plan sits with the knowledge, above the source: it changes
+/// when a plan is proposed or approved, and below the conversation it was
+/// resent on nearly every step.
+#[tokio::test]
+async fn the_plan_is_shown_above_the_source_and_the_changing_state() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    let at = |marker: &str| {
+        prompt
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker:?} missing from the prompt"))
+    };
+    let knowledge = at("Current accepted knowledge:");
+    let plan = at("\nPlan: {");
+    let source = at("Current source, refreshed");
+    let state = at("Current harness state");
+    assert!(
+        knowledge < plan && plan < source && source < state,
+        "knowledge {knowledge}, plan {plan}, source {source}, state {state}"
+    );
+    assert!(prompt[state..].find("\nPlan: ").is_none(), "shown once");
+}
+
 /// Sections in the order that keeps a model server's prefix cache: the
 /// entity dossiers, which change with the graph and with re-indexed
 /// definitions, follow the source instead of preceding it.
@@ -2602,6 +2628,51 @@ async fn a_cd_into_an_invented_project_root_is_dropped_and_the_command_runs() {
             .any(|e| e.starts_with("Command: test -f code.txt") && e.contains("Success: true")),
         "ran in the project root: {events:#?}"
     );
+}
+
+/// The tool list heads the rendered request, so it holds from the first Auto
+/// step: `apply_fix` is offered when a language server could check the plan,
+/// before any result exists (badciv a648f52e: added after the first check,
+/// it cost a whole cold prefill).
+#[tokio::test]
+async fn apply_fix_is_offered_from_the_first_auto_step_when_a_server_could_check_the_plan() {
+    for (file, offered) in [("lib.rs", true), ("code.txt", false)] {
+        let fixture = Fixture::new().await;
+        std::fs::write(fixture.root.join("lib.rs"), "pub fn one() -> u32 { 1 }\n").unwrap();
+        let mut provider = moosedev::harness::startup::ProviderSettings::fallback();
+        provider.config = fixture.config();
+        provider.language = moosedev::harness::startup::LanguageSettings {
+            enabled: true,
+            settle_timeout: std::time::Duration::from_secs(30),
+        };
+        let mut runner = Runner::create(fixture.root.clone(), fixture.url.clone(), "Fix it".into())
+            .await
+            .unwrap();
+        runner.configure_provider(&provider, None);
+        runner.enable_interactive().unwrap();
+        fixture.conversational(json!({"action":"read","file":file}));
+        runner.advance().await.unwrap();
+        fixture.conversational(
+            json!({"action":"plan","summary":"Fix it","files":[file],"checks":["true"]}),
+        );
+        runner.advance().await.unwrap();
+        runner.approve_plan().await.unwrap();
+        fixture.conversational(json!({"action":"reply","message":"Working."}));
+        runner.advance().await.unwrap();
+        assert!(runner.task.diagnostics.is_none(), "no server has reported");
+        let tools: Vec<String> = requests_of_kind(&fixture, "model").last().unwrap()["body"]
+            ["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            tools.contains(&"apply_fix".to_owned()),
+            offered,
+            "{file}: {tools:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2845,7 +2916,7 @@ async fn a_long_plan_is_accepted_and_each_step_sees_the_part_it_needs() {
     runner.advance().await.unwrap();
     let prompt = fixture.last_model_prompt("harness_action");
     let plan = prompt.split("\nPlan: ").nth(1).unwrap();
-    let plan = plan.split("\nFiles already read").next().unwrap();
+    let plan = plan.split("\nCurrent source").next().unwrap();
     assert!(plan.contains("Repair the output of code.txt."), "{plan}");
     assert!(plan.contains("code.txt: fix the output line."), "{plan}");
     assert!(plan.contains("[Plan shown in part:"), "{plan}");

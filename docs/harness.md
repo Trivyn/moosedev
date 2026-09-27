@@ -347,10 +347,11 @@ line and column.
   finding, and only those it can apply as one ordinary edit: text edits to a
   single plan file that change it. Each is listed under its finding
   (`fix 3: consider changing this to be mutable`). The Auto schema offers
-  `apply_fix(fix)` while the task has a language-server result, from the first
-  checked edit on, whether or not that result has fixes, so the prompt prefix
-  changes once rather than with every result; a server that stops takes it
-  away, since nothing could then offer a fix. A fix computed for another
+  `apply_fix(fix)` from the first Auto step whenever a language server could
+  check the plan (servers on, none failed, a planned file one a server checks),
+  or once a server has reported, whether or not a result has fixes. The tool
+  list heads the rendered request, so it must not change mid-task: offered
+  only after the first check, it cost a whole cold prefill (badciv a648f52e). A fix computed for another
   document version, or one the server marks disabled, is never offered. The harness makes the edit from the stored byte
   ranges and refuses it when the file is no longer the text the fix was
   offered for (a SHA-256 of that text travels with the fix). An applied fix is

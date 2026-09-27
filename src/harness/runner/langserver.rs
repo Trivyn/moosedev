@@ -27,6 +27,16 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Whether a language server checks any of `files`, or they shape its
+/// project.
+pub(super) fn any_checked(files: &[String]) -> bool {
+    language_servers().any(|spec| {
+        files
+            .iter()
+            .any(|file| spec.language_of(file).is_some() || spec.is_project_file(file))
+    })
+}
+
 impl ServerSpec {
     fn language_of(&self, file: &str) -> Option<&'static str> {
         let extension = Path::new(file).extension()?.to_str()?;
@@ -1806,6 +1816,19 @@ mod tests {
         drop(servers);
         let _ = std::fs::remove_dir_all(&project);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_plan_is_checked_when_a_server_covers_one_of_its_files() {
+        let files = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(any_checked(&files(&["README.md", "badciv-map/src/lib.rs"])));
+        assert!(any_checked(&files(&["badciv-map/Cargo.toml"])));
+        assert!(!any_checked(&files(&["code.txt", "notes.md"])));
     }
 
     #[test]

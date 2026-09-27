@@ -216,9 +216,10 @@ input tokens. Two causes put the changing bytes near the front:
   after it.
 
 The prompt is now ordered by how rarely each part changes: role and guidance,
-project rules, action meanings, objective, accepted knowledge, source, entity
-dossiers, repository paths, conversation, then the harness state (human guidance, mode,
-phase, plan, reads, edits, checks, allowed actions) and the observations. The
+project rules, action meanings, objective, accepted knowledge, the plan, source,
+entity dossiers, repository paths, conversation, then the harness state (human
+guidance, mode, phase, reads, edits, checks, allowed actions) and the
+observations. The
 conversation still precedes the authoritative state it may contradict. Full
 source is shown with files never edited first, in read order, then edited files
 least recently edited first. Tool observations are no longer replayed as

@@ -57,10 +57,26 @@ impl Runner {
         }
     }
 
-    /// Whether `apply_fix` is offered: the task has a language-server result
-    /// (settled or not), so a server is running that could offer a fix.
+    /// Whether `apply_fix` is offered: in Auto, when a language server could
+    /// offer a fix for this plan (servers are on, none has failed, and a
+    /// planned file is one a server checks), or has already reported. Decided
+    /// from the plan, not from the first result, so the tool list is the same
+    /// from the first Auto step: the tools head the rendered request, and a
+    /// change there costs a whole cold prefill (badciv a648f52e, action 8).
     pub(super) fn fixes_offerable(&self) -> bool {
-        self.task.mode == Mode::Auto && self.task.diagnostics.is_some()
+        if self.task.mode != Mode::Auto {
+            return false;
+        }
+        let could = self
+            .language_settings
+            .is_some_and(|settings| settings.enabled)
+            && !matches!(self.language, super::langserver::LanguageState::Unavailable)
+            && self
+                .task
+                .plan
+                .as_ref()
+                .is_some_and(|plan| super::langserver::any_checked(&plan.files));
+        could || self.task.diagnostics.is_some()
     }
 
     /// Post the frozen link request and turn its receipt into one review item.
