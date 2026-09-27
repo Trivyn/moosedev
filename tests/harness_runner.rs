@@ -2552,6 +2552,31 @@ async fn settled_language_server_errors_are_shown_and_send_finish_back_once() {
     assert_eq!(runner.task.phase, Phase::Verifying);
 }
 
+/// Sections in the order that keeps a model server's prefix cache: the
+/// entity dossiers, which change with the graph and with re-indexed
+/// definitions, follow the source instead of preceding it.
+#[tokio::test]
+async fn the_prompt_keeps_the_source_ahead_of_the_dossiers() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    let at = |marker: &str| {
+        prompt
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker:?} missing from the prompt"))
+    };
+    let knowledge = at("Current accepted knowledge:");
+    let source = at("Current source, refreshed");
+    let dossiers = at("\nEntity dossiers:\n");
+    let state = at("Current harness state");
+    assert!(
+        knowledge < source && source < dossiers && dossiers < state,
+        "knowledge {knowledge}, source {source}, dossiers {dossiers}, state {state}"
+    );
+}
+
 #[tokio::test]
 async fn a_cd_into_an_invented_project_root_is_dropped_and_the_command_runs() {
     let fixture = Fixture::new().await;

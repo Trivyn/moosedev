@@ -790,9 +790,16 @@ impl Runner {
         prompt.push_str(JOB);
         let dossiers = serde_json::to_string(&context.files)?;
         prompt.push_str(&format!(
-            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\nEntity dossiers:\n{}\n",
-            config.model, self.task.objective, context.context, dossiers,
+            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
+            config.model, self.task.objective, context.context,
         ));
+        // After the source, not before it: a dossier changes when the graph
+        // gains a record or an edited file's definitions change, and ahead of
+        // the source every such change cost its whole prefix (about 2.4 KB of
+        // prefill a step over badciv runs 6-8, at 1.2 s a KB).
+        // The source text ends with a newline, so the block needs none of
+        // its own: the prompt is byte for byte as long as before.
+        let dossier_block = format!("Entity dossiers:\n{dossiers}\n");
         let edited: Vec<_> = self.task.edits.iter().map(|edit| &edit.file).collect();
         let checks: Vec<_> = self
             .task
@@ -844,7 +851,12 @@ impl Runner {
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
         let outlines = protected_source(&blocks);
-        let fixed = prompt.len() + SOURCE_HEADER.len() + "{}\n".len() + state.len() + schema_bytes;
+        let fixed = prompt.len()
+            + SOURCE_HEADER.len()
+            + "{}\n".len()
+            + dossier_block.len()
+            + state.len()
+            + schema_bytes;
         let known = rules.len() + context.context.len() + dossiers.len() + schema_bytes;
         let overflow = |file: Option<(String, usize, usize)>| PromptOverflow {
             budget: limit,
@@ -870,7 +882,10 @@ impl Runner {
             .map_err(|oversized| {
                 overflow(Some((oversized.file, oversized.bytes, oversized.budget)))
             })?;
-        let source_text = format!("{SOURCE_HEADER}{}\n{}", source.full_json, source.outlines);
+        let source_text = format!(
+            "{SOURCE_HEADER}{}\n{}{dossier_block}",
+            source.full_json, source.outlines
+        );
         let required = prompt.len() + source_text.len() + state.len() + schema_bytes;
         Ok(Mandatory {
             head: prompt,
@@ -1052,9 +1067,10 @@ impl Runner {
         let navigation = navigation_context(files, remaining.min(8000));
         // Ordered by how often each part changes, so a model server's prefix
         // cache reuses the stable head and source: rules, knowledge and
-        // source first, then navigation, then conversation, then the state
-        // and observations that change every step. Historical intentions
-        // still precede the current authoritative execution state.
+        // source first, then the entity dossiers (with the source text),
+        // then navigation, then conversation, then the state and
+        // observations that change every step. Historical intentions still
+        // precede the current authoritative execution state.
         let mut prompt = head;
         prompt.push_str(&source_text);
         prompt.push_str(&navigation);

@@ -140,6 +140,10 @@ def main(argv=None):
     command.add_argument("--output", type=Path, required=True, help="new directory for the diagnostic evidence")
     command = sub.add_parser("prefix-reuse", help="offline prefix-cache reuse of a harness task journal; no model calls")
     command.add_argument("journal", type=Path, help="a .moosedev/harness/tasks/<id>.json task journal")
+    command.add_argument("--move", nargs=2, metavar=("SECTION", "AFTER"), default=None,
+                         help="reorder every prompt first, e.g. --move 'entity dossiers' source")
+    command.add_argument("--details", action="store_true",
+                         help="add per-section churn and the prefill/generation latency fit")
     command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
     command.add_argument("runs", type=Path, nargs="+")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -255,7 +259,8 @@ def main(argv=None):
         return 0
     elif args.command == "prefix-reuse":
         from .prefix_reuse import report_file
-        print(json.dumps(report_file(args.journal), indent=2))
+        move = tuple(args.move) if args.move else None
+        print(json.dumps(report_file(args.journal, move, args.details), indent=2))
         return 0
     elif args.command == "crowding-report":
         from .crowding import report as crowding_report

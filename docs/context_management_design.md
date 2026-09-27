@@ -216,8 +216,8 @@ input tokens. Two causes put the changing bytes near the front:
   after it.
 
 The prompt is now ordered by how rarely each part changes: role and guidance,
-project rules, action meanings, objective, accepted knowledge, dossiers, source,
-repository paths, conversation, then the harness state (human guidance, mode,
+project rules, action meanings, objective, accepted knowledge, source, entity
+dossiers, repository paths, conversation, then the harness state (human guidance, mode,
 phase, plan, reads, edits, checks, allowed actions) and the observations. The
 conversation still precedes the authoritative state it may contradict. Full
 source is shown with files never edited first, in read order, then edited files
@@ -236,6 +236,22 @@ measured 92.8% reuse, 6.4 KB to prefill per step, and a median action latency
 of 6.2 s against 66.8 s. That run then looped on `inspect`, and its reuse is
 flattered by the loop's near-identical steps; the next clean run is the
 measurement to quote.
+
+Clean runs 6 to 8 (`4ab49399`, `edc914f6`, `b443836f`) measured 62 to 68%
+reuse and 24 to 32 KB to prefill per step. Fitting each step's time to its
+uncached bytes and generated tokens (`prefix-reuse --details`, which joins the
+task's usage receipts; LM Studio reports no cached tokens) put prefill at 55 to
+62% of step time, about 1.2 s per uncached KB, against 27 to 34% for
+generation and 5 to 8 s fixed. The entity dossiers then sat before the source
+and were the first changed section on 12 steps of each run: they change when
+the graph gains a record or an edited file's definitions are re-indexed, and
+each change cost the whole source's prefix. They now follow the source; the
+replay (`prefix-reuse --move 'entity dossiers' source`) gives 2.3 to 2.8 points
+more reuse, 1.6 to 2.4 KB less per step. Moving the conversation after the
+state would save about 1.2 KB more, but would put old intentions after the
+authoritative state, so it stays. What remains is structural: an edit resends
+the edited file and everything after it, and the conversation, state and
+observations (about 15 KB) change on most steps.
 
 ## The plan, bounded where it is shown
 
