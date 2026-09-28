@@ -33,7 +33,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     // real substrate surface, not over-claiming.
     zed_languages: &["TypeScript", "TSX", "JavaScript"],
     is_test_path: Some(is_test_path),
-    server: None,
+    servers: &[],
     // npm finds its project by the nearest package.json at or above where it runs.
     checks: &[CheckTool {
         program: "npm",

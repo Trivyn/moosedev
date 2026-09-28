@@ -352,7 +352,12 @@ line and column.
   rust-analyzer, `experimental/serverStatus` quiescent. That covers
   `cargo check` on save, so borrow and lifetime errors arrive with the edit, not
   only rust-analyzer's own analysis. The first settle, which indexes the
-  project, may take 120 s; later ones `settle_timeout_secs` (30). A result that
+  project, may take 120 s; later ones `settle_timeout_secs` (30). pyright,
+  which publishes diagnostics for every version of an open document (even of
+  a file its configuration excludes), has also settled only once it has
+  published them for the text just sent of the edited file: it may say
+  nothing while it analyzes, and silence is not a clean result. Not ruff: it
+  publishes nothing for a file its configuration excludes. A result that
   did not settle is shown as unknown, never as clean. (OpenCode on the same
   badciv objective appended rust-analyzer errors to edit results without
   settling; qwen called them stale and ran `cargo build` after about one edit
@@ -408,7 +413,15 @@ line and column.
   (`cargo clippy --version`) under the server's sandbox; a missing linter is an
   Activity line ("No linter for Rust: clippy is not installed (rustup component
   add clippy); rust-analyzer checks without it.", `language_linter_missing`)
-  and the checker runs `cargo check`. Nothing stops.
+  and the checker runs `cargo check`. Nothing stops. For Python the linter is
+  ruff, a server of its own (`ruff server`) beside the type checker: its
+  warnings (source `Ruff`) are the lints, its errors stay errors. It leaves an
+  undefined name (F821) and syntax errors to the type checker, so each is
+  listed once, and offers no `# noqa` comment as a fix (it silences a lint,
+  it does not fix it); the project's own ruff configuration still applies,
+  with F821 ignored on top. A missing ruff is "No linter for Python: ruff is
+  not installed." With several linters the block names them all
+  (`clippy, ruff`).
 - **What the human sees.** The header shows the last result beside the model
   and phase (`rust-analyzer ✓` only with no errors, warnings or lints;
   `rust-analyzer: 2 error(s), 1 warning(s)` in red with errors, yellow
@@ -423,20 +436,40 @@ line and column.
   blocks.
 - **Lifecycle.** Servers start on the first applied edit once the project has a
   file of their language, restart when one of their project files
-  (`Cargo.toml`) is created or deleted, and stop at completion or cancellation.
-  A missing or failing server is journaled (`language_server`,
-  `language_server_error`) and the task carries on without one.
+  (`Cargo.toml`, `pyproject.toml`) is created or deleted, and stop at
+  completion or cancellation. A missing or failing server is journaled
+  (`language_server`, `language_server_error`) and the task carries on
+  without one.
 - **Confinement.** Each server runs under the command sandbox's rules with its
   own writable build, cargo home, home and temporary directories, no network,
   the `[harness.sandbox]` read paths, and a read-only mirror whose Cargo
   lockfile roots it may fill. The mirror is beside the command scratch, which
-  every command clears. macOS only so far; elsewhere the harness runs without
-  one.
-- **Languages.** Each language's server and linter are a row in the language
+  every command clears. Servers share one `stderr.log`, appended to. The
+  harness sends no `processId`: the sandbox denies a server any signal to the
+  harness, and pyright, which polls its parent with one every 3 s, would take
+  the harness for dead and exit. Homebrew's Node reads its OpenSSL
+  configuration file at start, so that one file is readable. macOS only so
+  far; elsewhere the harness runs without one.
+- **Languages.** Each language's servers and linter are rows in the language
   registry (`src/code/substrate/lang/`), beside its SCIP producer and
   tree-sitter grammar: commands, file extensions with their language ids,
-  project files, initialization options, and the linter's probe and install
-  hint. Only Rust has one so far; adding a language adds no client code.
+  project files, initialization options, the answers to
+  `workspace/configuration` by section, the `source` of a server that is
+  itself a linter, and an attached linter's probe and install hint. Every
+  installed server of a language runs, and every one hears every edit. Rust
+  has rust-analyzer (clippy attached). Python has two: a type checker,
+  basedpyright or else pyright (`basedpyright-langserver`/`pyright-langserver
+  --stdio`, shown as `pyright`), and ruff. The type checker is answered for
+  the sections it asks (`python` and `pyright`; basedpyright `python` and
+  `basedpyright`) with `typeCheckingMode: standard` (basedpyright's default
+  reports far more), `diagnosticMode: openFilesOnly` (the files the task
+  edited: a project's existing type errors elsewhere are not the task's) and
+  `reportMissingModuleSource` off; a project's own pyright configuration wins.
+  Known limit: the mirror carries no virtual environment (`.venv`, `venv` and
+  `node_modules` are not mirrored), so a third-party import may be reported
+  unresolved, and an edit that breaks a caller in a file the task has not
+  edited is not reported by the type checker. TypeScript has none yet. Adding
+  a language adds no client code.
 - **Configuration.** `[harness.lsp]` `enabled` (default true) and
   `settle_timeout_secs`; `MOOSEDEV_HARNESS_LSP=off`. Study sessions run without
   language servers, which would change their fixed conditions.

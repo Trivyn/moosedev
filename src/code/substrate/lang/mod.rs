@@ -39,10 +39,11 @@ pub(crate) struct LanguageSpec {
     /// Rust's `tests.rs`. `None` when the language adds nothing to the shared
     /// directory conventions.
     pub is_test_path: Option<fn(&str) -> bool>,
-    /// The language server the harness checks edits with; None when the
-    /// harness has none for this language yet.
+    /// The language servers the harness checks edits with, each started when
+    /// installed: a type checker, and a linter that runs as its own server
+    /// (ruff). Empty when the harness has none for this language yet.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
-    pub server: Option<ServerSpec>,
+    pub servers: &'static [ServerSpec],
     /// Programs a verification check runs that find their project by a
     /// manifest, searching upward from where they run.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
@@ -211,10 +212,29 @@ pub(crate) struct ServerSpec {
     /// The server reports `experimental/serverStatus` (rust-analyzer), whose
     /// `quiescent` flag says when indexing and checking are done.
     pub server_status: bool,
+    /// The server publishes diagnostics for every version of an open
+    /// document, even unchanged ones (pyright), so settling waits for its
+    /// report on the version just sent: it may say nothing while it
+    /// analyzes. Not ruff, which publishes nothing for a file its
+    /// configuration excludes.
+    pub publishes_every_version: bool,
     /// Sent as `initializationOptions` when the language has no linter.
     pub options: fn() -> Value,
     /// The language's linter, run through the server when installed.
     pub linter: Option<LinterSpec>,
+    /// The server is itself a linter (ruff): its warnings whose `source` is
+    /// this are lints. Its errors stay errors.
+    pub lint_source: Option<&'static str>,
+    /// The answer to a `workspace/configuration` item, by its `section`
+    /// (pyright asks for `python`); [`no_settings`] answers null to all.
+    pub settings: fn(&str) -> Value,
+}
+
+/// No settings for any section: the server keeps its defaults and its
+/// initialization options.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn no_settings(_section: &str) -> Value {
+    Value::Null
 }
 
 /// A linter the server runs for the harness. A missing one is reported to the
@@ -282,12 +302,12 @@ pub(crate) fn check_tools() -> impl Iterator<Item = &'static CheckTool> {
     LANGUAGES.iter().flat_map(|language| language.checks.iter())
 }
 
-/// The language servers in `LANGUAGES` order.
+/// The language servers in `LANGUAGES` order, each language's in its order.
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
 pub(crate) fn language_servers() -> impl Iterator<Item = &'static ServerSpec> {
     LANGUAGES
         .iter()
-        .filter_map(|language| language.server.as_ref())
+        .flat_map(|language| language.servers.iter())
 }
 
 pub(crate) fn producer_hooks(producer_name: &str) -> Option<&'static ProducerHooks> {

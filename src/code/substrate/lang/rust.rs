@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{backticked, file_name, note_failed, STUB_MESSAGES};
+use super::{backticked, file_name, no_settings, note_failed, STUB_MESSAGES};
 use super::{
     CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec,
     StubSyntax,
@@ -38,13 +38,14 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     zed_languages: &["Rust"],
     is_test_path: Some(is_test_path),
-    server: Some(ServerSpec {
+    servers: &[ServerSpec {
         name: "rust-analyzer",
         language: "Rust",
         commands: &[&["rust-analyzer"]],
         languages: &[("rs", "rust")],
         project_files: &["Cargo.toml"],
         server_status: true,
+        publishes_every_version: false,
         // Check with `cargo check` on save, so borrow and lifetime errors
         // arrive too, not only rust-analyzer's own analysis.
         options: || json!({"checkOnSave": true, "check": {"command": "check"}}),
@@ -57,7 +58,9 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
             install_hint: "rustup component add clippy",
             options: || json!({"checkOnSave": true, "check": {"command": "clippy"}}),
         }),
-    }),
+        lint_source: None,
+        settings: no_settings,
+    }],
     checks: &[CheckTool {
         program: "cargo",
         manifest: "Cargo.toml",

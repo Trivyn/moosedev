@@ -6,13 +6,15 @@ use std::process::Command;
 use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
-use super::{backticked, file_name, note_failed, STUB_MESSAGES};
+use super::{backticked, file_name, no_settings, note_failed, STUB_MESSAGES};
 use super::{
-    first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, StubSyntax,
+    first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, ServerSpec,
+    StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::symbols;
+use serde_json::{json, Value};
 
 pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     producer: Some(ProducerHooks {
@@ -38,7 +40,60 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     zed_languages: &["Python"],
     is_test_path: Some(is_test_path),
-    server: None,
+    // Two servers, both run when installed: a type checker, and ruff as the
+    // linter, which is its own server rather than a check the type checker
+    // runs (clippy through rust-analyzer).
+    servers: &[
+        ServerSpec {
+            // basedpyright is a pyright fork that speaks the same protocol and
+            // settings; either is the type checker.
+            name: "pyright",
+            language: "Python",
+            commands: &[
+                &["basedpyright-langserver", "--stdio"],
+                &["pyright-langserver", "--stdio"],
+            ],
+            languages: SOURCE_FILES,
+            project_files: &[
+                "pyproject.toml",
+                "setup.py",
+                "setup.cfg",
+                "requirements.txt",
+                "pyrightconfig.json",
+            ],
+            server_status: false,
+            publishes_every_version: true,
+            options: || Value::Null,
+            linter: None,
+            lint_source: None,
+            settings: pyright_settings,
+        },
+        ServerSpec {
+            name: "ruff",
+            language: "Python",
+            commands: &[&["ruff", "server"]],
+            languages: SOURCE_FILES,
+            project_files: &["pyproject.toml", "ruff.toml", ".ruff.toml"],
+            server_status: false,
+            publishes_every_version: false,
+            // An undefined name (F821) and a syntax error are the type
+            // checker's to report; reported by both, each would be listed
+            // twice. The project's own ruff configuration still applies:
+            // this ignore is added to its rule selection. No `# noqa`
+            // comment is offered as a fix: it silences the lint, it does not
+            // fix it.
+            options: || {
+                json!({"settings": {
+                    "lint": {"ignore": ["F821"]},
+                    "showSyntaxErrors": false,
+                    "codeAction": {"disableRuleComment": {"enable": false}},
+                }})
+            },
+            linter: None,
+            lint_source: Some("Ruff"),
+            settings: no_settings,
+        },
+    ],
     // pytest and python need no manifest to run.
     checks: &[],
     stubs: Some(StubSyntax {
@@ -52,6 +107,30 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
 };
+
+/// Python sources and the language id each is opened with.
+const SOURCE_FILES: &[(&str, &str)] = &[("py", "python"), ("pyi", "python")];
+
+/// pyright's and basedpyright's settings, by the section each asks for:
+/// pyright `python` (and `pyright`), basedpyright `python` and `basedpyright`;
+/// the `.analysis` sections as older versions ask. Standard checking (what
+/// pyright defaults to; basedpyright's default reports far more), only the
+/// files the harness opened, which are the files the task edited, and no
+/// complaint that an import's stubs were found without its source: the
+/// mirror has no virtual environment. A project's own pyright configuration
+/// overrides these.
+fn pyright_settings(section: &str) -> Value {
+    let analysis = json!({
+        "typeCheckingMode": "standard",
+        "diagnosticMode": "openFilesOnly",
+        "diagnosticSeverityOverrides": {"reportMissingModuleSource": "none"},
+    });
+    match section {
+        "python.analysis" | "basedpyright.analysis" => analysis,
+        "python" | "basedpyright" => json!({ "analysis": analysis }),
+        _ => Value::Null,
+    }
+}
 
 /// The name ruff's F821 ("Undefined name `X`") or pyright ("\"X\" is not
 /// defined") says is not defined.
@@ -225,6 +304,52 @@ mod tests {
         assert_eq!(super::unresolved_names("\"Grid\" is not defined"), ["Grid"]);
         assert!(super::unresolved_names("\"Grid\" is not accessed").is_empty());
         assert!(super::unresolved_names("Import \"os\" could not be resolved").is_empty());
+    }
+
+    /// A type checker (basedpyright before pyright) and ruff as the linter,
+    /// which leaves undefined names and syntax errors to the type checker.
+    #[test]
+    fn python_runs_a_type_checker_and_ruff_as_its_linter() {
+        let [types, lints] = super::LANGUAGE.servers else {
+            panic!("two Python servers");
+        };
+        assert_eq!((types.name, lints.name), ("pyright", "ruff"));
+        let programs: Vec<&str> = types.commands.iter().map(|argv| argv[0]).collect();
+        assert_eq!(programs, ["basedpyright-langserver", "pyright-langserver"]);
+        assert_eq!((types.lint_source, lints.lint_source), (None, Some("Ruff")));
+        // pyright reports on every version, even of an excluded file; ruff
+        // says nothing about a file its configuration excludes.
+        assert!(types.publishes_every_version && !lints.publishes_every_version);
+        for server in [types, lints] {
+            assert_eq!(server.languages, [("py", "python"), ("pyi", "python")]);
+            assert!(server.project_files.contains(&"pyproject.toml"));
+            assert!(server.linter.is_none() && !server.server_status);
+        }
+        let options = (lints.options)();
+        assert_eq!(
+            options["settings"]["lint"]["ignore"],
+            serde_json::json!(["F821"])
+        );
+        assert_eq!(options["settings"]["showSyntaxErrors"], false);
+        assert_eq!(
+            options["settings"]["codeAction"]["disableRuleComment"]["enable"],
+            false
+        );
+
+        // Each section pyright or basedpyright asks for, shaped as asked.
+        let settings = types.settings;
+        for section in ["python", "basedpyright"] {
+            let analysis = &settings(section)["analysis"];
+            assert_eq!(analysis["typeCheckingMode"], "standard", "{section}");
+            assert_eq!(analysis["diagnosticMode"], "openFilesOnly", "{section}");
+            assert_eq!(
+                analysis["diagnosticSeverityOverrides"]["reportMissingModuleSource"],
+                "none"
+            );
+            assert_eq!(settings(&format!("{section}.analysis")), *analysis);
+        }
+        assert!(settings("pyright").is_null());
+        assert!((lints.settings)("python").is_null());
     }
 
     #[test]

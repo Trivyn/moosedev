@@ -253,7 +253,8 @@ pub struct DiagnosticsSnapshot {
     /// other warnings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lints: Vec<Finding>,
-    /// The linter that ran, when one did.
+    /// The linters that ran, when any did, comma-separated (`clippy`,
+    /// `clippy, ruff`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linter: Option<String>,
     /// Warnings that are not the linter's: the compiler's own (unused
@@ -478,6 +479,8 @@ pub(super) const MIN_BLOCK_BYTES: usize = 400;
 struct Seen {
     /// Latest diagnostics per mirror-relative file.
     diagnostics: HashMap<String, Vec<lsp_types::Diagnostic>>,
+    /// When diagnostics about the text last sent of each file arrived.
+    published_at: HashMap<String, Instant>,
     /// The version of each open document the runner last sent; diagnostics
     /// for an older version arrive late and are dropped.
     sent_versions: HashMap<String, i32>,
@@ -532,7 +535,8 @@ impl LanguageServer {
             let outbox = outbox.clone();
             let seen = seen.clone();
             let mirror = mirror.clone();
-            std::thread::spawn(move || read_loop(stdout, outbox, seen, mirror));
+            let settings = spec.settings;
+            std::thread::spawn(move || read_loop(stdout, outbox, seen, mirror, settings));
         }
         let mut server = Self {
             spec,
@@ -550,7 +554,12 @@ impl LanguageServer {
         let id = server.request(
             "initialize",
             json!({
-                "processId": std::process::id(),
+                // None: the sandbox denies the server a signal to the
+                // harness, so a server that polls its parent with
+                // `kill(pid, 0)` (pyright, every 3 s) would see it dead and
+                // exit. Stopping the harness closes its stdin; the process
+                // group goes on drop.
+                "processId": Value::Null,
                 "rootUri": root,
                 "workspaceFolders": [{"uri": root, "name": "project"}],
                 "initializationOptions": linter.map_or(spec.options, |linter| linter.options)(),
@@ -710,21 +719,19 @@ impl LanguageServer {
         )
     }
 
-    /// Wait until the server has caught up with everything sent before
+    /// Wait until the server has caught up with the edit of `file` sent at
     /// `since`: something arrived after it, nothing has arrived for a quiet
     /// period, no progress is open, and a server that reports its status
     /// says it is quiescent. False at the deadline.
     ///
-    /// With `needs_status` (an edit this server checks), a server that reports
-    /// its status must also have shown work on this edit after `since` (a
-    /// status report, or announced work ending): a quiescent flag left over
-    /// from the previous edit says nothing about this one.
-    pub(super) async fn settle(
-        &mut self,
-        since: Instant,
-        timeout: Duration,
-        needs_status: bool,
-    ) -> bool {
+    /// When this server checks `file`, a server that reports its status must
+    /// also have shown work on this edit after `since` (a status report, or
+    /// announced work ending): a quiescent flag left over from the previous
+    /// edit says nothing about this one. A server that publishes for every
+    /// version (pyright) must have published diagnostics about the text just
+    /// sent of `file` when it has it open: it may say nothing while it
+    /// analyzes, and its silence is not a clean result.
+    pub(super) async fn settle(&mut self, file: &str, since: Instant, timeout: Duration) -> bool {
         const QUIET: Duration = Duration::from_millis(800);
         const FIRST_WORD: Duration = Duration::from_millis(1500);
         let timeout = if self.settled_once {
@@ -733,6 +740,8 @@ impl LanguageServer {
             timeout.max(Duration::from_secs(120))
         };
         let deadline = since + timeout;
+        let needs_status = self.concerns(file);
+        let awaits_report = self.spec.publishes_every_version && self.open.contains(file);
         loop {
             let now = Instant::now();
             let settled = match self.seen.lock() {
@@ -751,7 +760,10 @@ impl LanguageServer {
                     } else {
                         seen.quiescent != Some(false)
                     };
+                    let reported =
+                        !awaits_report || seen.published_at.get(file).is_some_and(|at| *at > since);
                     !seen.exited
+                        && reported
                         && (heard || now.duration_since(since) >= FIRST_WORD)
                         && quiet
                         && seen.progress.is_empty()
@@ -988,12 +1000,23 @@ impl LanguageServer {
         fix_targets(&seen.diagnostics, finding, &self.mirror)
     }
 
+    /// The name and diagnostic `source` of the linter this server runs: the
+    /// one it was started with, or the server itself when it is one.
+    pub(super) fn lint(&self) -> Option<(&'static str, &'static str)> {
+        match (self.linter, self.spec.lint_source) {
+            (Some(linter), _) => Some((linter.name, linter.source)),
+            (None, Some(source)) => Some((self.spec.name, source)),
+            (None, None) => None,
+        }
+    }
+
     /// Current errors, other warnings, and the linter's findings.
     pub(super) fn findings(&self) -> Findings {
         let Ok(seen) = self.seen.lock() else {
             return Findings::default();
         };
-        findings(&seen.diagnostics, self.linter, &self.mirror)
+        let source = self.lint().map(|(_, source)| source);
+        findings(&seen.diagnostics, source, &self.mirror)
     }
 }
 
@@ -1049,9 +1072,11 @@ fn fix_targets(
 /// "unresolved imports `badciv_map::Terrain`, …" four times, once per name's
 /// column, and the prompt listed it four times. The lowest column is kept;
 /// [`fix_targets`] still asks for every column's fixes.
+///
+/// A warning is a lint when its `source` is `lint_source`, the linter's.
 fn findings(
     diagnostics: &HashMap<String, Vec<lsp_types::Diagnostic>>,
-    linter: Option<LinterSpec>,
+    lint_source: Option<&str>,
     mirror: &Path,
 ) -> Findings {
     let mut found = Findings::default();
@@ -1069,8 +1094,7 @@ fn findings(
                 fixes: Vec::new(),
                 fixes_complete: false,
             };
-            let lint =
-                linter.is_some_and(|linter| diagnostic.source.as_deref() == Some(linter.source));
+            let lint = lint_source.is_some() && diagnostic.source.as_deref() == lint_source;
             match diagnostic.severity {
                 Some(lsp_types::DiagnosticSeverity::ERROR) | None => found.errors.push(finding()),
                 Some(lsp_types::DiagnosticSeverity::WARNING) if lint => found.lints.push(finding()),
@@ -1270,6 +1294,7 @@ fn read_loop(
     outbox: Sender<Message>,
     seen: Arc<Mutex<Seen>>,
     mirror: PathBuf,
+    settings: fn(&str) -> Value,
 ) {
     let mut reader = BufReader::new(stdout);
     while let Ok(Some(message)) = Message::read(&mut reader) {
@@ -1289,6 +1314,7 @@ fn read_loop(
                                     .is_some_and(|sent| version < *sent)
                             });
                             if !stale {
+                                state.published_at.insert(file.clone(), Instant::now());
                                 state.diagnostics.insert(file, params.diagnostics);
                             }
                         }
@@ -1318,14 +1344,11 @@ fn read_loop(
             }
             Message::Request(request) => {
                 drop(state);
-                // Answer what the server asks with defaults: no configuration
-                // beyond the initialization options, and accept progress
-                // tokens and registrations.
+                // Answer what the server asks: configuration from the
+                // language's settings, by section (null for any it does not
+                // name), and accept progress tokens and registrations.
                 let result = match request.method.as_str() {
-                    "workspace/configuration" => {
-                        let items = request.params["items"].as_array().map_or(0, Vec::len);
-                        Value::Array(vec![Value::Null; items])
-                    }
+                    "workspace/configuration" => configuration(&request.params, settings),
                     _ => Value::Null,
                 };
                 let _ = outbox.send(Message::Response(Response::new_ok(request.id, result)));
@@ -1336,6 +1359,17 @@ fn read_loop(
     if let Ok(mut state) = seen.lock() {
         state.exited = true;
     }
+}
+
+/// The answer to a `workspace/configuration` request: one value per item,
+/// by the item's section.
+fn configuration(params: &Value, settings: fn(&str) -> Value) -> Value {
+    params["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| item["section"].as_str().map_or(Value::Null, settings))
+        .collect()
 }
 
 /// Whether `linter` is installed: its probe succeeds under the server's
@@ -1408,10 +1442,19 @@ impl LanguageServers {
                 continue;
             }
             let Some(argv) = spec.argv() else {
-                notes.push((
-                    "language_server",
-                    format!("Language server {}: not installed.", spec.name),
-                ));
+                notes.push(match spec.lint_source {
+                    Some(_) => (
+                        "language_linter_missing",
+                        format!(
+                            "No linter for {}: {} is not installed.",
+                            spec.language, spec.name
+                        ),
+                    ),
+                    None => (
+                        "language_server",
+                        format!("Language server {}: not installed.", spec.name),
+                    ),
+                });
                 continue;
             };
             let linter = match spec.linter {
@@ -1479,8 +1522,7 @@ impl LanguageServers {
         }
         let mut settled = true;
         for server in &mut self.servers {
-            let checks = server.concerns(file);
-            settled &= server.settle(since, timeout, checks).await;
+            settled &= server.settle(file, since, timeout).await;
         }
         let mut snapshot = DiagnosticsSnapshot {
             servers: self
@@ -1491,6 +1533,7 @@ impl LanguageServers {
             settled,
             ..Default::default()
         };
+        let mut linters = Vec::new();
         for server in &mut self.servers {
             let mut found = server.findings();
             // The definition behind each of the first errors: what a type or
@@ -1526,12 +1569,11 @@ impl LanguageServers {
             snapshot.errors.extend(found.errors);
             snapshot.lints.extend(found.lints);
             snapshot.warnings.extend(found.warnings);
-            if let Some(linter) = server.linter {
-                snapshot
-                    .linter
-                    .get_or_insert_with(|| linter.name.to_owned());
+            if let Some((linter, _)) = server.lint() {
+                linters.push(linter);
             }
         }
+        snapshot.linter = (!linters.is_empty()).then(|| linters.join(", "));
         // Numbered in the order the block lists them.
         let offered = snapshot
             .errors
@@ -2114,6 +2156,181 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// Real pyright (basedpyright when installed) and ruff under the macOS
+    /// sandbox, over a mirror: a type error comes from the type checker, a
+    /// lint from ruff with its fix, an undefined name once, and a clean edit
+    /// settles clean.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires basedpyright or pyright, ruff and a functional OS sandbox; run explicitly"]
+    async fn python_servers_settle_to_the_errors_of_each_edit() {
+        let project = std::env::temp_dir().join(format!("moosedev-py-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(project.join("pkg")).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"py-probe\"\nversion = \"0.1.0\"\n\n[tool.ruff]\nextend-exclude = [\"pkg/gen.py\"]\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("pkg/__init__.py"), "").unwrap();
+        let clean = "def one() -> int:\n    return 1\n";
+        std::fs::write(project.join("pkg/mod.py"), clean).unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("moosedev-py-lsp-{}", uuid::Uuid::new_v4()));
+        let files = ["pyproject.toml", "pkg/__init__.py", "pkg/mod.py"].map(str::to_owned);
+        let (mut servers, notes) = LanguageServers::start(&project, &directory, &[], &files)
+            .await
+            .unwrap();
+        eprintln!("{notes:?}");
+        let names: Vec<&str> = servers.servers.iter().map(|s| s.name()).collect();
+        assert_eq!(names, ["pyright", "ruff"], "{notes:?}");
+
+        let editable = ["pkg/mod.py".to_owned()];
+        async fn edit(
+            servers: &mut LanguageServers,
+            project: &Path,
+            text: &str,
+            editable: &[String],
+        ) -> DiagnosticsSnapshot {
+            std::fs::write(project.join("pkg/mod.py"), text).unwrap();
+            let started = Instant::now();
+            let snapshot = servers
+                .after_edit(
+                    "pkg/mod.py",
+                    true,
+                    Some(text),
+                    Duration::from_secs(60),
+                    editable,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            eprintln!(
+                "settled={} in {:?}:\n{}",
+                snapshot.settled,
+                started.elapsed(),
+                snapshot.render(4_000)
+            );
+            assert!(snapshot.settled, "{snapshot:?}");
+            snapshot
+        }
+
+        // A type error, from the type checker; both servers named, and ruff
+        // the linter.
+        let typed = "x: int = \"a\"\n";
+        let snapshot = edit(&mut servers, &project, typed, &editable).await;
+        assert_eq!(snapshot.servers, ["pyright", "ruff"]);
+        assert_eq!(snapshot.linter.as_deref(), Some("ruff"));
+        assert!(
+            snapshot
+                .errors
+                .iter()
+                .any(|e| e.line == 1 && e.message.contains("is not assignable")),
+            "{snapshot:?}"
+        );
+        assert!(snapshot.lints.is_empty(), "{snapshot:?}");
+
+        // An unused import: ruff's lint (F401) alone, its removal offered as
+        // the fix ruff prefers. The harness does not apply it itself: a fix
+        // that only deletes may take scaffolding the model is about to use.
+        let unused = "import os\n\n\ndef one() -> int:\n    return 1\n";
+        let snapshot = edit(&mut servers, &project, unused, &editable).await;
+        assert!(
+            snapshot.errors.is_empty() && snapshot.warnings.is_empty(),
+            "the standard type check does not report it too: {snapshot:?}"
+        );
+        let [lint] = snapshot.lints.as_slice() else {
+            panic!("one lint: {snapshot:?}");
+        };
+        assert!(
+            lint.message.contains("`os` imported but unused"),
+            "{lint:?}"
+        );
+        assert!(lint.fixes_complete, "{lint:?}");
+        let preferred: Vec<&OfferedFix> = lint.fixes.iter().filter(|f| f.preferred).collect();
+        let [removal] = preferred.as_slice() else {
+            panic!("one preferred fix: {lint:?}");
+        };
+        assert!(
+            removal.title.contains("Remove unused import"),
+            "{removal:?}"
+        );
+        // No `# noqa` comment is offered: it silences, it does not fix.
+        assert!(
+            lint.fixes.iter().all(|f| !f.title.contains("Disable")),
+            "{lint:?}"
+        );
+        assert_eq!(
+            removal.apply(unused).unwrap(),
+            "\n\ndef one() -> int:\n    return 1\n"
+        );
+        assert!(snapshot.auto_fix().is_none(), "{lint:?}");
+
+        // A lint whose preferred fix replaces code (F632): the harness
+        // applies that one itself, and it clears the lint.
+        let literal = "def same(x: str) -> bool:\n    return x is \"a\"\n";
+        let snapshot = edit(&mut servers, &project, literal, &editable).await;
+        assert!(snapshot.errors.is_empty(), "{snapshot:?}");
+        let (finding, chosen) = snapshot
+            .auto_fix()
+            .unwrap_or_else(|| panic!("ruff's fix is the one to apply: {snapshot:?}"));
+        assert!(finding.message.contains("Use `==`"), "{finding:?}");
+        let fixed = chosen.apply(literal).unwrap();
+        assert!(fixed.contains("return x == \"a\""), "{fixed}");
+        let snapshot = edit(&mut servers, &project, &fixed, &editable).await;
+        assert!(snapshot.findings().next().is_none(), "{snapshot:?}");
+
+        // An undefined name is reported once, by the type checker: ruff's
+        // F821 is ignored.
+        let undefined = "def one() -> int:\n    return missing\n";
+        let snapshot = edit(&mut servers, &project, undefined, &editable).await;
+        let named: Vec<&Finding> = snapshot
+            .findings()
+            .filter(|f| f.message.contains("missing"))
+            .collect();
+        assert_eq!(named.len(), 1, "{snapshot:?}");
+        assert_eq!(named[0].message, "\"missing\" is not defined");
+        assert_eq!(snapshot.errors.len(), 1, "{snapshot:?}");
+
+        // A clean edit settles clean.
+        let snapshot = edit(&mut servers, &project, clean, &editable).await;
+        assert!(snapshot.findings().next().is_none(), "{snapshot:?}");
+        assert!(
+            snapshot
+                .render(4_000)
+                .contains("(pyright, ruff) after your last edit: no errors, no warnings, 0 lint(s) from ruff."),
+            "{}",
+            snapshot.render(4_000)
+        );
+
+        // A new file the project's ruff configuration excludes: ruff says
+        // nothing about it, and the result still settles, with the type
+        // checker's error and no lint.
+        let generated = "import os\ny: str = 1\n";
+        std::fs::write(project.join("pkg/gen.py"), generated).unwrap();
+        let snapshot = servers
+            .after_edit(
+                "pkg/gen.py",
+                false,
+                Some(generated),
+                Duration::from_secs(60),
+                &["pkg/gen.py".to_owned()],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.settled, "{snapshot:?}");
+        assert!(snapshot.lints.is_empty(), "{snapshot:?}");
+        assert!(
+            snapshot
+                .errors
+                .iter()
+                .any(|e| e.file == "pkg/gen.py" && e.line == 2),
+            "{snapshot:?}"
+        );
+        drop(servers);
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     fn diagnostic(line: u32, column: u32, message: &str) -> lsp_types::Diagnostic {
         let at = lsp_types::Position::new(line - 1, column - 1);
         lsp_types::Diagnostic {
@@ -2258,6 +2475,67 @@ mod tests {
         server.abort();
     }
 
+    /// A warning is a lint by its source: ruff, a server of its own, is the
+    /// linter of Python beside pyright. Its errors stay errors; the other
+    /// server's warnings stay warnings; information and hints are dropped.
+    #[test]
+    fn a_warning_is_a_lint_when_its_source_is_the_linters() {
+        let with = |line, severity, source: &str| lsp_types::Diagnostic {
+            severity: Some(severity),
+            source: Some(source.into()),
+            ..diagnostic(line, 1, &format!("{source} {line}"))
+        };
+        use lsp_types::DiagnosticSeverity as S;
+        let published = vec![
+            with(1, S::WARNING, "Ruff"),
+            with(2, S::ERROR, "Ruff"),
+            with(3, S::WARNING, "Pyright"),
+            with(4, S::ERROR, "Pyright"),
+            with(5, S::HINT, "Ruff"),
+            with(6, S::INFORMATION, "Pyright"),
+        ];
+        let diagnostics = HashMap::from([("pkg/mod.py".to_string(), published)]);
+        let lines = |findings: &[Finding]| findings.iter().map(|f| f.line).collect::<Vec<_>>();
+        let found = findings(&diagnostics, Some("Ruff"), Path::new("/m"));
+        assert_eq!(lines(&found.lints), [1]);
+        assert_eq!(lines(&found.errors), [2, 4]);
+        assert_eq!(lines(&found.warnings), [3]);
+        // Without a linter every warning is a warning.
+        let found = findings(&diagnostics, None, Path::new("/m"));
+        assert!(found.lints.is_empty());
+        assert_eq!(lines(&found.warnings), [1, 3]);
+    }
+
+    /// Each `workspace/configuration` item is answered from the language's
+    /// settings by its section; an item without one, with null.
+    #[test]
+    fn configuration_is_answered_by_section() {
+        fn settings(section: &str) -> Value {
+            match section {
+                "python" => json!({"analysis": {"typeCheckingMode": "standard"}}),
+                _ => Value::Null,
+            }
+        }
+        let params = json!({"items": [
+            {"scopeUri": "file:///m", "section": "python"},
+            {"section": "pyright"},
+            {"scopeUri": "file:///m"},
+        ]});
+        assert_eq!(
+            configuration(&params, settings),
+            json!([{"analysis": {"typeCheckingMode": "standard"}}, null, null])
+        );
+        // rust-analyzer's answer is unchanged: null for every item.
+        assert_eq!(
+            configuration(
+                &json!({"items": [{"section": "rust-analyzer"}]}),
+                crate::code::substrate::lang::no_settings
+            ),
+            json!([null])
+        );
+        assert_eq!(configuration(&json!({}), settings), json!([]));
+    }
+
     #[test]
     fn a_plan_is_checked_when_a_server_covers_one_of_its_files() {
         let files = |names: &[&str]| {
@@ -2268,6 +2546,8 @@ mod tests {
         };
         assert!(any_checked(&files(&["README.md", "badciv-map/src/lib.rs"])));
         assert!(any_checked(&files(&["badciv-map/Cargo.toml"])));
+        assert!(any_checked(&files(&["pkg/labels.py"])));
+        assert!(any_checked(&files(&["pyproject.toml"])));
         assert!(!any_checked(&files(&["code.txt", "notes.md"])));
     }
 
