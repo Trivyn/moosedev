@@ -90,6 +90,10 @@ pub struct SymbolicState {
     /// work, so auto-verify never counts them as a planned file edited.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub auto_fixed_edits: std::collections::BTreeSet<usize>,
+    /// Files a missing-module question asked about in the current approval
+    /// cycle: each is asked once; cleared when a plan is approved.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub asked_missing: BTreeSet<String>,
     #[serde(default)]
     pub retypes: usize,
     /// Model replans answered by continuing the approved plan because nothing

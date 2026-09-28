@@ -65,7 +65,21 @@ pub(crate) struct LanguageSpec {
     /// language.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub unresolved_names: Option<fn(&str) -> Vec<String>>,
+    /// The files a diagnostic or a failed run's output says a module
+    /// declaration or import could not find (rustc's "file not found for
+    /// module", pyright's unresolved import, Python's `ModuleNotFoundError`),
+    /// as paths relative to the project root, most likely first. Read from
+    /// the message, the compiler's full text when there is one, and the file
+    /// that declares the module (the finding's file; empty when unknown). The
+    /// harness asks the human whether a missing one joins the plan. None when
+    /// this build reads no such message of the language.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub missing_modules: Option<MissingModules>,
 }
+
+/// A language's reader of missing module files: (message, the compiler's full
+/// text, the declaring file) to paths relative to the project root.
+pub(crate) type MissingModules = fn(&str, Option<&str>, &str) -> Vec<String>;
 
 /// A test a runner reported failed: its name as the runner printed it
 /// (`parse::tests::grid`, `tests/test_map.py::test_grid`) and, when the output
@@ -144,6 +158,46 @@ pub(crate) fn unresolved_names(message: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// The files every registered language's parser reads as missing modules in
+/// a diagnostic (`message`, `detail`) found in `declaring_file`, in order, each
+/// once. As for [`unresolved_names`], the formats do not overlap.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn missing_modules(
+    message: &str,
+    detail: Option<&str>,
+    declaring_file: &str,
+) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for parse in LANGUAGES
+        .iter()
+        .filter_map(|language| language.missing_modules)
+    {
+        for file in parse(message, detail, declaring_file) {
+            if !file.is_empty() && !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// `path`'s directory, `/`-separated, without a trailing `/`; empty at the
+/// project root.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// `dir` joined with the relative `path`, `/`-separated.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+fn join_path(dir: &str, path: &str) -> String {
+    if dir.is_empty() {
+        path.to_string()
+    } else {
+        format!("{dir}/{path}")
+    }
 }
 
 /// The text between each pair of backticks in `text`, in order.
@@ -463,6 +517,23 @@ mod tests {
         );
         assert_eq!(super::unresolved_names("Undefined name `grid`"), ["grid"]);
         assert!(super::unresolved_names("mismatched types\nexpected `u8`").is_empty());
+    }
+
+    #[test]
+    fn missing_modules_union_every_language() {
+        assert_eq!(
+            super::missing_modules(
+                "unresolved module, can't find module file: parse.rs, or parse/mod.rs",
+                None,
+                "src/lib.rs"
+            ),
+            ["src/parse.rs", "src/parse/mod.rs"]
+        );
+        assert_eq!(
+            super::missing_modules("Import \".grid\" could not be resolved", None, "pkg/a.py"),
+            ["pkg/grid.py", "pkg/grid/__init__.py"]
+        );
+        assert!(super::missing_modules("mismatched types", None, "src/lib.rs").is_empty());
     }
 
     #[test]

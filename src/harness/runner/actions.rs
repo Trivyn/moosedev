@@ -35,6 +35,14 @@ pub(super) enum Step {
         #[serde(skip)]
         reason: String,
     },
+    /// A model read of a file outlined only for space whose earlier read is
+    /// still current. It journals as the read the model proposed; dispatch
+    /// serves the file's current text as the Last result, leaving the source
+    /// tiers and the working set as they are.
+    #[serde(rename = "read")]
+    ReadOutlined {
+        file: String,
+    },
     Search {
         query: String,
     },
@@ -265,12 +273,7 @@ impl Runner {
             | Action::Edit { ref file, .. } => file,
             Action::Inspect { event, offset } => return Ok(Step::Inspect { event, offset }),
             Action::Reply { message, then } => return Ok(Step::Reply { message, then }),
-            Action::Read { file } => {
-                return Ok(match self.redundant_read(&file) {
-                    Some(reason) => Step::ReadRefused { file, reason },
-                    None => Step::Read { file },
-                })
-            }
+            Action::Read { file } => return Ok(self.read_step(file)),
             Action::Search { query } => return Ok(Step::Search { query }),
             Action::Plan {
                 summary,
@@ -325,9 +328,11 @@ impl Runner {
             self.event(format!("First-edit guard: requesting source and dossier for {file}; the unread edit proposal will not execute."));
             return Ok(Step::Read { file: file.clone() });
         }
-        if self.task.source_outlined.contains(file) {
+        if self.task.source_outlined.contains(file) && !self.served_in_full(file) {
             // An outline is not the source: an edit written from it would
             // guess the text it replaces. Read it, which shows it in full next.
+            // A Last result that is the file's whole current text, served for
+            // a read of it, is the source.
             self.event(format!("Edit guard: {file} was shown only as an outline; showing its full source. The edit proposal will not execute."));
             return Ok(Step::Read { file: file.clone() });
         }
@@ -437,7 +442,79 @@ impl Runner {
     }
 }
 
+/// Whether an outlined file's re-read is served as the Last result.
+/// `MOOSEDEV_HARNESS_SERVE_OUTLINED=off` refuses it instead, as before.
+fn serve_outlined_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_SERVE_OUTLINED").map_or(true, |value| value.trim() != "off")
+}
+
+/// The journal prefix of an outlined read the harness served.
+pub(super) const OUTLINED_SERVED: &str = "Served outlined read:";
+
+/// The Last result serving the whole of `text`, the current text of the
+/// outlined `file`.
+pub(super) fn outlined_text_response(file: &str, text: &str) -> String {
+    format!(
+        "Current text of `{file}` (shown as an outline in Source; not added back to the working set):\n{text}"
+    )
+}
+
 impl Runner {
+    /// What a model read of `file` becomes: a read into the working set; a
+    /// refusal when it would add nothing ([`Self::redundant_read`]); or, for a
+    /// file outlined only for space whose earlier read is still current, its
+    /// current text served as the Last result without rotating the source
+    /// tiers: an outlined file read again was refused, and small models
+    /// re-read it anyway or edited blind. A serve is not repeated for the same
+    /// file until the model makes progress: the repeat is refused, and a
+    /// further one parks as any repeated refusal does.
+    fn read_step(&self, file: String) -> Step {
+        let reason = match self.redundant_read(&file) {
+            None => return Step::Read { file },
+            Some(reason) => reason,
+        };
+        if !serve_outlined_enabled()
+            || !self.task.source_outlined.contains(&file)
+            || self.task.source_full.contains(&file)
+        {
+            return Step::ReadRefused { file, reason };
+        }
+        match self.served_since_progress(&file) {
+            Some(event) => {
+                let next = if self.task.mode == Mode::Plan {
+                    "Propose the plan from it"
+                } else {
+                    "Edit it"
+                };
+                Step::ReadRefused {
+                    reason: format!(
+                        "`{file}` is unchanged and already served as the Last result at event {event}. {next}, or inspect event {event}."
+                    ),
+                    file,
+                }
+            }
+            None => Step::ReadOutlined { file },
+        }
+    }
+
+    /// The event of an outlined read of `file` served since the model last
+    /// did anything but look (reads, inspects and searches).
+    fn served_since_progress(&self, file: &str) -> Option<usize> {
+        let served = format!("{OUTLINED_SERVED} {file} ");
+        self.looking_run(self.task.events.len())
+            .find(|(_, event)| event.message.starts_with(&served))
+            .map(|(index, _)| index)
+    }
+
+    /// Whether the Last result is the whole current text of `file`, served
+    /// for a read of it: what the model proposing an edit now has seen.
+    fn served_in_full(&self, file: &str) -> bool {
+        match self.task.source.get(file) {
+            Some(Some(text)) => self.task.last_response == outlined_text_response(file, text),
+            _ => false,
+        }
+    }
+
     /// Why a model read of `file` would add nothing, or `None` when it
     /// should run. The prompt that produced the read already showed the
     /// file's current text in full, or it outlined the file only for space
@@ -516,7 +593,9 @@ impl Runner {
                 None => format!("no fix {id} is offered: no finding has a quick fix now; make the change with replace or write"),
             })?;
         let file = fix.file.clone();
-        if !self.task.read_files.contains(&file) || self.task.source_outlined.contains(&file) {
+        if !self.task.read_files.contains(&file)
+            || (self.task.source_outlined.contains(&file) && !self.served_in_full(&file))
+        {
             // As for any edit: never change a file whose source and dossier
             // the model has not been shown in full.
             self.event(format!(

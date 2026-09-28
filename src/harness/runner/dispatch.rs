@@ -377,6 +377,7 @@ impl Runner {
             Step::Inspect { .. }
                 | Step::Read { .. }
                 | Step::ReadRefused { .. }
+                | Step::ReadOutlined { .. }
                 | Step::Search { .. }
         );
         match step {
@@ -420,6 +421,9 @@ impl Runner {
             }
             Step::ReadRefused { file, reason } => {
                 self.refuse_read(&file, &reason);
+            }
+            Step::ReadOutlined { file } => {
+                self.serve_outlined_read(&file, &context)?;
             }
             Step::Search { query } => {
                 // A query already asked in this task returns the same records;
@@ -696,8 +700,9 @@ impl Runner {
 
     /// After an applied edit: check it with the language servers, then arm
     /// what the harness may do next by itself on that fresh result (a
-    /// preferred fix, or the required checks). `chained` keeps the count of
-    /// fixes the harness applied in a row; a model edit restarts it.
+    /// preferred fix, or the required checks), unless the result names a
+    /// missing module the human is asked about instead. `chained` keeps the
+    /// count of fixes the harness applied in a row; a model edit restarts it.
     pub(super) async fn settle_applied_edit(
         &mut self,
         file: &str,
@@ -709,6 +714,9 @@ impl Runner {
             self.symbolic_state_mut().auto_fix_chain = 0;
         }
         let fresh = self.check_applied_edit(file, existed, after).await;
+        if self.ask_missing_module_after_edit() {
+            return;
+        }
         self.arm_auto_fix(fresh);
         self.arm_auto_verify(fresh);
     }
@@ -869,7 +877,8 @@ impl Runner {
             self.note_pass(command);
         }
         // A blocked command is the permission gates' to answer.
-        let stalled = (!result.success && denial.is_none())
+        let unblocked_failure = !result.success && denial.is_none();
+        let stalled = unblocked_failure
             .then(|| self.note_failure(command, &result.output))
             .flatten();
         self.task.last_response = format!("{}{}", stalled.unwrap_or_default(), result.output);
@@ -903,6 +912,9 @@ impl Runner {
                 self.task.last_response.push_str(UNGRANTABLE_DENIAL_HINT)
             }
             None => {}
+        }
+        if unblocked_failure {
+            self.ask_missing_module_in_output(&result.output);
         }
         self.task.capture_due = true;
         self.task.after_review = Phase::Working;
@@ -1043,6 +1055,9 @@ impl Runner {
                 {
                     self.task.last_response.insert_str(0, &note);
                 }
+                if denial.is_none() {
+                    self.ask_missing_module_in_output(&result.output);
+                }
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
             } else if let Some(reason) = vacuous_reason(&result) {
@@ -1142,6 +1157,9 @@ const INSPECT_REFUSED: &str = "Not shown again: inspect of";
 const READ_REFUSED: &str = "Not read again:";
 /// Room for the "Journal event N, bytes a..b of c:" line above a page.
 const INSPECT_HEADER_RESERVE: usize = 96;
+/// Bytes kept for the note that says where a served outlined read that did
+/// not fit continues.
+const PAGE_NOTE_RESERVE: usize = 128;
 /// Vacuous-check returns per task before the task is allowed to finish anyway.
 /// One, matching the plan-coverage return limit: the nudge is worth sending
 /// once, and a project that genuinely has no tests must not be trapped.
@@ -1465,29 +1483,9 @@ impl Runner {
     fn refuse_read(&mut self, file: &str, reason: &str) {
         // The last event is this step's own journaled action.
         let before = self.task.events.len().saturating_sub(1);
-        let mut refused_before = false;
-        for earlier in self.task.events[..before].iter().rev() {
-            let message = earlier.message.as_str();
-            if message.starts_with(READ_REFUSED) {
-                refused_before = true;
-                break;
-            }
-            let looking = ["read", "inspect", "search"]
-                .iter()
-                .any(|kind| message.starts_with(&format!("Model action: {{\"action\":\"{kind}\"")));
-            // An edit a guard turned into a read journals as a read, after
-            // its guard's event: that attempt is progress, not looking.
-            let guarded_edit = ["First-edit guard:", "Edit guard:", "Fix guard:"]
-                .iter()
-                .any(|guard| message.starts_with(guard));
-            if message.starts_with("Human ")
-                || message.starts_with("Applied edit")
-                || guarded_edit
-                || (message.starts_with("Model action: ") && !looking)
-            {
-                break;
-            }
-        }
+        let refused_before = self
+            .looking_run(before)
+            .any(|(_, earlier)| earlier.message.starts_with(READ_REFUSED));
         self.intent_event("read_repeat_refused", &format!("{file}: {reason}"));
         if refused_before {
             self.event(format!("{READ_REFUSED} parked for guidance ({file})."));
@@ -1502,6 +1500,79 @@ impl Runner {
         let message = format!("{READ_REFUSED} {reason}");
         self.event(message.clone());
         self.task.last_response = message;
+    }
+
+    /// The journal events before `before`, latest first, back to the model's
+    /// last progress: the last human message, applied edit, guarded edit
+    /// attempt or model action other than a read, inspect or search.
+    pub(super) fn looking_run(&self, before: usize) -> impl Iterator<Item = (usize, &Event)> {
+        self.task.events[..before.min(self.task.events.len())]
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, earlier)| {
+                let message = earlier.message.as_str();
+                let looking = ["read", "inspect", "search"].iter().any(|kind| {
+                    message.starts_with(&format!("Model action: {{\"action\":\"{kind}\""))
+                });
+                // An edit a guard turned into a read journals as a read, after
+                // its guard's event: that attempt is progress, not looking.
+                let guarded_edit = ["First-edit guard:", "Edit guard:", "Fix guard:"]
+                    .iter()
+                    .any(|guard| message.starts_with(guard));
+                !(message.starts_with("Human ")
+                    || message.starts_with("Applied edit")
+                    || guarded_edit
+                    || (message.starts_with("Model action: ") && !looking))
+            })
+    }
+
+    /// Serve the current text of `file`, outlined in Source for space, as the
+    /// Last result, leaving the working set and its tiers as they are: no
+    /// source tier moves, so the read cannot outline the next file it needs.
+    /// A text larger than the Last result can show is served from its start,
+    /// with where to page the rest from. The read snapshot is refreshed to
+    /// the served text, and a Last result that holds all of it lets an edit
+    /// of the file through the outline guard.
+    fn serve_outlined_read(&mut self, file: &str, context: &ContextResponse) -> Result<()> {
+        let text = self
+            .workspace
+            .read(file)?
+            .context("an outlined file no longer exists")?;
+        self.symbolic_state_mut()
+            .read_snapshots
+            .insert(file.to_string(), fingerprint(&Some(text.clone())));
+        let whole = actions::outlined_text_response(file, &text);
+        let budget = self.next_inspect_budget(context)?;
+        let size = text.len();
+        let header = format!("{} {file} ({size} bytes):\n", actions::OUTLINED_SERVED);
+        let event = self.task.events.len();
+        let shown = if whole.len() <= budget {
+            size
+        } else {
+            let mut end = budget
+                .saturating_sub(whole.len() - size + PAGE_NOTE_RESERVE)
+                .min(size);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        };
+        self.event(format!("{header}{text}"));
+        self.intent_event(
+            "outlined_read_served",
+            &format!("{file}: bytes 0..{shown} of {size}"),
+        );
+        self.task.last_response = if shown == size {
+            whole
+        } else {
+            let offset = header.len() + shown;
+            format!(
+                "{}\n[Bytes 0..{shown} of {size} shown; the rest is in journal event {event}: inspect({event}, {offset}).]",
+                actions::outlined_text_response(file, &text[..shown])
+            )
+        };
+        Ok(())
     }
 
     /// Refuse an exact repeat of a command whose output cannot have changed,

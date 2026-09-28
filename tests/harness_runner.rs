@@ -3060,27 +3060,205 @@ async fn alternating_inspects_of_the_same_pages_are_refused_then_parked() {
     assert!(runner.task.last_response.contains("Guidance is needed"));
 }
 
-#[tokio::test]
-async fn reading_files_that_cannot_all_fit_is_refused_then_parked() {
-    // badciv 40cef4a5: the crate was larger than the source budget, and each
-    // read outlined the file qwen read next, for about 40 planning steps.
-    let fixture = Fixture::new().await;
-    let big = |name: &str| {
-        format!(
-            "// {name}\n{}",
-            "let value = 0; // padding line\n".repeat(900)
-        )
-    };
+/// a.rs read, then b.rs: together larger than the source budget, so a.rs
+/// is only an outline while its earlier read is still current.
+async fn outlined_a(fixture: &Fixture) -> Runner {
     for name in ["a.rs", "b.rs"] {
-        std::fs::write(fixture.root.join(name), big(name)).unwrap();
+        std::fs::write(fixture.root.join(name), big_source(name)).unwrap();
     }
     let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"a.rs"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"read","file":"b.rs"}));
+    runner.advance().await.unwrap();
+    assert!(runner.task.last_response.starts_with("Read b.rs"));
+    runner
+}
+
+fn big_source(name: &str) -> String {
+    format!(
+        "// {name}\n{}",
+        "let value = 0; // padding line\n".repeat(900)
+    )
+}
+
+/// `MOOSEDEV_HARNESS_SERVE_OUTLINED=off` for the life of the guard.
+struct ServeOutlinedOff;
+
+impl ServeOutlinedOff {
+    fn new() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_SERVE_OUTLINED", "off");
+        Self
+    }
+}
+
+impl Drop for ServeOutlinedOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_SERVE_OUTLINED");
+    }
+}
+
+#[tokio::test]
+async fn an_outlined_file_read_again_is_served_without_rotating_the_tiers() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = outlined_a(&fixture).await;
+    let read_files = runner.task.read_files.clone();
+    let recency = journal_value(&runner)["source_recency"].clone();
+    let source = journal_value(&runner)["source"].clone();
+    let calls = fixture.model_calls();
+    fixture.conversational(json!({"action":"read","file":"a.rs"}));
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls + 1, "no prompt was resent");
+    let text = big_source("a.rs");
+    let response = runner.task.last_response.clone();
+    let served = response
+        .strip_prefix("Current text of `a.rs` (shown as an outline in Source; not added back to the working set):\n")
+        .unwrap_or_else(|| panic!("{response}"));
+    // Larger than the Last result can show: served from its start, with
+    // where the rest is.
+    let (page, note) = served.rsplit_once("\n[Bytes 0..").unwrap();
+    assert!(text.starts_with(page));
+    let shown = page.len();
+    assert!(
+        note.starts_with(&format!(
+            "{shown} of {} shown; the rest is in journal event ",
+            text.len()
+        )),
+        "{note}"
+    );
+    // The working set and its tiers are untouched.
+    assert_eq!(runner.task.read_files, read_files);
+    assert_eq!(journal_value(&runner)["source_recency"], recency);
+    assert_eq!(journal_value(&runner)["source"], source);
+    assert_eq!(
+        intent_details(&runner, "outlined_read_served"),
+        vec![format!("a.rs: bytes 0..{shown} of {}", text.len())]
+    );
+    let event = runner
+        .task
+        .events
+        .iter()
+        .rposition(|event| event.message.starts_with("Served outlined read: a.rs "))
+        .unwrap();
+    let (at, offset) = note
+        .rsplit_once("inspect(")
+        .and_then(|(_, rest)| rest.strip_suffix(").]"))
+        .and_then(|rest| rest.split_once(", "))
+        .map(|(at, offset)| {
+            (
+                at.parse::<usize>().unwrap(),
+                offset.parse::<usize>().unwrap(),
+            )
+        })
+        .unwrap();
+    assert_eq!(at, event);
+
+    // The page it names continues the text.
+    fixture.conversational(json!({"action":"inspect","event":at,"offset":offset}));
+    runner.advance().await.unwrap();
+    let (_, rest) = runner.task.last_response.split_once(":\n").unwrap();
+    assert!(
+        text[shown..].starts_with(rest),
+        "{}",
+        runner.task.last_response
+    );
+
+    // A repeat with nothing but looking since is refused, then parks.
+    fixture.conversational(json!({"action":"read","file":"a.rs"}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.last_response,
+        format!("Not read again: `a.rs` is unchanged and already served as the Last result at event {event}. Propose the plan from it, or inspect event {event}.")
+    );
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 1);
+    fixture.conversational(json!({"action":"read","file":"a.rs"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner.task.last_response.contains("Guidance is needed"));
+}
+
+#[tokio::test]
+async fn an_edit_after_an_outlined_file_was_served_whole_applies() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    // b.rs and c.rs fill the source budget between them; a.rs, read before
+    // them, is outlined, though the Last result can show all of it.
+    let small = format!("// a.rs\n{}", "let small = 0;\n".repeat(500));
+    std::fs::write(fixture.root.join("a.rs"), &small).unwrap();
+    for name in ["b.rs", "c.rs"] {
+        let text = format!(
+            "// {name}\n{}",
+            "let value = 0; // padding line\n".repeat(480)
+        );
+        std::fs::write(fixture.root.join(name), text).unwrap();
+    }
+    let mut runner = fixture.interactive().await;
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        fixture.conversational(json!({"action":"read","file":name}));
+        runner.advance().await.unwrap();
+    }
+    fixture.conversational(json!({"action":"plan","summary":"Change a.rs beside b.rs and c.rs","files":["a.rs","b.rs","c.rs"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    assert_eq!(journal_value(&runner)["source_outlined"], json!(["a.rs"]));
+    fixture.conversational(json!({"action":"read","file":"a.rs"}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.last_response,
+        format!("Current text of `a.rs` (shown as an outline in Source; not added back to the working set):\n{small}")
+    );
+    // The model has the whole current text: its edit is not held for a read.
+    fixture.conversational(
+        json!({"action":"replace","file":"a.rs","old_text":"// a.rs\n","new_text":"// a\n"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert!(std::fs::read_to_string(fixture.root.join("a.rs"))
+        .unwrap()
+        .starts_with("// a\n"));
+}
+
+#[tokio::test]
+async fn alternating_served_reads_of_two_outlined_files_park() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        std::fs::write(fixture.root.join(name), big_source(name)).unwrap();
+    }
+    let mut runner = fixture.interactive().await;
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        fixture.conversational(json!({"action":"read","file":name}));
+        runner.advance().await.unwrap();
+    }
     let read = |file: &str| json!({"action":"read","file":file});
     fixture.conversational(read("a.rs"));
     runner.advance().await.unwrap();
     fixture.conversational(read("b.rs"));
     runner.advance().await.unwrap();
-    assert!(runner.task.last_response.starts_with("Read b.rs"));
+    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 2);
+    fixture.conversational(read("a.rs"));
+    runner.advance().await.unwrap();
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("Not read again: `a.rs`"));
+    fixture.conversational(read("b.rs"));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 2);
+}
+
+#[tokio::test]
+async fn serving_outlined_reads_switched_off_refuses_them_then_parks() {
+    // badciv 40cef4a5: the crate was larger than the source budget, and each
+    // read outlined the file qwen read next, for about 40 planning steps.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _off = ServeOutlinedOff::new();
+    let fixture = Fixture::new().await;
+    let mut runner = outlined_a(&fixture).await;
+    let read = |file: &str| json!({"action":"read","file":file});
 
     // a.rs is now only an outline; its earlier read is still current.
     fixture.conversational(read("a.rs"));
@@ -3095,6 +3273,7 @@ async fn reading_files_that_cannot_all_fit_is_refused_then_parked() {
     );
     assert!(runner.task.last_response.contains("Plan from its outline"));
     assert_eq!(intent_details(&runner, "read_repeat_refused").len(), 1);
+    assert!(intent_details(&runner, "outlined_read_served").is_empty());
 
     // b.rs is still in full: reading it adds nothing either, and a second
     // refusal while only looking parks the task.
@@ -3106,22 +3285,10 @@ async fn reading_files_that_cannot_all_fit_is_refused_then_parked() {
 
 #[tokio::test]
 async fn an_edit_attempt_between_refused_reads_does_not_park() {
+    let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
-    let big = |name: &str| {
-        format!(
-            "// {name}\n{}",
-            "let value = 0; // padding line\n".repeat(900)
-        )
-    };
-    for name in ["a.rs", "b.rs"] {
-        std::fs::write(fixture.root.join(name), big(name)).unwrap();
-    }
-    let mut runner = fixture.interactive().await;
+    let mut runner = outlined_a(&fixture).await;
     let read = |file: &str| json!({"action":"read","file":file});
-    fixture.conversational(read("a.rs"));
-    runner.advance().await.unwrap();
-    fixture.conversational(read("b.rs"));
-    runner.advance().await.unwrap();
     fixture.conversational(json!({"action":"plan","summary":"Change a.rs and b.rs","files":["a.rs","b.rs"],"checks":["true"]}));
     runner.advance().await.unwrap();
     runner.approve_plan().await.unwrap();
@@ -3132,24 +3299,32 @@ async fn an_edit_attempt_between_refused_reads_does_not_park() {
         runner
             .task
             .last_response
-            .starts_with("Not read again: a.rs is outlined only"),
+            .starts_with("Current text of `a.rs`"),
         "{}",
         runner.task.last_response
     );
-    assert!(runner.task.last_response.contains("propose the edit"));
-    // The edit guard turns this attempt into a read of a.rs: progress, so
-    // the next refusal is a first refusal again.
+    fixture.conversational(read("a.rs"));
+    runner.advance().await.unwrap();
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("Not read again: `a.rs`"));
+    assert!(runner.task.last_response.contains("Edit it, or inspect"));
+    // Served only in part, so the edit guard still holds: this attempt
+    // becomes a read of a.rs, which is progress, so the next refusal is a
+    // first refusal again.
     fixture.conversational(
         json!({"action":"replace","file":"a.rs","old_text":"// a.rs\n","new_text":"// a\n"}),
     );
     runner.advance().await.unwrap();
-    fixture.conversational(read("b.rs"));
+    assert!(runner.task.edits.is_empty());
+    fixture.conversational(read("a.rs"));
     runner.advance().await.unwrap();
     assert!(
         runner
             .task
             .last_response
-            .starts_with("Not read again: b.rs"),
+            .starts_with("Not read again: a.rs is shown in full"),
         "{}",
         runner.task.last_response
     );

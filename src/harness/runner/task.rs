@@ -213,9 +213,9 @@ impl PendingPermission {
 
 /// A question the harness asks the human, with the options it can carry
 /// out. The harness asks only what the symbolic layer cannot default: whether
-/// an approved plan may grow, or whether work may be verified with planned
-/// files missing (Constraint cd9f1a96 keeps such questions away from the
-/// model).
+/// an approved plan may grow (by a file an edit or a module declaration
+/// needs), or whether work may be verified with planned files missing
+/// (Constraint cd9f1a96 keeps such questions away from the model).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingChoice {
@@ -235,6 +235,9 @@ pub enum ChoiceKind {
     ScopeAdd { file: String },
     /// A finish came back with planned `files` still missing.
     MissingPlannedFile { files: Vec<String> },
+    /// A module declaration or import in `declared_in` names `file`, which
+    /// neither exists nor is planned.
+    MissingModule { file: String, declared_in: String },
 }
 
 impl ChoiceKind {
@@ -243,6 +246,7 @@ impl ChoiceKind {
         match self {
             ChoiceKind::ScopeAdd { .. } => "scope_add",
             ChoiceKind::MissingPlannedFile { .. } => "missing_planned_file",
+            ChoiceKind::MissingModule { .. } => "missing_module",
         }
     }
 }

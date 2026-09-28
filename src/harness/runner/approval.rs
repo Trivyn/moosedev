@@ -69,6 +69,8 @@ impl Runner {
         // A human choice to verify with planned files missing answered the
         // plan approved then; this approval's finish is gated again.
         state.unfinished_accepted_at = None;
+        // Missing modules are asked about once per approved plan.
+        state.asked_missing.clear();
         // A new approval starts a new cycle, and no arm from before it may
         // fire. Only edits made under it count toward auto-verify and the
         // unfinished-plan gate, unless it keeps the earlier plan's coverage

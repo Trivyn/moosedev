@@ -105,7 +105,11 @@ SYMBOLIC_EVENT_KINDS = (
     "finish_forced_missing",
     # At plan approval: the rules the plan left open, deferred by the approval, and the human's answers to the
     # plan's open choices (a default taken on approval says so). Human decisions, not autonomous recoveries.
-    "rules_deferred", "plan_choice")
+    "rules_deferred", "plan_choice",
+    # A module declaration or import naming a file neither planned nor on disk, asked of the human (a harness
+    # question); and an outlined file's re-read served as the Last result without rotating the source tiers.
+    # Neither is an autonomous recovery.
+    "missing_module_asked", "outlined_read_served")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")

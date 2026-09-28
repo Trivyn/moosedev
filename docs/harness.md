@@ -1205,23 +1205,40 @@ contract 3 and intent contract 2.
   a cycle through a budget one file short (badciv 7e0c50eb) is told it is
   swapping, rather than finding out one read at a time.
 - Redundant reads. A model `read` of a file the producing prompt already
-  covers is refused without touching the tiers: a file shown there in full
-  (the refusal gives the next action: plan in Plan mode; edit, check or
-  finish while working), or a file outlined only for space whose earlier read is still current (its
-  `Read` event is named, and the next step is mode-aware: plan from the
-  outline, inspect that event, or propose the edit so the edit guard shows it
-  in full). A changed file is read as before, and reads the guards make are
-  never judged. The refusal is journaled as `Not read again:` with
-  `read_repeat_refused`. A second refusal while the model is only looking
-  (reads, inspects and searches since the last human message, applied edit,
-  guarded edit attempt or other action) parks the task for guidance. With more
-  source than the budget holds, recency ranking outlines exactly the file a
-  model reads next; badciv 40cef4a5 rotated six files that way for about 40
-  planning steps.
+  shows in full is refused without touching the tiers (the refusal gives the
+  next action: plan in Plan mode; edit, check or finish while working). A
+  changed file is read as before, and reads the guards make are never judged.
+  The refusal is journaled as `Not read again:` with `read_repeat_refused`. A
+  second refusal while the model is only looking (reads, inspects and searches
+  since the last human message, applied edit, guarded edit attempt or other
+  action) parks the task for guidance. With more source than the budget
+  holds, recency ranking outlines exactly the file a model reads next; badciv
+  40cef4a5 rotated six files that way for about 40 planning steps.
+- Served outlined reads. A `read` of a file outlined only for space whose
+  earlier read is still current is served in the observation slot instead:
+  the Last result is "Current text of `<file>` (shown as an outline in
+  Source; not added back to the working set):" and the file's current text.
+  The working set, its recency and the source tiers stay as they were, so the
+  read cannot outline the next file the model needs; the file's read snapshot
+  is refreshed to the served text. The event is journaled as `Served outlined
+  read: <file> (<size> bytes):` with the whole text, and `outlined_read_served`
+  records the bytes shown. A text larger than the Last result can show
+  unclipped (the budget an `inspect` page gets) is served from its start with
+  a note naming that event and the offset to `inspect` for the rest. A repeat
+  read of the same file while the model has only looked since the serve is
+  refused ("Not read again: `<file>` is unchanged and already served as the
+  Last result at event N", with a mode-aware next step), so a further repeat
+  parks as above; reads alternating between outlined files are each served
+  once and then park the same way. `MOOSEDEV_HARNESS_SERVE_OUTLINED=off`
+  restores the refusal (its `Read` event is named, and the next step is
+  mode-aware: plan from the outline, inspect that event, or propose the edit
+  so the edit guard shows it in full).
 - Edit guard for outlined files. An edit to a file the producing prompt showed
   only as an outline is not applied: an edit written from an outline would
   guess the text it replaces. The step becomes a read, which makes the file the
-  latest read and shows it in full next.
+  latest read and shows it in full next. A Last result that is the file's
+  whole current text, served for a read of it, is the source: the edit
+  applies. A served text cut into pages is not, and the guard holds.
 - Prompt overflow stops the task. When the part of the prompt the harness never
   cuts (rules, knowledge, dossiers, instructions and every outline) exceeds
   the budget, or the file the model just read cannot fit the source budget
@@ -1261,7 +1278,8 @@ contract 3 and intent contract 2.
 - Harness questions. When the symbolic layer cannot default a decision (Constraint
   cd9f1a96 keeps such decisions from the model), the task parks in
   `AwaitingChoice` with a `pending_choice`: an id, its kind (`scope_add` with
-  the file, or `missing_planned_file` with the files), a prompt, options by key
+  the file, `missing_planned_file` with the files, or `missing_module` with the
+  file and the file declaring it), a prompt, options by key
   and label, and a default (`choice_asked` journals the kind, the keys and the
   default). The TUI shows it under "HARNESS QUESTION" with each option as
   `/choose <key>`, the default marked; `/choose` alone takes the default, and
@@ -1271,6 +1289,36 @@ contract 3 and intent contract 2.
   checks it, as a permission approval does. A plain message instead is new
   guidance and returns the task to Plan, discarding the question, as `/plan`
   and a withdrawn approval do. Headless `run` stops at it like any gate.
+- Missing modules. The runtime twin of the plan check that planned files
+  exist or are written: after an applied edit settles, a settled
+  language-server error saying a module declaration or import finds no file
+  asks the human whether the approved plan grows by that file
+  (`missing_module`, with `missing_module_asked`), instead of leaving the model
+  to discover the file is outside the plan. Each language's registry entry
+  reads the files from the diagnostic (`missing_modules`): rustc's E0583 "file
+  not found for module" names them in its `help:` line relative to where cargo
+  ran rustc, and they are re-rooted at the declaring file's directory (the
+  shortest tail of that directory the path starts with is where it joins;
+  absolute paths keep what follows the directory's last occurrence);
+  rust-analyzer's "unresolved module, can't find module file: …" lists them
+  relative to the declaring file's directory; pyright's `Import "pkg.mod" could
+  not be resolved` names `pkg/mod.py` or `pkg/mod/__init__.py` at the project
+  root or under `src/` (a relative `.mod` in the declaring package). A failed
+  command or required check whose output says `ModuleNotFoundError: No module
+  named 'pkg.mod'` asks the same, the declaring file unknown. It asks only
+  during approved work (Auto, Working, nothing else pending) and never about a
+  file that exists or is planned (a planned file not written yet is the
+  unfinished-plan gate's), a file already asked about this approval cycle, a
+  file in a directory the project neither has nor plans, or a top-level
+  Python name alone (an uninstalled package looks the same). The harness arms
+  no auto-fix or auto-verify while it asks. `add` amends the approved plan as
+  a scope `add` does (with the same fallback to a replan when the file brings
+  rules the plan does not address), the model told "`<file>` was added to the
+  approved plan. Write it: `<declared_in>` declares or imports `<file>`.";
+  `replan` returns to Plan naming the file, counted as a scope escape;
+  `refuse` returns to the model: "`<file>` stays outside the plan: remove its
+  declaration or import from `<declared_in>`." The default is `add`.
+  `MOOSEDEV_HARNESS_STRUCTURAL_ASK=off` asks nothing.
 - Unfinished plan. A finish while a planned file does not exist, or exists with
   no edit of the model's in this approval cycle (a fix the harness applied is
   not the model's), is sent back once for that source state, naming the

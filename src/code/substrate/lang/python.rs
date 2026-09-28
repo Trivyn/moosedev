@@ -6,7 +6,9 @@ use std::process::Command;
 use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
-use super::{backticked, file_name, no_settings, note_failed, STUB_MESSAGES};
+use super::{
+    backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
+};
 use super::{
     first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, ServerSpec,
     StubSyntax,
@@ -106,6 +108,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
+    missing_modules: Some(missing_modules),
 };
 
 /// Python sources and the language id each is opened with.
@@ -130,6 +133,76 @@ fn pyright_settings(section: &str) -> Value {
         "python" | "basedpyright" => json!({ "analysis": analysis }),
         _ => Value::Null,
     }
+}
+
+/// The files an import could not find, relative to the project root: a
+/// module `pkg.mod` is `pkg/mod.py` or the package `pkg/mod/__init__.py`, at
+/// the project root or under `src/`. pyright says `Import "pkg.mod" could not
+/// be resolved` of the declaring file, where a relative `.mod` resolves in
+/// the declaring file's package (`..mod` one package up); a failed run prints
+/// `ModuleNotFoundError: No module named 'pkg.mod'`, declaring file unknown.
+/// A top-level name alone (`import yaml`) could as well be a package not
+/// installed as a module of the project, so it names no file.
+fn missing_modules(message: &str, _detail: Option<&str>, declaring_file: &str) -> Vec<String> {
+    let first = message.lines().next().unwrap_or_default().trim();
+    if let Some(module) = first
+        .strip_prefix("Import \"")
+        .and_then(|rest| rest.strip_suffix("\" could not be resolved"))
+    {
+        return module_files(module, declaring_file);
+    }
+    let mut files = Vec::new();
+    for line in message.lines() {
+        let Some((_, rest)) = line.split_once("ModuleNotFoundError: No module named '") else {
+            continue;
+        };
+        let Some((module, _)) = rest.split_once('\'') else {
+            continue;
+        };
+        for file in module_files(module, "") {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The files that would define `module` (dotted, perhaps relative) imported
+/// from `declaring_file`.
+fn module_files(module: &str, declaring_file: &str) -> Vec<String> {
+    let module = module.trim();
+    let dots = module.len() - module.trim_start_matches('.').len();
+    let path = module[dots..].replace('.', "/");
+    if path.is_empty() || path.split('/').any(|part| part.is_empty()) {
+        return Vec::new();
+    }
+    let roots: Vec<String> = if dots > 0 {
+        if declaring_file.is_empty() {
+            return Vec::new();
+        }
+        let mut dir = parent_dir(declaring_file);
+        for _ in 1..dots {
+            if dir.is_empty() {
+                return Vec::new();
+            }
+            dir = parent_dir(dir);
+        }
+        vec![dir.to_string()]
+    } else if path.contains('/') {
+        vec![String::new(), "src".to_string()]
+    } else {
+        return Vec::new();
+    };
+    roots
+        .iter()
+        .flat_map(|root| {
+            [
+                join_path(root, &format!("{path}.py")),
+                join_path(root, &format!("{path}/__init__.py")),
+            ]
+        })
+        .collect()
 }
 
 /// The name ruff's F821 ("Undefined name `X`") or pyright ("\"X\" is not
@@ -350,6 +423,73 @@ mod tests {
         }
         assert!(settings("pyright").is_null());
         assert!((lints.settings)("python").is_null());
+    }
+
+    #[test]
+    fn unresolved_imports_name_the_module_files() {
+        let missing = super::missing_modules;
+        assert_eq!(
+            missing(
+                "Import \"badciv.grid\" could not be resolved",
+                None,
+                "badciv/map.py"
+            ),
+            [
+                "badciv/grid.py",
+                "badciv/grid/__init__.py",
+                "src/badciv/grid.py",
+                "src/badciv/grid/__init__.py"
+            ]
+        );
+        // Relative imports resolve in the declaring package.
+        assert_eq!(
+            missing(
+                "Import \".grid\" could not be resolved",
+                None,
+                "src/badciv/map.py"
+            ),
+            ["src/badciv/grid.py", "src/badciv/grid/__init__.py"]
+        );
+        assert_eq!(
+            missing(
+                "Import \"..core.grid\" could not be resolved",
+                None,
+                "badciv/ui/map.py"
+            ),
+            ["badciv/core/grid.py", "badciv/core/grid/__init__.py"]
+        );
+        // A top-level name could be a package not installed; a source-only
+        // miss is about a stub, not a module.
+        assert!(missing("Import \"yaml\" could not be resolved", None, "a.py").is_empty());
+        assert!(missing(
+            "Import \"yaml.x\" could not be resolved from source",
+            None,
+            "a.py"
+        )
+        .is_empty());
+        assert!(missing("Import \"..x\" could not be resolved", None, "a.py").is_empty());
+        assert!(missing("\"Grid\" is not defined", None, "a.py").is_empty());
+    }
+
+    #[test]
+    fn a_failed_run_names_the_module_it_could_not_import() {
+        let output = "ImportError while importing test module '/w/tests/test_map.py'.
+tests/test_map.py:1: in <module>
+    from badciv.grid import Grid
+E   ModuleNotFoundError: No module named 'badciv.grid'
+Traceback (most recent call last):
+ModuleNotFoundError: No module named 'badciv.grid'
+ModuleNotFoundError: No module named 'numpy'
+";
+        assert_eq!(
+            super::missing_modules(output, None, ""),
+            [
+                "badciv/grid.py",
+                "badciv/grid/__init__.py",
+                "src/badciv/grid.py",
+                "src/badciv/grid/__init__.py"
+            ]
+        );
     }
 
     #[test]

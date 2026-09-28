@@ -51,11 +51,14 @@ def review_input(state, episode):
     if phase == "AwaitingChoice":
         # A harness question. The frozen reviewer answers as it reviews a plan:
         # an out-of-plan file within the episode's allowance is added, any
-        # other is refused; a missing planned file is left for the model to
-        # write (the question's default).
+        # other is refused (an edit outside the plan, or a module file a
+        # declaration or import names); a missing planned file is left for the
+        # model to write (the question's default).
         choice = task.get("pending_choice") or {}
         kind = choice.get("kind") or {}
-        scope = kind.get("scope_add") if isinstance(kind, dict) else None
+        scope = None
+        if isinstance(kind, dict):
+            scope = kind.get("scope_add") or kind.get("missing_module")
         if scope is not None:
             key = "add" if in_scope(scope.get("file", ""), episode["allowed_paths"]) else "refuse"
             return {"input": "/choose " + key, "reason": "simulated scope answer by episode allowance",

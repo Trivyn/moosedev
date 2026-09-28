@@ -342,6 +342,16 @@ class ReviewerControls(unittest.TestCase):
         self.assertEqual(reviewer.review_input(asked({"missing_planned_file": {"files": ["a.py"]}}, "write"),
                                                self.episode)["input"], "/choose write")
 
+    def test_a_missing_module_is_answered_by_allowance(self):
+        def asked(file):
+            return self.state("AwaitingChoice", pending_choice={
+                "id": "c2", "kind": {"missing_module": {"file": file, "declared_in": "service.py"}},
+                "prompt": "?", "options": [], "default": "add"})
+        answer = reviewer.review_input(asked("pkg/grid.py"), self.episode)
+        self.assertEqual(answer["input"], "/choose add")
+        self.assertEqual(answer["kind"], "choice")
+        self.assertEqual(reviewer.review_input(asked("src/grid.rs"), self.episode)["input"], "/choose refuse")
+
     def test_scope_review_does_not_grade_false_or_stale_claims(self):
         # Deliberately wrong claim: valid simulation acceptance must earn no semantic credit.
         request = {"operation_id": "capture-1", "proposals": [{"kind": "Constraint", "title": "Global IDs forever",
