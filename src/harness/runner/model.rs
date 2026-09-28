@@ -611,15 +611,49 @@ impl Runner {
             // decoding, so a fenced, wrapped or slightly broken reply is
             // recovered here and the recovery journaled; the caller still
             // validates what it gets.
-            let (value, recovery) = crate::llm::parse_model_json::<T>(&text)
-                .context(InvalidModelOutput)
-                .context("model returned malformed output")?;
+            let (value, recovery) = match crate::llm::parse_model_json::<T>(&text) {
+                Ok(parsed) => parsed,
+                // Nothing enforced the schema's nesting either: a model may
+                // flatten a nested object into its parent. The schema-driven
+                // repair runs only after the answer failed as given.
+                Err(error) => match self.unflattened::<T>(&text, &schema, name)? {
+                    Some(value) => (value, None),
+                    None => {
+                        return Err(anyhow::Error::new(error)
+                            .context(InvalidModelOutput)
+                            .context("model returned malformed output"))
+                    }
+                },
+            };
             if let Some(recovery) = recovery {
                 self.intent_event("json_recovered", &format!("{name}: {}", recovery.as_str()));
                 self.persist()?;
             }
             Ok(value)
         }
+    }
+
+    /// The answer with a flattened nested object folded back into place, when
+    /// that makes it valid (`llm::normalize::json_schema::unflatten`); the
+    /// repair is journaled as `json_unflattened`.
+    fn unflattened<T: serde::de::DeserializeOwned>(
+        &mut self,
+        text: &str,
+        schema: &Value,
+        name: &str,
+    ) -> Result<Option<T>> {
+        let Ok((value, _)) = crate::llm::parse_model_json::<Value>(text) else {
+            return Ok(None);
+        };
+        let Some(repaired) = crate::llm::normalize::json_schema::unflatten(&value, schema) else {
+            return Ok(None);
+        };
+        let Ok(parsed) = serde_json::from_value::<T>(repaired) else {
+            return Ok(None);
+        };
+        self.intent_event("json_unflattened", name);
+        self.persist()?;
+        Ok(Some(parsed))
     }
 
     /// Journal what a tool-contract response carried and decode it into action

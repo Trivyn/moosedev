@@ -345,6 +345,28 @@ async fn a_refused_required_tool_choice_falls_back_to_auto_once() {
     assert!(runner.task.recovery.is_none());
 }
 
+/// Qwen3.5-9B under the json_schema contract flattened the conversational
+/// envelope (`{"message":…,"action":"write","file":…}`) three times running;
+/// the schema-driven repair folds it back instead of spending the repairs.
+#[tokio::test]
+async fn a_flattened_json_schema_answer_is_folded_back_into_its_envelope() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    runner.set_action_contract(ActionContract::JsonSchema);
+    fixture.reply(
+        "harness_action",
+        json!({"message":"Reading it first.","action":"read","file":"code.txt"}),
+    );
+    runner.advance().await.unwrap();
+    assert!(runner.task.recovery.is_none(), "no repair was spent");
+    assert!(runner.task.read_files.iter().any(|file| file == "code.txt"));
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "json_unflattened"));
+}
+
 #[tokio::test]
 async fn the_json_schema_contract_remains_selectable() {
     let fixture = Fixture::new().await;
