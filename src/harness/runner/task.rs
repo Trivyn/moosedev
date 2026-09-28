@@ -36,6 +36,36 @@ pub struct Plan {
     /// summary's prose, become the capture's `isMotivatedBy` edges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
+    /// The governing rules delivered for the plan files that the plan leaves
+    /// open: not in `addresses` and not covered by the summary. The approval
+    /// gate names them; `/approve` records them as deferred.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_rules: Vec<OpenRule>,
+    /// Questions the planner left for the human to decide before building,
+    /// answered with `/choose <n> <option>` or by their default on approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_choices: Vec<OpenChoice>,
+}
+
+/// A governing rule a proposed plan leaves open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRule {
+    pub iri: String,
+    pub label: String,
+    pub kind: String,
+}
+
+/// A question a proposed plan leaves for the human, with its options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenChoice {
+    pub question: String,
+    pub options: Vec<String>,
+    pub default: String,
+    /// The option the human chose, or the default once the plan is approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 /// One plan the human approved during this task. A replan replaces
@@ -51,6 +81,10 @@ pub struct ApprovedPlan {
     /// IRIs of every governing rule delivered for the plan files at approval.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules_in_view: Vec<String>,
+    /// IRIs of the rules the plan left open, deferred by its approval. They
+    /// stay open: spec progress counts only recorded `isMotivatedBy` edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<String>,
     /// `Task::edits` index where this plan's work begins.
     pub edit_start: usize,
 }

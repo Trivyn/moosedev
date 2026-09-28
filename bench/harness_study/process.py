@@ -102,7 +102,10 @@ SYMBOLIC_EVENT_KINDS = (
     # the unfinished-plan gate's send-back and forced verification. None is an autonomous recovery: the human
     # decides.
     "choice_asked", "choice_made", "scope_added", "scope_add_needs_replan", "finish_refused_unfinished",
-    "finish_forced_missing")
+    "finish_forced_missing",
+    # At plan approval: the rules the plan left open, deferred by the approval, and the human's answers to the
+    # plan's open choices (a default taken on approval says so). Human decisions, not autonomous recoveries.
+    "rules_deferred", "plan_choice")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")

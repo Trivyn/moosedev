@@ -1,7 +1,7 @@
 //! Validate sensor arguments and materialize edits before permission or execution.
 use super::{
     model::{Action, ReplyThen},
-    Mode, Runner, MAX_FILES, MAX_PLAN_SUMMARY,
+    plan_choices, Mode, OpenChoice, Runner, MAX_FILES, MAX_PLAN_SUMMARY,
 };
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
@@ -43,6 +43,8 @@ pub(super) enum Step {
         files: Vec<String>,
         checks: Vec<String>,
         addresses: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        open_choices: Vec<OpenChoice>,
     },
     Edit {
         file: String,
@@ -149,8 +151,12 @@ impl Runner {
                 summary,
                 files,
                 checks,
+                open_choices,
                 ..
             } => {
+                if plan_choices::enabled() {
+                    plan_choices::validate(open_choices)?;
+                }
                 ensure!(
                     !summary.trim().is_empty(),
                     "plan requires a nonempty summary"
@@ -271,13 +277,22 @@ impl Runner {
                 files,
                 checks,
                 addresses,
+                open_choices,
             } => {
+                // Switched off, the field is not offered; any sent anyway
+                // are dropped rather than judged.
+                let open_choices = if plan_choices::enabled() {
+                    plan_choices::open_choices(open_choices)
+                } else {
+                    Vec::new()
+                };
                 return Ok(Step::Plan {
                     summary,
                     files,
                     checks,
                     addresses,
-                })
+                    open_choices,
+                });
             }
             Action::Command { command } => {
                 return Ok(Step::Command {

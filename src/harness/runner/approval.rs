@@ -59,6 +59,7 @@ impl Runner {
             }
             _ => false,
         };
+        self.settle_plan_approval();
         self.record_approved_plan(&context);
         let edits = self.task.edits.len();
         let state = self.symbolic_state_mut();
@@ -530,11 +531,17 @@ impl Runner {
             .iter()
             .map(|rule| rule.iri.clone())
             .collect();
+        let deferred = plan
+            .open_rules
+            .iter()
+            .map(|rule| rule.iri.clone())
+            .collect();
         let edit_start = self.task.edits.len();
         match self.task.approved_plans.last_mut() {
             Some(last) if last.summary == plan.summary && last.files == plan.files => {
                 last.addresses = plan.addresses.clone();
                 last.rules_in_view = rules_in_view;
+                last.deferred = deferred;
             }
             _ => {
                 let entry = ApprovedPlan {
@@ -542,6 +549,7 @@ impl Runner {
                     files: plan.files.clone(),
                     addresses: plan.addresses.clone(),
                     rules_in_view,
+                    deferred,
                     edit_start,
                 };
                 self.task.approved_plans.push(entry);

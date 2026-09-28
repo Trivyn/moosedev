@@ -26,7 +26,8 @@ Usage: moosedev code [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] 
   approve-policy ID        Approve the pending policy-gated edit
   approve-permission ID    Approve the pending sandbox permission request
   deny-permission ID       Deny the pending sandbox permission request
-  choose ID KEY            Answer the pending harness question with an option
+  choose ID KEY            Answer the pending harness question with an option;
+                           at the plan gate KEY is N OPTION (quoted), an open choice
   permissions ID           List active task-scoped permission grants
   revoke-permission ID GRANT
                             Revoke an active permission grant

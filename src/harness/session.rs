@@ -1337,17 +1337,27 @@ impl Controller {
                 self.auto = !matches!(command, "/review" | "/permissions" | "/revoke-permission");
             }
             "/choose" => {
-                let key = parts.next().unwrap_or_default();
-                anyhow::ensure!(parts.next().is_none(), "Use /choose <option>.");
                 let runner = self
                     .runner
                     .as_mut()
                     .context("No active task. Describe work first.")?;
-                anyhow::ensure!(
-                    runner.task.phase == Phase::AwaitingChoice,
-                    "There is no harness question pending."
-                );
-                runner.choose(key).await?;
+                if runner.task.phase == Phase::AwaitingPlan {
+                    // An open choice of the displayed plan: `/choose <n> <option>`,
+                    // the option as many words as it has.
+                    let argument = text
+                        .trim_start()
+                        .strip_prefix("/choose")
+                        .unwrap_or_default();
+                    runner.choose_plan_option(argument)?;
+                } else {
+                    let key = parts.next().unwrap_or_default();
+                    anyhow::ensure!(parts.next().is_none(), "Use /choose <option>.");
+                    anyhow::ensure!(
+                        runner.task.phase == Phase::AwaitingChoice,
+                        "There is no harness question pending."
+                    );
+                    runner.choose(key).await?;
+                }
                 self.conversation.sync_task(&runner.task);
                 self.save_conversation()?;
                 self.auto = true;
@@ -1453,7 +1463,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/choose [option] — answer the displayed harness question (alone: its default)\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/drop <proposal> · /keep <proposal> — leave one numbered proposal out of the capture you accept (or <review>.<proposal>)\n/no-knowledge — confirm the consolidated no-change assessment\n/rework <note> — at the final review, reject the capture and send the work back with the note\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/choose [option] — answer the displayed harness question (alone: its default); at a plan, /choose <n> <option> answers its open choice n\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/drop <proposal> · /keep <proposal> — leave one numbered proposal out of the capture you accept (or <review>.<proposal>)\n/no-knowledge — confirm the consolidated no-change assessment\n/rework <note> — at the final review, reject the capture and send the work back with the note\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
 
 #[cfg(test)]
 mod tests {

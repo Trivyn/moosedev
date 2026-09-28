@@ -3927,3 +3927,179 @@ async fn a_choice_relying_on_a_withdrawn_approval_is_refused_and_the_question_di
     assert_eq!(runner.task.plan.as_ref().unwrap().files, ["labels.py"]);
     assert!(intent_details(&runner, "choice_made").is_empty());
 }
+
+/// A plan kept although it neither addresses nor mentions a delivered rule
+/// leaves that rule open: the plan stores it for the approval gate, and
+/// approval records it as deferred.
+#[tokio::test]
+async fn a_plan_leaving_a_rule_open_stores_it_and_approval_defers_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![GoverningRule {
+        iri: PRESERVE.into(),
+        label: "Preserve display label behavior".into(),
+        kind: "Requirement".into(),
+        claim: "hasDescription: Display labels render exactly as before.\n".into(),
+        via: "via: linked to labels.py".into(),
+    }];
+    let mut runner = fixture.interactive().await;
+    let plan = json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[]});
+    fixture.conversational(plan.clone());
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_none(), "returned once for the rule");
+    fixture.conversational(plan);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    let open = &runner.task.plan.as_ref().unwrap().open_rules;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].iri, PRESERVE);
+    assert_eq!(open[0].label, "Preserve display label behavior");
+    assert_eq!(open[0].kind, "Requirement");
+
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.approved_plans[0].deferred, vec![PRESERVE]);
+    assert_eq!(
+        intent_details(&runner, "rules_deferred"),
+        vec!["1 rule(s): Preserve display label behavior"]
+    );
+    // The builder is not shown what the plan left open.
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    assert!(!fixture
+        .last_model_prompt("harness_action")
+        .contains("open_rules"));
+}
+
+/// A plan's open choices: an invalid one goes back for repair, the human
+/// answers one at the gate, approval settles the other by its default, and
+/// the builder is shown both decisions.
+#[tokio::test]
+async fn open_choices_are_answered_at_the_gate_and_defaulted_on_approval() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    let plan = |choices: Value| json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["true"],"addresses":[],"open_choices":choices});
+    fixture.conversational(plan(json!([
+        {"question":"Which separator joins words?","options":["space","dash"],"default":"tab"}
+    ])));
+    fixture.conversational(plan(json!([
+        {"question":"Which separator joins words?","options":["space","dash"],"default":"space"},
+        {"question":"Strip trailing whitespace?","options":["yes","no"],"default":"yes"}
+    ])));
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(
+        runner.task.events.iter().any(|event| event
+            .message
+            .contains("its default \"tab\" is not one of its options")),
+        "the invalid choice went back for repair"
+    );
+    let choices = &runner.task.plan.as_ref().unwrap().open_choices;
+    assert_eq!(choices.len(), 2);
+    assert!(choices.iter().all(|choice| choice.answer.is_none()));
+
+    assert!(runner.choose_plan_option("3 space").is_err());
+    assert!(runner.choose_plan_option("1 tab").is_err());
+    // An option by its number; a later answer replaces it.
+    runner.choose_plan_option("1 1").unwrap();
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().open_choices[0]
+            .answer
+            .as_deref(),
+        Some("space")
+    );
+    // The headless route: `choose ID "1 dash"`, by the option's text in any case.
+    moosedev::harness::tui::execute(
+        &mut runner,
+        moosedev::harness::tui::Action::Choose("1 DASH".into()),
+    )
+    .await
+    .unwrap();
+    let choices = &runner.task.plan.as_ref().unwrap().open_choices;
+    assert_eq!(choices[0].answer.as_deref(), Some("dash"));
+    assert_eq!(choices[1].answer, None);
+
+    runner.approve_plan().await.unwrap();
+    assert_eq!(
+        intent_details(&runner, "plan_choice"),
+        vec!["1: space", "1: dash", "2: yes (default)"]
+    );
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        prompt.contains("Decided: Which separator joins words? → dash\\nDecided: Strip trailing whitespace? → yes"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("\"open_choices\""));
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().open_choices[1]
+            .answer
+            .as_deref(),
+        Some("yes"),
+        "answers survive resume"
+    );
+}
+
+/// `MOOSEDEV_HARNESS_PLAN_CHOICES=off` offers no `open_choices`, says
+/// nothing of them, and drops any a model sends anyway.
+#[tokio::test]
+async fn the_plan_choices_switch_removes_open_choices() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let plan_parameters = |fixture: &Fixture| {
+        let request = requests_of_kind(fixture, "model")
+            .into_iter()
+            .rfind(|request| request["schema"] == "harness_action")
+            .unwrap();
+        request["body"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "plan")
+            .unwrap()["function"]["parameters"]
+            .clone()
+    };
+    let plan = json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["true"],"addresses":[],"open_choices":[{"question":"Which separator?","options":["space","dash"],"default":"space"}]});
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(plan.clone());
+    runner.advance().await.unwrap();
+    let on = plan_parameters(&fixture);
+    assert!(on["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("open_choices")));
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("plan(summary,files,checks,addresses,open_choices)"));
+    assert_eq!(runner.task.plan.as_ref().unwrap().open_choices.len(), 1);
+
+    std::env::set_var("MOOSEDEV_HARNESS_PLAN_CHOICES", "off");
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(plan);
+    let result = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_PLAN_CHOICES");
+    result.unwrap();
+    let off = plan_parameters(&fixture);
+    assert!(off["properties"].get("open_choices").is_none());
+    assert!(!off["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("open_choices")));
+    assert!(!fixture
+        .last_model_prompt("harness_action")
+        .contains("open_choices"));
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.plan.as_ref().unwrap().open_choices.is_empty());
+}

@@ -428,6 +428,7 @@ impl Runner {
                     files: plan.files.clone(),
                     addresses: plan.addresses.clone(),
                     rules_in_view: Vec::new(),
+                    deferred: Vec::new(),
                     edit_start: 0,
                 })
                 .collect::<Vec<_>>();

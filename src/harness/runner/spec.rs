@@ -1784,6 +1784,8 @@ mod tests {
             files: vec!["src/lib.rs".into()],
             checks: vec!["cargo check".into()],
             addresses: vec![],
+            open_rules: vec![],
+            open_choices: vec![],
         });
         runner.persist().unwrap();
         let id = runner.task.id.clone();

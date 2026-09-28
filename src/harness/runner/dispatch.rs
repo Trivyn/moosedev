@@ -487,6 +487,7 @@ impl Runner {
                 files,
                 checks,
                 addresses,
+                open_choices,
             } => {
                 let context = self.refresh(&files).await?;
                 // Before anything is stored: a plan whose summary skips a
@@ -503,6 +504,8 @@ impl Runner {
                     files,
                     checks,
                     addresses,
+                    open_rules: Vec::new(),
+                    open_choices,
                 });
                 self.task.approved_change_scope = None;
                 self.start_intent_cycle();
@@ -510,6 +513,15 @@ impl Runner {
                     "Proposed plan: {}",
                     serde_json::to_string(&self.task.plan)?
                 ));
+                // What the stored plan leaves open, for the approval gate
+                // (the coverage check journaled any it kept unmet). Harness
+                // state, not the model's: the event above, which later steps
+                // see, is the plan as proposed. A new plan replaces what the
+                // last one left open and the answers to its choices.
+                let open_rules = self.open_rules(&context);
+                if let Some(plan) = self.task.plan.as_mut() {
+                    plan.open_rules = open_rules;
+                }
                 self.task.last_response = summary;
                 self.task.approved_revision = None;
                 self.task.after_review = Phase::AwaitingPlan;

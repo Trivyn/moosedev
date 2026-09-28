@@ -493,7 +493,8 @@ return to planning, so the plan gate shows how many are still active.
 before later commands run.
 A harness question (see "How the harness decides") lists its options as
 `/choose <option>` commands; `/choose` alone takes the marked default, and a
-plain message instead returns the task to Plan.
+plain message instead returns the task to Plan. At the plan gate,
+`/choose <n> <option>` answers the plan's open choice n (see "Open choices").
 The Knowledge tab shows chronological graph context grouped by the exact human query
 that caused it, without adding retrieval payloads to Conversation. Each query
 contains typed record cards (kind, title, full supplied claim, provenance, and
@@ -1068,6 +1069,34 @@ contract 3 and intent contract 2.
   in `approved_plans` with its addresses, the rules delivered at its approval
   and where its edits begin; a replan replaces the current plan but not this
   history, and a new objective clears it.
+- Open rules at plan approval. When a plan is stored, the delivered rules it
+  neither lists in `addresses` nor covers in its summary (as plan coverage
+  reads it; normally the rules a plan kept after its coverage returns still
+  skips) are kept on the plan as `open_rules` (IRI, label, kind). The plan
+  gate names them: "Leaves open N rule(s): <labels, at most 8, then '… and K
+  more'> — /approve defers them; a message revises the plan." `/approve`
+  records their IRIs as the approved plan's `deferred` and journals
+  `rules_deferred` with the count and labels. Deferring changes no knowledge:
+  spec progress still counts only recorded `isMotivatedBy` edges, so a
+  deferred rule stays open there. The model is not shown the open rules; the
+  "Proposed plan" event journals the plan as proposed.
+- Open choices. A plan may carry `open_choices`: up to 3 questions the human
+  should decide before building, each with a question (at most 300 bytes),
+  2-4 distinct options (at most 120 bytes each) and a default that is one of
+  them. In the strict schema the field is required and may be empty, like
+  `addresses`; a plan breaking these bounds is invalid output and spends a
+  repair. The plan gate lists each as "Open choice n: <question> [a / b / c]
+  (default: a) — /choose n <option>". While the plan awaits approval,
+  `/choose <n> <option>` (headless: `choose ID "<n> <option>"`) answers
+  choice n with an option named by its text, in any case, or by its 1-based
+  number, and journals `plan_choice` ("n: option"); a later answer replaces
+  an earlier one. On `/approve` each unanswered choice takes its default
+  (`plan_choice` "n: default (default)"): open choices never block approval.
+  Every step after that is shown the plan with one "Decided: <question> →
+  <option>" line per choice after its summary. A new plan replaces the open
+  rules and choices of the last one; answers do not carry over.
+  `MOOSEDEV_HARNESS_PLAN_CHOICES=off` removes `open_choices` from the schema
+  and from the action meanings, and drops any a model sends anyway.
 - Dossiers. A file dossier lists each knowledge-bearing entity's direct records
   rendered like linked evidence (superseded records show only their header
   line), and its component's records by title: accepted Constraints always,
