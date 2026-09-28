@@ -46,6 +46,8 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         block_comments: &["/*", "*"],
         quotes: &['"', '\'', '`'],
     }),
+    // Jest's and Mocha's reports are not read yet.
+    test_failures: None,
 };
 
 /// The `*.test.*` / `*.spec.*` infix every JS test runner recognizes. A JS

@@ -50,6 +50,20 @@ pub struct SymbolicState {
     /// same plan.
     #[serde(default)]
     pub cycle_edit_start: usize,
+    /// The edit count a fresh result with a fix the harness may apply armed
+    /// auto-fix at; taken by the next advance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_fix_armed: Option<usize>,
+    /// Fixes the harness applied in a row since the model's last edit.
+    #[serde(default)]
+    pub auto_fix_chain: usize,
+    /// Fixes the harness applied in this task.
+    #[serde(default)]
+    pub auto_fixes: usize,
+    /// Indices into `Task::edits` of the harness's own fixes: not the model's
+    /// work, so auto-verify never counts them as a planned file edited.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub auto_fixed_edits: std::collections::BTreeSet<usize>,
     #[serde(default)]
     pub retypes: usize,
     /// Model replans answered by continuing the approved plan because nothing
@@ -104,6 +118,11 @@ pub struct SymbolicState {
     /// already failed, so it is repaired instead of run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<FailedRun>,
+    /// The last failure and how many times in a row it came back with no
+    /// edit between (`stall`); cleared by a pass of its command or a human
+    /// answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_failure: Option<super::stall::StalledFailure>,
 }
 
 /// A required check that failed, how many edits the task had applied when
@@ -131,6 +150,11 @@ pub struct CaptureNoteState {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<CaptureTypeResponse>,
+    /// Facts the harness checked beside the note, shown to the human at
+    /// review: what the checks proved, stubs left, planned files untouched,
+    /// what the note claims that no edit shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

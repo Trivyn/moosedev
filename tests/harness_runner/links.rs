@@ -245,8 +245,10 @@ async fn last_error_kind_classifies_model_daemon_and_service_failures() {
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
     assert!(runner.task.last_error_kind.is_none());
-    for _ in 0..3 {
-        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"not in the file","new_text":"changed"}));
+    // Three different invalid candidates: identical ones stop at two (the
+    // repair lever).
+    for n in 0..3 {
+        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":format!("not in the file {n}"),"new_text":"changed"}));
     }
     assert!(runner.advance().await.is_err());
     assert_eq!(runner.task.last_error_kind.as_deref(), Some("model_output"));

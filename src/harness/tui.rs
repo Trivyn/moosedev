@@ -389,7 +389,7 @@ fn gate(task: &Task, standing: &[String]) -> String {
             .unwrap_or_else(|| {
                 "PERMISSION REQUEST · details unavailable; deny it and retry the task.".into()
             }),
-        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion.")),
+        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion."),match review_evidence(task).len() { 0 => String::new(), n => format!("\nEvidence: {n} fact(s) the harness checked, see Review") }),
         Phase::AwaitingInput => if task.turn_finished {
             "Your turn. Ask a follow-up or describe the next change.".into()
         } else if task.last_response.is_empty() {
@@ -826,6 +826,10 @@ fn body(snapshot: &Snapshot, view: &View) -> Text<'static> {
                         .as_deref()
                         .unwrap_or("No pending assessment")
                 ));
+                if task.reviews.is_empty() {
+                    // No card shows the note's evidence: a no-knowledge review.
+                    text.push_str(&evidence_lines(review_evidence(task)));
+                }
                 if task.capture_request.is_some() {
                     text.push_str("A capture request is pending; its exact evidence is preserved in Journal.\n");
                 }
@@ -1310,6 +1314,26 @@ fn link_review(page: &AssociatePage) -> String {
 }
 
 /// The final review card: the model's one note and how the daemon typed it.
+/// The harness's facts beside a capture note, one per line.
+fn evidence_lines(evidence: &[String]) -> String {
+    if evidence.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("Evidence (checked by the harness)\n");
+    for fact in evidence {
+        text.push_str(&format!("- {fact}\n"));
+    }
+    text
+}
+
+/// The current capture note's evidence, if any.
+fn review_evidence(task: &Task) -> &[String] {
+    task.symbolic
+        .as_ref()
+        .and_then(|symbolic| symbolic.capture_note.as_ref())
+        .map_or(&[], |note| note.evidence.as_slice())
+}
+
 fn final_review(task: &Task, review: &ReviewItem) -> String {
     let Some(note) = task
         .symbolic
@@ -1320,6 +1344,7 @@ fn final_review(task: &Task, review: &ReviewItem) -> String {
         return String::new();
     };
     let mut text = format!("\nCapture note\n{}\n", note.note);
+    text.push_str(&evidence_lines(&note.evidence));
     let Some(typed) = &note.response else {
         return text;
     };
@@ -1874,8 +1899,10 @@ async fn show(
     runner: Option<Runner>,
     startup: StartupOptions,
     provider: ProviderSettings,
-    startup_notice: Option<String>,
+    startup_notices: Vec<String>,
 ) -> Result<()> {
+    let terminated = super::crash::termination()?;
+    tokio::pin!(terminated);
     let mut screen = Screen::enter()?;
     let (input, input_rx) = mpsc::unbounded_channel();
     let (output, mut output_rx) = mpsc::unbounded_channel();
@@ -1891,7 +1918,7 @@ async fn show(
     };
     let mut controller = tokio::spawn(
         Controller::new(conversation, runner, startup, provider, input_rx, output)
-            .with_startup_notice(startup_notice)
+            .with_startup_notices(startup_notices)
             .run(),
     );
     let mut view = View {
@@ -1899,6 +1926,8 @@ async fn show(
         ..View::default()
     };
     let mut interval = tokio::time::interval(Duration::from_millis(40));
+    // What ended the loop, for the crash log if the controller must be aborted.
+    let mut ending = String::from("the interface stopping");
     let result = async {
         let mut dirty = true;
         loop {
@@ -1919,7 +1948,20 @@ async fn show(
                     result?;
                     break;
                 },
+                // A closed terminal or a `kill` ends the session like /quit:
+                // the controller saves, the screen is restored, the marker goes.
+                signal = &mut terminated => {
+                    super::crash::log(&format!("session ended by signal {signal}"));
+                    ending = format!("signal {signal}");
+                    break;
+                },
                 _ = interval.tick() => {
+                    // A panic on any thread restores the terminal from the
+                    // hook; drawing after that paints over the shell.
+                    anyhow::ensure!(
+                        SCREEN_ACTIVE.load(Ordering::SeqCst),
+                        "the interface stopped after a panic; see .moosedev/harness/crash.log"
+                    );
                     view.tick += 1;
                     while event::poll(Duration::ZERO)? {
                         let (command, event_dirty) = match event::read()? {
@@ -1943,7 +1985,7 @@ async fn show(
                             if quit {
                                 view.notice = "Saving session…".into();
                                 // An unavailable startup server must not trap the terminal.
-                                finish_controller(&mut controller).await;
+                                finish_controller(&mut controller, "/quit", &snapshot).await;
                                 return Ok::<(), anyhow::Error>(());
                             }
                         }
@@ -1979,17 +2021,38 @@ async fn show(
     }.await;
     if !controller.is_finished() {
         let _ = input.send(Command::Quit);
-        finish_controller(&mut controller).await;
+        finish_controller(&mut controller, &ending, &snapshot).await;
     }
     result
 }
 
-async fn finish_controller(controller: &mut tokio::task::JoinHandle<()>) {
+/// Give the controller three seconds to save and stop, then abort it: a quit
+/// must not hang on a server that never answers. Work still running then
+/// (a model step's cancellation, a spec extraction whose daemon result would
+/// be recorded) is dropped, and the exit is otherwise clean, so the crash log
+/// names what was abandoned.
+async fn finish_controller(
+    controller: &mut tokio::task::JoinHandle<()>,
+    ending: &str,
+    snapshot: &Snapshot,
+) {
     if tokio::time::timeout(Duration::from_secs(3), &mut *controller)
         .await
         .is_err()
     {
         controller.abort();
+        let task = snapshot
+            .task
+            .as_ref()
+            .map_or_else(|| "no task".into(), |task| format!("task {}", task.id));
+        let work = if snapshot.busy {
+            format!("work in flight: {}", snapshot.status)
+        } else {
+            format!("last status: {}", snapshot.status)
+        };
+        super::crash::log(&format!(
+            "session controller did not stop within 3 s of {ending} and was aborted; abandoned {task}, {work}"
+        ));
     }
 }
 
@@ -2004,11 +2067,13 @@ pub enum Launch {
     Conversation(String),
 }
 
+/// `notices` (earlier sessions' unclean ends) open the transcript.
 pub async fn interactive(
     root: PathBuf,
     daemon: Option<String>,
     daemon_exe: Option<PathBuf>,
     launch: Launch,
+    notices: Vec<String>,
 ) -> Result<()> {
     let root = root.canonicalize()?;
     let (provider,config_error)=match ProviderSettings::load(&root) {Ok(provider)=>(provider,None),Err(error)=>(ProviderSettings::fallback(),Some(format!("Model configuration failed: {error:#}. Use /model <endpoint> <model> to configure this session.")))};
@@ -2045,13 +2110,13 @@ pub async fn interactive(
             daemon_exe,
         },
         provider,
-        config_error,
+        notices.into_iter().chain(config_error).collect(),
     )
     .await
 }
 
 /// Compatibility entry point for an existing headless task.
-pub async fn run(runner: Runner) -> Result<()> {
+pub async fn run(runner: Runner, notices: Vec<String>) -> Result<()> {
     let root = runner.task.root.clone();
     let conversation = conversation_for_task(&runner.task)?;
     let provider = ProviderSettings::load(&root)?;
@@ -2065,7 +2130,7 @@ pub async fn run(runner: Runner) -> Result<()> {
             daemon_exe: None,
         },
         provider,
-        None,
+        notices,
     )
     .await
 }
@@ -2170,6 +2235,7 @@ mod tests {
                     detail: None,
                     definition: None,
                     fixes: vec![],
+                    fixes_complete: false,
                 })
                 .collect(),
             warnings: vec![],

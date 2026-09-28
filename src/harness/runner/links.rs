@@ -49,6 +49,9 @@ impl Runner {
     }
 
     pub(super) fn action_schema(&self) -> Value {
+        if let Some(files) = self.narrowed_files() {
+            return super::model::narrowed_schema(files, self.task.batch_capture);
+        }
         let fixes = self.fixes_offerable();
         if self.task.batch_capture {
             conversational_schema(self.task.mode, fixes)

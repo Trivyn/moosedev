@@ -54,6 +54,8 @@ impl Runner {
         // A new approval starts a new cycle: only edits made under it count,
         // and no arm from before it may fire.
         state.auto_verify_armed = None;
+        state.auto_fix_armed = None;
+        state.auto_fix_chain = 0;
         state.cycle_edit_start = edits;
         state.plan_grounded = false;
         self.task.approved_revision = Some(context.revision);
@@ -100,10 +102,8 @@ impl Runner {
         ));
         let (file, existed, after) = (edit.file.clone(), edit.before.is_some(), edit.after.clone());
         self.apply_edit(edit)?;
-        let fresh = self
-            .check_applied_edit(&file, existed, after.as_deref())
+        self.settle_applied_edit(&file, existed, after.as_deref(), false)
             .await;
-        self.arm_auto_verify(fresh);
         self.persist()
     }
 
@@ -383,6 +383,9 @@ impl Runner {
             self.clear_working_set();
         }
         self.task.steps = 0;
+        // Returning to Plan is human guidance: a fresh repair cycle, as for
+        // an answer, or a spent budget would refuse the first plan.
+        self.task.recovery = None;
         self.forget_failure();
         self.end_intent_cycle("human replan");
         self.event("Human returned the task to Plan.");

@@ -85,6 +85,12 @@ pub struct Finding {
     /// Quick fixes the server offers for it, numbered for `apply_fix`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixes: Vec<OfferedFix>,
+    /// Whether `fixes` is everything the server offered that it prefers: no
+    /// cap, deadline or failed request cut the list, and no fix it prefers was
+    /// dropped or can be applied only in part. Only then does "exactly one
+    /// preferred fix" say something about the server's answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fixes_complete: bool,
 }
 
 /// A quick fix a server offered, ready to apply: text edits to one file,
@@ -98,6 +104,30 @@ pub struct OfferedFix {
     /// SHA-256 of the text the edits apply to.
     pub base: String,
     pub edits: Vec<FixEdit>,
+    /// The server marks it the fix to apply (LSP `isPreferred`; for rustc
+    /// and clippy suggestions, machine-applicable ones).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preferred: bool,
+}
+
+/// What a server's code action became.
+enum Offer {
+    Fix(OfferedFix),
+    /// A fix whose follow-up command the harness does not run: offered to
+    /// the model as its edit alone, never as the server's preferred fix.
+    /// `preferred` says the server preferred it.
+    Partial {
+        fix: OfferedFix,
+        preferred: bool,
+    },
+    /// Not a fix the harness can apply (a bare command, another kind, an
+    /// edit outside the plan). The list is complete without it unless the
+    /// server preferred it: then the server's choice is not in the list.
+    Filtered {
+        preferred: bool,
+    },
+    /// The server failed to resolve it: the list may be missing a fix.
+    Failed,
 }
 
 /// One replacement, in byte offsets into the fix's base text.
@@ -280,6 +310,26 @@ impl DiagnosticsSnapshot {
             ));
         }
         reason
+    }
+
+    /// The fix the harness applies itself, if any (offloading change 2): the
+    /// first error, then lint, whose complete list holds exactly one fix the
+    /// server prefers, and that fix does not only delete. Warnings never:
+    /// rustc's fixes for unused items delete scaffolding the model is about
+    /// to use, or hide an omission (badciv edc914f6's `_key`).
+    pub(super) fn auto_fix(&self) -> Option<(&Finding, &OfferedFix)> {
+        if !self.settled {
+            return None;
+        }
+        self.errors.iter().chain(&self.lints).find_map(|finding| {
+            if !finding.fixes_complete {
+                return None;
+            }
+            let mut preferred = finding.fixes.iter().filter(|fix| fix.preferred);
+            let fix = preferred.next()?;
+            let deletes_only = fix.edits.iter().all(|edit| edit.text.is_empty());
+            (preferred.next().is_none() && !deletes_only).then_some((finding, fix))
+        })
     }
 
     /// The offered fix numbered `id`.
@@ -776,14 +826,17 @@ impl LanguageServer {
     /// [`FIXES_PER_FINDING`], with ids still to assign. Only fixes the harness
     /// can apply as one ordinary edit are kept: text edits to a single file
     /// among `editable` that change it. Any failure is no fixes.
+    /// The fixes offered for `finding`, and whether that is the whole list:
+    /// false when the cap, the deadline or a failed request cut it short.
     async fn fixes(
         &mut self,
         finding: &Finding,
         editable: &[String],
         timeout: Duration,
-    ) -> Vec<OfferedFix> {
+    ) -> (Vec<OfferedFix>, bool) {
         let deadline = Instant::now() + timeout;
         let mut fixes: Vec<OfferedFix> = Vec::new();
+        let mut complete = true;
         for (file, diagnostic) in self.fix_targets(finding) {
             let Ok(uri) = uri(&self.mirror.join(&file)) else {
                 continue;
@@ -793,60 +846,106 @@ impl LanguageServer {
                 "textDocument/codeAction",
                 json!({"textDocument": {"uri": uri}, "range": diagnostic.range, "context": {"diagnostics": [diagnostic], "only": ["quickfix"]}}),
             ) else {
-                return fixes;
+                return (fixes, false);
             };
-            let Ok(Value::Array(actions)) = self.response(id, left).await else {
-                continue;
+            let actions = match self.response(id, left).await {
+                Ok(Value::Array(actions)) => actions,
+                Ok(Value::Null) => continue,
+                _ => {
+                    complete = false;
+                    continue;
+                }
             };
             for action in actions {
                 if fixes.len() == FIXES_PER_FINDING || Instant::now() >= deadline {
-                    return fixes;
+                    return (fixes, false);
                 }
                 // The same fix arrives for the error and for its related
                 // hint; distinct fixes may share a title.
-                if let Some(fix) = self.offered(action, editable, deadline).await {
-                    if !fixes
-                        .iter()
-                        .any(|known| known.file == fix.file && known.edits == fix.edits)
-                    {
-                        fixes.push(fix);
+                match self.offered(action, editable, deadline).await {
+                    Offer::Fix(fix) => {
+                        if !fixes
+                            .iter()
+                            .any(|known| known.file == fix.file && known.edits == fix.edits)
+                        {
+                            fixes.push(fix);
+                        }
                     }
+                    Offer::Partial { fix, preferred } => {
+                        complete &= !preferred;
+                        if !fixes
+                            .iter()
+                            .any(|known| known.file == fix.file && known.edits == fix.edits)
+                        {
+                            fixes.push(fix);
+                        }
+                    }
+                    Offer::Filtered { preferred } => complete &= !preferred,
+                    Offer::Failed => complete = false,
                 }
             }
         }
-        fixes
+        (fixes, complete)
     }
 
     /// One code action as a fix the harness can apply, resolving its edit
     /// when the server sends it without one.
-    async fn offered(
-        &mut self,
-        action: Value,
-        editable: &[String],
-        deadline: Instant,
-    ) -> Option<OfferedFix> {
+    async fn offered(&mut self, action: Value, editable: &[String], deadline: Instant) -> Offer {
         // A bare Command (its `command` a string) is only runnable by the
         // server's own client. A CodeAction's follow-up command, when it has
-        // one, is left unrun: the edit is the fix.
-        let title = action["title"].as_str()?.to_owned();
+        // one, is left unrun: its edit is offered alone (`Offer::Partial`).
+        let listed_preferred = action["isPreferred"].as_bool() == Some(true);
+        let Some(title) = action["title"].as_str().map(str::to_owned) else {
+            return Offer::Filtered {
+                preferred: listed_preferred,
+            };
+        };
         if action["command"].is_string()
             || action.get("disabled").is_some()
             || action["kind"]
                 .as_str()
                 .is_some_and(|kind| !kind.starts_with("quickfix"))
         {
-            return None;
+            return Offer::Filtered {
+                preferred: listed_preferred,
+            };
         }
+        // Read before a resolve request takes the action.
+        let mut preferred = listed_preferred;
+        let mut follow_up = action["command"].is_object();
         let edit = if action["edit"].is_object() {
             action["edit"].clone()
         } else if action.get("data").is_some() {
-            let id = self.request("codeAction/resolve", action).ok()?;
+            let Ok(id) = self.request("codeAction/resolve", action) else {
+                return Offer::Failed;
+            };
             let left = deadline.saturating_duration_since(Instant::now());
-            self.response(id, left).await.ok()?["edit"].clone()
+            let Ok(resolved) = self.response(id, left).await else {
+                return Offer::Failed;
+            };
+            preferred |= resolved["isPreferred"].as_bool() == Some(true);
+            follow_up |= resolved["command"].is_object();
+            resolved["edit"].clone()
         } else {
-            return None;
+            return Offer::Filtered { preferred };
         };
-        let (target, version, edits) = single_file_edits(&edit)?;
+        match self.fix_from_edit(&edit, title, preferred && !follow_up, editable) {
+            Some(fix) if follow_up => Offer::Partial { fix, preferred },
+            Some(fix) => Offer::Fix(fix),
+            None => Offer::Filtered { preferred },
+        }
+    }
+
+    /// A resolved WorkspaceEdit as a fix, when it is one text edit to a
+    /// planned file of the current version that changes something.
+    fn fix_from_edit(
+        &self,
+        edit: &Value,
+        title: String,
+        preferred: bool,
+        editable: &[String],
+    ) -> Option<OfferedFix> {
+        let (target, version, edits) = single_file_edits(edit)?;
         let file = relative(&target, &self.mirror).filter(|file| editable.contains(file))?;
         // An edit for another version of the document than the one sent last
         // would land on the wrong bytes of this one.
@@ -864,6 +963,7 @@ impl LanguageServer {
             file,
             base: sha256_hex(&text),
             edits,
+            preferred,
         })
     }
 
@@ -920,6 +1020,7 @@ impl LanguageServer {
                     detail: detail(diagnostic, &self.mirror),
                     definition: None,
                     fixes: Vec::new(),
+                    fixes_complete: false,
                 };
                 let lint = self
                     .linter
@@ -1373,7 +1474,8 @@ impl LanguageServers {
                     break;
                 }
                 let left = deadline.saturating_duration_since(Instant::now());
-                finding.fixes = server.fixes(finding, editable, left).await;
+                (finding.fixes, finding.fixes_complete) =
+                    server.fixes(finding, editable, left).await;
             }
             snapshot.errors.extend(found.errors);
             snapshot.lints.extend(found.lints);
@@ -1568,7 +1670,7 @@ impl super::Runner {
             self.intent_event(
                 "language_server_diagnostics",
                 &format!(
-                    "{}: {} error(s), {} warning(s), {} lint(s), {} after {} ms",
+                    "{}: {} error(s), {} warning(s), {} lint(s), {} after {} ms, {} fix(es), {} preferred",
                     snapshot.servers.join(", "),
                     snapshot.errors.len(),
                     snapshot.warnings.len(),
@@ -1578,7 +1680,13 @@ impl super::Runner {
                     } else {
                         "NOT settled"
                     },
-                    started.elapsed().as_millis()
+                    started.elapsed().as_millis(),
+                    snapshot.findings().map(|finding| finding.fixes.len()).sum::<usize>(),
+                    snapshot
+                        .findings()
+                        .flat_map(|finding| &finding.fixes)
+                        .filter(|fix| fix.preferred)
+                        .count()
                 ),
             );
             self.task.diagnostics = Some(snapshot);
@@ -1740,6 +1848,30 @@ mod tests {
         // Its suggestion is offered as a fix, and applying it clears the lint.
         let fix = snapshot.fix(1).expect("clippy's suggestion is offered");
         assert!(fix.title.contains("v.first()"), "{fix:?}");
+        // Machine-applicable: preferred, the list complete, and the fix the
+        // harness applies itself (offloading change 2).
+        let flags = |s: &DiagnosticsSnapshot| {
+            s.findings()
+                .map(|f| {
+                    format!(
+                        "{}:{} complete={} [{}]",
+                        f.file,
+                        f.line,
+                        f.fixes_complete,
+                        f.fixes
+                            .iter()
+                            .map(|x| format!("{} preferred={}", x.title, x.preferred))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        eprintln!("clippy: {:?}", flags(&snapshot));
+        let (_, chosen) = snapshot
+            .auto_fix()
+            .unwrap_or_else(|| panic!("clippy's fix is the one to apply: {:?}", flags(&snapshot)));
+        assert!(chosen.title.contains("v.first()"), "{chosen:?}");
         let fixed = fix.apply(linted).unwrap();
         assert!(
             fix.apply(&fixed).is_none(),
@@ -1789,6 +1921,14 @@ mod tests {
             .unwrap_or_else(|| panic!("the missing mut is offered as a fix: {snapshot:?}"));
         let fixed = fix.apply(immutable).unwrap();
         assert!(fixed.contains("let mut v"), "{fixed}");
+        eprintln!("mut: {:?}", flags(&snapshot));
+        let (_, chosen) = snapshot.auto_fix().unwrap_or_else(|| {
+            panic!(
+                "the missing mut is the one to apply: {:?}",
+                flags(&snapshot)
+            )
+        });
+        assert!(chosen.apply(immutable).unwrap().contains("let mut v"));
         // Outside the editable files, nothing is offered.
         let snapshot = servers
             .after_edit(
@@ -1851,6 +1991,9 @@ mod tests {
                 .any(|fixed| fixed.contains("_key: &str")),
             "rustc's `_key` is among the fixes: {titles:?}"
         );
+        // A warning's fix is never applied by the harness, preferred or not.
+        eprintln!("unused: {:?}", flags(&snapshot));
+        assert!(snapshot.auto_fix().is_none(), "{:?}", flags(&snapshot));
         drop(servers);
         let _ = std::fs::remove_dir_all(&project);
         let _ = std::fs::remove_dir_all(&directory);
@@ -1893,6 +2036,7 @@ mod tests {
             detail: None,
             definition: None,
             fixes: vec![],
+            fixes_complete: false,
         };
         let snapshot = DiagnosticsSnapshot {
             servers: vec!["rust-analyzer".into()],
@@ -1935,6 +2079,7 @@ mod tests {
             ),
             definition: None,
             fixes: vec![],
+            fixes_complete: false,
         }];
         let block = rich.render(3_000);
         assert!(
@@ -1976,6 +2121,7 @@ mod tests {
                 ),
                 definition: None,
                 fixes: vec![],
+                fixes_complete: false,
             }],
             ..rich.clone()
         };
@@ -2075,6 +2221,7 @@ mod tests {
             file: "src/lib.rs".into(),
             base: sha256_hex(text),
             edits,
+            preferred: false,
         };
         let after = fix.apply(text).unwrap();
         assert_eq!(after, "// a\n// b\nlet v = x.first();\nlet mut w = 1;\n");
@@ -2107,6 +2254,120 @@ mod tests {
     }
 
     #[test]
+    fn auto_fix_takes_the_one_preferred_fix_of_a_complete_list() {
+        let fix = |id, preferred: bool, text: &str| OfferedFix {
+            id,
+            title: format!("fix {id}"),
+            file: "src/lib.rs".into(),
+            base: String::new(),
+            edits: vec![FixEdit {
+                start: 0,
+                end: 1,
+                text: text.into(),
+            }],
+            preferred,
+        };
+        let finding = |fixes: Vec<OfferedFix>, complete: bool| Finding {
+            file: "src/lib.rs".into(),
+            line: 3,
+            column: 1,
+            message: "problem".into(),
+            detail: None,
+            definition: None,
+            fixes,
+            fixes_complete: complete,
+        };
+        let snapshot = |errors: Vec<Finding>, warnings: Vec<Finding>, lints: Vec<Finding>| {
+            DiagnosticsSnapshot {
+                settled: true,
+                errors,
+                warnings,
+                lints,
+                ..Default::default()
+            }
+        };
+        let chosen = |s: &DiagnosticsSnapshot| s.auto_fix().map(|(_, fix)| fix.id);
+        // One preferred among others: taken.
+        let one = snapshot(
+            vec![finding(vec![fix(1, false, "a"), fix(2, true, "b")], true)],
+            vec![],
+            vec![],
+        );
+        assert_eq!(chosen(&one), Some(2));
+        // Two preferred, an incomplete list, a pure deletion: none.
+        assert_eq!(
+            chosen(&snapshot(
+                vec![finding(vec![fix(1, true, "a"), fix(2, true, "b")], true)],
+                vec![],
+                vec![]
+            )),
+            None
+        );
+        assert_eq!(
+            chosen(&snapshot(
+                vec![finding(vec![fix(1, true, "a")], false)],
+                vec![],
+                vec![]
+            )),
+            None
+        );
+        assert_eq!(
+            chosen(&snapshot(
+                vec![finding(vec![fix(1, true, "")], true)],
+                vec![],
+                vec![]
+            )),
+            None
+        );
+        // Warnings never; a lint is taken; an error comes first.
+        assert_eq!(
+            chosen(&snapshot(
+                vec![],
+                vec![finding(vec![fix(1, true, "a")], true)],
+                vec![]
+            )),
+            None
+        );
+        assert_eq!(
+            chosen(&snapshot(
+                vec![],
+                vec![],
+                vec![finding(vec![fix(4, true, "a")], true)]
+            )),
+            Some(4)
+        );
+        assert_eq!(
+            chosen(&snapshot(
+                vec![finding(vec![fix(1, true, "a")], true)],
+                vec![],
+                vec![finding(vec![fix(2, true, "b")], true)]
+            )),
+            Some(1)
+        );
+        // A disqualified error does not hide a good lint.
+        assert_eq!(
+            chosen(&snapshot(
+                vec![finding(vec![fix(1, true, "a")], false)],
+                vec![],
+                vec![finding(vec![fix(2, true, "b")], true)]
+            )),
+            Some(2)
+        );
+        // Unsettled: nothing.
+        let mut unsettled = one.clone();
+        unsettled.settled = false;
+        assert_eq!(chosen(&unsettled), None);
+        // A journal from before these fields loads and selects nothing.
+        let old: Finding = serde_json::from_value(serde_json::json!({
+            "file": "src/lib.rs", "line": 3, "column": 1, "message": "problem",
+            "fixes": [{"id": 1, "title": "t", "file": "src/lib.rs", "base": "", "edits": [{"start": 0, "end": 1, "text": "a"}]}]
+        }))
+        .unwrap();
+        assert!(!old.fixes_complete && !old.fixes[0].preferred);
+        assert_eq!(chosen(&snapshot(vec![old], vec![], vec![])), None);
+    }
+
+    #[test]
     fn an_unknown_fix_says_whether_any_fix_exists_and_names_a_line_number() {
         let lint = Finding {
             file: "badciv-map/src/codes.rs".into(),
@@ -2116,6 +2377,7 @@ mod tests {
             detail: None,
             definition: None,
             fixes: vec![],
+            fixes_complete: false,
         };
         let snapshot = DiagnosticsSnapshot {
             settled: true,
@@ -2142,6 +2404,7 @@ mod tests {
             file: "src/lib.rs".into(),
             base: String::new(),
             edits: vec![],
+            preferred: false,
         };
         let finding = |line, fixes| Finding {
             file: "src/lib.rs".into(),
@@ -2151,6 +2414,7 @@ mod tests {
             detail: None,
             definition: None,
             fixes,
+            fixes_complete: false,
         };
         let snapshot = DiagnosticsSnapshot {
             servers: vec!["rust-analyzer".into()],

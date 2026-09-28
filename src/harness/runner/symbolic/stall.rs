@@ -1,0 +1,494 @@
+//! The same failure coming back with nothing edited in between. In badciv run
+//! 12 qwen spent about twenty steps reading parse.rs, paging the output and
+//! rerunning `cargo test` while `grid_too_few_rows` failed each time, with no
+//! edit between the failures. No repeat guard fired, because each action
+//! differed (`| tail -30`, `| tail -40`, reads, inspects). The harness can see
+//! that the failure is the same and the source is not, so it decides
+//! (Constraint cd9f1a96): the second time it shows the failing test's source
+//! and the code it calls; the fourth time it parks for the human.
+
+use serde::{Deserialize, Serialize};
+
+use super::super::dispatch::error_lines;
+use super::super::{Phase, Runner};
+use crate::code::substrate::lang::{failed_tests, is_test_path, FailedTest};
+use crate::code::substrate::outline;
+
+/// Bytes the focus block may take: about a test and three short functions.
+const FOCUS_BYTES: usize = 4_000;
+/// Of which the failing test itself, in full up to this.
+const TEST_BYTES: usize = 1_500;
+/// Definitions the test calls, shown after it.
+const MAX_CALLEES: usize = 3;
+/// The failure seen this many times with no edit shows the focus block.
+const FOCUS_AT: usize = 2;
+/// And this many times parks the task for the human.
+const PARK_AT: usize = 4;
+/// Room kept for the line naming definitions left out.
+const OMITTED_RESERVE: usize = 96;
+/// A definition given less room than this is named instead of shown.
+const MIN_SECTION_BYTES: usize = 160;
+/// A failure naming no test and no error line is known by this much output.
+const SIGNATURE_OUTPUT_BYTES: usize = 200;
+/// How a signature from the output alone begins: the weakest identity.
+const OUTPUT_SIGNATURE: &str = "output: ";
+
+/// The failure last seen, how many edits the task had applied then, and how
+/// many times in a row it has been seen at that edit count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StalledFailure {
+    pub signature: String,
+    pub edits: usize,
+    pub count: usize,
+    /// The command that last failed this way. A pass of that command clears
+    /// the record; a pass of another (`cargo check` between two `cargo test`
+    /// runs) says nothing about this failure.
+    #[serde(default)]
+    pub command: String,
+}
+
+/// `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` switches the detector off for study
+/// variants: nothing is tracked, shown or parked.
+fn enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_LOOP_DETECTOR").map_or(true, |value| value.trim() != "off")
+}
+
+/// What makes two failures the same: the failed tests' names, sorted (a
+/// `| tail` keeps them while cutting the rest); else the compiler's error
+/// lines; else the start of the output.
+fn signature(output: &str, tests: &[FailedTest]) -> String {
+    if !tests.is_empty() {
+        let mut names: Vec<&str> = tests.iter().map(|test| test.name.as_str()).collect();
+        names.sort_unstable();
+        return format!("tests: {}", names.join(", "));
+    }
+    let errors = error_lines(output);
+    if !errors.is_empty() {
+        return format!(
+            "errors: {}",
+            errors.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+    let output = output.trim();
+    format!(
+        "{OUTPUT_SIGNATURE}{}",
+        &output[..floor_boundary(output, SIGNATURE_OUTPUT_BYTES)]
+    )
+}
+
+/// The failure as the model is told it.
+fn described(tests: &[FailedTest], signature: &str) -> String {
+    match tests {
+        [] if signature.starts_with(OUTPUT_SIGNATURE) => "the same output".into(),
+        [] => format!(
+            "the same {} error line(s)",
+            signature.lines().count().max(1)
+        ),
+        [test] => format!("test `{}`", test.name),
+        [test, rest @ ..] => format!("test `{}` and {} more", test.name, rest.len()),
+    }
+}
+
+/// The largest char boundary at or below `at`.
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// A function's current text, located by the tree-sitter outline of the
+/// file's current text: the SCIP index is stale for files just written.
+#[derive(Debug, Clone)]
+struct Definition {
+    file: String,
+    name: String,
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// The named functions of a file's current text.
+fn functions(file: &str, text: &str) -> Vec<Definition> {
+    let lines: Vec<&str> = text.lines().collect();
+    outline(file, text)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.kind == "fn")
+        .filter_map(|entry| {
+            let name = entry.name?;
+            let body = lines.get(entry.line - 1..entry.end_line.min(lines.len()))?;
+            Some(Definition {
+                file: file.to_string(),
+                name,
+                start: entry.line,
+                end: entry.end_line,
+                text: body.join("\n"),
+            })
+        })
+        .collect()
+}
+
+/// Where `word` first occurs in `text` as a whole identifier.
+fn word_at(text: &str, word: &str) -> Option<usize> {
+    let identifier = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).map(|(at, _)| at).find(|&at| {
+        !text[..at].chars().next_back().is_some_and(identifier)
+            && !text[at + word.len()..]
+                .chars()
+                .next()
+                .is_some_and(identifier)
+    })
+}
+
+/// One definition as the focus block shows it, cut to `budget` bytes with
+/// what was cut named.
+fn section(definition: &Definition, role: &str, budget: usize) -> String {
+    let header = format!(
+        "{}:{}-{} `{}`{role}:\n",
+        definition.file, definition.start, definition.end, definition.name
+    );
+    let text = &definition.text;
+    if header.len() + text.len() < budget {
+        return format!("{header}{text}\n");
+    }
+    let notice = |cut: usize| {
+        format!(
+            "\n[… `{}` continues; {} bytes not shown]\n",
+            definition.name,
+            text.len() - cut
+        )
+    };
+    // The notice for a cut at 0 is the longest one.
+    let cut = floor_boundary(text, budget.saturating_sub(header.len() + notice(0).len()));
+    format!("{header}{}{}", &text[..cut], notice(cut))
+}
+
+const FOCUS_CLOSING: &str = "Rerunning or rereading without an edit shows this same failure again: edit the code it points at.]\n";
+
+impl Runner {
+    /// Track a failed command or required check against the edits applied so
+    /// far, and return the harness text to put before its output: the focus
+    /// block on the second sighting with no edit between, the park message on
+    /// the fourth, which also parks the task.
+    pub(in crate::harness::runner) fn note_failure(
+        &mut self,
+        command: &str,
+        output: &str,
+    ) -> Option<String> {
+        if !enabled() {
+            return None;
+        }
+        let tests = failed_tests(output);
+        let signature = signature(output, &tests);
+        let edits = self.task.edits.len();
+        let state = self.symbolic_state_mut();
+        let count = match state.stalled_failure.as_mut() {
+            Some(stall) if stall.edits == edits && stall.signature == signature => {
+                stall.count += 1;
+                stall.command = command.to_string();
+                stall.count
+            }
+            // A failure that names no test and no error (a `grep` that
+            // matched nothing) says nothing about the one being tracked.
+            Some(stall)
+                if stall.edits == edits
+                    && signature.starts_with(OUTPUT_SIGNATURE)
+                    && !stall.signature.starts_with(OUTPUT_SIGNATURE) =>
+            {
+                return None;
+            }
+            _ => {
+                state.stalled_failure = Some(StalledFailure {
+                    signature: signature.clone(),
+                    edits,
+                    count: 1,
+                    command: command.to_string(),
+                });
+                1
+            }
+        };
+        let what = described(&tests, &signature);
+        if count >= PARK_AT {
+            self.intent_event(
+                "stalled_failure_parked",
+                &format!("{what}, {count} times at edit {edits}: {command}"),
+            );
+            self.event(format!(
+                "Stalled failure: {what} came back {count} times with no edit between; parked for guidance."
+            ));
+            self.task.phase = Phase::AwaitingInput;
+            self.task.turn_finished = true;
+            return Some(format!(
+                "[Harness: the same failure ({what}) has come back {count} times with no edit in between; rerunning, reading and paging have not changed it. Guidance is needed: say what to change, or /plan to change the approach.]\n"
+            ));
+        }
+        if count != FOCUS_AT {
+            return None;
+        }
+        self.intent_event(
+            "stalled_failure_focus",
+            &format!("{what} at edit {edits}: {command}"),
+        );
+        Some(match tests.first() {
+            Some(test) => self.focus_block(test, &what),
+            None => format!(
+                "[Harness: the same failure again with no edit since: {what}. {FOCUS_CLOSING}"
+            ),
+        })
+    }
+
+    /// A pass of the command that last failed clears the record: the failure
+    /// it tracked did not come back.
+    pub(in crate::harness::runner) fn note_pass(&mut self, command: &str) {
+        if let Some(state) = self.task.symbolic.as_mut() {
+            if state
+                .stalled_failure
+                .as_ref()
+                .is_some_and(|stall| stall.command == command)
+            {
+                state.stalled_failure = None;
+            }
+        }
+    }
+
+    /// The failing test's source and up to three definitions it calls, from
+    /// the files' current text, in at most [`FOCUS_BYTES`].
+    fn focus_block(&self, test: &FailedTest, what: &str) -> String {
+        let place = test
+            .location
+            .as_ref()
+            .map(|(file, line)| format!(" ({file}:{line})"))
+            .unwrap_or_default();
+        let mut block =
+            format!("[Harness: the same failure again with no edit since: {what}{place}.");
+        let (found, panicked_in) = self.find_test(test);
+        if found.is_none() && panicked_in.is_none() {
+            block.push_str(&format!(
+                " The test `{}` was not found in the plan's files or the working set. {FOCUS_CLOSING}",
+                test.function()
+            ));
+            return block;
+        }
+        block.push_str(" Its source and the code it calls:\n");
+        let mut shown: Vec<(Definition, &str)> = Vec::new();
+        if let Some(panicked) = panicked_in {
+            shown.push((panicked, " (where it panicked)"));
+        }
+        if let Some(found) = found {
+            block.push_str(&section(&found, " (the test)", TEST_BYTES));
+            for callee in self.callees(&found) {
+                if shown.len() >= MAX_CALLEES {
+                    break;
+                }
+                if !shown
+                    .iter()
+                    .any(|(definition, _)| definition.name == callee.name)
+                {
+                    shown.push((callee, " (called by the test)"));
+                }
+            }
+        }
+        let mut omitted = Vec::new();
+        let total = shown.len();
+        for (index, (definition, role)) in shown.into_iter().enumerate() {
+            let room =
+                FOCUS_BYTES.saturating_sub(block.len() + FOCUS_CLOSING.len() + OMITTED_RESERVE);
+            let budget = room / (total - index);
+            if budget < MIN_SECTION_BYTES {
+                omitted.push(format!("`{}`", definition.name));
+                continue;
+            }
+            block.push_str(&section(&definition, role, budget));
+        }
+        if !omitted.is_empty() {
+            block.push_str(&format!("[Not shown for room: {}]\n", omitted.join(", ")));
+        }
+        block.push_str(FOCUS_CLOSING);
+        block
+    }
+
+    /// A file's current text: the working set's copy, else the workspace's.
+    fn current_text(&self, file: &str) -> Option<String> {
+        match self.task.source.get(file) {
+            Some(text) => text.clone(),
+            None => self.workspace.read(file).ok().flatten(),
+        }
+    }
+
+    /// The plan's files, then the working set's, once each.
+    fn known_files(&self) -> Vec<String> {
+        let mut files: Vec<String> = self
+            .task
+            .plan
+            .as_ref()
+            .map(|plan| plan.files.clone())
+            .unwrap_or_default();
+        for file in self.task.source.keys() {
+            if !files.contains(file) {
+                files.push(file.clone());
+            }
+        }
+        files
+    }
+
+    /// A path from a runner's output as the workspace knows it: as printed,
+    /// else the known file it names relative to another directory (a crate's
+    /// `tests/x.rs` under `badciv-map/`, or an absolute path).
+    fn resolve_path(&self, path: &str) -> Option<(String, String)> {
+        if let Some(text) = self.current_text(path) {
+            return Some((path.to_string(), text));
+        }
+        self.known_files()
+            .into_iter()
+            .filter(|file| {
+                file.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{file}"))
+            })
+            .find_map(|file| self.current_text(&file).map(|text| (file, text)))
+    }
+
+    /// The failing test's function, and the function it panicked in when that
+    /// is another. The panic location names the function when the test's own
+    /// assertion failed; otherwise the test is found by name in the plan's
+    /// test files, then in the working set.
+    fn find_test(&self, test: &FailedTest) -> (Option<Definition>, Option<Definition>) {
+        let function = test.function();
+        let mut panicked_in = None;
+        if let Some((path, line)) = &test.location {
+            if let Some((file, text)) = self.resolve_path(path) {
+                let line = *line as usize;
+                let containing = functions(&file, &text)
+                    .into_iter()
+                    .filter(|definition| definition.start <= line && line <= definition.end)
+                    .max_by_key(|definition| definition.start);
+                match containing {
+                    Some(definition) if definition.name == function => {
+                        return (Some(definition), None);
+                    }
+                    other => panicked_in = other,
+                }
+            }
+        }
+        let files = self.known_files();
+        let (tests, others): (Vec<String>, Vec<String>) =
+            files.into_iter().partition(|file| is_test_path(file));
+        let found = tests.iter().chain(&others).find_map(|file| {
+            let text = self.current_text(file)?;
+            functions(file, &text)
+                .into_iter()
+                .find(|definition| definition.name == function)
+        });
+        (found, panicked_in)
+    }
+
+    /// Functions declared in the plan's non-test files whose names the test
+    /// uses, in the order the test first uses them.
+    fn callees(&self, test: &Definition) -> Vec<Definition> {
+        let files: Vec<String> = self
+            .task
+            .plan
+            .as_ref()
+            .map(|plan| plan.files.clone())
+            .unwrap_or_default();
+        let mut used: Vec<(usize, Definition)> = files
+            .iter()
+            .filter(|file| !is_test_path(file))
+            .filter_map(|file| Some((file, self.current_text(file)?)))
+            .flat_map(|(file, text)| functions(file, &text))
+            .filter(|definition| definition.name != test.name)
+            .filter_map(|definition| Some((word_at(&test.text, &definition.name)?, definition)))
+            .collect();
+        used.sort_by_key(|(at, _)| *at);
+        let mut callees: Vec<Definition> = Vec::new();
+        for (_, definition) in used {
+            if !callees.iter().any(|seen| seen.name == definition.name) {
+                callees.push(definition);
+            }
+        }
+        callees
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(name: &str) -> FailedTest {
+        FailedTest {
+            name: name.into(),
+            location: None,
+        }
+    }
+
+    #[test]
+    fn a_signature_is_the_failed_tests_else_the_errors_else_the_output() {
+        let tests = [failed("b"), failed("a")];
+        assert_eq!(signature("", &tests), "tests: a, b");
+        let errors = "   Compiling x\nerror[E0308]: mismatched types\n  --> src/a.rs:1:1\nerror: could not compile `x`\n";
+        assert_eq!(
+            signature(errors, &[]),
+            "errors: --> src/a.rs:1:1\nerror[E0308]: mismatched types"
+        );
+        let long = "é".repeat(150);
+        let output = signature(&long, &[]);
+        assert!(output.starts_with(OUTPUT_SIGNATURE));
+        assert_eq!(output.len(), OUTPUT_SIGNATURE.len() + 200);
+    }
+
+    #[test]
+    fn a_failure_is_described_by_what_identifies_it() {
+        assert_eq!(described(&[failed("grid")], "tests: grid"), "test `grid`");
+        assert_eq!(
+            described(&[failed("a"), failed("b")], "tests: a, b"),
+            "test `a` and 1 more"
+        );
+        assert_eq!(described(&[], "errors: a\nb"), "the same 2 error line(s)");
+        assert_eq!(described(&[], "output: x"), "the same output");
+    }
+
+    #[test]
+    fn identifiers_are_found_whole() {
+        assert_eq!(
+            word_at("parse_map_all(x); parse_map(y)", "parse_map"),
+            Some(18)
+        );
+        assert_eq!(word_at("reparse_map(x)", "parse_map"), None);
+    }
+
+    #[test]
+    fn functions_carry_their_whole_current_text() {
+        let text = "fn helper() -> u32 {\n    1\n}\n\n#[test]\nfn grid() {\n    assert_eq!(helper(), 2);\n}\n";
+        let found = functions("tests/t.rs", text);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[1].name, "grid");
+        assert_eq!((found[1].start, found[1].end), (6, 8));
+        assert_eq!(
+            found[1].text,
+            "fn grid() {\n    assert_eq!(helper(), 2);\n}"
+        );
+    }
+
+    #[test]
+    fn a_section_over_budget_is_cut_on_a_char_boundary_and_says_so() {
+        let definition = Definition {
+            file: "src/a.rs".into(),
+            name: "long".into(),
+            start: 1,
+            end: 2,
+            text: "é".repeat(1_000),
+        };
+        let shown = section(&definition, " (the test)", 400);
+        assert!(shown.len() <= 400, "{}", shown.len());
+        assert!(shown.starts_with("src/a.rs:1-2 `long` (the test):\n"));
+        assert!(shown.contains("`long` continues;"));
+        let short = Definition {
+            text: "fn long() {}".into(),
+            ..definition
+        };
+        assert_eq!(
+            section(&short, "", 400),
+            "src/a.rs:1-2 `long`:\nfn long() {}\n"
+        );
+    }
+}

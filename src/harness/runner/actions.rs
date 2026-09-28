@@ -127,6 +127,22 @@ impl Runner {
     }
 
     pub(super) fn validate_action(&mut self, action: Action) -> Result<Step> {
+        // A narrowed repair (the repair lever) offers only these; argument
+        // values are not schema-checked, so the file list is enforced here.
+        if let Some(files) = self.narrowed_files() {
+            match &action {
+                Action::Write { file, .. } => ensure!(
+                    files.contains(file),
+                    "write is offered now only for the planned files that do not exist yet: {}",
+                    files.join(", ")
+                ),
+                Action::Read { .. } | Action::Question { .. } => {}
+                _ => anyhow::bail!(
+                    "only read, question, or a write to {} is offered now",
+                    files.join(", ")
+                ),
+            }
+        }
         match &action {
             Action::Plan {
                 summary,

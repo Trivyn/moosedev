@@ -59,7 +59,7 @@ impl Runner {
             self.task.approved_revision = None;
             self.task.approved_change_scope = None;
             self.task.snapshots = sources;
-            self.disarm_auto_verify();
+            self.disarm_harness_arms();
             self.task.check_results.clear();
             self.discard_pending_edit("source or accepted knowledge changed")?;
             self.discard_pending_permission("source or accepted knowledge changed")?;
@@ -247,6 +247,9 @@ impl Runner {
         }
         if self.task.phase == Phase::Verifying {
             return self.verify_next().await;
+        }
+        if self.auto_fix_due() {
+            return self.auto_apply_fix().await;
         }
         if self.auto_verify_due() {
             return self.auto_finish().await;
@@ -565,10 +568,8 @@ impl Runner {
                     let (file, existed, after) =
                         (edit.file.clone(), edit.before.is_some(), edit.after.clone());
                     self.apply_edit(edit)?;
-                    let fresh = self
-                        .check_applied_edit(&file, existed, after.as_deref())
+                    self.settle_applied_edit(&file, existed, after.as_deref(), false)
                         .await;
-                    self.arm_auto_verify(fresh);
                     self.persist()?;
                 }
             }
@@ -668,6 +669,25 @@ impl Runner {
             }
         }
         Ok(())
+    }
+
+    /// After an applied edit: check it with the language servers, then arm
+    /// what the harness may do next by itself on that fresh result (a
+    /// preferred fix, or the required checks). `chained` keeps the count of
+    /// fixes the harness applied in a row; a model edit restarts it.
+    pub(super) async fn settle_applied_edit(
+        &mut self,
+        file: &str,
+        existed: bool,
+        after: Option<&str>,
+        chained: bool,
+    ) {
+        if !chained {
+            self.symbolic_state_mut().auto_fix_chain = 0;
+        }
+        let fresh = self.check_applied_edit(file, existed, after).await;
+        self.arm_auto_fix(fresh);
+        self.arm_auto_verify(fresh);
     }
 
     /// From finished work to the required checks. The language-server and
@@ -818,7 +838,14 @@ impl Runner {
         let unchanged = (!result.success)
             .then(|| self.unchanged_failure_note())
             .flatten();
-        self.task.last_response = result.output;
+        if result.success {
+            self.note_pass(command);
+        }
+        // A blocked command is the permission gates' to answer.
+        let stalled = (!result.success && denial.is_none())
+            .then(|| self.note_failure(command, &result.output))
+            .flatten();
+        self.task.last_response = format!("{}{}", stalled.unwrap_or_default(), result.output);
         if let Some(note) = unchanged {
             self.task.last_response.push_str(&note);
         }
@@ -946,6 +973,9 @@ impl Runner {
             let denial = self.note_sandbox_denial(&command, &result);
             let ungrantable = denial == Some(SandboxDenial::Ungrantable);
             self.record_symbolic_check(&command, result.success, denial.is_some(), ungrantable);
+            if result.success {
+                self.note_pass(&command);
+            }
             let failure = (!result.success)
                 .then(|| check_failure_response(&command, &result, denial.as_ref()));
             if let (false, Some(code)) = (result.success, unrunnable_exit(&result)) {
@@ -978,6 +1008,14 @@ impl Runner {
                 } else {
                     response
                 };
+                // A blocked check is the permission gates' to answer.
+                if let Some(note) = denial
+                    .is_none()
+                    .then(|| self.note_failure(&command, &result.output))
+                    .flatten()
+                {
+                    self.task.last_response.insert_str(0, &note);
+                }
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
             } else if let Some(reason) = vacuous_reason(&result) {
@@ -1056,7 +1094,7 @@ fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
 
 /// The error lines of a failed command's output, with the locations
 /// compilers print under them: what "the same failure" compares.
-fn error_lines(output: &str) -> std::collections::BTreeSet<&str> {
+pub(super) fn error_lines(output: &str) -> std::collections::BTreeSet<&str> {
     output
         .lines()
         .map(str::trim)
@@ -1124,26 +1162,34 @@ fn vacuous_reason(result: &executor::CommandResult) -> Option<&'static str> {
 /// be128e71 finished with `parse_map` unimplemented because cargo's "running 1
 /// test" for an `#[ignore]`d fixture counted as a run.
 fn tests_ran(output: &str) -> bool {
+    tests_passed(output) > 0
+}
+
+/// Tests the runners in `output` report as passed, summed over every report
+/// line (cargo prints one per test binary). Python's unittest prints "Ran N
+/// tests" and then OK or FAILED, never a passed count; a failure fails the
+/// check, so its N counts only for a check that succeeded.
+pub(super) fn tests_passed(output: &str) -> u64 {
     let count = |token: &str| {
         token
             .trim_matches(|c: char| !c.is_ascii_digit())
             .parse::<u64>()
             .ok()
     };
-    output.lines().any(|line| {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        // Python's unittest prints "Ran N tests" and then OK or FAILED, never
-        // a passed count; a failure fails the check, so N > 0 here ran.
-        let unittest = tokens.len() >= 3
-            && tokens[0] == "Ran"
-            && tokens[2].starts_with("test")
-            && count(tokens[1]).is_some_and(|n| n > 0);
-        unittest
-            || tokens.windows(2).any(|pair| {
-                (pair[1].starts_with("passed") || pair[1].starts_with("passing"))
-                    && count(pair[0]).is_some_and(|n| n > 0)
-            })
-    })
+    output
+        .lines()
+        .map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() >= 3 && tokens[0] == "Ran" && tokens[2].starts_with("test") {
+                return count(tokens[1]).unwrap_or(0);
+            }
+            tokens
+                .windows(2)
+                .find(|pair| pair[1].starts_with("passed") || pair[1].starts_with("passing"))
+                .and_then(|pair| count(pair[0]))
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 const PATH_DENIALS: [&str; 5] = [

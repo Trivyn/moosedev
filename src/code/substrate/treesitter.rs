@@ -60,11 +60,15 @@ pub fn parse_source(relative_path: &str, source: &str) -> Option<Tree> {
 pub struct OutlineEntry {
     /// 1-based line the declaration starts on.
     pub line: usize,
+    /// 1-based line it ends on, so a caller can take its whole text.
+    pub end_line: usize,
     /// Declarations enclosing this one: an impl method is 1.
     pub depth: usize,
     pub kind: &'static str,
     /// The declaration's first line, trimmed.
     pub text: String,
+    /// Its name, as the fallback's identities name it; None when it has none.
+    pub name: Option<String>,
 }
 
 /// The declarations of in-memory source, in source order, located by the same
@@ -95,9 +99,11 @@ pub fn outline(relative_path: &str, source: &str) -> Option<Vec<OutlineEntry>> {
                 .to_string();
             entries.push(OutlineEntry {
                 line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
                 depth: depth - 1,
                 kind,
                 text,
+                name: declaration_name(fallback, node, source),
             });
         }
     }
@@ -613,13 +619,32 @@ mod tests {
             ]
         );
 
-        let python = "class Fees:\n    @staticmethod\n    def late(days):\n        return days\n\ndef total(items):\n    return sum(items)\n";
-        let entries: Vec<(usize, usize, &str)> = outline("fees.py", python)
+        let spans: Vec<(usize, usize, Option<String>)> = outline("src/lib.rs", rust)
             .unwrap()
             .into_iter()
-            .map(|entry| (entry.line, entry.depth, entry.kind))
+            .map(|entry| (entry.line, entry.end_line, entry.name))
             .collect();
-        assert_eq!(entries, vec![(1, 0, "class"), (3, 1, "fn"), (6, 0, "fn")]);
+        assert_eq!(
+            spans,
+            vec![
+                (5, 7, Some("Map".to_string())),
+                (9, 13, Some("Map".to_string())),
+                (10, 12, Some("new".to_string())),
+                (15, 15, Some("Terrain".to_string())),
+                (17, 19, Some("parse_map".to_string())),
+            ]
+        );
+
+        let python = "class Fees:\n    @staticmethod\n    def late(days):\n        return days\n\ndef total(items):\n    return sum(items)\n";
+        let entries: Vec<(usize, usize, usize, &str)> = outline("fees.py", python)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.line, entry.end_line, entry.depth, entry.kind))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![(1, 4, 0, "class"), (3, 4, 1, "fn"), (6, 7, 0, "fn")]
+        );
 
         assert_eq!(outline("Cargo.toml", "[package]\n"), None, "no grammar");
     }

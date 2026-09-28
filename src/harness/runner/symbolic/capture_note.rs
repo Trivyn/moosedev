@@ -67,9 +67,11 @@ impl Runner {
                 note,
                 status: "asked".into(),
                 response: None,
+                evidence: Vec::new(),
             });
             self.persist()?;
         }
+        self.record_review_evidence()?;
         let state = self
             .task
             .symbolic

@@ -514,8 +514,8 @@ impl Controller {
         }
         Ok(())
     }
-    pub fn with_startup_notice(mut self, notice: Option<String>) -> Self {
-        self.startup_notices.extend(notice);
+    pub fn with_startup_notices(mut self, notices: impl IntoIterator<Item = String>) -> Self {
+        self.startup_notices.extend(notices);
         self
     }
     async fn interrupt(&mut self) {
@@ -1676,7 +1676,7 @@ mod tests {
             input,
             output,
         )
-        .with_startup_notice(Some("Model configuration failed: invalid endpoint".into()));
+        .with_startup_notices(Some("Model configuration failed: invalid endpoint".into()));
         controller.acquire().unwrap();
         controller.save_conversation().unwrap();
         let saved = Conversation::load(root.path(), &controller.conversation.id).unwrap();

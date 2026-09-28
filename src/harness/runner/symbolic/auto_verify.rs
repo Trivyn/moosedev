@@ -39,10 +39,30 @@ impl Runner {
         self.symbolic_state_mut().auto_verify_armed = clean.then_some(at);
     }
 
-    pub(in crate::harness::runner) fn disarm_auto_verify(&mut self) {
+    /// Clear what the harness would do by itself next: an approval was
+    /// withdrawn or granted.
+    pub(in crate::harness::runner) fn disarm_harness_arms(&mut self) {
         if let Some(state) = self.task.symbolic.as_mut() {
             state.auto_verify_armed = None;
+            state.auto_fix_armed = None;
         }
+    }
+
+    /// Whether approved work is idle, so the harness may act without the
+    /// model: nothing pending, no human waited on, no handback.
+    pub(in crate::harness::runner) fn harness_may_act(&self) -> bool {
+        let task = &self.task;
+        task.mode == Mode::Auto
+            && task.phase == Phase::Working
+            && task.approved_revision.is_some()
+            && task.pending_edit.is_none()
+            && task.pending_permission.is_none()
+            && task.intent.is_none()
+            && task.recovery.is_none()
+            && !task.handed_back
+            && !task.turn_finished
+            && !task.completion_pending
+            && !task.final_capture
     }
 
     fn diagnostics_clean(&self) -> bool {
@@ -66,33 +86,32 @@ impl Runner {
         if armed != Some(at) || !enabled() {
             return false;
         }
+        let idle = self.harness_may_act();
         let task = &self.task;
-        let idle = task.mode == Mode::Auto
-            && task.phase == Phase::Working
-            && task.approved_revision.is_some()
-            && task.pending_edit.is_none()
-            && task.pending_permission.is_none()
-            && task.intent.is_none()
-            && task.recovery.is_none()
-            && !task.handed_back
-            && !task.turn_finished
-            && !task.completion_pending
-            && !task.final_capture;
         let Some(plan) = task.plan.as_ref().filter(|plan| !plan.checks.is_empty()) else {
             return false;
         };
         if !idle || self.untested_failure().is_some() || !self.diagnostics_clean() {
             return false;
         }
-        let start = task
-            .symbolic
-            .as_ref()
-            .map_or(0, |state| state.cycle_edit_start);
-        let edited_since = task.edits.get(start..).unwrap_or_default();
-        let every_file_done = plan.files.iter().all(|file| {
-            matches!(self.workspace.read(file), Ok(Some(_)))
-                && edited_since.iter().any(|edit| &edit.file == file)
+        let (start, harness_fixes) = task.symbolic.as_ref().map_or((0, None), |state| {
+            (state.cycle_edit_start, Some(&state.auto_fixed_edits))
         });
+        // The model's own edits only: a fix the harness applied to a file the
+        // model has not worked on yet is not that file done.
+        let edited_by_model = |file: &String| {
+            task.edits
+                .iter()
+                .enumerate()
+                .skip(start)
+                .any(|(index, edit)| {
+                    &edit.file == file && !harness_fixes.is_some_and(|fixes| fixes.contains(&index))
+                })
+        };
+        let every_file_done = plan
+            .files
+            .iter()
+            .all(|file| matches!(self.workspace.read(file), Ok(Some(_))) && edited_by_model(file));
         if !every_file_done || !self.planned_stubs().is_empty() {
             return false;
         }

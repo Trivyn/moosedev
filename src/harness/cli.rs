@@ -3,6 +3,7 @@
 //! headless, prints JSON and exits non-zero on error, for scripts and
 //! pipelines.
 use crate::harness::{
+    crash,
     runner::{default_daemon_url, Runner},
     startup::ProviderSettings,
     tui::{self, Action},
@@ -134,9 +135,11 @@ fn action(command: &str, args: &[String]) -> Result<Action> {
 }
 
 /// Run `moosedev code` with the arguments after `code`. An error is printed
-/// as `{"error": …}` and the process exits 1, as scripts expect.
+/// as `{"error": …}` and the process exits 1, as scripts expect; it is also
+/// kept in the crash log, since an interactive session's terminal may be gone.
 pub async fn main(args: Vec<String>) -> Result<()> {
     if let Err(error) = run(args).await {
+        crash::log(&format!("exited with an error: {error:#}"));
         eprintln!("{}", serde_json::json!({"error": format!("{error:#}")}));
         std::process::exit(1);
     }
@@ -155,6 +158,15 @@ async fn run(args: Vec<String>) -> Result<()> {
     let root = crate::project::project_root_from(&root)
         .unwrap_or(&root)
         .to_path_buf();
+    // From here on a panic, a fatal error or a silent death leaves evidence
+    // under .moosedev/harness (badciv task c83c10f8 died and left none).
+    crash::install(&root, std::env::args().collect::<Vec<_>>().join(" "));
+    let previous_sessions = crash::previous_sessions();
+    if !is_interactive(&args.command) {
+        for report in &previous_sessions {
+            eprintln!("{report}");
+        }
+    }
     // Match the daemon's explicit environment configuration without changing cwd.
     load_dotenv_file(&root.join(".env"))?;
     // Every model command runs confined and none runs outside it: a sandbox
@@ -180,7 +192,15 @@ async fn run(args: Vec<String>) -> Result<()> {
                 tui::Launch::Last
             }
         };
-        return tui::interactive(root, args.daemon, args.daemon_exe, launch).await;
+        let _session = crash::begin_session();
+        return tui::interactive(
+            root,
+            args.daemon,
+            args.daemon_exe,
+            launch,
+            previous_sessions,
+        )
+        .await;
     }
     let daemon = args
         .daemon
@@ -211,7 +231,8 @@ async fn run(args: Vec<String>) -> Result<()> {
     };
     let mut runner = Runner::load(root.clone(), daemon, id)?;
     if args.command == "tui" {
-        return tui::run(runner).await;
+        let _session = crash::begin_session();
+        return tui::run(runner, previous_sessions).await;
     }
     let result = if let Some(operation) = operation {
         // The same moosedev.toml roles as the interactive session. A broken
@@ -250,6 +271,12 @@ async fn run(args: Vec<String>) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&runner.task)?);
     }
     result
+}
+
+/// Commands that open the full-screen interface, where a notice belongs in
+/// the transcript rather than on stderr.
+fn is_interactive(command: &str) -> bool {
+    matches!(command, "interactive" | "resume-session" | "tui")
 }
 
 /// Commands that can run a model's commands or checks. Reading, listing,

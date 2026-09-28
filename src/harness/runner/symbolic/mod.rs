@@ -3,12 +3,15 @@
 //! typing are derived by the daemon from the approved plan, the resolved
 //! definition scopes and the graph.
 mod associate;
+mod auto_fix;
 mod auto_verify;
 pub(super) use auto_verify::AUTO_VERIFY_FAILED;
 mod capture_note;
 mod coverage;
+mod evidence;
 mod grounding;
 mod scope;
+mod stall;
 mod state;
 mod stubs;
 
@@ -330,8 +333,11 @@ impl Runner {
     pub(in crate::harness::runner) fn forget_failure(&mut self) {
         if let Some(state) = self.task.symbolic.as_mut() {
             state.last_failure = None;
-            // The human spoke: the next word is the model's, not a check run.
+            // A rerun after it is not the same failure coming back unheeded.
+            state.stalled_failure = None;
+            // The human spoke: the next word is the model's, not the harness's.
             state.auto_verify_armed = None;
+            state.auto_fix_armed = None;
         }
     }
 }

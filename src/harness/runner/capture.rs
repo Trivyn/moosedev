@@ -324,6 +324,7 @@ mod tests {
             attempts: 2,
             diagnostic: "Return one note field".into(),
             status: super::super::RecoveryStatus::Paused,
+            narrowed: None,
         });
         // Stop exactly at the inner durable acknowledgment boundary, before
         // the outer capture wrapper can perform any additional persistence.

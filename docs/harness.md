@@ -241,6 +241,16 @@ it journals as `replace_text_repair` — trimming stray envelope junk from the
 ends, or decoding JSON string escapes a model copied from the JSON-encoded
 source in its prompt (`\"` for `"`) — and otherwise names the first line of
 `old_text` that the file does not contain.
+A candidate whose decoded action is identical to the previous rejected
+candidate of the same decision does not spend the remaining attempt on the same
+prompt, which a model at temperature 0 answers the same way (badciv c83c10f8
+sent one whole-file `write` of `lib.rs` four times). When it was rejected as a
+no-op edit and planned files do not exist yet, the offer narrows for the rest of
+that repair: `read`, `question`, and `write` restricted to those files, both in
+the tool schema (`file` becomes an enum) and in validation, and the prompt says
+why (`repair_narrowed`). Any other identical repeat parks at once for guidance
+(`repair_repeat_parked`). An accepted candidate clears the narrowing;
+`MOOSEDEV_HARNESS_NARROW_REPAIR=off` switches it off for study variants.
 Permission denials and source/knowledge changes still require the applicable
 human review; correction never grants approval.
 
@@ -674,6 +684,17 @@ decision proposal each one that is a current Requirement or Constraint becomes
 an `isMotivatedBy` edge (derivation reason `addressed`), shown at review as
 `Motivated by:`. Only when no plan addressed any rule does the single-candidate
 obligation rule apply.
+
+Beside the capture note, the review shows **Evidence (checked by the
+harness)**: facts read from the task and the disk, never from the model, each
+journaled once as `review_evidence`. How many tests the passing required checks
+passed ("no test passed" when the only test was ignored or skipped), stub
+markers left in planned files, planned files no edit touched, and code names the
+note mentions (in backticks, or written as a call) that no edit in the task
+added or changed. badciv be128e71 finished with two functions stubbed and one
+ignored test, and a note describing validation code that did not exist was
+accepted with nothing shown against it. The gate line counts the facts; the
+Review tab lists them, and headless callers read `symbolic.capture_note.evidence`.
 
 Spec progress is derived from those edges, never stored. An approved spec's
 record is open until an accepted ArchitecturalDecision other than the spec's
@@ -1139,6 +1160,41 @@ contract 3 and intent contract 2.
   plan's required checks after your last edit …". A plan that lists a file
   needing no change never fires it: the model finishes as before.
   `MOOSEDEV_HARNESS_AUTO_VERIFY=off` switches it off for study variants.
+- Auto-applied fixes (offloading change 2). After an applied edit, the harness
+  applies a language server's quick fix itself, without a model step, when the
+  result is settled and a finding that is an error or a lint (never a warning:
+  rustc's unused-item fixes delete unfinished code or hide an omission) has a
+  complete list of offered fixes with exactly one marked `isPreferred` by the
+  server, and that fix does not only delete. A preferred fix the harness cannot
+  apply in full (an edit outside the plan, a follow-up command it does not run)
+  means the server's choice is not in the list, so nothing is applied. There
+  is no heuristic fallback: a server that marks nothing preferred gets no
+  auto-fix. The file must be a
+  planned file the model has read, the fix must still apply to its current
+  text, and policy decides as for any edit: a gate holds the fix for the model
+  (`fix_auto_held`), so the harness never produces an edit the human did not
+  expect to review. An applied fix is an ordinary edit, checked again like the
+  model's (`fix_auto_applied`, "Harness applied fix: …"), and the model's next
+  prompt says so. At most three in a row after one model edit and twenty per
+  task (`auto_fix_exhausted`); a harness fix never counts as the model's edit of
+  a planned file for auto-verify. `apply_fix` stays offered for the rest.
+  `MOOSEDEV_HARNESS_AUTO_FIX=off` switches it off.
+- Stalled failure (loop detector). A failed command or required check is
+  known by the tests its output reports failed (sorted names, read by each
+  language's registry module: libtest, pytest, unittest), else by its compiler
+  error lines, else by the start of its output. The same failure again at the
+  same edit count (no edit between, whatever the command string) is counted.
+  The second sighting puts a focus block before the output
+  (`stalled_failure_focus`): the failing test's source and up to three
+  functions of the plan's non-test files it calls, located by the tree-sitter
+  outline of the files' current text (by the panic location, else by the
+  test's name), within 4,000 bytes. The fourth parks for guidance
+  (`stalled_failure_parked`). An applied edit, a pass of the command that
+  failed, or a human answer starts the count again; a failure naming no test
+  and no error (a `grep` matching nothing) leaves it alone. badciv run 12
+  reread, paged and reran `cargo test` for about twenty steps while
+  `grid_too_few_rows` kept failing, each action different, so no repeat guard
+  fired. `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` switches it off.
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). A no-op edit (the result equals
@@ -1365,3 +1421,25 @@ grants; `permissions` prints only the active grants. Headless `resume ID` resume
 a task; interactive
 `resume-session ID` resumes a conversation. `--help` lists all commands. Options
 precede the command. Errors produce JSON on stderr and a nonzero exit status.
+
+## Crash log
+
+`moosedev code` keeps evidence of how a process ended in
+`.moosedev/harness/crash.log` (appended, never rotated). Each entry has an RFC 3339
+timestamp, the process id, the command line and the task last opened. A panic
+records its thread, message, location and a backtrace. An error that ends the
+command (the JSON on stderr) is recorded too. So is a SIGHUP or SIGTERM
+received by the interface, which it handles like `/quit`: the conversation is
+saved and the terminal restored before a clean exit. Both give the session three
+seconds to stop; work still running then (a step being cancelled, a spec
+extraction) is abandoned, and the log names the task and what was in flight.
+
+A death that runs no code (SIGKILL, an abort, power loss) cannot write an entry.
+While the interface is open, `.moosedev/harness/session-PID.json` names its pid,
+task, start time and command; a clean exit removes it. Each interface has its
+own marker, so several in one project do not hide each other. When the next
+`moosedev code` finds markers whose processes are gone, it records "previous
+session PID ended without a clean exit" in the crash log for each, removes them
+and reports them once: in the opening transcript, or on stderr for a headless
+command. A `session.json` left by an earlier version is read the same way. Nothing is
+written in a project without a `.moosedev` directory.

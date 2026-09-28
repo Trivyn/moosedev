@@ -81,6 +81,15 @@ SYMBOLIC_EVENT_KINDS = (
     # The harness ran the required checks itself after a clean edit covering every planned file
     # (offloading change 1), and its per-cycle limit; and a finish sent back for stub markers.
     "auto_verify", "auto_verify_exhausted", "finish_refused_stubs",
+    # The same failure again with no edit between: the harness showed the failing test and what it calls,
+    # and on the fourth sighting parked for the human. Neither is an autonomous recovery.
+    "stalled_failure_focus", "stalled_failure_parked",
+    # A repair whose candidate repeated the rejected one: the offer narrowed to writing the missing planned
+    # files, or the task parked early. Language-server fixes the harness applied or held itself, and its
+    # per-task limit (offloading change 2). Facts shown beside the capture note at review. None is an
+    # autonomous recovery.
+    "repair_narrowed", "repair_repeat_parked", "fix_auto_applied", "fix_auto_held", "auto_fix_exhausted",
+    "review_evidence",
     # Tool-call decoding under the tools action contract: repaired arguments, extra calls that did not run,
     # a call written as text, and the provider's refusal of a required tool choice. None is an autonomous
     # recovery.

@@ -732,11 +732,14 @@ async fn approve_spec_starts_a_task_when_none_is_active() {
 async fn a_spent_repair_budget_shows_its_request_and_continue_explains() {
     let fixture = Fixture::new().await;
     fixture.state.release.add_permits(1);
-    let invalid = json!({"message":"Working.","action":{"action":"invented_action"}});
+    // Different invalid candidates: identical ones stop at two (the repair
+    // lever).
+    let invalid =
+        |n: usize| json!({"message":"Working.","action":{"action":format!("invented_action_{n}")}});
     *fixture.state.replies.lock().unwrap() = VecDeque::from([
-        invalid.clone(),
-        invalid.clone(),
-        invalid,
+        invalid(1),
+        invalid(2),
+        invalid(3),
         json!({"message":"Recovered.","action":{"action":"reply","message":"Recovered answer."}}),
     ]);
     let (input, mut updates, handle) = fixture.controller(Conversation::new(fixture.root.clone()));

@@ -412,6 +412,7 @@ impl Runner {
         runner.event("Task created in Plan mode; current project knowledge retrieved.");
         runner.guidance_loaded();
         runner.persist()?;
+        crate::harness::crash::record_task(&runner.task.id);
         Ok(runner)
     }
 
@@ -467,6 +468,7 @@ impl Runner {
             runner.guidance_loaded();
             runner.persist()?;
         }
+        crate::harness::crash::record_task(&runner.task.id);
         Ok(runner)
     }
 

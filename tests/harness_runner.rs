@@ -2551,6 +2551,7 @@ fn diagnostics(errors: usize) -> moosedev::harness::runner::DiagnosticsSnapshot 
                 detail: None,
                 definition: None,
                 fixes: vec![],
+                fixes_complete: false,
             })
             .collect(),
         warnings: vec![],
@@ -2724,6 +2725,7 @@ async fn an_offered_fix_is_applied_as_an_ordinary_edit_and_refused_once_stale() 
             end: 8,
             text: "changed".into(),
         }],
+        preferred: false,
     }];
     runner.task.diagnostics = Some(snapshot);
     fixture.conversational(json!({"action":"apply_fix","fix":1}));

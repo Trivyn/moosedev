@@ -6,8 +6,10 @@ use std::process::Command;
 use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
-use super::file_name;
-use super::{first_matching_subdir, FallbackSpec, LanguageSpec, ProducerHooks, StubSyntax};
+use super::{file_name, note_failed};
+use super::{
+    first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, StubSyntax,
+};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::symbols;
@@ -45,7 +47,48 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         block_comments: &[],
         quotes: &['"', '\''],
     }),
+    test_failures: Some(test_failures),
 };
+
+/// pytest's and unittest's reports of failed tests. pytest names a node id in
+/// its short summary (`FAILED tests/test_map.py::test_grid - AssertionError`)
+/// and, verbose, after it (`tests/test_map.py::test_grid FAILED [ 50%]`);
+/// unittest names the method and its class (`FAIL: test_grid
+/// (tests.test_map.MapTests)`, since 3.11 with the method repeated inside).
+/// An `ERROR` is a failure too: the test did not pass.
+fn test_failures(output: &str) -> Vec<FailedTest> {
+    let mut failures = Vec::new();
+    for line in output.lines().map(str::trim) {
+        if let Some(rest) = line
+            .strip_prefix("FAILED ")
+            .or_else(|| line.strip_prefix("ERROR "))
+        {
+            let id = rest.split(" - ").next().unwrap_or(rest).trim();
+            if id.contains("::") {
+                note_failed(&mut failures, id, None);
+            }
+        } else if let Some(rest) = line
+            .strip_prefix("FAIL: ")
+            .or_else(|| line.strip_prefix("ERROR: "))
+        {
+            let Some((method, context)) = rest.split_once(" (") else {
+                continue;
+            };
+            let context = context.trim_end_matches(')');
+            if context.ends_with(&format!(".{method}")) {
+                note_failed(&mut failures, context, None);
+            } else {
+                note_failed(&mut failures, &format!("{context}.{method}"), None);
+            }
+        } else if let Some((id, verdict)) = line.split_once(' ') {
+            if id.contains("::") && (verdict.starts_with("FAILED") || verdict.starts_with("ERROR"))
+            {
+                note_failed(&mut failures, id, None);
+            }
+        }
+    }
+    failures
+}
 
 /// pytest's default discovery: `test_*.py` and `*_test.py`, plus the `conftest`
 /// fixture module. None of these sit in a test DIRECTORY by convention, so a
@@ -156,6 +199,58 @@ fn declaration_kind(node_kind: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pytest_and_unittest_failures_are_named() {
+        let pytest = "tests/test_map.py::test_ok PASSED                    [ 33%]
+tests/test_map.py::test_grid FAILED                  [ 66%]
+=========================== short test summary info ============================
+FAILED tests/test_map.py::test_grid - AssertionError: assert 3 == 4
+FAILED tests/test_map.py::MapTests::test_rows[2] - ValueError
+========================= 2 failed, 1 passed in 0.12s ==========================
+";
+        let failures = super::test_failures(pytest);
+        let names: Vec<&str> = failures
+            .iter()
+            .map(|failure| failure.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "tests/test_map.py::test_grid",
+                "tests/test_map.py::MapTests::test_rows[2]"
+            ]
+        );
+        assert_eq!(failures[0].function(), "test_grid");
+        assert_eq!(failures[1].function(), "test_rows");
+
+        let unittest = "======================================================================
+FAIL: test_grid (tests.test_map.MapTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File \"/work/tests/test_map.py\", line 12, in test_grid
+    self.assertEqual(rows, 4)
+AssertionError: 3 != 4
+
+======================================================================
+ERROR: test_rows (tests.test_map.MapTests.test_rows)
+----------------------------------------------------------------------
+FAILED (failures=1, errors=1)
+";
+        let failures = super::test_failures(unittest);
+        let names: Vec<&str> = failures
+            .iter()
+            .map(|failure| failure.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "tests.test_map.MapTests.test_grid",
+                "tests.test_map.MapTests.test_rows"
+            ]
+        );
+        assert_eq!(failures[0].function(), "test_grid");
+    }
+
     use super::*;
 
     #[test]

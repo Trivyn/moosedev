@@ -52,6 +52,72 @@ pub(crate) struct LanguageSpec {
     /// language has no stub idiom: the finish gate then says nothing.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub stubs: Option<StubSyntax>,
+    /// The tests a test runner's output reports failed, so the harness can
+    /// tell the same failure coming back from a new one (badciv run 12:
+    /// `grid_too_few_rows` failed on four runs with no edit between them).
+    /// None when this build reads no runner of the language.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub test_failures: Option<fn(&str) -> Vec<FailedTest>>,
+}
+
+/// A test a runner reported failed: its name as the runner printed it
+/// (`parse::tests::grid`, `tests/test_map.py::test_grid`) and, when the output
+/// says, the file and line it failed at.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedTest {
+    pub name: String,
+    pub location: Option<(String, u32)>,
+}
+
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+impl FailedTest {
+    /// The test function's own name: the last segment of a qualified name,
+    /// without a parameterization (`test_grid[3]`).
+    pub(crate) fn function(&self) -> &str {
+        let last = self.name.rsplit("::").next().unwrap_or(&self.name);
+        let last = last.rsplit('.').next().unwrap_or(last);
+        last.split('[').next().unwrap_or(last)
+    }
+}
+
+/// Add a failure to `failures` unless its name is already there, keeping the
+/// first location any line gave it. A runner names one failure several times
+/// (libtest: the `... FAILED` line, the panic, the summary list).
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+fn note_failed(failures: &mut Vec<FailedTest>, name: &str, location: Option<(String, u32)>) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    match failures.iter_mut().find(|failure| failure.name == name) {
+        Some(failure) => {
+            if failure.location.is_none() {
+                failure.location = location;
+            }
+        }
+        None => failures.push(FailedTest {
+            name: name.to_string(),
+            location,
+        }),
+    }
+}
+
+/// The failed tests every registered runner reads in `output`, in the order
+/// first named. Output does not say which runner printed it, and the
+/// languages' formats do not overlap, so every parser reads it.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn failed_tests(output: &str) -> Vec<FailedTest> {
+    let mut failures = Vec::new();
+    for parse in LANGUAGES
+        .iter()
+        .filter_map(|language| language.test_failures)
+    {
+        for failure in parse(output) {
+            note_failed(&mut failures, &failure.name, failure.location);
+        }
+    }
+    failures
 }
 
 /// A language's stub idiom (`unimplemented!(`, `raise NotImplementedError`)

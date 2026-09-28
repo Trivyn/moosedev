@@ -840,9 +840,10 @@ impl Runner {
             "Required check results (indices into plan checks): {}\n",
             serde_json::to_string(&checks)?
         ));
-        state.push_str(&match self.task.mode {
-            Mode::Plan => PLAN_MODE_ACTIONS.to_owned(),
-            Mode::Auto => auto_mode_actions(fixes),
+        state.push_str(&match (self.task.mode, self.narrowed_files()) {
+            (Mode::Plan, _) => PLAN_MODE_ACTIONS.to_owned(),
+            (Mode::Auto, Some(files)) => narrowed_actions(files),
+            (Mode::Auto, None) => auto_mode_actions(fixes),
         });
         if self.task.mode == Mode::Plan {
             state.push_str(&plan_rule_echo(&context.governing_rules));
@@ -1342,6 +1343,33 @@ fn navigation_context(files: &[String], budget: usize) -> String {
     preview
 }
 
+/// The offer after an identical rejected no-op (the repair lever): `write`
+/// only to `files`, `read` and `question`, in the contract's shape.
+pub(super) fn narrowed_schema(files: &[String], conversational: bool) -> Value {
+    let mut actions = action_schema(Mode::Auto, false);
+    retain_actions(&mut actions, |name| NARROWED_ACTION_NAMES.contains(&name));
+    for variant in actions["oneOf"].as_array_mut().unwrap() {
+        if variant["properties"]["action"]["const"] == "write" {
+            variant["properties"]["file"] = json!({"type":"string","enum":files});
+        }
+    }
+    if conversational {
+        json!({"type":"object","additionalProperties":false,"required":["message","action"],"properties":{"message":{"type":"string"},"action":actions}})
+    } else {
+        actions
+    }
+}
+
+pub(super) const NARROWED_ACTION_NAMES: [&str; 3] = ["read", "write", "question"];
+
+/// What the narrowed offer allows, for the state section.
+fn narrowed_actions(files: &[String]) -> String {
+    format!(
+        "\nYour last two answers were the same rejected action. Allowed actions now: read, write (only to {}), question. Write the next planned file that does not exist yet.",
+        files.join(", ")
+    )
+}
+
 pub(super) fn conversational_schema(mode: Mode, fixes: bool) -> Value {
     let mut actions = action_schema(mode, fixes);
     if mode == Mode::Auto {
@@ -1388,6 +1416,33 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
 mod tests {
     use super::*;
     use crate::harness::runner::test_support::{context_router, serve, test_config, Project};
+
+    #[test]
+    fn the_narrowed_offer_writes_only_missing_files_and_says_so() {
+        let files = vec!["src/parse.rs".to_string(), "src/write.rs".to_string()];
+        for conversational in [false, true] {
+            let schema = narrowed_schema(&files, conversational);
+            let actions = if conversational {
+                &schema["properties"]["action"]
+            } else {
+                &schema
+            };
+            let names: Vec<&str> = actions["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|variant| variant["properties"]["action"]["const"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["read", "write", "question"]);
+            let write = &actions["oneOf"][1]["properties"]["file"];
+            assert_eq!(write["enum"], json!(files));
+        }
+        let text = narrowed_actions(&files);
+        for name in NARROWED_ACTION_NAMES {
+            assert!(text.contains(name), "{text}");
+        }
+        assert!(text.contains("only to src/parse.rs, src/write.rs"));
+    }
 
     #[test]
     fn optional_context_respects_byte_budgets_and_unicode() {

@@ -31,6 +31,8 @@ mod clipboard;
 #[cfg(feature = "harness")]
 pub mod config;
 pub mod coverage;
+#[cfg(feature = "harness")]
+pub mod crash;
 pub mod daemon;
 pub mod digest;
 #[cfg(feature = "harness")]

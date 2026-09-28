@@ -508,7 +508,10 @@ sys.exit(2)''',
                     "restated_links": 1, "capture_notes": 1, "guidance_loaded": 1, "constraint_coverage": 2,
                     "constraint_coverage_unmet": 1, "edit_grounding": 1, "plan_grounding": 1,
                     "replace_text_repair": 1, "auto_verify": 0, "auto_verify_exhausted": 0,
-                    "finish_refused_stubs": 0, "tool_arguments_repaired": 1, "extra_tool_calls_ignored": 1,
+                    "finish_refused_stubs": 0, "stalled_failure_focus": 0, "stalled_failure_parked": 0,
+                    "repair_narrowed": 0, "repair_repeat_parked": 0, "fix_auto_applied": 0,
+                    "fix_auto_held": 0, "auto_fix_exhausted": 0, "review_evidence": 0,
+                    "tool_arguments_repaired": 1, "extra_tool_calls_ignored": 1,
                     "tool_call_from_content": 1, "tool_choice_fallback": 1,
                     # Coverage returns, grounding conversions and tool-call decoding are nudges, not recoveries.
                     "structured_model_decisions": 0, "autonomous_recoveries": 2}

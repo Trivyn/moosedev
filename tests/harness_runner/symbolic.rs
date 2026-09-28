@@ -547,8 +547,12 @@ async fn symbolic_noop_edit_is_repaired_while_the_language_server_reports_errors
     let mut snapshot = diagnostics(2);
     snapshot.errors[0].file = "labels.py".into();
     runner.task.diagnostics = Some(snapshot);
-    for _ in 0..3 {
-        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+    // Three different no-ops: identical ones are narrowed or stopped at two
+    // (the repair lever).
+    for span in ["return name", "def render_name", "render_name(name)"] {
+        fixture.conversational(
+            json!({"action":"replace","file":"labels.py","old_text":span,"new_text":span}),
+        );
     }
     let error = runner.advance().await.unwrap_err();
     let rendered = format!("{error:#}");
@@ -642,8 +646,12 @@ async fn the_noop_repair_names_planned_files_not_written_yet() {
     let mut snapshot = diagnostics(1);
     snapshot.errors[0].file = "labels.py".into();
     runner.task.diagnostics = Some(snapshot);
-    for _ in 0..3 {
-        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+    // Three different no-ops: identical ones are narrowed or stopped at two
+    // (the repair lever).
+    for span in ["return name", "def render_name", "render_name(name)"] {
+        fixture.conversational(
+            json!({"action":"replace","file":"labels.py","old_text":span,"new_text":span}),
+        );
     }
     let rendered = format!("{:#}", runner.advance().await.unwrap_err());
     assert!(
@@ -678,8 +686,12 @@ async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
         denied: false,
         ungrantable: false,
     });
-    for _ in 0..3 {
-        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+    // Three different no-ops: identical ones are narrowed or stopped at two
+    // (the repair lever).
+    for span in ["return name", "def render_name", "render_name(name)"] {
+        fixture.conversational(
+            json!({"action":"replace","file":"labels.py","old_text":span,"new_text":span}),
+        );
     }
     let error = runner.advance().await.unwrap_err();
     let rendered = format!("{error:#}");
@@ -785,8 +797,10 @@ async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
     // Finishing again changes nothing: the check is not rerun, the finish is
     // repaired naming the check and the permission request, and the third
     // refusal parks the task for the human.
-    for _ in 0..3 {
-        fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    for n in 0..3 {
+        fixture.conversational(
+            json!({"action":"finish","summary":format!("The helper is implemented ({n}).")}),
+        );
     }
     let error = runner.advance().await.unwrap_err();
     let rendered = format!("{error:#}");
@@ -825,8 +839,10 @@ async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
     assert_eq!(check_runs(&runner), 2);
     assert_eq!(runner.task.phase, Phase::Working);
     runner.advance().await.unwrap();
-    for _ in 0..3 {
-        fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    for n in 0..3 {
+        fixture.conversational(
+            json!({"action":"finish","summary":format!("The helper is implemented ({n}).")}),
+        );
     }
     runner.advance().await.unwrap_err();
     assert_eq!(check_runs(&runner), 2);
@@ -2101,4 +2117,591 @@ async fn a_new_approval_drops_the_arm_and_counts_only_its_own_edits() {
     runner.task.diagnostics = Some(diagnostics(0));
     assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
     assert!(intent_details(&runner, "auto_verify").is_empty());
+}
+
+/// A plan over labels.py and a codes.py not written yet, approved, with a
+/// settled language-server error: the state badciv c83c10f8 was in.
+async fn missing_module_runner(fixture: &Fixture) -> Runner {
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper module","files":["labels.py","codes.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    let mut snapshot = diagnostics(1);
+    snapshot.errors[0].file = "labels.py".into();
+    runner.task.diagnostics = Some(snapshot);
+    runner
+}
+
+#[tokio::test]
+async fn a_repeated_noop_narrows_the_offer_to_the_missing_files() {
+    // badciv c83c10f8: a4b sent the identical whole-file write of lib.rs until
+    // the repairs ran out; the correction line alone could not change it.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = missing_module_runner(&fixture).await;
+    let noop = json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"});
+    fixture.conversational(noop.clone());
+    fixture.conversational(noop);
+    fixture.conversational(json!({"action":"write","file":"codes.py","content":"CODES = {}\n"}));
+    runner.advance().await.unwrap();
+    assert_eq!(intent_details(&runner, "repair_narrowed"), vec!["codes.py"]);
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("Allowed actions now: read, write (only to codes.py), question."));
+    assert_eq!(runner.task.edits.len(), 1, "the narrowed write applied");
+    assert_eq!(runner.task.edits[0].file, "codes.py");
+    assert!(
+        runner.task.recovery.is_none(),
+        "an accepted candidate clears the narrowing"
+    );
+}
+
+#[tokio::test]
+async fn a_narrowed_repair_refuses_a_write_elsewhere_and_other_repeats_park_early() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    // Narrowed, then a write to a file outside the set is refused.
+    let fixture = symbolic_fixture().await;
+    let mut runner = missing_module_runner(&fixture).await;
+    let noop = json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"});
+    fixture.conversational(noop.clone());
+    fixture.conversational(noop);
+    fixture.conversational(json!({"action":"write","file":"labels.py","content":"x = 1\n"}));
+    let error = format!("{:#}", runner.advance().await.unwrap_err());
+    assert!(
+        error.contains("only for the planned files that do not exist yet: codes.py"),
+        "{error}"
+    );
+    assert!(runner.task.edits.is_empty());
+    // Returning to Plan is guidance: the spent budget and its narrowing go,
+    // or the first plan would be refused.
+    assert!(runner.task.recovery.is_some());
+    runner.mode_plan().await.unwrap();
+    assert!(runner.task.recovery.is_none());
+
+    // The same rejected candidate of another kind: stop spending attempts.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let miss =
+        json!({"action":"replace","file":"labels.py","old_text":"no such text","new_text":"x"});
+    fixture.conversational(miss.clone());
+    fixture.conversational(miss);
+    let calls = fixture.model_calls();
+    assert!(runner.advance().await.is_err());
+    assert_eq!(
+        fixture.model_calls(),
+        calls + 2,
+        "parked after two identical rejections, not three"
+    );
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "repair_repeat_parked").len(), 1);
+    assert!(runner
+        .task
+        .last_response
+        .contains("repeated the same rejected candidate"));
+
+    // Switched off: the old behaviour, three attempts.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    for _ in 0..3 {
+        fixture.conversational(
+            json!({"action":"replace","file":"labels.py","old_text":"no such text","new_text":"x"}),
+        );
+    }
+    std::env::set_var("MOOSEDEV_HARNESS_NARROW_REPAIR", "off");
+    let calls = fixture.model_calls();
+    let result = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_NARROW_REPAIR");
+    assert!(result.is_err());
+    assert_eq!(fixture.model_calls(), calls + 3);
+    assert!(intent_details(&runner, "repair_repeat_parked").is_empty());
+}
+
+/// Give `file` a settled lint with one preferred fix that turns `from` into
+/// `to`, offered against the file as it is now, and arm auto-fix the way a
+/// fresh language-server result would.
+fn offer_preferred_fix(fixture: &Fixture, runner: &mut Runner, file: &str, from: &str, to: &str) {
+    let text = std::fs::read_to_string(fixture.root.join(file)).unwrap();
+    let start = text.find(from).unwrap();
+    let fix = moosedev::harness::runner::OfferedFix {
+        id: 1,
+        title: format!("replace `{from}` with `{to}`"),
+        file: file.into(),
+        base: moosedev::harness::digest::sha256_hex(&text),
+        edits: vec![moosedev::harness::runner::FixEdit {
+            start,
+            end: start + from.len(),
+            text: to.into(),
+        }],
+        preferred: true,
+    };
+    let mut snapshot = diagnostics(0);
+    snapshot.lints = vec![moosedev::harness::runner::Finding {
+        file: file.into(),
+        line: 2,
+        column: 5,
+        message: "a lint with a machine-applicable suggestion".into(),
+        detail: None,
+        definition: None,
+        fixes: vec![fix],
+        fixes_complete: true,
+    }];
+    runner.task.diagnostics = Some(snapshot);
+    let at = runner.task.edits.len();
+    runner.task.symbolic.as_mut().unwrap().auto_fix_armed = Some(at);
+}
+
+/// Advance while the harness works without the model, at most six times.
+async fn advance_without_the_model(fixture: &Fixture, runner: &mut Runner) {
+    fixture.conversational(json!({"action":"reply","message":"Working.","then":"wait"}));
+    let calls = fixture.model_calls();
+    for _ in 0..6 {
+        if fixture.model_calls() > calls || runner.task.phase != Phase::Working {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_harness_applies_the_one_preferred_fix_without_a_model_step() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    offer_preferred_fix(&fixture, &mut runner, "labels.py", "strip", "lower");
+    let calls = fixture.model_calls();
+    for _ in 0..4 {
+        if runner.task.edits.len() == 2 {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(fixture.model_calls(), calls, "no model step");
+    assert_eq!(runner.task.edits.len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("labels.py")).unwrap(),
+        "def render_name(name):\n    return name.lower()\n"
+    );
+    assert_eq!(intent_details(&runner, "fix_auto_applied").len(), 1);
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("The harness applied the language server's preferred fix to labels.py"));
+}
+
+#[tokio::test]
+async fn an_auto_fix_is_held_capped_disarmed_and_switched_off() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let edit = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"});
+    // The file changed after the fix was offered: held, not applied.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, edit.clone()).await;
+    offer_preferred_fix(&fixture, &mut runner, "labels.py", "strip", "lower");
+    // A change on disk withdraws the approval first; a stale offer is the
+    // case left for the fix itself to refuse.
+    runner.task.diagnostics.as_mut().unwrap().lints[0].fixes[0].base = "stale".into();
+    advance_without_the_model(&fixture, &mut runner).await;
+    assert!(intent_details(&runner, "fix_auto_applied").is_empty());
+    assert_eq!(
+        intent_details(&runner, "fix_auto_held"),
+        vec!["labels.py: the file changed since the fix was offered"]
+    );
+
+    // At the chain cap, after a human message, or switched off: not applied.
+    for case in ["cap", "human", "off"] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = planned_symbolic_runner(&fixture).await;
+        runner.approve_plan().await.unwrap();
+        clean_edit(&fixture, &mut runner, edit.clone()).await;
+        offer_preferred_fix(&fixture, &mut runner, "labels.py", "strip", "lower");
+        match case {
+            "cap" => runner.task.symbolic.as_mut().unwrap().auto_fix_chain = 3,
+            "human" => runner.submit_message("Keep going.".into()).await.unwrap(),
+            _ => std::env::set_var("MOOSEDEV_HARNESS_AUTO_FIX", "off"),
+        }
+        advance_without_the_model(&fixture, &mut runner).await;
+        std::env::remove_var("MOOSEDEV_HARNESS_AUTO_FIX");
+        assert!(
+            intent_details(&runner, "fix_auto_applied").is_empty(),
+            "{case}"
+        );
+        assert_eq!(runner.task.edits.len(), 1, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn a_harness_fix_is_not_the_models_planned_edit_for_auto_verify() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::fs::write(fixture.root.join("codes.py"), "CODES = {'a': 1}\n").unwrap();
+    let mut runner = fixture.interactive().await;
+    for file in ["labels.py", "codes.py"] {
+        fixture.conversational(json!({"action":"read","file":file}));
+        runner.advance().await.unwrap();
+    }
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper module","files":["labels.py","codes.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    offer_preferred_fix(&fixture, &mut runner, "codes.py", "1", "2");
+    for _ in 0..4 {
+        if runner.task.edits.len() == 2 {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(intent_details(&runner, "fix_auto_applied").len(), 1);
+    // Clean again, armed: codes.py was touched only by the harness.
+    runner.task.diagnostics = Some(diagnostics(0));
+    let at = runner.task.edits.len();
+    runner.task.symbolic.as_mut().unwrap().auto_verify_armed = Some(at);
+    assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert!(intent_details(&runner, "auto_verify").is_empty());
+}
+
+#[tokio::test]
+async fn the_review_shows_what_the_harness_checked_beside_the_note() {
+    // badciv be128e71: a stubbed finish with only an ignored test, and a note
+    // describing code that did not exist, was accepted at review.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    raise NotImplementedError\n"}));
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    fixture
+        .note("I implemented `validate_labels` as a separate pass that check_grid(labels) calls.");
+    fixture.typed(vec![]);
+    for _ in 0..16 {
+        if runner.task.phase == Phase::AwaitingReview {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    let evidence = runner
+        .task
+        .symbolic
+        .as_ref()
+        .and_then(|state| state.capture_note.as_ref())
+        .map(|note| note.evidence.clone())
+        .unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|fact| fact.starts_with("Required checks passed, but no test passed")),
+        "{evidence:?}"
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|fact| fact
+                == "Stubs left in planned files: labels.py:2 raise NotImplementedError."),
+        "{evidence:?}"
+    );
+    assert!(
+        evidence.iter().any(|fact| fact == "The note names `validate_labels`, `check_grid`, which no edit in this task added or changed."),
+        "{evidence:?}"
+    );
+    assert_eq!(
+        intent_details(&runner, "review_evidence").len(),
+        evidence.len()
+    );
+}
+
+/// A command that fails `test_render` as libtest reports it, made distinct by
+/// a trailing comment so the exact-repeat guard never fires: badciv run 12
+/// varied `| tail -30`, `| tail -40` the same way.
+fn failing_test_command(variant: &str) -> Value {
+    json!({"action":"command","command":format!(
+        "printf \"test test_render ... FAILED\\nthread 'test_render' panicked at tests/test_labels.py:2:5:\\n\"; exit 101 # {variant}"
+    )})
+}
+
+/// The symbolic fixture with a test of `render_name` that the failing
+/// command's panic line points into.
+async fn stalled_failure_runner(fixture: &Fixture) -> Runner {
+    std::fs::create_dir_all(fixture.root.join("tests")).unwrap();
+    std::fs::write(
+        fixture.root.join("tests/test_labels.py"),
+        "def test_render():\n    assert render_name(\" a \") == \"a\"\n",
+    )
+    .unwrap();
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.approve_plan().await.unwrap();
+    runner
+}
+
+async fn act(fixture: &Fixture, runner: &mut Runner, action: Value) {
+    fixture.conversational(action);
+    for _ in 0..4 {
+        if fixture.shared.lock().unwrap().replies.is_empty() {
+            return;
+        }
+        runner.advance().await.unwrap();
+    }
+    panic!("the scripted action was never requested");
+}
+
+fn stall_count(runner: &Runner) -> Option<usize> {
+    runner
+        .task
+        .symbolic
+        .as_ref()
+        .and_then(|state| state.stalled_failure.as_ref())
+        .map(|stall| stall.count)
+}
+
+/// badciv run 12: `grid_too_few_rows` failed again and again with no edit
+/// between while qwen reread and paged. The second failure shows the test and
+/// what it calls, before the output; the fourth parks. A passing command in
+/// between says nothing about the failure.
+#[tokio::test]
+async fn the_same_failure_with_no_edit_between_is_focused_then_parks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    assert_eq!(stall_count(&runner), Some(1));
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("test test_render ... FAILED"));
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"command","command":"true"}),
+    )
+    .await;
+    act(&fixture, &mut runner, failing_test_command("b")).await;
+    assert_eq!(stall_count(&runner), Some(2));
+    assert_eq!(intent_details(&runner, "stalled_failure_focus").len(), 1);
+    let response = runner.task.last_response.clone();
+    assert!(
+        response.starts_with("[Harness: the same failure again with no edit since: test `test_render` (tests/test_labels.py:2). Its source and the code it calls:\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("tests/test_labels.py:1-2 `test_render` (the test):\ndef test_render():\n    assert render_name(\" a \") == \"a\"\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("labels.py:1-2 `render_name` (called by the test):\ndef render_name(name):\n    return name\n"),
+        "{response}"
+    );
+    let (block, output) = response
+        .split_once("edit the code it points at.]\n")
+        .unwrap();
+    assert!(block.len() <= 4_000);
+    assert!(
+        output.starts_with("test test_render ... FAILED"),
+        "{output}"
+    );
+    assert_eq!(runner.task.phase, Phase::Working);
+
+    act(&fixture, &mut runner, failing_test_command("c")).await;
+    assert_eq!(stall_count(&runner), Some(3));
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("test test_render ... FAILED"));
+    act(&fixture, &mut runner, failing_test_command("d")).await;
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner.task.turn_finished);
+    assert_eq!(intent_details(&runner, "stalled_failure_parked").len(), 1);
+    assert!(
+        runner.task.last_response.starts_with(
+            "[Harness: the same failure (test `test_render`) has come back 4 times with no edit in between"
+        ),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner.task.last_response.contains("Guidance is needed"));
+
+    // The human's answer starts the count again.
+    runner.answer("Strip the name.".into()).await.unwrap();
+    assert_eq!(stall_count(&runner), None);
+}
+
+/// An applied edit is a new source: the same failure after it is the first
+/// sighting again.
+#[tokio::test]
+async fn an_applied_edit_starts_the_count_again() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    act(&fixture, &mut runner, failing_test_command("b")).await;
+    assert_eq!(intent_details(&runner, "stalled_failure_focus").len(), 1);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"}),
+    )
+    .await;
+    act(&fixture, &mut runner, failing_test_command("c")).await;
+    assert_eq!(stall_count(&runner), Some(1));
+    assert!(!runner.task.last_response.starts_with("[Harness:"));
+    act(&fixture, &mut runner, failing_test_command("d")).await;
+    assert_eq!(stall_count(&runner), Some(2));
+    assert_eq!(intent_details(&runner, "stalled_failure_focus").len(), 2);
+    // The focus shows the file's current text, not the index's.
+    assert!(
+        runner
+            .task
+            .last_response
+            .contains("    return name.lower()\n"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
+/// A required check that fails the same way as the model's last command,
+/// with no edit between, is the second sighting too.
+#[tokio::test]
+async fn a_required_check_failing_the_same_way_is_focused() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::fs::create_dir_all(fixture.root.join("tests")).unwrap();
+    std::fs::write(
+        fixture.root.join("tests/test_labels.py"),
+        "def test_render():\n    assert render_name(\" a \") == \"a\"\n",
+    )
+    .unwrap();
+    let check = failing_test_command("check")["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Strip the rendered name","files":["labels.py"],"checks":[check]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    for _ in 0..6 {
+        if runner
+            .task
+            .check_results
+            .last()
+            .is_some_and(|run| !run.success)
+        {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(intent_details(&runner, "stalled_failure_focus").len(), 1);
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("[Harness: the same failure again with no edit since: test `test_render`"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner
+        .task
+        .last_response
+        .contains("Required verification failed."));
+}
+
+/// `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` tracks nothing, shows nothing and
+/// never parks, for study variants.
+#[tokio::test]
+async fn the_loop_detector_can_be_switched_off() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    std::env::set_var("MOOSEDEV_HARNESS_LOOP_DETECTOR", "off");
+    for variant in ["a", "b", "c", "d"] {
+        act(&fixture, &mut runner, failing_test_command(variant)).await;
+    }
+    std::env::remove_var("MOOSEDEV_HARNESS_LOOP_DETECTOR");
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(stall_count(&runner), None);
+    assert!(intent_details(&runner, "stalled_failure_focus").is_empty());
+    assert!(intent_details(&runner, "stalled_failure_parked").is_empty());
+}
+
+/// Long sources are cut to the focus budget on char boundaries, each cut
+/// named; the output still follows the block.
+#[tokio::test]
+async fn the_focus_block_keeps_to_its_budget() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let padding = |name: &str| {
+        format!("    # {}\n", "é".repeat(40)).repeat(30) + &format!("    return {name}\n")
+    };
+    std::fs::write(
+        fixture.root.join("labels.py"),
+        format!(
+            "def render_name(name):\n{}\ndef normalize(value):\n{}\ndef trim(value):\n{}",
+            padding("name"),
+            padding("value"),
+            padding("value")
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(fixture.root.join("tests")).unwrap();
+    std::fs::write(
+        fixture.root.join("tests/test_labels.py"),
+        format!(
+            "def test_render():\n{}    assert trim(normalize(render_name(\" a \"))) == \"a\"\n",
+            "    # é padding line of the test body\n".repeat(60)
+        ),
+    )
+    .unwrap();
+    // Written before approval: a change outside the harness withdraws it.
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    act(&fixture, &mut runner, failing_test_command("b")).await;
+    let (block, output) = runner
+        .task
+        .last_response
+        .split_once("edit the code it points at.]\n")
+        .unwrap();
+    assert!(block.len() <= 4_000, "{}", block.len());
+    assert!(block.contains("`test_render` continues;"), "{block}");
+    for callee in ["trim", "normalize", "render_name"] {
+        assert!(
+            block.contains(&format!("`{callee}` (called by the test)")),
+            "{block}"
+        );
+    }
+    assert!(output.starts_with("test test_render ... FAILED"));
+}
+
+/// A panic in the code under test shows the function it panicked in; the
+/// test itself, in no planned or read file here, is not shown.
+#[tokio::test]
+async fn a_panic_outside_the_test_shows_where_it_panicked() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let command = |variant: &str| {
+        json!({"action":"command","command":format!(
+            "printf \"test test_render ... FAILED\\nthread 'test_render' panicked at labels.py:2:5:\\n\"; exit 101 # {variant}"
+        )})
+    };
+    act(&fixture, &mut runner, command("a")).await;
+    act(&fixture, &mut runner, command("b")).await;
+    let response = &runner.task.last_response;
+    assert!(
+        response
+            .contains("labels.py:1-2 `render_name` (where it panicked):\ndef render_name(name):\n"),
+        "{response}"
+    );
+    assert!(!response.contains("(the test)"), "{response}");
 }
