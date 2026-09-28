@@ -1527,6 +1527,12 @@ contract 3 and intent contract 2.
   reread, paged and reran `cargo test` for about twenty steps while
   `grid_too_few_rows` kept failing, each action different, so no repeat guard
   fired. `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` switches it off.
+- A `write` without `content` is invalid output, repaired within the budget:
+  `null` deletes the file, and a missing field means the model meant to write
+  and left the text out (Qwen3.5-9B on badciv sent `write` with only `file`,
+  which read as deleting an absent file, a no-op, so a finish). A `write` with
+  `null` content to a file that does not exist is invalid too ("nothing to
+  delete").
 - Misrouted actions. An edit, `replace` or `write` whose `file` has no `/` or
   `.` and is an action name (`command`, `read`, `write`, …) is invalid output,
   repaired within the budget and never a scope escape, unless the task knows a

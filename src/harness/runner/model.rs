@@ -1242,6 +1242,21 @@ pub(super) enum ModelOutput {
 impl<'de> Deserialize<'de> for ModelOutput {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
+        // A `write` without `content` is not a deletion: `null` deletes, and
+        // a model that leaves the field out means to write and forgot the
+        // text (Qwen3.5-9B on badciv sent `{"action":"write","file":…}`, which
+        // read as deleting an absent file and so as a no-op finish).
+        let action = value
+            .get("action")
+            .filter(|action| action.is_object())
+            .unwrap_or(&value);
+        if action.get("action").and_then(Value::as_str) == Some("write")
+            && action.get("content").is_none()
+        {
+            return Err(serde::de::Error::custom(
+                "write needs the file's whole text in `content` (`null` deletes the file); `content` was missing",
+            ));
+        }
         let output = if value.get("action").is_some_and(Value::is_object) {
             SpokenOutput::deserialize(value).map(Self::Conversational)
         } else {
@@ -1988,6 +2003,22 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<ModelOutput>(
                 r#"{"message":"hi","action":{"action":"read","file":"a"}}"#
+            ),
+            Ok(ModelOutput::Conversational(_))
+        ));
+        // A write that leaves out `content` meant to write, not to delete.
+        for missing in [
+            r#"{"message":"x","action":{"action":"write","file":"Cargo.toml"}}"#,
+            r#"{"action":"write","file":"Cargo.toml"}"#,
+        ] {
+            assert!(
+                error(missing).contains("`content` was missing"),
+                "{missing}"
+            );
+        }
+        assert!(matches!(
+            serde_json::from_str::<ModelOutput>(
+                r#"{"message":"x","action":{"action":"write","file":"a","content":null}}"#
             ),
             Ok(ModelOutput::Conversational(_))
         ));

@@ -436,6 +436,10 @@ impl Runner {
                 (file, Some(source.replacen(&old_text, &new_text, 1)))
             }
             Action::Write { file, content } => {
+                ensure!(
+                    before.is_some() || content.is_some(),
+                    "`{file}` does not exist, so there is nothing to delete. To create it, send its whole text in `content`."
+                );
                 if let (Some(before), Some(after), true) =
                     (before.as_deref(), content.as_deref(), write_guard_enabled())
                 {
