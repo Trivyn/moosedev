@@ -262,8 +262,14 @@ pub(crate) struct StubSyntax {
     pub failure_constructs: &'static [&'static str],
     /// Openers of a comment that runs to the end of the line (`//`, `#`).
     pub line_comments: &'static [&'static str],
-    /// Openers of a block comment, and a line that continues one (`/*`, `*`).
+    /// Openers of a block comment, and a line that continues one (`/*`, `*`),
+    /// for a line read alone.
     pub block_comments: &'static [&'static str],
+    /// Comments and strings that may span lines, as `(opener, closer)`
+    /// (`/*` … `*/`, `"""` … `"""`); a string's when its opener starts with
+    /// one of `quotes`. Reading a whole file, what such a span covers is not
+    /// code on the lines after the one it opens on either.
+    pub multiline: &'static [(&'static str, &'static str)],
     /// String delimiters (`"`, `'`, `` ` ``).
     pub quotes: &'static [char],
 }

@@ -246,15 +246,19 @@ ends, or decoding JSON string escapes a model copied from the JSON-encoded
 source in its prompt (`\"` for `"`) — and otherwise names the first line of
 `old_text` that the file does not contain. When `old_text` matched only after
 decoding and `new_text` is not escaped the same way throughout, `new_text` is
-written as sent; if it holds a literal `\n` escape (a backslash then `n`, not
-after another backslash, not a `'\n'` character literal) in code — outside
-the string literals and line comments of the file's language, read with its
-registry `StubSyntax`, or by `"` parity for a language without one — the
+written as sent; if one of its lines uses literal `\n` escapes as line
+breaks — at least two escapes (a backslash then `n`, not after another
+backslash) each followed by indentation (two spaces or a tab), at least one of
+them in code, outside the string literals and line comments of the file's
+language, read with its registry `StubSyntax` (a backslash-escaped quote does
+not close a string), or by `"` parity for a language without one — the
 candidate is a repair: "new_text contains literal \n escapes outside string
 literals on line K; send the replacement with real line breaks"
 (`replace_escapes_refused`). badciv P5 attempts 2 and 3 sent new_text that
-broke its first lines with real line breaks and the rest with `\n`, and the
-harness wrote the escapes into parse.rs.
+broke its first lines with real line breaks and the rest with `\n` plus
+indentation, and the harness wrote the escapes into parse.rs. A single escape,
+or escapes not followed by indentation, is left alone: a line read alone
+cannot tell a raw string, a triple-quoted string or a regex from code.
 A candidate whose decoded action is identical to the previous rejected
 candidate of the same decision does not spend the remaining attempt on the same
 prompt, which a model at temperature 0 answers the same way (badciv c83c10f8
@@ -802,11 +806,17 @@ request carries every rule those plans addressed (`addressed_rules`); for the
 decision proposal each one that is a current Requirement or Constraint becomes
 an `isMotivatedBy` edge (derivation reason `addressed`), shown at review as
 `Motivated by:`. Only when no plan addressed any rule does the single-candidate
-obligation rule apply. While a planned file still holds a stub, an addressed
-rule is withheld from the request unless every planned file the approval
-derived it for (`symbolic.obligations`) is free of stubs; a rule derived for
-no planned file cannot be attributed and is withheld too
-(`addressed_withheld`, with the counts and the stubbed files), and the review
+obligation rule apply. Each of those plans is judged by its own files as
+they are now: a plan none of whose files (that exist and are not test paths)
+holds a stub keeps every rule it addressed. A plan with a stub left keeps a
+rule only when it is the latest approval and every planned file that approval
+derived the rule for (`symbolic.obligations`) is free of stubs; a rule derived
+for no planned file cannot be attributed and is withheld. A rule several plans
+addressed is kept when any of them keeps it: an earlier plan finished its work
+even if a later one left a stub, and a later plan's clean files do not vouch
+for an earlier plan's stub. The rest are withheld from the request
+(`addressed_withheld`, with the counts and the stubbed files of the addressing
+plans), and the review
 evidence says "Motivated-by edges withheld: stubs left in planned files (N of
 M addressed rules)." badciv P5 attempt 3's first step, scaffolding whose
 bodies were mostly `unimplemented!()`, drew edges to 40 rules and spec
@@ -1300,10 +1310,12 @@ contract 3 and intent contract 2.
   notices when it does, since resending a file is what spends the context
   window (Lesson af16b95e) and what an edit loop looks like from outside.
 - Destructive whole-file writes. A `write` to a file that exists, whose new
-  content drops at least half of the file's top-level named declarations (and
+  content deletes at least half of the file's top-level named declarations (and
   at least two) as its language's outline reads them (the registry grammar:
   `depth` 0 entries with a name, compared by kind and name), is a repair naming
-  them: "This write deletes `Map`, `Tile`, … from lib.rs. To add to a file use
+  them. Deletions are net per kind: the names of a kind that are gone count
+  only beyond the new names of that kind the write adds, so a rewrite renaming
+  two of four functions deletes none: "This write deletes `Map`, `Tile`, … from lib.rs. To add to a file use
   replace on a span, or write the whole file including what it already
   declares." (`destructive_write_refused`). badciv P5 attempt 3 answered "add a
   test" with a `write` of `lib.rs` holding only the `#[cfg(test)]` module,
@@ -1397,7 +1409,9 @@ contract 3 and intent contract 2.
   the files out of the plan and the latest approved plan and verifies, and
   `finish` verifies anyway (`finish_forced_missing`) for that finish only: a
   new approval or `/rework` gates the next finish again, as it does after an
-  `unedited_planned_files` answer. badciv P5 finished step 2
+  `unedited_planned_files` answer. A new approval also forgets the send-back,
+  so its first finish is sent back before the human is asked, even with no
+  edit since the send-back under the plan before it. badciv P5 finished step 2
   through a no-op edit with 2 of 11 planned files edited and 4 planned test
   files never written; the checks passed on older tests and it reached final
   review as a false completion. Auto-verify never meets this gate: it fires
@@ -1412,7 +1426,11 @@ contract 3 and intent contract 2.
   `raise `; TypeScript `throw `) with the stub messages ("not implemented",
   "not yet implemented", "unimplemented", "todo", as whole words in any case),
   and the comment openers and string quotes to read a line with, so a marker in a
-  comment or a string is not code. A failure construct in code is a stub when
+  comment or a string is not code. A file is read with its comments and
+  strings that span lines (`multiline`: Rust and TypeScript `/*` … `*/`,
+  Python `"""` and `'''`) blanked out first, so `todo!()` in a block comment or
+  `raise NotImplementedError` in a docstring is not a stub either; a span
+  that closes on the line it opens on is left to the line-level reading. A failure construct in code is a stub when
   a stub message inside a string follows it in the same statement (before the
   next `;` in code, or the line's end): `let r = Err(e); let s = "not
   implemented";` is not one. badciv P5 left
@@ -1455,19 +1473,30 @@ contract 3 and intent contract 2.
   error among its findings: each language's registry hook `is_syntax_error`
   reads the message (rust-analyzer's "Syntax Error: …"; rustc's "unknown start
   of token", "expected one of", "expected identifier, found", "expected item,
-  found", unclosed, unexpected and mismatched delimiters; pyright's and ruff's
-  parser messages: "Expected …" naming what the grammar wanted ("Expected
-  expression", "Expected `)`, found newline") but not a count, "no" or
-  "… but received" as pyright's type errors do, "Unexpected indentation",
-  "… was not closed", older ruff's "SyntaxError: …"; a finding keeps no rule
-  code, so the message decides, and a false match only withholds auto-fix), and
+  found", unclosed, unexpected and mismatched delimiters; pyright's,
+  basedpyright's and ruff's parser messages from an allowlist: "Expected
+  expression", "Expected indented block", "Expected member name", "Expected
+  parameter name", "Expected a parameter", "Expected a statement", "Expected
+  class name", "Expected function name", "Expected newline", "Expected \":\"",
+  "Expected `…" (ruff's "Expected `)`, found newline"), "Expected \")\"" and
+  the other closing brackets, "Unexpected indentation", "Unindent not
+  expected", "Statements must be separated by newlines or semicolons",
+  "Invalid character", "String literal is unterminated", "… was not closed",
+  ruff's "SyntaxError: …" and anything saying "invalid syntax"; pyright's type
+  errors that also open with "Expected" ("Expected 2 positional arguments",
+  "Expected type arguments for generic class") are not; a finding keeps no
+  rule code, so the message decides, and a false match withholds auto-fix for
+  the whole file), and
   the harness applies no fix for a finding in, or a fix editing, such a file:
   a fix there guesses at text the model meant to write (badciv P5 attempt 3:
   literal `\n\n` written into parse.rs drew rustc's "there is a keyword `fn`
   with a similar name" and "add a parameter list `()`", which turned it into
-  `\fn\fn()`). Nor a fix whose inserted text holds `.unwrap()` or `.expect(`:
+  `\fn\fn()`). Nor a fix that adds a panicking call: when it is applied, a
+  file that would hold more `.unwrap()` and `.expect(` calls after it than
+  before is left as it is (`fix_auto_held`, "the fix adds a panicking call");
   rustc's preferred `u32`/`usize` conversion `(…).try_into().unwrap()` was
-  applied twice in the same run, adding panics. Both stay offered to the
+  applied twice in the same run, adding panics, while a fix that rewrites a
+  line keeping its existing `.unwrap()` is applied. Both stay offered to the
   model. A preferred fix the harness cannot
   apply in full (an edit outside the plan, a follow-up command it does not run)
   means the server's choice is not in the list, so nothing is applied. There

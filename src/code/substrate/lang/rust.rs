@@ -79,6 +79,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         failure_constructs: &["panic!(", "Err(", "bail!(", "anyhow!("],
         line_comments: &["//"],
         block_comments: &["/*", "*"],
+        multiline: &[("/*", "*/")],
         quotes: &['"'],
     }),
     test_failures: Some(test_failures),

@@ -513,18 +513,24 @@ impl Gate {
         let mut lines = Vec::new();
         for part in &self.parts {
             match part {
-                GatePart::Header(text) => lines.push(Line::from(Span::styled(
-                    visible(text),
-                    Style::default()
+                // Embedded line breaks are rows, as in a body: a scoping
+                // diagnostic's "\n[output truncated]" gets its own.
+                GatePart::Header(text) => {
+                    let style = Style::default()
                         .fg(self.accent)
-                        .add_modifier(Modifier::BOLD),
-                ))),
+                        .add_modifier(Modifier::BOLD);
+                    for line in visible(text).split('\n') {
+                        lines.push(Line::from(Span::styled(line.to_owned(), style)));
+                    }
+                }
                 GatePart::Section(text) => {
                     lines.push(Line::default());
-                    lines.push(Line::from(Span::styled(
-                        visible(text),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )));
+                    for line in visible(text).split('\n') {
+                        lines.push(Line::from(Span::styled(
+                            line.to_owned(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )));
+                    }
                 }
                 GatePart::Body(text) => {
                     for line in visible(text).split('\n') {
@@ -2933,6 +2939,31 @@ mod tests {
             )),
             "{text}"
         );
+    }
+
+    /// A section's embedded line breaks are rows, as a body's are: a long
+    /// scoping diagnostic's "\n[output truncated]" suffix keeps its own row.
+    #[test]
+    fn gate_headers_and_sections_split_embedded_line_breaks_into_rows() {
+        let mut gate = Gate::new(Color::Yellow, "SPEC · approval\nsecond line");
+        gate.section(
+            "SCOPING FAILED · every record governs component x. error: y\n[output truncated]",
+        );
+        let lines = gate.lines(40);
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rows,
+            [
+                "SPEC · approval",
+                "second line",
+                "",
+                "SCOPING FAILED · every record governs component x. error: y",
+                "[output truncated]",
+            ]
+        );
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        assert_eq!(lines[1].spans[0].style, bold.fg(Color::Yellow));
+        assert_eq!(lines[4].spans[0].style, bold);
     }
 
     #[test]

@@ -102,6 +102,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         failure_constructs: &["raise "],
         line_comments: &["#"],
         block_comments: &[],
+        multiline: &[("\"\"\"", "\"\"\""), ("'''", "'''")],
         quotes: &['"', '\''],
     }),
     test_failures: Some(test_failures),
@@ -111,33 +112,41 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     module_dir: None,
 };
 
-/// pyright's parser errors and ruff's (`invalid-syntax`: "Expected a
-/// parameter or the end of the parameter list", "Expected `)`, found
-/// newline"; older ruff wrote "SyntaxError: …"), by the first line of the
-/// message. The finding keeps no rule code, so the form decides: a parser
-/// error opens with "Expected" and names what the grammar wanted, while
-/// pyright's type errors that open the same way name a count ("Expected 2
-/// positional arguments"), "no" ("Expected no type arguments") or what was
-/// received ("Expected class but received …"). A false match only keeps the
-/// harness from applying a fix in that file itself.
+/// pyright's and basedpyright's parser errors and ruff's (`invalid-syntax`:
+/// "Expected a parameter or the end of the parameter list", "Expected `)`,
+/// found newline"; older ruff wrote "SyntaxError: …"), by the first line of
+/// the message. The finding keeps no rule code, so the form decides, from an
+/// allowlist of the parsers' own messages: pyright's type errors open with
+/// "Expected" too ("Expected 2 positional arguments", "Expected type
+/// arguments for generic class"), and one read as a syntax error keeps the
+/// harness from applying any fix in that file.
 fn is_syntax_error(message: &str) -> bool {
     const PARSE_ERRORS: &[&str] = &[
         "SyntaxError",
+        "Expected expression",
+        "Expected indented block",
+        "Expected member name",
+        "Expected parameter name",
+        "Expected a parameter",
+        "Expected a statement",
+        "Expected class name",
+        "Expected function name",
+        "Expected newline",
+        "Expected \":\"",
+        "Expected `",
+        "Expected \")\"",
+        "Expected \"]\"",
+        "Expected \"}\"",
         "Unexpected indentation",
         "Unindent not expected",
         "Statements must be separated by newlines or semicolons",
+        "Invalid character",
         "String literal is unterminated",
     ];
     let first = message.lines().next().unwrap_or_default().trim();
-    if PARSE_ERRORS.iter().any(|form| first.starts_with(form)) || first.ends_with("was not closed")
-    {
-        return true;
-    }
-    first.strip_prefix("Expected ").is_some_and(|wanted| {
-        !wanted.starts_with(|c: char| c.is_ascii_digit())
-            && !wanted.starts_with("no ")
-            && !wanted.contains(" but received")
-    })
+    PARSE_ERRORS.iter().any(|form| first.starts_with(form))
+        || first.ends_with("was not closed")
+        || first.contains("invalid syntax")
 }
 
 /// ruff's `initializationOptions`. The project's own ruff configuration
@@ -457,6 +466,11 @@ mod tests {
             "\"(\" was not closed",
             "SyntaxError: Expected an expression",
             "SyntaxError: Unexpected indentation",
+            "Expected member name after \".\"",
+            "Expected \":\"",
+            "Expected newline",
+            "Invalid character in identifier",
+            "invalid syntax",
         ] {
             assert!(super::is_syntax_error(message), "{message}");
         }
@@ -466,6 +480,8 @@ mod tests {
             "Expected no type arguments for class \"Grid\"",
             "Expected class but received \"int\"",
             "Expected type expression but received \"str\"",
+            "Expected type arguments for generic class \"list\"",
+            "Expected mapping for dictionary unpack operator",
             "\"Grid\" is not defined",
             "Undefined name `grid`",
             "Import \"os\" could not be resolved",

@@ -48,6 +48,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         failure_constructs: &["throw "],
         line_comments: &["//"],
         block_comments: &["/*", "*"],
+        multiline: &[("/*", "*/")],
         quotes: &['"', '\'', '`'],
     }),
     // Jest's and Mocha's reports are not read yet.

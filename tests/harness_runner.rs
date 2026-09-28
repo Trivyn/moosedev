@@ -1516,10 +1516,12 @@ async fn completed_verification_requires_human_confirmation_and_durable_checkpoi
         "changed governing evidence invalidates the old verification"
     );
     runner.approve_plan().await.unwrap();
-    fixture.reply("harness_action", json!({"action":"finish","summary":"Reviewed the updated governing knowledge; verify again."}));
-    runner.advance().await.unwrap();
-    // Still at the source the file was sent back for: the new approval asks
-    // the human again.
+    // A new approval gates its own finishes: the first is sent back once for
+    // the unedited planned file, the repeat asks the human again.
+    for _ in 0..2 {
+        fixture.reply("harness_action", json!({"action":"finish","summary":"Reviewed the updated governing knowledge; verify again."}));
+        runner.advance().await.unwrap();
+    }
     verify_unedited(&mut runner).await;
     runner.task.check_results = vec![passed_check()];
     runner.advance().await.unwrap();

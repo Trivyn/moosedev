@@ -1,5 +1,5 @@
 //! Validate sensor arguments and materialize edits before permission or execution.
-use super::symbolic::code_at;
+use super::symbolic::{code_at, quote_open};
 use super::{
     model::{Action, ReplyThen},
     plan_choices, Mode, OpenChoice, Runner, MAX_FILES, MAX_PLAN_SUMMARY,
@@ -8,7 +8,7 @@ use crate::code::substrate::lang::stub_syntax_for;
 use crate::code::substrate::outline;
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// A validated action the dispatcher can execute without re-checking its
 /// arguments: bounds hold, the target was read, and `replace`/`write` are
@@ -497,20 +497,34 @@ fn top_level_declarations(file: &str, text: &str) -> Option<Vec<(&'static str, S
 /// deletes, when that is at least half of them and at least two: a4b
 /// answered "add a test" with a `write` of `lib.rs` holding only the test
 /// module, deleting every type and `mod` declaration (badciv P5 attempt 3).
-/// None for a language with no grammar, or a write that keeps most of them.
+/// Deletions are net per kind: a name of a kind that is gone counts only
+/// beyond the new names of that kind the write adds, so a rewrite renaming
+/// functions deletes none. The names listed are the gone names of each kind
+/// with a net deletion. None for a language with no grammar, or a write that
+/// keeps most of them.
 fn deleted_declarations(file: &str, before: &str, after: &str) -> Option<Vec<String>> {
     let declared = top_level_declarations(file, before)?;
-    let kept = top_level_declarations(file, after)?;
-    let deleted: Vec<&(&str, String)> = declared
+    let written = top_level_declarations(file, after)?;
+    let gone: Vec<&(&str, String)> = declared
         .iter()
-        .filter(|declaration| !kept.contains(declaration))
+        .filter(|declaration| !written.contains(declaration))
         .collect();
-    if deleted.len() < 2 || deleted.len() * 2 < declared.len() {
+    let added: Vec<&(&str, String)> = written
+        .iter()
+        .filter(|declaration| !declared.contains(declaration))
+        .collect();
+    let net_deleted = |kind: &str| {
+        let count = |list: &[&(&str, String)]| list.iter().filter(|(k, _)| *k == kind).count();
+        count(&gone).saturating_sub(count(&added))
+    };
+    let kinds: BTreeSet<&str> = gone.iter().map(|(kind, _)| *kind).collect();
+    let deleted: usize = kinds.into_iter().map(net_deleted).sum();
+    if deleted < 2 || deleted * 2 < declared.len() {
         return None;
     }
     let mut names: Vec<String> = Vec::new();
-    for (_, name) in deleted {
-        if !names.contains(name) {
+    for (kind, name) in &gone {
+        if net_deleted(kind) > 0 && !names.contains(name) {
             names.push(name.clone());
         }
     }
@@ -530,24 +544,31 @@ fn listed_names(names: &[String], shown: usize) -> String {
     listed.join(", ")
 }
 
-/// The 1-based line of `text` holding a literal `\n` escape (a backslash
-/// then `n`, not after another backslash) in code: outside the string
-/// literals and line comments of `file`'s language (a `"` quote parity when
-/// the language is unknown), and not a `'\n'` character literal.
+/// The 1-based line of `text` that uses literal `\n` escapes as line breaks:
+/// one physical line holding at least two `\n` escapes (a backslash then
+/// `n`, not after another backslash) each followed by indentation (two spaces or a tab), at least one of them in
+/// code, outside the string literals and line comments of `file`'s language
+/// (a `"` quote parity when the language is unknown). badciv P5 attempts 2
+/// and 3 broke a replacement's later lines that way. A single escape, or
+/// escapes not followed by indentation, is left alone: a line-level reading
+/// cannot tell a raw string, a triple-quoted string or a regex from code.
 fn escaped_newline_in_code(file: &str, text: &str) -> Option<usize> {
     let syntax = stub_syntax_for(file);
     let in_code = |line: &str, at: usize| match syntax {
         Some(syntax) => code_at(line, at, syntax),
-        None => line[..at].matches('"').count().is_multiple_of(2),
+        None => !quote_open(&line[..at], '"'),
     };
     text.lines().enumerate().find_map(|(index, line)| {
-        line.match_indices("\\n")
-            .any(|(at, _)| {
+        let breaks: Vec<usize> = line
+            .match_indices("\\n")
+            .map(|(at, _)| at)
+            .filter(|&at| {
                 let backslashes = line[..at].chars().rev().take_while(|c| *c == '\\').count();
-                let char_literal = line[..at].ends_with('\'') && line[at + 2..].starts_with('\'');
-                backslashes.is_multiple_of(2) && !char_literal && in_code(line, at)
+                let indented = line[at + 2..].starts_with("  ") || line[at + 2..].starts_with('\t');
+                backslashes.is_multiple_of(2) && indented
             })
-            .then_some(index + 1)
+            .collect();
+        (breaks.len() >= 2 && breaks.iter().any(|&at| in_code(line, at))).then_some(index + 1)
     })
 }
 
@@ -1328,6 +1349,42 @@ mod tests {
         assert_eq!(deleted_declarations("notes.txt", before, after), None);
     }
 
+    /// A rewrite that renames declarations deletes none of them: deletions
+    /// are net per kind. The P5 write, which added only a test module, still
+    /// deletes most of lib.rs.
+    #[test]
+    fn a_write_that_renames_declarations_deletes_none() {
+        let before = "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n";
+        let renamed = "fn a() {}\nfn b() {}\nfn parse_c() {}\nfn parse_d() {}\n";
+        assert_eq!(deleted_declarations("a.rs", before, renamed), None);
+        // Renaming two and dropping the other two still deletes two of four.
+        assert_eq!(
+            deleted_declarations("a.rs", before, "fn x() {}\nfn y() {}\n"),
+            Some(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+        );
+        // A new name of another kind does not offset a deleted function.
+        assert_eq!(
+            deleted_declarations(
+                "a.rs",
+                before,
+                "fn a() {}\nfn b() {}\nstruct C;\nstruct D;\n"
+            ),
+            Some(vec!["c".into(), "d".into()])
+        );
+        let lib = "pub struct Map {\n    pub width: u32,\n}\n\npub struct Tile;\n\npub mod codes;\npub mod error;\npub mod parse;\n";
+        let test_only = "#[cfg(test)]\nmod tests {\n    use super::*;\n}\n";
+        assert_eq!(
+            deleted_declarations("badciv-map/src/lib.rs", lib, test_only),
+            Some(vec![
+                "Map".into(),
+                "Tile".into(),
+                "codes".into(),
+                "error".into(),
+                "parse".into()
+            ])
+        );
+    }
+
     /// badciv P5 attempt 3, from the archived journal: the replace's new_text
     /// (decoded from the model's JSON) broke its first lines with real line
     /// breaks and the rest with literal `\n`.
@@ -1340,20 +1397,50 @@ mod tests {
             escaped_newline_in_code("badciv-map/src/parse.rs", new_text),
             Some(3)
         );
-        // Inside a string, a character literal, a comment, or an escaped
-        // backslash: not a line break written as an escape.
+        // Escapes used as line breaks inside a string, a comment, or after
+        // an escaped backslash: not code.
         for text in [
-            "let s = \"a\\nb\";\nlet t = 1;",
-            "if c == '\\n' {\n}",
-            "let x = 1; // split on \\n\n",
-            "let s = r\"C:\\\\new\";",
+            "let s = \"a\\n    b\\n    c\";\nlet t = 1;",
+            "let x = 1; // split on \\n    x\\n    y\n",
+            "let s = r\"C:\\\\n    \\\\n    \";",
         ] {
             assert_eq!(escaped_newline_in_code("src/a.rs", text), None, "{text}");
         }
-        assert_eq!(escaped_newline_in_code("a.py", "x = 1\\ny = 2"), Some(1));
-        assert_eq!(escaped_newline_in_code("a.py", "print('a\\nb')"), None);
+        assert_eq!(
+            escaped_newline_in_code("a.py", "x = 1\\n    y = 2\\n    z = 3"),
+            Some(1)
+        );
         // An unknown language: a `"` string is still read.
-        assert_eq!(escaped_newline_in_code("notes.txt", "a\\nb"), Some(1));
-        assert_eq!(escaped_newline_in_code("notes.txt", "say \"a\\nb\""), None);
+        assert_eq!(
+            escaped_newline_in_code("notes.txt", "a\\n  b\\n  c"),
+            Some(1)
+        );
+        assert_eq!(
+            escaped_newline_in_code("notes.txt", "say \"a\\n  b\\n  c\""),
+            None
+        );
+    }
+
+    /// Only `\n` escapes used as line breaks, two or more on a line each
+    /// followed by indentation, are the P5 corruption; the string shapes a
+    /// line-level reading misjudges are left alone.
+    #[test]
+    fn a_newline_escape_is_refused_only_as_indented_line_breaks() {
+        for (file, text) in [
+            // One escape followed by indentation.
+            ("src/a.rs", "println!(\"a\\n    b\");"),
+            // A string with an escaped quote before its escapes.
+            ("src/a.rs", "let s = \"a\\\"b\\n\";"),
+            ("src/a.rs", "let s = \"a\\\"b\\n    c\\n    d\";"),
+            // Python triple-quoted text.
+            ("a.py", "HELP = \"\"\"usage:\\n    run\\n    stop\"\"\""),
+            // A TypeScript regex.
+            ("a.ts", "const lines = text.split(/\\r?\\n/);"),
+            // Escapes not followed by indentation.
+            ("src/a.rs", "let b = 2;\\n\\nlet c = 3;"),
+            ("a.py", "x = 1\\ny = 2"),
+        ] {
+            assert_eq!(escaped_newline_in_code(file, text), None, "{text}");
+        }
     }
 }

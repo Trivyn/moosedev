@@ -5,7 +5,8 @@
 //!
 //! Only what the server itself marks preferred, for an error or a lint whose
 //! offered list is complete, and never a fix that only deletes
-//! ([`DiagnosticsSnapshot::auto_fix`]). Armed on a fresh result like
+//! ([`DiagnosticsSnapshot::auto_fix`]) nor one that adds a panicking call
+//! (held when applied, against the file's text). Armed on a fresh result like
 //! auto-verify, one fix per advance, at most three in a row after a model edit
 //! and twenty per task. A policy gate holds it: the harness never makes a
 //! pending edit the human did not see coming. `MOOSEDEV_HARNESS_AUTO_FIX=off`
@@ -22,6 +23,22 @@ use crate::policy::PolicyDecision;
 const AUTO_FIX_CHAIN: usize = 3;
 /// Fixes the harness applies in one task: a runaway guard.
 const AUTO_FIX_LIMIT: usize = 20;
+
+/// Calls that turn a failure into a panic. rustc's preferred `u32`/`usize`
+/// conversion `(…).try_into().unwrap()` was applied twice in the same run
+/// (badciv P5), making code panic where the compiler asked for a conversion
+/// or an error path.
+const PANICKING_CALLS: &[&str] = &[".unwrap()", ".expect("];
+
+/// How many [`PANICKING_CALLS`] `text` holds. A fix is held when the file
+/// has more after it than before, so one that rewrites a line keeping its
+/// `.unwrap()` is still applied.
+fn panicking_calls(text: &str) -> usize {
+    PANICKING_CALLS
+        .iter()
+        .map(|call| text.matches(call).count())
+        .sum()
+}
 
 fn enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_AUTO_FIX").map_or(true, |value| value.trim() != "off")
@@ -110,6 +127,9 @@ impl Runner {
         let Some(after) = fix.apply(&before) else {
             return self.hold_fix(&fix.file, "the file changed since the fix was offered");
         };
+        if panicking_calls(&after) > panicking_calls(&before) {
+            return self.hold_fix(&fix.file, "the fix adds a panicking call");
+        }
         // Policy decides as for any edit; a gate holds the fix for the model,
         // whose own apply_fix would bring it to the human.
         let context = self.refresh(std::slice::from_ref(&fix.file)).await?;
@@ -166,5 +186,17 @@ impl Runner {
     fn hold_fix(&mut self, file: &str, reason: &str) -> Result<()> {
         self.intent_event("fix_auto_held", &format!("{file}: {reason}"));
         self.persist()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn panicking_calls_are_counted_in_the_whole_text() {
+        assert_eq!(super::panicking_calls("let x = y;"), 0);
+        assert_eq!(
+            super::panicking_calls("let x: usize = y.try_into().unwrap();\nz.expect(\"z\");"),
+            2
+        );
     }
 }

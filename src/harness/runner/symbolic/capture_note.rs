@@ -490,85 +490,112 @@ impl Runner {
         out.trim_end().to_string()
     }
 
-    /// Every rule an approved plan of this task said it implements, once each
-    /// and in the order first named. A plan replaced before any edit was made
-    /// under it implemented nothing, so its rules are not counted.
-    fn addressed_rules(&self) -> Vec<String> {
-        let mut rules: Vec<String> = Vec::new();
+    /// The plans whose rules count as addressed, as `(files, addresses,
+    /// current)`: each approved plan of this task that had an edit made under
+    /// it (a plan replaced before any edit implemented nothing), or the plan
+    /// itself when none was approved. `current` marks the latest approval,
+    /// the one `symbolic.obligations` was derived for.
+    fn addressing_plans(&self) -> Vec<(&[String], &[String], bool)> {
         let plans = &self.task.approved_plans;
-        let named = if plans.is_empty() {
-            self.task
+        if plans.is_empty() {
+            return self
+                .task
                 .plan
                 .iter()
-                .flat_map(|plan| plan.addresses.iter())
-                .collect::<Vec<_>>()
-        } else {
-            plans
-                .iter()
-                .enumerate()
-                .filter(|(index, plan)| {
-                    let end = plans
-                        .get(index + 1)
-                        .map_or(self.task.edits.len(), |next| next.edit_start);
-                    plan.edit_start < end.min(self.task.edits.len())
-                })
-                .flat_map(|(_, plan)| plan.addresses.iter())
-                .collect()
-        };
-        for iri in named {
-            if !rules.contains(iri) {
-                rules.push(iri.clone());
+                .map(|plan| (plan.files.as_slice(), plan.addresses.as_slice(), true))
+                .collect();
+        }
+        plans
+            .iter()
+            .enumerate()
+            .filter(|(index, plan)| {
+                let end = plans
+                    .get(index + 1)
+                    .map_or(self.task.edits.len(), |next| next.edit_start);
+                plan.edit_start < end.min(self.task.edits.len())
+            })
+            .map(|(index, plan)| {
+                (
+                    plan.files.as_slice(),
+                    plan.addresses.as_slice(),
+                    index + 1 == plans.len(),
+                )
+            })
+            .collect()
+    }
+
+    /// Every rule an addressing plan (see [`Self::addressing_plans`]) said it
+    /// implements, once each and in the order first named.
+    fn addressed_rules(&self) -> Vec<String> {
+        let mut rules: Vec<String> = Vec::new();
+        for (_, addresses, _) in self.addressing_plans() {
+            for iri in addresses {
+                if !rules.contains(iri) {
+                    rules.push(iri.clone());
+                }
             }
         }
         rules
     }
 
-    /// The addressed rules as `(kept, withheld)`. While stubs are left in
-    /// planned files, a rule the plan said it implements is withheld from
-    /// motivating the decision unless every planned file the approval derived
-    /// it for (`obligations`) is free of stubs; a rule derived for no planned
-    /// file cannot be told apart and is withheld too. badciv P5 attempt 3:
-    /// a scaffolding step of `unimplemented!()` bodies drew 40 `isMotivatedBy`
-    /// edges and spec progress read "36 of 53 addressed".
-    pub(super) fn addressed_split(&self) -> (Vec<String>, Vec<String>) {
-        let rules = self.addressed_rules();
-        let stubbed: BTreeSet<String> = self
-            .planned_stubs()
+    /// The addressed rules as `(kept, withheld, stubbed files)`. Each
+    /// addressing plan is judged by its own files as they are now: a plan
+    /// none of whose files holds a stub keeps every rule it addressed. A
+    /// plan with a stub left keeps only the rules the approval derived for
+    /// planned files (`obligations`) that are all free of stubs, and only
+    /// when it is the latest approval, whose obligations those are; a rule
+    /// derived for no planned file cannot be told apart and is withheld. A
+    /// rule several plans addressed is kept when any of them keeps it: an
+    /// earlier plan finished its work even if a later one left a stub. The
+    /// stubbed files are those of every addressing plan. badciv P5 attempt
+    /// 3: a scaffolding step of `unimplemented!()` bodies drew 40
+    /// `isMotivatedBy` edges and spec progress read "36 of 53 addressed".
+    pub(super) fn addressed_split(&self) -> (Vec<String>, Vec<String>, BTreeSet<String>) {
+        let plans = self.addressing_plans();
+        let stubbed: BTreeSet<String> = plans
+            .iter()
+            .flat_map(|(files, _, _)| files.iter())
+            .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|(file, _, _)| file)
+            .filter(|file| !self.file_stubs(file).is_empty())
+            .cloned()
             .collect();
-        if stubbed.is_empty() {
-            return (rules, Vec::new());
-        }
         let obligations = self.task.symbolic.as_ref().map(|state| &state.obligations);
-        rules.into_iter().partition(|rule| {
-            let mut files = obligations
-                .into_iter()
-                .flatten()
-                .filter(|(_, iris)| iris.contains(rule))
-                .map(|(file, _)| file)
-                .peekable();
-            files.peek().is_some() && files.all(|file| !stubbed.contains(file))
-        })
+        let mut kept: BTreeSet<&String> = BTreeSet::new();
+        for (files, addresses, current) in &plans {
+            let plan_clean = files.iter().all(|file| !stubbed.contains(file));
+            for rule in addresses.iter() {
+                let derived_clean = *current && {
+                    let mut derived = obligations
+                        .into_iter()
+                        .flatten()
+                        .filter(|(file, iris)| iris.contains(rule) && files.contains(file))
+                        .map(|(file, _)| file)
+                        .peekable();
+                    derived.peek().is_some() && derived.all(|file| !stubbed.contains(file))
+                };
+                if plan_clean || derived_clean {
+                    kept.insert(rule);
+                }
+            }
+        }
+        let rules = self.addressed_rules();
+        let (kept, withheld) = rules.iter().cloned().partition(|rule| kept.contains(rule));
+        (kept, withheld, stubbed)
     }
 
     /// The addressed rules the capture request carries: those
     /// [`Self::addressed_split`] keeps, journaling any withheld.
     fn motivating_addressed_rules(&mut self) -> Vec<String> {
-        let (kept, withheld) = self.addressed_split();
+        let (kept, withheld, stubbed) = self.addressed_split();
         if !withheld.is_empty() {
-            let files: BTreeSet<String> = self
-                .planned_stubs()
-                .into_iter()
-                .map(|(file, _, _)| file)
-                .collect();
             self.intent_event(
                 "addressed_withheld",
                 &format!(
                     "{} of {} addressed rules; stubs left in {}",
                     withheld.len(),
                     withheld.len() + kept.len(),
-                    files.into_iter().collect::<Vec<_>>().join(", ")
+                    stubbed.into_iter().collect::<Vec<_>>().join(", ")
                 ),
             );
         }

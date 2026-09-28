@@ -2968,6 +2968,57 @@ async fn an_auto_fix_is_held_capped_disarmed_and_switched_off() {
     }
 }
 
+/// A fix is held when it adds a panicking call to the file (rustc's
+/// preferred `.try_into().unwrap()` conversion, badciv P5), judged against
+/// the file's text: one that rewrites a line keeping its `.unwrap()` is
+/// applied.
+#[tokio::test]
+async fn an_auto_fix_is_held_only_when_it_adds_a_panicking_call() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    offer_preferred_fix(
+        &fixture,
+        &mut runner,
+        "labels.py",
+        "strip()",
+        "strip().unwrap()",
+    );
+    advance_without_the_model(&fixture, &mut runner).await;
+    assert!(intent_details(&runner, "fix_auto_applied").is_empty());
+    assert_eq!(
+        intent_details(&runner, "fix_auto_held"),
+        vec!["labels.py: the fix adds a panicking call"]
+    );
+    assert_eq!(runner.task.edits.len(), 1);
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip().unwrap()\n"})).await;
+    offer_preferred_fix(
+        &fixture,
+        &mut runner,
+        "labels.py",
+        "strip().unwrap()",
+        "lower().unwrap()",
+    );
+    for _ in 0..4 {
+        if runner.task.edits.len() == 2 {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(intent_details(&runner, "fix_auto_applied").len(), 1);
+    assert!(intent_details(&runner, "fix_auto_held").is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("labels.py")).unwrap(),
+        "def render_name(name):\n    return name.lower().unwrap()\n"
+    );
+}
+
 #[tokio::test]
 async fn a_harness_fix_is_not_the_models_planned_edit_for_auto_verify() {
     let _env_lock = ENVIRONMENT.lock().await;
@@ -3834,6 +3885,14 @@ async fn verifying_anyway_does_not_outlive_a_new_approval_or_a_rework() {
     }
     runner.approve_plan().await.unwrap();
     assert_eq!(accepted(&runner), None);
+    // The new approval's first finish is sent back, its second asks.
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Working, "sent back first");
     act(
         &fixture,
         &mut runner,
@@ -3868,6 +3927,54 @@ async fn verifying_anyway_does_not_outlive_a_new_approval_or_a_rework() {
     )
     .await;
     assert_eq!(runner.task.phase, Phase::AwaitingChoice, "asked again");
+}
+
+/// A send-back under one plan does not make the first finish under the next
+/// approval a repeat, even with no edit between: it is sent back again
+/// before the human is asked.
+#[tokio::test]
+async fn a_new_approval_sends_its_first_unfinished_finish_back() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = edited_with_notes_missing(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().unfinished_refused_at,
+        Some(1)
+    );
+    // A different plan, approved with no edit since the send-back.
+    runner.mode_plan().await.unwrap();
+    act(&fixture, &mut runner, json!({"action":"plan","summary":"Record the reasoning for the repair in notes.txt","files":["code.txt","notes.txt"],"checks":["true"]})).await;
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().unfinished_refused_at,
+        None
+    );
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Working, "sent back, not asked");
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished").len(),
+        2
+    );
 }
 
 /// Finish twice with notes.txt on disk but never edited: sent back once,
@@ -4583,7 +4690,7 @@ async fn a_decoded_replace_whose_new_text_holds_newline_escapes_in_code_is_repai
     )
     .unwrap();
     let mut runner = fixture.approved_interactive().await;
-    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"let a = \\\"x\\\";\\nlet b = 2;\\n","new_text":"let a = \"y\";\nlet b = 2;\\n\\nlet c = 3;\n"}));
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"let a = \\\"x\\\";\\nlet b = 2;\\n","new_text":"let a = \"y\";\nlet b = 2;\\n\\n    let c = 3;\\n    let d = 4;\n"}));
     fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"let b = 2;\n","new_text":"let b = 2;\n\nlet c = 3;\n"}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.edits.len(), 1);
@@ -4694,5 +4801,123 @@ async fn addressed_rules_are_withheld_while_planned_files_hold_stubs() {
         ),
         "{:?}",
         intent_details(&runner, "review_evidence")
+    );
+}
+
+/// Approve the labels.py plan, make two edits to it (the second writes
+/// `second`), then split the approvals: an earlier plan over `earlier` that
+/// addressed UNLINKED owns the first edit, the current one addressed
+/// PRESERVE. Finish (`finishes` times, so a stub send-back is answered),
+/// verify, note, and return the capture request's addressed rules.
+async fn addressed_rules_across_two_plans(
+    fixture: &Fixture,
+    earlier: &str,
+    second: &str,
+    finishes: usize,
+) -> (Runner, Vec<String>) {
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.approve_plan().await.unwrap();
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name.strip()\n","new_text":second}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 2);
+    let current = runner.task.approved_plans.last().unwrap().clone();
+    runner.task.approved_plans = vec![
+        moosedev::harness::runner::ApprovedPlan {
+            summary: "Keep labels on one line".into(),
+            files: vec![earlier.into()],
+            addresses: vec![UNLINKED.into()],
+            edit_start: 0,
+            ..current.clone()
+        },
+        moosedev::harness::runner::ApprovedPlan {
+            addresses: vec![PRESERVE.into()],
+            edit_start: 1,
+            ..current
+        },
+    ];
+    for _ in 0..finishes {
+        fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    }
+    for _ in 0..6 {
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.review(true).await.unwrap(),
+            Phase::Verifying => break,
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    runner.task.check_results = vec![passed_check()];
+    fixture.note("Normalization lives in one helper.");
+    runner.advance().await.unwrap();
+    let request = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .capture_type_requests
+        .last()
+        .cloned()
+        .expect("the note was typed");
+    (runner, request.addressed_rules)
+}
+
+/// Each approved plan is judged by its own files: an earlier plan whose
+/// file still holds a stub withholds its rules even when the current plan's
+/// files are clean.
+#[tokio::test]
+async fn an_earlier_plan_left_with_a_stub_withholds_its_rules() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::fs::write(
+        fixture.root.join("other.py"),
+        "def other():\n    raise NotImplementedError\n",
+    )
+    .unwrap();
+    let (runner, addressed) = addressed_rules_across_two_plans(
+        &fixture,
+        "other.py",
+        "    return name.strip().lower()\n",
+        1,
+    )
+    .await;
+    assert_eq!(addressed, vec![PRESERVE.to_string()]);
+    assert_eq!(
+        intent_details(&runner, "addressed_withheld"),
+        vec!["1 of 2 addressed rules; stubs left in other.py"]
+    );
+}
+
+/// A stub the current plan left does not withhold the rules of an earlier
+/// plan whose own files are free of stubs: that plan finished its work.
+#[tokio::test]
+async fn a_completed_plans_rules_are_kept_when_the_current_plan_leaves_a_stub() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::fs::write(
+        fixture.root.join("other.py"),
+        "def other():\n    return 1\n",
+    )
+    .unwrap();
+    let (runner, addressed) = addressed_rules_across_two_plans(
+        &fixture,
+        "other.py",
+        "    raise NotImplementedError\n",
+        2,
+    )
+    .await;
+    assert_eq!(intent_details(&runner, "finish_refused_stubs").len(), 1);
+    assert_eq!(addressed, vec![UNLINKED.to_string()]);
+    assert_eq!(
+        intent_details(&runner, "addressed_withheld"),
+        vec!["1 of 2 addressed rules; stubs left in labels.py"]
     );
 }

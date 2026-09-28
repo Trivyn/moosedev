@@ -201,19 +201,6 @@ fn splice(text: &str, edits: &[FixEdit]) -> Option<String> {
     Some(out)
 }
 
-/// Calls that turn a failure into a panic. A fix whose inserted text holds
-/// one makes code panic where the compiler asked for a conversion or an
-/// error path; the snapshot keeps no base text, so any in the inserted text
-/// counts as added.
-const PANICKING_CALLS: &[&str] = &[".unwrap()", ".expect("];
-
-/// Whether `fix` inserts a call that panics (see [`PANICKING_CALLS`]).
-fn adds_a_panic(fix: &OfferedFix) -> bool {
-    fix.edits
-        .iter()
-        .any(|edit| PANICKING_CALLS.iter().any(|call| edit.text.contains(call)))
-}
-
 /// The byte offset of an LSP position (UTF-16 units, the default encoding)
 /// in `text`; None when it lies outside the text. Strict: a fix whose
 /// positions do not fit is dropped, never clamped into a different edit.
@@ -365,10 +352,9 @@ impl DiagnosticsSnapshot {
     /// to use, or hide an omission (badciv edc914f6's `_key`). Nothing in a
     /// file that does not parse: a fix there guesses at text the model meant
     /// to write (badciv P5 attempt 3: rustc's "a keyword `fn` with a similar
-    /// name" turned literal `\n\n` into `\fn\fn()`). And never a fix that
-    /// makes code panic: rustc's preferred u32/usize conversion
-    /// `.try_into().unwrap()` was applied twice in the same run. Each stays
-    /// offered to the model.
+    /// name" turned literal `\n\n` into `\fn\fn()`). Each stays offered to
+    /// the model. A fix that adds a panicking call is held where it is
+    /// applied, against the file's text (`Runner::auto_apply_fix`).
     pub(super) fn auto_fix(&self) -> Option<(&Finding, &OfferedFix)> {
         if !self.settled {
             return None;
@@ -385,11 +371,8 @@ impl DiagnosticsSnapshot {
             let mut preferred = finding.fixes.iter().filter(|fix| fix.preferred);
             let fix = preferred.next()?;
             let deletes_only = fix.edits.iter().all(|edit| edit.text.is_empty());
-            (preferred.next().is_none()
-                && !deletes_only
-                && !unparsed.contains(fix.file.as_str())
-                && !adds_a_panic(fix))
-            .then_some((finding, fix))
+            (preferred.next().is_none() && !deletes_only && !unparsed.contains(fix.file.as_str()))
+                .then_some((finding, fix))
         })
     }
 
@@ -3408,10 +3391,9 @@ mod tests {
     /// written into parse.rs drew rust-analyzer's "Syntax Error: …" and
     /// rustc's "unknown start of token", and rustc's preferred fixes for the
     /// same file ("there is a keyword `fn` with a similar name", "add a
-    /// parameter list") were applied. Earlier, its preferred `u32` to `usize`
-    /// conversion ending in `.try_into().unwrap()` was applied twice.
+    /// parameter list") were applied.
     #[test]
-    fn auto_fix_takes_nothing_in_a_file_that_does_not_parse_nor_a_panic() {
+    fn auto_fix_takes_nothing_in_a_file_that_does_not_parse() {
         let fix = |id, file: &str, texts: &[&str]| OfferedFix {
             id,
             title: format!("fix {id}"),
@@ -3493,32 +3475,17 @@ mod tests {
             )])),
             Some(2)
         );
-        // rustc's conversion that panics if the value does not fit: offered,
-        // never applied by the harness; nor is an `.expect(`.
-        let unwrap = finding(
-            parse,
-            "mismatched types",
-            vec![fix(4, parse, &["(", ").try_into().unwrap()"])],
-        );
-        let snapshot_unwrap = snapshot(vec![unwrap]);
-        assert_eq!(chosen(&snapshot_unwrap), None);
-        assert_eq!(snapshot_unwrap.fix(4).map(|fix| fix.id), Some(4));
+        // A fix whose text holds a panicking call is selected here: whether
+        // it adds one is decided against the file's text where it is
+        // applied (`panicking_calls` in auto_fix.rs), so a corrected line
+        // keeping its `.unwrap()` is not held.
         assert_eq!(
             chosen(&snapshot(vec![finding(
                 parse,
                 "mismatched types",
-                vec![fix(5, parse, &[".expect(\"fits\")"])]
+                vec![fix(4, parse, &["(", ").try_into().unwrap()"])]
             )])),
-            None
-        );
-        // A conversion that cannot panic is still taken.
-        assert_eq!(
-            chosen(&snapshot(vec![finding(
-                parse,
-                "mismatched types",
-                vec![fix(6, parse, &["usize::from(", ")"])]
-            )])),
-            Some(6)
+            Some(4)
         );
     }
 

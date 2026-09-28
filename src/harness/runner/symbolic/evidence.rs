@@ -75,7 +75,7 @@ impl Runner {
                     .join(", ")
             ));
         }
-        let (kept, withheld) = self.addressed_split();
+        let (kept, withheld, _) = self.addressed_split();
         if !withheld.is_empty() {
             facts.push(format!(
                 "Motivated-by edges withheld: stubs left in planned files ({} of {} addressed rules).",
