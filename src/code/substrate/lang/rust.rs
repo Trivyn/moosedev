@@ -3,10 +3,12 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{backticked, file_name, note_failed, STUB_MESSAGES};
 use super::{
-    CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec,
-    StubSyntax,
+    backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
+};
+use super::{
+    CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, Publishes,
+    ServerSpec, StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -38,16 +40,18 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     zed_languages: &["Rust"],
     is_test_path: Some(is_test_path),
-    server: Some(ServerSpec {
+    servers: &[ServerSpec {
         name: "rust-analyzer",
         language: "Rust",
         commands: &[&["rust-analyzer"]],
         languages: &[("rs", "rust")],
         project_files: &["Cargo.toml"],
         server_status: true,
+        publishes: Publishes::OnChange,
         // Check with `cargo check` on save, so borrow and lifetime errors
         // arrive too, not only rust-analyzer's own analysis.
         options: || json!({"checkOnSave": true, "check": {"command": "check"}}),
+        defers_to: None,
         // Clippy as the on-save check: its lints arrive through the same
         // settled path as the compiler's errors, which it reports too.
         linter: Some(LinterSpec {
@@ -57,7 +61,9 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
             install_hint: "rustup component add clippy",
             options: || json!({"checkOnSave": true, "check": {"command": "clippy"}}),
         }),
-    }),
+        lint_source: None,
+        settings: no_settings,
+    }],
     checks: &[CheckTool {
         program: "cargo",
         manifest: "Cargo.toml",
@@ -77,7 +83,112 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
+    missing_modules: Some(missing_modules),
+    module_dir: Some(module_dir),
 };
+
+/// The files a module declaration could not find, relative to the project
+/// root. rustc's E0583 ("file not found for module `parse`") names them in
+/// its `help:` line (`create file "src/parse.rs" or "src/parse/mod.rs"`),
+/// relative to where cargo ran rustc: the package or the workspace
+/// directory, or absolute. Each is re-rooted at the declaring file, whose
+/// directory the module file lies under (see [`under_declaring_dir`]). Without
+/// the help line, the module's directory is the declaring file's own for a
+/// `lib.rs`, `main.rs` or `mod.rs`, else its stem's subdirectory.
+/// rust-analyzer's own "unresolved module, can't find module file: parse.rs,
+/// or parse/mod.rs" lists them relative to the declaring file's directory,
+/// the `foo/` of a non-`mod.rs` file `foo.rs` included (they are the paths it
+/// resolves anchored at that file).
+fn missing_modules(message: &str, detail: Option<&str>, declaring_file: &str) -> Vec<String> {
+    let first = message.lines().next().unwrap_or_default().trim();
+    let declaring_file = declaring_file.replace('\\', "/");
+    if let Some(listed) = first.strip_prefix("unresolved module, can't find module file: ") {
+        let dir = parent_dir(&declaring_file);
+        return listed
+            .split(", or ")
+            .flat_map(|part| part.split(", "))
+            .map(|candidate| candidate.trim().replace('\\', "/"))
+            .filter(|candidate| !candidate.is_empty())
+            .map(|candidate| join_path(dir, candidate.trim_start_matches("./")))
+            .collect();
+    }
+    if !first.starts_with("file not found for module") || declaring_file.is_empty() {
+        return Vec::new();
+    }
+    let helped: Vec<String> = detail
+        .into_iter()
+        .flat_map(str::lines)
+        .filter_map(|line| line.split_once("create file ").map(|(_, files)| files))
+        .flat_map(|files| files.split('"').skip(1).step_by(2))
+        .filter_map(|help| under_declaring_dir(&help.replace('\\', "/"), &declaring_file))
+        .collect();
+    if !helped.is_empty() {
+        return helped;
+    }
+    let Some(name) = backticked(first).next().filter(|name| !name.is_empty()) else {
+        return Vec::new();
+    };
+    let module_dir = module_dir(&declaring_file);
+    vec![
+        join_path(&module_dir, &format!("{name}.rs")),
+        join_path(&module_dir, &format!("{name}/mod.rs")),
+    ]
+}
+
+/// The directory the modules `declaring_file` declares live in: its own for
+/// a `lib.rs`, `main.rs` or `mod.rs`, else its stem's subdirectory
+/// (`src/foo/` for `src/foo.rs`).
+fn module_dir(declaring_file: &str) -> String {
+    let declaring_file = declaring_file.replace('\\', "/");
+    let dir = parent_dir(&declaring_file);
+    match file_name(&declaring_file) {
+        "lib.rs" | "main.rs" | "mod.rs" => dir.to_string(),
+        other => join_path(dir, other.strip_suffix(".rs").unwrap_or(other)),
+    }
+}
+
+/// `help` (a path rustc printed) relative to the project root, given that the
+/// module file lies under the directory of `declaring_file` (a project-root
+/// path). A relative `help` starts with some tail of that directory (`src/…`
+/// under `badciv-map/src`, or the whole of it when rustc ran at the project
+/// root): the shortest-prefix tail that matches is taken, so the head it
+/// leaves out is where rustc ran. An absolute `help` holds the whole
+/// directory; what precedes its last occurrence is outside the project.
+fn under_declaring_dir(help: &str, declaring_file: &str) -> Option<String> {
+    let dirs: Vec<&str> = parent_dir(declaring_file)
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let parts: Vec<&str> = help
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    if help.starts_with('/') || help.chars().nth(1) == Some(':') {
+        if dirs.is_empty() {
+            return None;
+        }
+        let at = (0..parts.len().saturating_sub(dirs.len()))
+            .rev()
+            .find(|&at| parts[at..].starts_with(&dirs))?;
+        return Some(parts[at..].join("/"));
+    }
+    if dirs.is_empty() {
+        return Some(parts.join("/"));
+    }
+    (0..dirs.len())
+        .find(|&at| parts.len() > dirs.len() - at && parts.starts_with(&dirs[at..]))
+        .map(|at| {
+            dirs[..at]
+                .iter()
+                .chain(&parts)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+}
 
 /// The names rustc's and rust-analyzer's resolution errors name, each as its
 /// last path segment: "unresolved import(s) `a::B`, `a::C`" names every one;
@@ -252,7 +363,80 @@ fn declaration_name(node: tree_sitter::Node<'_>, source: &str) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{test_failures, unresolved_names};
+    use super::{missing_modules, test_failures, unresolved_names};
+
+    const E0583: &str = "error[E0583]: file not found for module `parse`\n --> src/lib.rs:1:1\n  |\n1 | mod parse;\n  | ^^^^^^^^^^\n  |\n  = help: to create the module `parse`, create file \"src/parse.rs\" or \"src/parse/mod.rs\"\n  = note: if there is a `mod parse` elsewhere in the crate already, import it with `use crate::...` instead";
+
+    #[test]
+    fn rustc_help_paths_are_rerooted_at_the_declaring_package() {
+        let message = "file not found for module `parse`";
+        // Relative to the package rustc ran in, a member of a workspace.
+        assert_eq!(
+            missing_modules(message, Some(E0583), "badciv-map/src/lib.rs"),
+            ["badciv-map/src/parse.rs", "badciv-map/src/parse/mod.rs"]
+        );
+        // A package at the project root.
+        assert_eq!(
+            missing_modules(message, Some(E0583), "src/lib.rs"),
+            ["src/parse.rs", "src/parse/mod.rs"]
+        );
+        // Relative to the workspace root already, or absolute.
+        let rooted = E0583.replace("\"src/", "\"crates/map/src/");
+        assert_eq!(
+            missing_modules(message, Some(&rooted), "crates/map/src/lib.rs"),
+            ["crates/map/src/parse.rs", "crates/map/src/parse/mod.rs"]
+        );
+        let absolute = E0583.replace("\"src/", "\"/home/me/game/badciv-map/src/");
+        assert_eq!(
+            missing_modules(message, Some(&absolute), "badciv-map/src/lib.rs"),
+            ["badciv-map/src/parse.rs", "badciv-map/src/parse/mod.rs"]
+        );
+        // A module of a non-mod.rs file lies in its stem's directory.
+        let nested = E0583.replace("\"src/parse", "\"src/map/parse");
+        assert_eq!(
+            missing_modules(message, Some(&nested), "badciv-map/src/map.rs"),
+            [
+                "badciv-map/src/map/parse.rs",
+                "badciv-map/src/map/parse/mod.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn without_the_help_line_the_module_directory_is_derived() {
+        let message = "file not found for module `parse`";
+        assert_eq!(
+            missing_modules(message, None, "badciv-map/src/lib.rs"),
+            ["badciv-map/src/parse.rs", "badciv-map/src/parse/mod.rs"]
+        );
+        assert_eq!(
+            missing_modules(message, None, "src/map.rs"),
+            ["src/map/parse.rs", "src/map/parse/mod.rs"]
+        );
+        assert!(missing_modules(message, None, "").is_empty());
+    }
+
+    #[test]
+    fn rust_analyzer_candidates_are_relative_to_the_declaring_file() {
+        assert_eq!(
+            missing_modules(
+                "unresolved module, can't find module file: parse.rs, or parse/mod.rs",
+                None,
+                "badciv-map/src/lib.rs"
+            ),
+            ["badciv-map/src/parse.rs", "badciv-map/src/parse/mod.rs"]
+        );
+        assert_eq!(
+            missing_modules(
+                "unresolved module, can't find module file: map/parse.rs, or map/parse/mod.rs",
+                None,
+                "src/map.rs"
+            ),
+            ["src/map/parse.rs", "src/map/parse/mod.rs"]
+        );
+        assert!(missing_modules("unresolved import `crate::parse`", None, "src/lib.rs").is_empty());
+        assert!(missing_modules("mismatched types", Some(E0583), "src/lib.rs").is_empty());
+    }
 
     #[test]
     fn resolution_errors_name_the_last_segment() {

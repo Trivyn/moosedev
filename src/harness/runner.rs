@@ -33,6 +33,7 @@ mod langserver;
 mod links;
 mod model;
 mod permissions;
+mod plan_choices;
 mod plan_view;
 mod recovery;
 mod review;
@@ -58,9 +59,9 @@ pub use symbolic::{CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicSta
 use task::{bounded, fingerprint, Intent};
 pub use task::{
     ApprovedPlan, CheckResult, ChoiceKind, ChoiceOption, Event, KnowledgeContextSnapshot,
-    KnowledgeFileDossier, KnowledgeSearchResult, KnowledgeTurn, Mode, PendingChoice, PendingEdit,
-    PendingPermission, PendingSpecApproval, PermissionGrant, Phase, Plan, ReviewItem, SpecUncited,
-    StandingGuidance, Task,
+    KnowledgeFileDossier, KnowledgeSearchResult, KnowledgeTurn, Mode, OpenChoice, OpenRule,
+    PendingChoice, PendingEdit, PendingPermission, PendingSpecApproval, PermissionGrant, Phase,
+    Plan, ReviewItem, SpecUncited, StandingGuidance, Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;

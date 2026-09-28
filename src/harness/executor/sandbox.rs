@@ -88,6 +88,13 @@ pub(super) fn readable_files() -> Vec<PathBuf> {
     // Grant only its system configuration file, not /etc or the SSL directory.
     #[cfg(target_os = "macos")]
     paths.push(PathBuf::from("/private/etc/ssl/openssl.cnf"));
+    // Homebrew's Node (under pyright) reads its OpenSSL's configuration file
+    // at start and exits when it cannot; again only that file.
+    #[cfg(target_os = "macos")]
+    paths.extend(
+        ["/opt/homebrew", "/usr/local"]
+            .map(|prefix| PathBuf::from(prefix).join("etc/openssl@3/openssl.cnf")),
+    );
     #[cfg(target_os = "linux")]
     paths.push(PathBuf::from("/etc/ld.so.cache"));
     if let Some(home) = std::env::var_os("HOME") {

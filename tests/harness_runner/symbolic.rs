@@ -3927,3 +3927,517 @@ async fn a_choice_relying_on_a_withdrawn_approval_is_refused_and_the_question_di
     assert_eq!(runner.task.plan.as_ref().unwrap().files, ["labels.py"]);
     assert!(intent_details(&runner, "choice_made").is_empty());
 }
+
+fn preserve_rule() -> GoverningRule {
+    GoverningRule {
+        iri: PRESERVE.into(),
+        label: "Preserve display label behavior".into(),
+        kind: "Requirement".into(),
+        claim: "hasDescription: Display labels render exactly as before.\n".into(),
+        via: "via: linked to labels.py".into(),
+    }
+}
+
+/// A plan kept although it neither addresses nor mentions a delivered rule
+/// leaves that rule open: the plan stores it for the approval gate, and
+/// approval records it as deferred.
+#[tokio::test]
+async fn a_plan_leaving_a_rule_open_stores_it_and_approval_defers_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
+    let mut runner = fixture.interactive().await;
+    let plan = json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[]});
+    fixture.conversational(plan.clone());
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_none(), "returned once for the rule");
+    fixture.conversational(plan);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    let open = &runner.task.plan.as_ref().unwrap().open_rules;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].iri, PRESERVE);
+    assert_eq!(open[0].label, "Preserve display label behavior");
+    assert_eq!(open[0].kind, "Requirement");
+    assert!(!open[0].mentioned);
+
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.approved_plans[0].deferred, vec![PRESERVE]);
+    assert_eq!(
+        intent_details(&runner, "rules_deferred"),
+        vec!["1 rule(s): Preserve display label behavior"]
+    );
+    // The builder is not shown what the plan left open.
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    assert!(!fixture
+        .last_model_prompt("harness_action")
+        .contains("open_rules"));
+}
+
+/// A summary that defers a rule satisfies plan coverage, but the plan does
+/// not list the rule as implemented: it stays open, marked as mentioned, and
+/// approval records its deferral. Only `addresses` closes a rule.
+#[tokio::test]
+async fn a_rule_the_summary_defers_is_still_open_and_approval_defers_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a helper. Preserve display label behavior is deferred outside this objective.","files":["labels.py"],"checks":["true"],"addresses":[]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan, "coverage is met");
+    let open = &runner.task.plan.as_ref().unwrap().open_rules;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].iri, PRESERVE);
+    assert!(open[0].mentioned);
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.approved_plans[0].deferred, vec![PRESERVE]);
+    assert_eq!(
+        intent_details(&runner, "rules_deferred"),
+        vec!["1 rule(s): Preserve display label behavior"]
+    );
+
+    // A plan that lists the rule in `addresses` leaves nothing open.
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a helper that preserves display label behavior.","files":["labels.py"],"checks":["true"],"addresses":[PRESERVE]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.plan.as_ref().unwrap().open_rules.is_empty());
+    runner.approve_plan().await.unwrap();
+    assert!(runner.task.approved_plans[0].deferred.is_empty());
+    assert!(intent_details(&runner, "rules_deferred").is_empty());
+}
+
+/// A plan's open choices: an invalid one goes back for repair, the human
+/// answers one at the gate, approval settles the other by its default, and
+/// the builder is shown both decisions.
+#[tokio::test]
+async fn open_choices_are_answered_at_the_gate_and_defaulted_on_approval() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    let plan = |choices: Value| json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["true"],"addresses":[],"open_choices":choices});
+    fixture.conversational(plan(json!([
+        {"question":"Which separator joins words?","options":["space","dash"],"default":"tab"}
+    ])));
+    fixture.conversational(plan(json!([
+        {"question":"Which separator joins words?","options":["space","dash"],"default":"space"},
+        {"question":"Strip trailing whitespace?","options":["yes","no"],"default":"yes"}
+    ])));
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(
+        runner.task.events.iter().any(|event| event
+            .message
+            .contains("its default \"tab\" is not one of its options")),
+        "the invalid choice went back for repair"
+    );
+    let choices = &runner.task.plan.as_ref().unwrap().open_choices;
+    assert_eq!(choices.len(), 2);
+    assert!(choices.iter().all(|choice| choice.answer.is_none()));
+
+    assert!(runner.choose_plan_option("3 space").is_err());
+    assert!(runner.choose_plan_option("1 tab").is_err());
+    // An option by its number; a later answer replaces it.
+    runner.choose_plan_option("1 1").unwrap();
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().open_choices[0]
+            .answer
+            .as_deref(),
+        Some("space")
+    );
+    // The headless route: `choose ID "1 dash"`, by the option's text in any case.
+    moosedev::harness::tui::execute(
+        &mut runner,
+        moosedev::harness::tui::Action::Choose("1 DASH".into()),
+    )
+    .await
+    .unwrap();
+    let choices = &runner.task.plan.as_ref().unwrap().open_choices;
+    assert_eq!(choices[0].answer.as_deref(), Some("dash"));
+    assert_eq!(choices[1].answer, None);
+
+    runner.approve_plan().await.unwrap();
+    assert_eq!(
+        intent_details(&runner, "plan_choice"),
+        vec!["1: space", "1: dash", "2: yes (default)"]
+    );
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        prompt.contains("Decided: Which separator joins words? → dash\\nDecided: Strip trailing whitespace? → yes"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("\"open_choices\""));
+
+    let id = runner.task.id.clone();
+    drop(runner);
+    let runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().open_choices[1]
+            .answer
+            .as_deref(),
+        Some("yes"),
+        "answers survive resume"
+    );
+}
+
+/// `MOOSEDEV_HARNESS_PLAN_CHOICES=off` offers no `open_choices`, says
+/// nothing of them, and drops any a model sends anyway.
+#[tokio::test]
+async fn the_plan_choices_switch_removes_open_choices() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let plan_parameters = |fixture: &Fixture| {
+        let request = requests_of_kind(fixture, "model")
+            .into_iter()
+            .rfind(|request| request["schema"] == "harness_action")
+            .unwrap();
+        request["body"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "plan")
+            .unwrap()["function"]["parameters"]
+            .clone()
+    };
+    let plan = json!({"action":"plan","summary":"Preserve display behavior while adding a helper","files":["labels.py"],"checks":["true"],"addresses":[],"open_choices":[{"question":"Which separator?","options":["space","dash"],"default":"space"}]});
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(plan.clone());
+    runner.advance().await.unwrap();
+    let on = plan_parameters(&fixture);
+    assert!(on["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("open_choices")));
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("plan(summary,files,checks,addresses,open_choices)"));
+    assert_eq!(runner.task.plan.as_ref().unwrap().open_choices.len(), 1);
+
+    std::env::set_var("MOOSEDEV_HARNESS_PLAN_CHOICES", "off");
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(plan);
+    let result = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_PLAN_CHOICES");
+    result.unwrap();
+    let off = plan_parameters(&fixture);
+    assert!(off["properties"].get("open_choices").is_none());
+    assert!(!off["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("open_choices")));
+    assert!(!fixture
+        .last_model_prompt("harness_action")
+        .contains("open_choices"));
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.plan.as_ref().unwrap().open_choices.is_empty());
+}
+
+/// A settled language-server error in labels.py, rustc's shape: `mod
+/// helpers;` names a file that does not exist.
+fn module_not_found(runner: &mut Runner) {
+    let mut snapshot = diagnostics(1);
+    snapshot.errors[0].file = "labels.py".into();
+    snapshot.errors[0].message = "file not found for module `helpers`".into();
+    snapshot.errors[0].detail = Some(
+        "error[E0583]: file not found for module `helpers`\n  = help: to create the module `helpers`, create file \"helpers.rs\" or \"helpers/mod.rs\""
+            .into(),
+    );
+    runner.task.diagnostics = Some(snapshot);
+}
+
+/// The approved labels.py plan, a settled error saying `helpers.rs` is
+/// missing, and a model edit of labels.py that the result settles on.
+async fn edited_with_module_missing(fixture: &Fixture) -> Runner {
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.approve_plan().await.unwrap();
+    module_not_found(&mut runner);
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 1);
+    runner
+}
+
+#[tokio::test]
+async fn a_module_declared_without_its_file_asks_the_human_and_add_amends_the_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = edited_with_module_missing(&fixture).await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    let pending = runner.task.pending_choice.clone().unwrap();
+    assert_eq!(
+        pending.kind,
+        moosedev::harness::runner::ChoiceKind::MissingModule {
+            file: "helpers.rs".into(),
+            declared_in: "labels.py".into()
+        }
+    );
+    assert_eq!(
+        pending.prompt,
+        "`labels.py` declares or imports `helpers.rs`, which does not exist and is outside the approved plan (labels.py)."
+    );
+    assert_eq!(choice_keys(&runner), ["add", "replan", "refuse"]);
+    assert_eq!(pending.default, "add");
+    assert_eq!(
+        intent_details(&runner, "missing_module_asked"),
+        vec!["helpers.rs in `labels.py`"]
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_asked"),
+        vec!["missing_module helpers.rs: add, replan, refuse (default add)"]
+    );
+    let state = runner.task.symbolic.as_ref().unwrap();
+    assert!(state.auto_verify_armed.is_none() && state.auto_fix_armed.is_none());
+
+    let calls = fixture.model_calls();
+    runner.choose("add").await.unwrap();
+    assert_eq!(fixture.model_calls(), calls, "the model is asked nothing");
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().files,
+        ["labels.py", "helpers.rs"]
+    );
+    assert_eq!(
+        runner.task.approved_plans.last().unwrap().files,
+        ["labels.py", "helpers.rs"]
+    );
+    assert_eq!(
+        runner.task.last_response,
+        "`helpers.rs` was added to the approved plan. Write it: `labels.py` declares or imports `helpers.rs`."
+    );
+    assert_eq!(intent_details(&runner, "scope_added"), vec!["helpers.rs"]);
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["missing_module:add"]
+    );
+
+    // The approval stands for the amended plan: the model's write of the
+    // file is applied, and a planned file is not asked about again.
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"write","file":"helpers.rs","content":"pub fn helper() {}\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 2);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_ne!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("helpers.rs")).unwrap(),
+        "pub fn helper() {}\n"
+    );
+    assert_eq!(intent_details(&runner, "missing_module_asked").len(), 1);
+}
+
+#[tokio::test]
+async fn refusing_a_missing_module_keeps_the_plan_and_it_is_asked_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = edited_with_module_missing(&fixture).await;
+    runner.choose("refuse").await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.plan.as_ref().unwrap().files, ["labels.py"]);
+    assert_eq!(
+        runner.task.last_response,
+        "`helpers.rs` stays outside the plan: remove its declaration or import from `labels.py`."
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["missing_module:refuse"]
+    );
+    // The same error after another edit: answered already this approval.
+    module_not_found(&mut runner);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"name.strip()","new_text":"name.strip().title()"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 2);
+    assert_ne!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(intent_details(&runner, "missing_module_asked").len(), 1);
+}
+
+#[tokio::test]
+async fn choosing_replan_at_a_missing_module_replans_naming_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = edited_with_module_missing(&fixture).await;
+    runner.choose("replan").await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 1);
+    assert_eq!(
+        intent_details(&runner, "scope_escape_replan"),
+        vec!["helpers.rs: escape 1, chosen by the human"]
+    );
+    assert_eq!(
+        runner.task.last_response,
+        "`labels.py` declares or imports `helpers.rs`, which does not exist and is outside the approved plan files [labels.py]; replan with every file the change needs, or without the module."
+    );
+}
+
+#[tokio::test]
+async fn a_planned_module_file_not_written_yet_or_the_switch_off_asks_nothing() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    // Planned but not written: the unfinished-plan gate owns it.
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper module","files":["labels.py","helpers.rs"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    module_not_found(&mut runner);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_ne!(runner.task.phase, Phase::AwaitingChoice);
+    assert!(intent_details(&runner, "missing_module_asked").is_empty());
+
+    // Switched off: the model is left to find out, as before.
+    let fixture = symbolic_fixture().await;
+    std::env::set_var("MOOSEDEV_HARNESS_STRUCTURAL_ASK", "off");
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    module_not_found(&mut runner);
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}));
+    let result = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_STRUCTURAL_ASK");
+    result.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_ne!(runner.task.phase, Phase::AwaitingChoice);
+    assert!(intent_details(&runner, "missing_module_asked").is_empty());
+}
+
+/// `mod inner;` in `src/foo.rs` wants `src/foo/inner.rs`, whose directory
+/// the first module there creates: the declaration derives it, so the human
+/// is asked although `src/foo/` does not exist.
+#[tokio::test]
+async fn a_rust_module_in_a_directory_not_created_yet_is_asked_about() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    assert!(!fixture.root.join("src/foo").exists());
+    let mut snapshot = diagnostics(1);
+    snapshot.errors[0].file = "src/foo.rs".into();
+    snapshot.errors[0].message =
+        "unresolved module, can't find module file: foo/inner.rs, or foo/inner/mod.rs".into();
+    runner.task.diagnostics = Some(snapshot);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().kind,
+        moosedev::harness::runner::ChoiceKind::MissingModule {
+            file: "src/foo/inner.rs".into(),
+            declared_in: "src/foo.rs".into()
+        }
+    );
+    assert_eq!(
+        intent_details(&runner, "missing_module_asked"),
+        vec!["src/foo/inner.rs in `src/foo.rs`"]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_run_that_cannot_import_a_module_of_the_project_asks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::fs::create_dir_all(fixture.root.join("pkg")).unwrap();
+    std::fs::write(fixture.root.join("pkg/__init__.py"), "").unwrap();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    // A package the project does not have is not asked about.
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"command","command":"echo \"ModuleNotFoundError: No module named 'numpy.linalg'\"; exit 1"}),
+    )
+    .await;
+    assert_ne!(runner.task.phase, Phase::AwaitingChoice);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"command","command":"echo \"ModuleNotFoundError: No module named 'pkg.helpers'\"; exit 1"}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().kind,
+        moosedev::harness::runner::ChoiceKind::MissingModule {
+            file: "pkg/helpers.py".into(),
+            declared_in: String::new()
+        }
+    );
+    assert_eq!(
+        intent_details(&runner, "missing_module_asked"),
+        vec!["pkg/helpers.py (named by a failed run)"]
+    );
+    runner.choose("refuse").await.unwrap();
+    assert_eq!(
+        runner.task.last_response,
+        "`pkg/helpers.py` stays outside the plan: remove the import of it."
+    );
+
+    // A required check failing the same way asks too.
+    let fixture = symbolic_fixture().await;
+    std::fs::create_dir_all(fixture.root.join("pkg")).unwrap();
+    std::fs::write(fixture.root.join("pkg/__init__.py"), "").unwrap();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.task.plan.as_mut().unwrap().checks =
+        vec!["echo \"ModuleNotFoundError: No module named 'pkg.helpers'\"; exit 1".into()];
+    runner.approve_plan().await.unwrap();
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    for _ in 0..4 {
+        if runner.task.phase != Phase::Verifying && runner.task.phase != Phase::Working {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.check_results.len(), 1);
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        intent_details(&runner, "missing_module_asked"),
+        vec!["pkg/helpers.py (named by a failed run)"]
+    );
+}

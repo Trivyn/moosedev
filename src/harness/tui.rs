@@ -98,6 +98,10 @@ pub async fn execute(runner: &mut Runner, action: Action) -> Result<()> {
             runner.advance().await
         }
         Action::DenyPermission => runner.deny_permission(),
+        // At the plan gate the argument is "<n> <option>", an open choice.
+        Action::Choose(argument) if runner.task.phase == Phase::AwaitingPlan => {
+            runner.choose_plan_option(&argument)
+        }
         Action::Choose(key) => runner.choose(&key).await,
         Action::Permissions => Ok(()),
         Action::RevokePermission(id) => runner.revoke_permission(&id),
@@ -381,6 +385,7 @@ fn gate(task: &Task, standing: &[String]) -> String {
                     standing.len()
                 ));
             }
+            text.push_str(&plan_leaves(plan));
             text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
             text
         }).unwrap_or_default(),
@@ -425,6 +430,55 @@ fn gate(task: &Task, standing: &[String]) -> String {
         Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
         _ => String::new(),
     }
+}
+
+/// Rule labels the plan gate names before counting the rest.
+const OPEN_RULES_SHOWN: usize = 8;
+
+/// What a plan leaves to the human, for its approval gate: the rules it
+/// leaves open, which approval defers (marked when its summary speaks to
+/// them), and its open choices.
+fn plan_leaves(plan: &super::runner::Plan) -> String {
+    let mut text = String::new();
+    if !plan.open_rules.is_empty() {
+        let labels: Vec<String> = plan
+            .open_rules
+            .iter()
+            .take(OPEN_RULES_SHOWN)
+            .map(|rule| {
+                if rule.mentioned {
+                    format!("{} (mentioned in the summary)", rule.label)
+                } else {
+                    rule.label.clone()
+                }
+            })
+            .collect();
+        let more = plan.open_rules.len().saturating_sub(OPEN_RULES_SHOWN);
+        let more = if more > 0 {
+            format!(" … and {more} more")
+        } else {
+            String::new()
+        };
+        text.push_str(&format!(
+            "\nLeaves open {} rule(s): {}{more} — /approve defers them; a message revises the plan.",
+            plan.open_rules.len(),
+            labels.join("; ")
+        ));
+    }
+    for (index, choice) in plan.open_choices.iter().enumerate() {
+        let number = index + 1;
+        let chosen = choice
+            .answer
+            .as_ref()
+            .map_or(String::new(), |answer| format!("; chosen: {answer}"));
+        text.push_str(&format!(
+            "\nOpen choice {number}: {} [{}] (default: {}{chosen}) — /choose {number} <option>",
+            choice.question,
+            choice.options.join(" / "),
+            choice.default
+        ));
+    }
+    text
 }
 
 fn permission_gate(request: &super::runner::PendingPermission, standing: &[String]) -> String {
@@ -2358,6 +2412,57 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn the_plan_gate_names_open_rules_and_choices() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingPlan;
+        let rule = |n: usize| super::super::runner::OpenRule {
+            iri: format!("urn:rule:{n}"),
+            label: format!("Rule {n}"),
+            kind: "Constraint".into(),
+            mentioned: n == 2,
+        };
+        task.plan = Some(super::super::runner::Plan {
+            summary: "Trim label whitespace".into(),
+            files: vec!["labels.py".into()],
+            checks: vec!["pytest -q".into()],
+            addresses: vec![],
+            open_rules: vec![rule(1), rule(2)],
+            open_choices: vec![super::super::runner::OpenChoice {
+                question: "Which separator?".into(),
+                options: vec!["space".into(), "dash".into(), "none".into()],
+                default: "space".into(),
+                answer: None,
+            }],
+        });
+        let text = gate(&task, &[]);
+        assert!(
+            text.contains("\nLeaves open 2 rule(s): Rule 1; Rule 2 (mentioned in the summary) — /approve defers them; a message revises the plan."),
+            "{text}"
+        );
+        assert!(
+            text.contains("\nOpen choice 1: Which separator? [space / dash / none] (default: space) — /choose 1 <option>"),
+            "{text}"
+        );
+        assert!(text.ends_with("/approve to execute · send feedback to revise"));
+
+        let plan = task.plan.as_mut().unwrap();
+        plan.open_rules = (1..=10).map(rule).collect();
+        plan.open_choices[0].answer = Some("dash".into());
+        let text = gate(&task, &[]);
+        assert!(
+            text.contains("Leaves open 10 rule(s): Rule 1; Rule 2 (mentioned in the summary); Rule 3; Rule 4; Rule 5; Rule 6; Rule 7; Rule 8 … and 2 more — "),
+            "{text}"
+        );
+        assert!(text.contains("(default: space; chosen: dash)"), "{text}");
+
+        let plan = task.plan.as_mut().unwrap();
+        plan.open_rules.clear();
+        plan.open_choices.clear();
+        let text = gate(&task, &[]);
+        assert!(!text.contains("Leaves open") && !text.contains("Open choice"));
+    }
+
+    #[test]
     fn approval_gate_explains_symbolic_derivation() {
         let mut task = task_fixture(PathBuf::from("/project"));
         task.phase = Phase::AwaitingPlan;
@@ -2366,6 +2471,8 @@ mod tests {
             files: vec!["labels.py".into()],
             checks: vec!["pytest -q".into()],
             addresses: vec![],
+            open_rules: vec![],
+            open_choices: vec![],
         });
         let text = gate(&task, &[]);
         assert!(text.contains("PLAN · human approval required"));

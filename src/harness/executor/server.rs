@@ -62,13 +62,17 @@ impl ServerDirectory {
     }
 
     /// The confined server process: `argv` under the platform sandbox, working
-    /// in the mirror, with piped stdio and stderr kept in `stderr.log`.
+    /// in the mirror, with piped stdio and stderr appended to `stderr.log`,
+    /// which every server of the task shares (Python runs two).
     /// `read_paths` are the standing sandbox read grants (for example a
     /// Node installation outside the system directories).
     pub fn command(&self, argv: &[String], read_paths: &[PathBuf]) -> Result<Command> {
         anyhow::ensure!(!argv.is_empty(), "language server command is empty");
         let mut process = confined(self, argv, read_paths)?;
-        let stderr = fs::File::create(self.root.join("stderr.log"))?;
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.root.join("stderr.log"))?;
         process
             .current_dir(self.mirror())
             .env_clear()

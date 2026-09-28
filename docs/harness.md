@@ -352,7 +352,16 @@ line and column.
   rust-analyzer, `experimental/serverStatus` quiescent. That covers
   `cargo check` on save, so borrow and lifetime errors arrive with the edit, not
   only rust-analyzer's own analysis. The first settle, which indexes the
-  project, may take 120 s; later ones `settle_timeout_secs` (30). A result that
+  project, may take 120 s; later ones `settle_timeout_secs` (30). pyright,
+  which publishes diagnostics for every version of an open document (even of
+  a file its configuration excludes), has also settled only once it has
+  published them for the text just sent of the edited file: it may say
+  nothing while it analyzes, and silence is not a clean result. ruff
+  publishes for every version of a file it checks but nothing for a file its
+  configuration excludes, so it is held to the same once it has published
+  about the file at all; a file it never published about may be excluded,
+  and its quiet there is taken as settled. The settle deadline bounds either
+  wait. A result that
   did not settle is shown as unknown, never as clean. (OpenCode on the same
   badciv objective appended rust-analyzer errors to edit results without
   settling; qwen called them stale and ran `cargo build` after about one edit
@@ -360,7 +369,10 @@ line and column.
 - **Current state, not history.** Every prompt shows the latest result in the
   harness state (4 KB): the errors, each with the compiler's full text while it
   fits (rust-analyzer's `data.rendered`: the source excerpt and the `note:` and
-  `help:` lines, up to 800 bytes each, else its related spans) and the
+  `help:` lines, up to 800 bytes each; else the error's line followed by the
+  rest of a multi-line message, at most three lines within 300 bytes —
+  pyright's second line names the mismatch, `"Literal['a']" is not assignable
+  to "int"` — and its related spans) and the
   definition behind it ("defined at file:line: …", at most two targets, for the
   first five errors: a field's `&'static str` next to the `&str` binding that
   fails it). An error among those five that the server located nowhere and
@@ -375,6 +387,8 @@ line and column.
   (Constraint 6bf5ef13); badciv P5's tests imported four names `lib.rs` did not
   re-export. One finding stands for each file, line and message (at the lowest
   column): rust-analyzer published that unresolved-imports error once per name.
+  The whole message is that key, as it is what quick fixes are asked for by:
+  two errors on one line that differ past their first line stay two.
   Then the compiler's warnings and the linter's findings, each with its
   suggestion (warnings were once only counted, and qwen ran `cargo build` to
   read them). Files with
@@ -388,7 +402,13 @@ line and column.
   hint on the `let`, not on the failed borrow. It keeps at most three per
   diagnostic the finding stands for, and at most eight per finding (four
   unresolved names each bring their own fix), and only those it can apply as
-  one ordinary edit: text edits to a single plan file that change it. Each is listed under its finding
+  one ordinary edit: text edits to a single plan file that change it. A fix
+  that silences the diagnostic instead of fixing it is never offered or
+  applied: one titled with, or whose edit adds, `# pyright: ignore`,
+  `# type: ignore`, `# noqa`, `// @ts-ignore` or `#[allow(` (basedpyright
+  offers "Add `# pyright: ignore[…]`" under every error); dropping one the
+  server prefers leaves the list incomplete, so no auto-fix is chosen from
+  it. Each is listed under its finding
   (`fix 3: consider changing this to be mutable`). The Auto schema offers
   `apply_fix(fix)` from the first Auto step whenever a language server could
   check the plan (servers on, none failed, a planned file one a server checks),
@@ -408,7 +428,18 @@ line and column.
   (`cargo clippy --version`) under the server's sandbox; a missing linter is an
   Activity line ("No linter for Rust: clippy is not installed (rustup component
   add clippy); rust-analyzer checks without it.", `language_linter_missing`)
-  and the checker runs `cargo check`. Nothing stops.
+  and the checker runs `cargo check`. Nothing stops. For Python the linter is
+  ruff, a server of its own (`ruff server`) beside the type checker: its
+  warnings (source `Ruff`) are the lints, its errors stay errors. While a
+  type checker runs for the task it leaves an undefined name (F821) and
+  syntax errors to it, so each is listed once ("Language server ruff:
+  started, deferring to pyright"); with no type checker installed, or one
+  that failed to start, ruff reports them itself, so `return missing` never
+  settles clean. It offers no `# noqa` comment as a fix (it silences a lint,
+  it does not fix it); the project's own ruff configuration still applies,
+  with F821 ignored on top while deferring. A missing ruff is "No linter for
+  Python: ruff is not installed." With several linters the block names them
+  all (`clippy, ruff`).
 - **What the human sees.** The header shows the last result beside the model
   and phase (`rust-analyzer ✓` only with no errors, warnings or lints;
   `rust-analyzer: 2 error(s), 1 warning(s)` in red with errors, yellow
@@ -423,20 +454,42 @@ line and column.
   blocks.
 - **Lifecycle.** Servers start on the first applied edit once the project has a
   file of their language, restart when one of their project files
-  (`Cargo.toml`) is created or deleted, and stop at completion or cancellation.
-  A missing or failing server is journaled (`language_server`,
-  `language_server_error`) and the task carries on without one.
+  (`Cargo.toml`, `pyproject.toml`) is created or deleted, and stop at
+  completion or cancellation. A missing or failing server is journaled
+  (`language_server`, `language_server_error`) and the task carries on
+  without one.
 - **Confinement.** Each server runs under the command sandbox's rules with its
   own writable build, cargo home, home and temporary directories, no network,
   the `[harness.sandbox]` read paths, and a read-only mirror whose Cargo
   lockfile roots it may fill. The mirror is beside the command scratch, which
-  every command clears. macOS only so far; elsewhere the harness runs without
-  one.
-- **Languages.** Each language's server and linter are a row in the language
+  every command clears. Servers share one `stderr.log`, appended to. The
+  harness sends no `processId`: the sandbox denies a server any signal to the
+  harness, and pyright, which polls its parent with one every 3 s, would take
+  the harness for dead and exit. Homebrew's Node reads its OpenSSL
+  configuration file at start, so that one file is readable. macOS only so
+  far; elsewhere the harness runs without one.
+- **Languages.** Each language's servers and linter are rows in the language
   registry (`src/code/substrate/lang/`), beside its SCIP producer and
   tree-sitter grammar: commands, file extensions with their language ids,
-  project files, initialization options, and the linter's probe and install
-  hint. Only Rust has one so far; adding a language adds no client code.
+  project files, initialization options (and, for a server that defers to
+  another of its language, those used while that one runs; it is listed
+  after it, so whether it started is known), the answers to
+  `workspace/configuration` by section, the `source` of a server that is
+  itself a linter, and an attached linter's probe and install hint. Every
+  installed server of a language runs, and every one hears every edit. Rust
+  has rust-analyzer (clippy attached). Python has two: a type checker,
+  basedpyright or else pyright (`basedpyright-langserver`/`pyright-langserver
+  --stdio`, shown as `pyright`), and ruff. The type checker is answered for
+  the sections it asks (`python` and `pyright`; basedpyright `python` and
+  `basedpyright`) with `typeCheckingMode: standard` (basedpyright's default
+  reports far more), `diagnosticMode: openFilesOnly` (the files the task
+  edited: a project's existing type errors elsewhere are not the task's) and
+  `reportMissingModuleSource` off; a project's own pyright configuration wins.
+  Known limit: the mirror carries no virtual environment (`.venv`, `venv` and
+  `node_modules` are not mirrored), so a third-party import may be reported
+  unresolved, and an edit that breaks a caller in a file the task has not
+  edited is not reported by the type checker. TypeScript has none yet. Adding
+  a language adds no client code.
 - **Configuration.** `[harness.lsp]` `enabled` (default true) and
   `settle_timeout_secs`; `MOOSEDEV_HARNESS_LSP=off`. Study sessions run without
   language servers, which would change their fixed conditions.
@@ -493,7 +546,8 @@ return to planning, so the plan gate shows how many are still active.
 before later commands run.
 A harness question (see "How the harness decides") lists its options as
 `/choose <option>` commands; `/choose` alone takes the marked default, and a
-plain message instead returns the task to Plan.
+plain message instead returns the task to Plan. At the plan gate,
+`/choose <n> <option>` answers the plan's open choice n (see "Open choices").
 The Knowledge tab shows chronological graph context grouped by the exact human query
 that caused it, without adding retrieval payloads to Conversation. Each query
 contains typed record cards (kind, title, full supplied claim, provenance, and
@@ -1068,6 +1122,38 @@ contract 3 and intent contract 2.
   in `approved_plans` with its addresses, the rules delivered at its approval
   and where its edits begin; a replan replaces the current plan but not this
   history, and a new objective clears it.
+- Open rules at plan approval. When a plan is stored, the delivered rules it
+  does not list in `addresses` are kept on the plan as `open_rules` (IRI,
+  label, kind), whatever its summary says of them: `addresses` is the
+  structural record of what the plan implements, and a summary that says a
+  rule "is deferred outside this objective" or "does not apply" leaves it
+  open as surely as one that skips it. Those the summary speaks to (as plan
+  coverage reads it) are marked `mentioned`. The plan gate names them:
+  "Leaves open N rule(s): <labels, at most 8, a mentioned one followed by
+  '(mentioned in the summary)', then '… and K more'> — /approve defers them;
+  a message revises the plan." `/approve`
+  records their IRIs as the approved plan's `deferred` and journals
+  `rules_deferred` with the count and labels. Deferring changes no knowledge:
+  spec progress still counts only recorded `isMotivatedBy` edges, so a
+  deferred rule stays open there. The model is not shown the open rules; the
+  "Proposed plan" event journals the plan as proposed.
+- Open choices. A plan may carry `open_choices`: up to 3 questions the human
+  should decide before building, each with a question (at most 300 bytes),
+  2-4 distinct options (at most 120 bytes each) and a default that is one of
+  them. In the strict schema the field is required and may be empty, like
+  `addresses`; a plan breaking these bounds is invalid output and spends a
+  repair. The plan gate lists each as "Open choice n: <question> [a / b / c]
+  (default: a) — /choose n <option>". While the plan awaits approval,
+  `/choose <n> <option>` (headless: `choose ID "<n> <option>"`) answers
+  choice n with an option named by its text, in any case, or by its 1-based
+  number, and journals `plan_choice` ("n: option"); a later answer replaces
+  an earlier one. On `/approve` each unanswered choice takes its default
+  (`plan_choice` "n: default (default)"): open choices never block approval.
+  Every step after that is shown the plan with one "Decided: <question> →
+  <option>" line per choice after its summary. A new plan replaces the open
+  rules and choices of the last one; answers do not carry over.
+  `MOOSEDEV_HARNESS_PLAN_CHOICES=off` removes `open_choices` from the schema
+  and from the action meanings, and drops any a model sends anyway.
 - Dossiers. A file dossier lists each knowledge-bearing entity's direct records
   rendered like linked evidence (superseded records show only their header
   line), and its component's records by title: accepted Constraints always,
@@ -1143,23 +1229,40 @@ contract 3 and intent contract 2.
   a cycle through a budget one file short (badciv 7e0c50eb) is told it is
   swapping, rather than finding out one read at a time.
 - Redundant reads. A model `read` of a file the producing prompt already
-  covers is refused without touching the tiers: a file shown there in full
-  (the refusal gives the next action: plan in Plan mode; edit, check or
-  finish while working), or a file outlined only for space whose earlier read is still current (its
-  `Read` event is named, and the next step is mode-aware: plan from the
-  outline, inspect that event, or propose the edit so the edit guard shows it
-  in full). A changed file is read as before, and reads the guards make are
-  never judged. The refusal is journaled as `Not read again:` with
-  `read_repeat_refused`. A second refusal while the model is only looking
-  (reads, inspects and searches since the last human message, applied edit,
-  guarded edit attempt or other action) parks the task for guidance. With more
-  source than the budget holds, recency ranking outlines exactly the file a
-  model reads next; badciv 40cef4a5 rotated six files that way for about 40
-  planning steps.
+  shows in full is refused without touching the tiers (the refusal gives the
+  next action: plan in Plan mode; edit, check or finish while working). A
+  changed file is read as before, and reads the guards make are never judged.
+  The refusal is journaled as `Not read again:` with `read_repeat_refused`. A
+  second refusal while the model is only looking (reads, inspects and searches
+  since the last human message, applied edit, guarded edit attempt or other
+  action) parks the task for guidance. With more source than the budget
+  holds, recency ranking outlines exactly the file a model reads next; badciv
+  40cef4a5 rotated six files that way for about 40 planning steps.
+- Served outlined reads. A `read` of a file outlined only for space whose
+  earlier read is still current is served in the observation slot instead:
+  the Last result is "Current text of `<file>` (shown as an outline in
+  Source; not added back to the working set):" and the file's current text.
+  The working set, its recency and the source tiers stay as they were, so the
+  read cannot outline the next file the model needs; the file's read snapshot
+  is refreshed to the served text. The event is journaled as `Served outlined
+  read: <file> (<size> bytes):` with the whole text, and `outlined_read_served`
+  records the bytes shown. A text larger than the Last result can show
+  unclipped (the budget an `inspect` page gets) is served from its start with
+  a note naming that event and the offset to `inspect` for the rest. A repeat
+  read of the same file while the model has only looked since the serve is
+  refused ("Not read again: `<file>` is unchanged and already served as the
+  Last result at event N", with a mode-aware next step), so a further repeat
+  parks as above; reads alternating between outlined files are each served
+  once and then park the same way. `MOOSEDEV_HARNESS_SERVE_OUTLINED=off`
+  restores the refusal (its `Read` event is named, and the next step is
+  mode-aware: plan from the outline, inspect that event, or propose the edit
+  so the edit guard shows it in full).
 - Edit guard for outlined files. An edit to a file the producing prompt showed
   only as an outline is not applied: an edit written from an outline would
   guess the text it replaces. The step becomes a read, which makes the file the
-  latest read and shows it in full next.
+  latest read and shows it in full next. A Last result that is the file's
+  whole current text, served for a read of it, is the source: the edit
+  applies. A served text cut into pages is not, and the guard holds.
 - Prompt overflow stops the task. When the part of the prompt the harness never
   cuts (rules, knowledge, dossiers, instructions and every outline) exceeds
   the budget, or the file the model just read cannot fit the source budget
@@ -1199,7 +1302,8 @@ contract 3 and intent contract 2.
 - Harness questions. When the symbolic layer cannot default a decision (Constraint
   cd9f1a96 keeps such decisions from the model), the task parks in
   `AwaitingChoice` with a `pending_choice`: an id, its kind (`scope_add` with
-  the file, or `missing_planned_file` with the files), a prompt, options by key
+  the file, `missing_planned_file` with the files, or `missing_module` with the
+  file and the file declaring it), a prompt, options by key
   and label, and a default (`choice_asked` journals the kind, the keys and the
   default). The TUI shows it under "HARNESS QUESTION" with each option as
   `/choose <key>`, the default marked; `/choose` alone takes the default, and
@@ -1209,6 +1313,42 @@ contract 3 and intent contract 2.
   checks it, as a permission approval does. A plain message instead is new
   guidance and returns the task to Plan, discarding the question, as `/plan`
   and a withdrawn approval do. Headless `run` stops at it like any gate.
+- Missing modules. The runtime twin of the plan check that planned files
+  exist or are written: after an applied edit settles, a settled
+  language-server error saying a module declaration or import finds no file
+  asks the human whether the approved plan grows by that file
+  (`missing_module`, with `missing_module_asked`), instead of leaving the model
+  to discover the file is outside the plan. Each language's registry entry
+  reads the files from the diagnostic (`missing_modules`): rustc's E0583 "file
+  not found for module" names them in its `help:` line relative to where cargo
+  ran rustc, and they are re-rooted at the declaring file's directory (the
+  shortest tail of that directory the path starts with is where it joins;
+  absolute paths keep what follows the directory's last occurrence);
+  rust-analyzer's "unresolved module, can't find module file: …" lists them
+  relative to the declaring file's directory; pyright's `Import "pkg.mod" could
+  not be resolved` names `pkg/mod.py` or `pkg/mod/__init__.py` under the
+  source root the declaring file's path shows (the directory above its
+  `pkg/`: `services/api/src/` for `services/api/src/pkg/x.py`), then at the
+  project root or under `src/` (a relative `.mod` in the declaring package). A failed
+  command or required check whose output says `ModuleNotFoundError: No module
+  named 'pkg.mod'` asks the same, the declaring file unknown. It asks only
+  during approved work (Auto, Working, nothing else pending) and never about a
+  file that exists or is planned (a planned file not written yet is the
+  unfinished-plan gate's), a file already asked about this approval cycle, a
+  file in a directory the project neither has nor plans, or a top-level
+  Python name alone (an uninstalled package looks the same). A directory not
+  created yet is no reason to skip a file its declaration places there:
+  Rust's `mod inner;` in `src/foo.rs` wants `src/foo/inner.rs` whether or not
+  `src/foo/` exists (the declaring file's module directory, its own for
+  `lib.rs`, `main.rs` and `mod.rs`: each language's `module_dir`). The harness arms
+  no auto-fix or auto-verify while it asks. `add` amends the approved plan as
+  a scope `add` does (with the same fallback to a replan when the file brings
+  rules the plan does not address), the model told "`<file>` was added to the
+  approved plan. Write it: `<declared_in>` declares or imports `<file>`.";
+  `replan` returns to Plan naming the file, counted as a scope escape;
+  `refuse` returns to the model: "`<file>` stays outside the plan: remove its
+  declaration or import from `<declared_in>`." The default is `add`.
+  `MOOSEDEV_HARNESS_STRUCTURAL_ASK=off` asks nothing.
 - Unfinished plan. A finish while a planned file does not exist, or exists with
   no edit of the model's in this approval cycle (a fix the harness applied is
   not the model's), is sent back once for that source state, naming the

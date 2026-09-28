@@ -6,13 +6,17 @@ use std::process::Command;
 use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
-use super::{backticked, file_name, note_failed, STUB_MESSAGES};
 use super::{
-    first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, StubSyntax,
+    backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
+};
+use super::{
+    first_matching_subdir, Deferral, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks,
+    Publishes, ServerSpec, StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::symbols;
+use serde_json::{json, Value};
 
 pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     producer: Some(ProducerHooks {
@@ -38,7 +42,58 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     zed_languages: &["Python"],
     is_test_path: Some(is_test_path),
-    server: None,
+    // Two servers, both run when installed: a type checker, and ruff as the
+    // linter, which is its own server rather than a check the type checker
+    // runs (clippy through rust-analyzer).
+    servers: &[
+        ServerSpec {
+            // basedpyright is a pyright fork that speaks the same protocol and
+            // settings; either is the type checker.
+            name: "pyright",
+            language: "Python",
+            commands: &[
+                &["basedpyright-langserver", "--stdio"],
+                &["pyright-langserver", "--stdio"],
+            ],
+            languages: SOURCE_FILES,
+            project_files: &[
+                "pyproject.toml",
+                "setup.py",
+                "setup.cfg",
+                "requirements.txt",
+                "pyrightconfig.json",
+            ],
+            server_status: false,
+            publishes: Publishes::EveryVersion,
+            options: || Value::Null,
+            defers_to: None,
+            linter: None,
+            lint_source: None,
+            settings: pyright_settings,
+        },
+        ServerSpec {
+            name: "ruff",
+            language: "Python",
+            commands: &[&["ruff", "server"]],
+            languages: SOURCE_FILES,
+            project_files: &["pyproject.toml", "ruff.toml", ".ruff.toml"],
+            server_status: false,
+            // Nothing for a file its configuration excludes.
+            publishes: Publishes::CheckedFiles,
+            options: || ruff_options(false),
+            // An undefined name (F821) and a syntax error are the type
+            // checker's to report while it runs; reported by both, each
+            // would be listed twice. Without a type checker ruff reports
+            // them: `return missing` must not settle clean.
+            defers_to: Some(Deferral {
+                to: "pyright",
+                options: || ruff_options(true),
+            }),
+            linter: None,
+            lint_source: Some("Ruff"),
+            settings: no_settings,
+        },
+    ],
     // pytest and python need no manifest to run.
     checks: &[],
     stubs: Some(StubSyntax {
@@ -51,7 +106,143 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }),
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
+    missing_modules: Some(missing_modules),
+    module_dir: None,
 };
+
+/// ruff's `initializationOptions`. The project's own ruff configuration
+/// still applies: `deferring` adds F821 to its ignored rules and turns syntax
+/// errors off, which the type checker reports. No `# noqa` comment is offered
+/// as a fix: it silences the lint, it does not fix it.
+fn ruff_options(deferring: bool) -> Value {
+    let mut settings = json!({"codeAction": {"disableRuleComment": {"enable": false}}});
+    if deferring {
+        settings["lint"] = json!({"ignore": ["F821"]});
+        settings["showSyntaxErrors"] = json!(false);
+    }
+    json!({ "settings": settings })
+}
+
+/// Python sources and the language id each is opened with.
+const SOURCE_FILES: &[(&str, &str)] = &[("py", "python"), ("pyi", "python")];
+
+/// pyright's and basedpyright's settings, by the section each asks for:
+/// pyright `python` (and `pyright`), basedpyright `python` and `basedpyright`;
+/// the `.analysis` sections as older versions ask. Standard checking (what
+/// pyright defaults to; basedpyright's default reports far more), only the
+/// files the harness opened, which are the files the task edited, and no
+/// complaint that an import's stubs were found without its source: the
+/// mirror has no virtual environment. A project's own pyright configuration
+/// overrides these.
+fn pyright_settings(section: &str) -> Value {
+    let analysis = json!({
+        "typeCheckingMode": "standard",
+        "diagnosticMode": "openFilesOnly",
+        "diagnosticSeverityOverrides": {"reportMissingModuleSource": "none"},
+    });
+    match section {
+        "python.analysis" | "basedpyright.analysis" => analysis,
+        "python" | "basedpyright" => json!({ "analysis": analysis }),
+        _ => Value::Null,
+    }
+}
+
+/// The files an import could not find, relative to the project root: a
+/// module `pkg.mod` is `pkg/mod.py` or the package `pkg/mod/__init__.py`,
+/// under the source root the declaring file lies in (the directory above its
+/// path's `pkg/`: `services/api/src/` for `services/api/src/pkg/x.py`), then
+/// at the project root or under `src/`. pyright says `Import "pkg.mod" could not
+/// be resolved` of the declaring file, where a relative `.mod` resolves in
+/// the declaring file's package (`..mod` one package up); a failed run prints
+/// `ModuleNotFoundError: No module named 'pkg.mod'`, declaring file unknown.
+/// A top-level name alone (`import yaml`) could as well be a package not
+/// installed as a module of the project, so it names no file.
+fn missing_modules(message: &str, _detail: Option<&str>, declaring_file: &str) -> Vec<String> {
+    let first = message.lines().next().unwrap_or_default().trim();
+    if let Some(module) = first
+        .strip_prefix("Import \"")
+        .and_then(|rest| rest.strip_suffix("\" could not be resolved"))
+    {
+        return module_files(module, declaring_file);
+    }
+    let mut files = Vec::new();
+    for line in message.lines() {
+        let Some((_, rest)) = line.split_once("ModuleNotFoundError: No module named '") else {
+            continue;
+        };
+        let Some((module, _)) = rest.split_once('\'') else {
+            continue;
+        };
+        for file in module_files(module, "") {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The files that would define `module` (dotted, perhaps relative) imported
+/// from `declaring_file`.
+fn module_files(module: &str, declaring_file: &str) -> Vec<String> {
+    let module = module.trim();
+    let dots = module.len() - module.trim_start_matches('.').len();
+    let path = module[dots..].replace('.', "/");
+    if path.is_empty() || path.split('/').any(|part| part.is_empty()) {
+        return Vec::new();
+    }
+    let roots: Vec<String> = if dots > 0 {
+        if declaring_file.is_empty() {
+            return Vec::new();
+        }
+        let mut dir = parent_dir(declaring_file);
+        for _ in 1..dots {
+            if dir.is_empty() {
+                return Vec::new();
+            }
+            dir = parent_dir(dir);
+        }
+        vec![dir.to_string()]
+    } else if path.contains('/') {
+        let mut roots = source_roots(&path, declaring_file);
+        for root in ["", "src"] {
+            if !roots.iter().any(|known| known == root) {
+                roots.push(root.to_string());
+            }
+        }
+        roots
+    } else {
+        return Vec::new();
+    };
+    roots
+        .iter()
+        .flat_map(|root| {
+            [
+                join_path(root, &format!("{path}.py")),
+                join_path(root, &format!("{path}/__init__.py")),
+            ]
+        })
+        .collect()
+}
+
+/// The source roots `declaring_file`'s own path shows for an absolute import
+/// of `path` (`pkg/mod`): each directory of the declaring file named as the
+/// import's first package, its prefix being a root, outermost first.
+fn source_roots(path: &str, declaring_file: &str) -> Vec<String> {
+    let package = path.split('/').next().unwrap_or_default();
+    let dirs: Vec<&str> = parent_dir(declaring_file)
+        .split('/')
+        .filter(|dir| !dir.is_empty())
+        .collect();
+    let mut roots: Vec<String> = Vec::new();
+    for (at, dir) in dirs.iter().enumerate() {
+        let root = dirs[..at].join("/");
+        if *dir == package && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
 
 /// The name ruff's F821 ("Undefined name `X`") or pyright ("\"X\" is not
 /// defined") says is not defined.
@@ -225,6 +416,177 @@ mod tests {
         assert_eq!(super::unresolved_names("\"Grid\" is not defined"), ["Grid"]);
         assert!(super::unresolved_names("\"Grid\" is not accessed").is_empty());
         assert!(super::unresolved_names("Import \"os\" could not be resolved").is_empty());
+    }
+
+    /// A type checker (basedpyright before pyright) and ruff as the linter,
+    /// which leaves undefined names and syntax errors to the type checker
+    /// while one runs, and reports them itself otherwise.
+    #[test]
+    fn python_runs_a_type_checker_and_ruff_as_its_linter() {
+        let [types, lints] = super::LANGUAGE.servers else {
+            panic!("two Python servers");
+        };
+        assert_eq!((types.name, lints.name), ("pyright", "ruff"));
+        let programs: Vec<&str> = types.commands.iter().map(|argv| argv[0]).collect();
+        assert_eq!(programs, ["basedpyright-langserver", "pyright-langserver"]);
+        assert_eq!((types.lint_source, lints.lint_source), (None, Some("Ruff")));
+        // pyright reports on every version, even of an excluded file; ruff
+        // says nothing about a file its configuration excludes.
+        assert_eq!(types.publishes, super::Publishes::EveryVersion);
+        assert_eq!(lints.publishes, super::Publishes::CheckedFiles);
+        for server in [types, lints] {
+            assert_eq!(server.languages, [("py", "python"), ("pyi", "python")]);
+            assert!(server.project_files.contains(&"pyproject.toml"));
+            assert!(server.linter.is_none() && !server.server_status);
+        }
+        assert!(types.defers_to.is_none());
+        let deferral = lints.defers_to.expect("ruff defers to the type checker");
+        assert_eq!(deferral.to, types.name);
+        let deferring = (deferral.options)();
+        assert_eq!(
+            deferring["settings"]["lint"]["ignore"],
+            serde_json::json!(["F821"])
+        );
+        assert_eq!(deferring["settings"]["showSyntaxErrors"], false);
+        // Alone, ruff reports undefined names and syntax errors itself.
+        let alone = (lints.options)();
+        assert!(alone["settings"].get("lint").is_none(), "{alone}");
+        assert!(
+            alone["settings"].get("showSyntaxErrors").is_none(),
+            "{alone}"
+        );
+        for options in [deferring, alone] {
+            assert_eq!(
+                options["settings"]["codeAction"]["disableRuleComment"]["enable"],
+                false
+            );
+        }
+
+        // Each section pyright or basedpyright asks for, shaped as asked.
+        let settings = types.settings;
+        for section in ["python", "basedpyright"] {
+            let analysis = &settings(section)["analysis"];
+            assert_eq!(analysis["typeCheckingMode"], "standard", "{section}");
+            assert_eq!(analysis["diagnosticMode"], "openFilesOnly", "{section}");
+            assert_eq!(
+                analysis["diagnosticSeverityOverrides"]["reportMissingModuleSource"],
+                "none"
+            );
+            assert_eq!(settings(&format!("{section}.analysis")), *analysis);
+        }
+        assert!(settings("pyright").is_null());
+        assert!((lints.settings)("python").is_null());
+    }
+
+    #[test]
+    fn unresolved_imports_name_the_module_files() {
+        let missing = super::missing_modules;
+        assert_eq!(
+            missing(
+                "Import \"badciv.grid\" could not be resolved",
+                None,
+                "badciv/map.py"
+            ),
+            [
+                "badciv/grid.py",
+                "badciv/grid/__init__.py",
+                "src/badciv/grid.py",
+                "src/badciv/grid/__init__.py"
+            ]
+        );
+        // A nested source root, read from the declaring file's path, comes
+        // first.
+        assert_eq!(
+            missing(
+                "Import \"pkg.mod\" could not be resolved",
+                None,
+                "services/api/src/pkg/sub/x.py"
+            ),
+            [
+                "services/api/src/pkg/mod.py",
+                "services/api/src/pkg/mod/__init__.py",
+                "pkg/mod.py",
+                "pkg/mod/__init__.py",
+                "src/pkg/mod.py",
+                "src/pkg/mod/__init__.py"
+            ]
+        );
+        assert_eq!(
+            missing(
+                "Import \"badciv.grid\" could not be resolved",
+                None,
+                "src/badciv/map.py"
+            ),
+            [
+                "src/badciv/grid.py",
+                "src/badciv/grid/__init__.py",
+                "badciv/grid.py",
+                "badciv/grid/__init__.py"
+            ]
+        );
+        // A declaring file outside any `pkg/` shows no root of its own.
+        assert_eq!(
+            missing(
+                "Import \"pkg.mod\" could not be resolved",
+                None,
+                "tools/run.py"
+            ),
+            [
+                "pkg/mod.py",
+                "pkg/mod/__init__.py",
+                "src/pkg/mod.py",
+                "src/pkg/mod/__init__.py"
+            ]
+        );
+        // Relative imports resolve in the declaring package.
+        assert_eq!(
+            missing(
+                "Import \".grid\" could not be resolved",
+                None,
+                "src/badciv/map.py"
+            ),
+            ["src/badciv/grid.py", "src/badciv/grid/__init__.py"]
+        );
+        assert_eq!(
+            missing(
+                "Import \"..core.grid\" could not be resolved",
+                None,
+                "badciv/ui/map.py"
+            ),
+            ["badciv/core/grid.py", "badciv/core/grid/__init__.py"]
+        );
+        // A top-level name could be a package not installed; a source-only
+        // miss is about a stub, not a module.
+        assert!(missing("Import \"yaml\" could not be resolved", None, "a.py").is_empty());
+        assert!(missing(
+            "Import \"yaml.x\" could not be resolved from source",
+            None,
+            "a.py"
+        )
+        .is_empty());
+        assert!(missing("Import \"..x\" could not be resolved", None, "a.py").is_empty());
+        assert!(missing("\"Grid\" is not defined", None, "a.py").is_empty());
+    }
+
+    #[test]
+    fn a_failed_run_names_the_module_it_could_not_import() {
+        let output = "ImportError while importing test module '/w/tests/test_map.py'.
+tests/test_map.py:1: in <module>
+    from badciv.grid import Grid
+E   ModuleNotFoundError: No module named 'badciv.grid'
+Traceback (most recent call last):
+ModuleNotFoundError: No module named 'badciv.grid'
+ModuleNotFoundError: No module named 'numpy'
+";
+        assert_eq!(
+            super::missing_modules(output, None, ""),
+            [
+                "badciv/grid.py",
+                "badciv/grid/__init__.py",
+                "src/badciv/grid.py",
+                "src/badciv/grid/__init__.py"
+            ]
+        );
     }
 
     #[test]

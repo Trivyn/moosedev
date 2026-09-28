@@ -647,6 +647,8 @@ mod tests {
             files: vec!["command".into()],
             checks: vec![],
             addresses: vec![],
+            open_rules: vec![],
+            open_choices: vec![],
         });
         assert!(misrouted_action(&runner, &write("command")).is_ok());
         assert!(misrouted_action(&runner, &write("question")).is_err());

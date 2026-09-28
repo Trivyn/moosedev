@@ -39,10 +39,11 @@ pub(crate) struct LanguageSpec {
     /// Rust's `tests.rs`. `None` when the language adds nothing to the shared
     /// directory conventions.
     pub is_test_path: Option<fn(&str) -> bool>,
-    /// The language server the harness checks edits with; None when the
-    /// harness has none for this language yet.
+    /// The language servers the harness checks edits with, each started when
+    /// installed: a type checker, and a linter that runs as its own server
+    /// (ruff). Empty when the harness has none for this language yet.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
-    pub server: Option<ServerSpec>,
+    pub servers: &'static [ServerSpec],
     /// Programs a verification check runs that find their project by a
     /// manifest, searching upward from where they run.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
@@ -64,7 +65,29 @@ pub(crate) struct LanguageSpec {
     /// language.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub unresolved_names: Option<fn(&str) -> Vec<String>>,
+    /// The files a diagnostic or a failed run's output says a module
+    /// declaration or import could not find (rustc's "file not found for
+    /// module", pyright's unresolved import, Python's `ModuleNotFoundError`),
+    /// as paths relative to the project root, most likely first. Read from
+    /// the message, the compiler's full text when there is one, and the file
+    /// that declares the module (the finding's file; empty when unknown). The
+    /// harness asks the human whether a missing one joins the plan. None when
+    /// this build reads no such message of the language.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub missing_modules: Option<MissingModules>,
+    /// The directory a module declared in a file lives in, by the
+    /// language's own rule (Rust: `src/foo/` for `mod inner;` in
+    /// `src/foo.rs`, the file's own directory for `lib.rs`, `main.rs` and
+    /// `mod.rs`). A missing module file there is the project's even while
+    /// that directory does not exist yet. None when the language has no
+    /// such rule (Python's absolute imports name no directory by it).
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub module_dir: Option<fn(&str) -> String>,
 }
+
+/// A language's reader of missing module files: (message, the compiler's full
+/// text, the declaring file) to paths relative to the project root.
+pub(crate) type MissingModules = fn(&str, Option<&str>, &str) -> Vec<String>;
 
 /// A test a runner reported failed: its name as the runner printed it
 /// (`parse::tests::grid`, `tests/test_map.py::test_grid`) and, when the output
@@ -145,6 +168,54 @@ pub(crate) fn unresolved_names(message: &str) -> Vec<String> {
     names
 }
 
+/// The files every registered language's parser reads as missing modules in
+/// a diagnostic (`message`, `detail`) found in `declaring_file`, in order, each
+/// once. As for [`unresolved_names`], the formats do not overlap.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn missing_modules(
+    message: &str,
+    detail: Option<&str>,
+    declaring_file: &str,
+) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for parse in LANGUAGES
+        .iter()
+        .filter_map(|language| language.missing_modules)
+    {
+        for file in parse(message, detail, declaring_file) {
+            if !file.is_empty() && !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The directory a module declared in `declaring_file` lives in, when its
+/// language says (see [`LanguageSpec::module_dir`]).
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn declared_module_dir(declaring_file: &str) -> Option<String> {
+    let module_dir = language_for_path(declaring_file)?.module_dir?;
+    Some(module_dir(declaring_file))
+}
+
+/// `path`'s directory, `/`-separated, without a trailing `/`; empty at the
+/// project root.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// `dir` joined with the relative `path`, `/`-separated.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+fn join_path(dir: &str, path: &str) -> String {
+    if dir.is_empty() {
+        path.to_string()
+    } else {
+        format!("{dir}/{path}")
+    }
+}
+
 /// The text between each pair of backticks in `text`, in order.
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
 fn backticked(text: &str) -> impl Iterator<Item = &str> {
@@ -211,10 +282,60 @@ pub(crate) struct ServerSpec {
     /// The server reports `experimental/serverStatus` (rust-analyzer), whose
     /// `quiescent` flag says when indexing and checking are done.
     pub server_status: bool,
+    /// When the server publishes diagnostics for an open document, which is
+    /// what settling may wait for.
+    pub publishes: Publishes,
     /// Sent as `initializationOptions` when the language has no linter.
     pub options: fn() -> Value,
+    /// What this server leaves to another server of its language while that
+    /// one runs for the task (ruff: undefined names and syntax errors, to the
+    /// type checker). The other is listed before it in `servers`, so it has
+    /// started, or not, by the time this one starts.
+    pub defers_to: Option<Deferral>,
     /// The language's linter, run through the server when installed.
     pub linter: Option<LinterSpec>,
+    /// The server is itself a linter (ruff): its warnings whose `source` is
+    /// this are lints. Its errors stay errors.
+    pub lint_source: Option<&'static str>,
+    /// The answer to a `workspace/configuration` item, by its `section`
+    /// (pyright asks for `python`); [`no_settings`] answers null to all.
+    pub settings: fn(&str) -> Value,
+}
+
+/// When a language server publishes diagnostics for an open document.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Publishes {
+    /// For every version, even an unchanged result and even of a file its
+    /// configuration excludes (pyright): settling waits for its report on
+    /// the version just sent, since it may say nothing while it analyzes.
+    EveryVersion,
+    /// For every version of a file it checks, and nothing for a file its
+    /// configuration excludes (ruff): once it has published for a file,
+    /// settling waits for its report on the version just sent; a file it has
+    /// never published for may be one it excludes.
+    CheckedFiles,
+    /// Only when its result changes (rust-analyzer); other evidence
+    /// (`server_status`) says when it is done.
+    OnChange,
+}
+
+/// See [`ServerSpec::defers_to`].
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deferral {
+    /// The [`ServerSpec::name`] of the server deferred to.
+    pub to: &'static str,
+    /// Sent as `initializationOptions` instead of [`ServerSpec::options`]
+    /// while that server runs.
+    pub options: fn() -> Value,
+}
+
+/// No settings for any section: the server keeps its defaults and its
+/// initialization options.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn no_settings(_section: &str) -> Value {
+    Value::Null
 }
 
 /// A linter the server runs for the harness. A missing one is reported to the
@@ -282,12 +403,12 @@ pub(crate) fn check_tools() -> impl Iterator<Item = &'static CheckTool> {
     LANGUAGES.iter().flat_map(|language| language.checks.iter())
 }
 
-/// The language servers in `LANGUAGES` order.
+/// The language servers in `LANGUAGES` order, each language's in its order.
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
 pub(crate) fn language_servers() -> impl Iterator<Item = &'static ServerSpec> {
     LANGUAGES
         .iter()
-        .filter_map(|language| language.server.as_ref())
+        .flat_map(|language| language.servers.iter())
 }
 
 pub(crate) fn producer_hooks(producer_name: &str) -> Option<&'static ProducerHooks> {
@@ -443,6 +564,37 @@ mod tests {
         );
         assert_eq!(super::unresolved_names("Undefined name `grid`"), ["grid"]);
         assert!(super::unresolved_names("mismatched types\nexpected `u8`").is_empty());
+    }
+
+    #[test]
+    fn missing_modules_union_every_language() {
+        assert_eq!(
+            super::missing_modules(
+                "unresolved module, can't find module file: parse.rs, or parse/mod.rs",
+                None,
+                "src/lib.rs"
+            ),
+            ["src/parse.rs", "src/parse/mod.rs"]
+        );
+        assert_eq!(
+            super::missing_modules("Import \".grid\" could not be resolved", None, "pkg/a.py"),
+            ["pkg/grid.py", "pkg/grid/__init__.py"]
+        );
+        assert!(super::missing_modules("mismatched types", None, "src/lib.rs").is_empty());
+    }
+
+    /// Rust puts the modules a file declares in its stem's directory, or in
+    /// its own for `lib.rs`, `main.rs` and `mod.rs`; Python names none.
+    #[test]
+    fn a_declared_module_lives_in_the_declaring_files_module_directory() {
+        let dir = super::declared_module_dir;
+        assert_eq!(dir("src/foo.rs").as_deref(), Some("src/foo"));
+        assert_eq!(dir("crates/a/src/lib.rs").as_deref(), Some("crates/a/src"));
+        assert_eq!(dir("src/main.rs").as_deref(), Some("src"));
+        assert_eq!(dir("src/foo/mod.rs").as_deref(), Some("src/foo"));
+        assert_eq!(dir("lib.rs").as_deref(), Some(""));
+        assert_eq!(dir("pkg/a.py"), None);
+        assert_eq!(dir(""), None);
     }
 
     #[test]

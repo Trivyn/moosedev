@@ -314,6 +314,8 @@ mod tests {
             files: vec![],
             checks: vec!["true".into()],
             addresses: vec![],
+            open_rules: vec![],
+            open_choices: vec![],
         });
         runner.task.mode = Mode::Auto;
         runner.task.final_capture = true;
