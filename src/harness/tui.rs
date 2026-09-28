@@ -45,7 +45,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_RUN_STEPS: usize = 32;
 const MOUSE_SCROLL_LINES: u16 = 1;
@@ -372,23 +372,273 @@ fn visible(value: &str) -> String {
         .collect()
 }
 
-fn gate(task: &Task, standing: &[String]) -> String {
-    match task.phase {
-        Phase::AwaitingPlan => task.plan.as_ref().map(|plan| {
-            let mut text = format!("PLAN · human approval required\n{}\nFiles: {}\nChecks:\n{}", plan.summary, plan.files.join(", "), plan.checks.join("\n"));
-            if !task.permission_grants.is_empty() || !standing.is_empty() {
-                // Grants outlive a replan, so re-approval must not hide them,
-                // and standing paths are in force whether or not any exist.
-                text.push_str(&format!(
-                    "\nActive sandbox grants: {} task · {} standing · /permissions lists them",
-                    task.permission_grants.len(),
-                    standing.len()
-                ));
+/// A human gate as typed parts, so the pane can tell what the harness is
+/// asking from the plan or request it shows and from the commands that answer
+/// it; `to_plain` is the same content as text.
+#[derive(Debug, Default)]
+struct Gate {
+    accent: Color,
+    parts: Vec<GatePart>,
+    /// What the human can do; always rendered last, after a rule.
+    actions: Vec<GateAction>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GatePart {
+    /// The phase and what it needs, in the gate's accent.
+    Header(String),
+    /// A titled group inside a long gate, after a blank line.
+    Section(String),
+    /// The plan summary, request, or question, with its own line structure.
+    Body(String),
+    /// A labelled value; a block value sits indented under its label.
+    Field {
+        label: String,
+        value: String,
+        block: bool,
+    },
+    /// Side information.
+    Note(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GateAction {
+    command: String,
+    description: String,
+}
+
+/// Widest command the action column pads to; longer ones push their
+/// description along instead of widening every row.
+const ACTION_COLUMN: usize = 22;
+
+impl Gate {
+    fn new(accent: Color, header: impl Into<String>) -> Self {
+        Self {
+            accent,
+            parts: vec![GatePart::Header(header.into())],
+            actions: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.parts.is_empty() && self.actions.is_empty()
+    }
+
+    fn section(&mut self, text: impl Into<String>) -> &mut Self {
+        self.parts.push(GatePart::Section(text.into()));
+        self
+    }
+
+    fn body(&mut self, text: impl Into<String>) -> &mut Self {
+        let text = text.into();
+        if !text.is_empty() {
+            self.parts.push(GatePart::Body(text));
+        }
+        self
+    }
+
+    /// A field on one line, or under its label when the value spans lines.
+    fn field(&mut self, label: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        let value = value.into();
+        let block = value.contains('\n');
+        self.parts.push(GatePart::Field {
+            label: label.into(),
+            value,
+            block,
+        });
+        self
+    }
+
+    /// A field whose value always sits indented under its label.
+    fn block(&mut self, label: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        self.parts.push(GatePart::Field {
+            label: label.into(),
+            value: value.into(),
+            block: true,
+        });
+        self
+    }
+
+    fn note(&mut self, text: impl Into<String>) -> &mut Self {
+        self.parts.push(GatePart::Note(text.into()));
+        self
+    }
+
+    fn action(&mut self, command: impl Into<String>, description: impl Into<String>) -> &mut Self {
+        self.actions.push(GateAction {
+            command: command.into(),
+            description: description.into(),
+        });
+        self
+    }
+
+    #[cfg(test)]
+    fn to_plain(&self) -> String {
+        let mut lines = Vec::new();
+        for part in &self.parts {
+            match part {
+                GatePart::Header(text) | GatePart::Body(text) | GatePart::Note(text) => {
+                    lines.push(text.clone())
+                }
+                GatePart::Section(text) => {
+                    lines.push(String::new());
+                    lines.push(text.clone());
+                }
+                GatePart::Field {
+                    label,
+                    value,
+                    block: false,
+                } => lines.push(format!("{label}: {value}")),
+                GatePart::Field { label, value, .. } => {
+                    lines.push(format!("{label}:"));
+                    lines.extend(value.split('\n').map(indented));
+                }
             }
-            text.push_str(&plan_leaves(plan));
-            text.push_str(&format!("\n{SYMBOLIC_APPROVAL}\n/approve to execute · send feedback to revise"));
-            text
-        }).unwrap_or_default(),
+        }
+        if !self.actions.is_empty() && !self.parts.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(
+            self.actions
+                .iter()
+                .map(|action| format!("{}  {}", action.command, action.description)),
+        );
+        lines.join("\n")
+    }
+
+    /// Styled rows; `width` sizes the rule above the actions (the pane wraps
+    /// long rows afterwards, as it does every row).
+    fn lines(&self, width: usize) -> Vec<Line<'static>> {
+        let dim = Style::default().fg(Color::DarkGray);
+        let mut lines = Vec::new();
+        for part in &self.parts {
+            match part {
+                GatePart::Header(text) => lines.push(Line::from(Span::styled(
+                    visible(text),
+                    Style::default()
+                        .fg(self.accent)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                GatePart::Section(text) => {
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        visible(text),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                }
+                GatePart::Body(text) => {
+                    for line in visible(text).split('\n') {
+                        lines.push(body_line(line, self.accent));
+                    }
+                }
+                GatePart::Field {
+                    label,
+                    value,
+                    block: false,
+                } => lines.push(Line::from(vec![
+                    Span::styled(format!("{}: ", visible(label)), dim),
+                    Span::raw(visible(value)),
+                ])),
+                GatePart::Field { label, value, .. } => {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}:", visible(label)),
+                        dim,
+                    )));
+                    lines.extend(
+                        visible(value)
+                            .split('\n')
+                            .map(|line| Line::raw(indented(line))),
+                    );
+                }
+                GatePart::Note(text) => {
+                    for line in visible(text).split('\n') {
+                        lines.push(Line::from(Span::styled(
+                            line.to_owned(),
+                            dim.add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                }
+            }
+        }
+        if !self.actions.is_empty() {
+            if !self.parts.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "─".repeat(width.clamp(8, 60)),
+                    dim,
+                )));
+            }
+            let column = self
+                .actions
+                .iter()
+                .map(|action| visible(&action.command).width())
+                .filter(|width| *width <= ACTION_COLUMN)
+                .max()
+                .unwrap_or(0);
+            for action in &self.actions {
+                let command = visible(&action.command);
+                let pad = column.saturating_sub(command.width()) + 2;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        command,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(visible(&action.description), dim),
+                ]));
+            }
+        }
+        lines
+    }
+}
+
+/// A block field's value line, indented under its label (blank lines stay
+/// blank).
+fn indented(line: &str) -> String {
+    if line.is_empty() {
+        String::new()
+    } else {
+        format!("  {line}")
+    }
+}
+
+/// One line of a gate body: headings bold, list markers in the accent, the
+/// rest as written.
+fn body_line(line: &str, accent: Color) -> Line<'static> {
+    let content = line.trim_start();
+    let indent = &line[..line.len() - content.len()];
+    if content.starts_with('#') {
+        return Line::from(Span::styled(
+            line.to_owned(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    }
+    let digits = content.chars().take_while(char::is_ascii_digit).count();
+    let marker = if ["- ", "* ", "+ "].iter().any(|m| content.starts_with(m)) {
+        2
+    } else if digits > 0 && content[digits..].starts_with(". ") {
+        digits + 2
+    } else {
+        0
+    };
+    if marker == 0 {
+        return Line::raw(line.to_owned());
+    }
+    Line::from(vec![
+        Span::raw(indent.to_owned()),
+        Span::styled(content[..marker].to_owned(), Style::default().fg(accent)),
+        Span::raw(content[marker..].to_owned()),
+    ])
+}
+
+fn gate(task: &Task, standing: &[String]) -> Gate {
+    match task.phase {
+        Phase::AwaitingPlan => task
+            .plan
+            .as_ref()
+            .map(|plan| plan_gate(task, plan, standing))
+            .unwrap_or_default(),
         Phase::AwaitingSpecApproval => task
             .pending_spec
             .as_ref()
@@ -399,49 +649,128 @@ fn gate(task: &Task, standing: &[String]) -> String {
                     pending.scoping_failed.as_deref(),
                 )
             })
-            .unwrap_or_else(|| "SPEC APPROVAL · preview unavailable; run /approve-spec <path> again.".into()),
-        Phase::AwaitingPolicy => format!("EDIT APPROVAL · {}\n{}\nView Diff and Review (Tab), then /approve or send feedback.",task.pending_edit.as_ref().map(|e|e.file.as_str()).unwrap_or("pending edit"),task.pending_edit.as_ref().map(|e|e.reason.as_str()).unwrap_or("")),
+            .unwrap_or_else(|| {
+                let mut gate = Gate::new(Color::Yellow, "SPEC APPROVAL · preview unavailable");
+                gate.action("/approve-spec <path>", "run it again");
+                gate
+            }),
+        Phase::AwaitingPolicy => {
+            let edit = task.pending_edit.as_ref();
+            let mut gate = Gate::new(
+                Color::Yellow,
+                format!(
+                    "EDIT APPROVAL · {}",
+                    edit.map_or("pending edit", |e| e.file.as_str())
+                ),
+            );
+            gate.body(edit.map_or("", |e| e.reason.as_str()))
+                .action("Tab", "view the Diff and Review")
+                .action("/approve", "authorizes this exact edit")
+                .action("a message", "sends feedback instead");
+            gate
+        }
         Phase::AwaitingPermission => task
             .pending_permission
             .as_ref()
             .map(|pending| permission_gate(pending, standing))
             .unwrap_or_else(|| {
-                "PERMISSION REQUEST · details unavailable; deny it and retry the task.".into()
+                let mut gate =
+                    Gate::new(Color::LightRed, "PERMISSION REQUEST · details unavailable");
+                gate.action("/deny", "deny it, then retry the task");
+                gate
             }),
         Phase::AwaitingChoice => task
             .pending_choice
             .as_ref()
             .map(choice_gate)
-            .unwrap_or_else(|| "HARNESS QUESTION · details unavailable; send guidance to replan.".into()),
-        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge{}",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion."),match review_evidence(task).len() { 0 => String::new(), n => format!("\nEvidence: {n} fact(s) the harness checked, see Review") },rework_line(task)),
+            .unwrap_or_else(|| {
+                let mut gate = Gate::new(Color::Magenta, "HARNESS QUESTION · details unavailable");
+                gate.action("a message", "sends guidance to replan");
+                gate
+            }),
+        Phase::AwaitingReview => review_gate(task),
         // A park where the approved plan stands, or a question the model
         // asked under it: the reply is judged against the plan.
-        Phase::AwaitingInput if task.plan_stands_park || (task.handed_back && !task.turn_finished && task.mode == super::runner::Mode::Auto) => format!("INPUT NEEDED\n{}\nReply to continue the approved plan, or /plan to replan.", task.last_response),
-        Phase::AwaitingInput => if task.turn_finished {
-            "Your turn. Ask a follow-up or describe the next change.".into()
-        } else if task.last_response.is_empty() {
-            "Your input is needed. Reply below.".into()
-        } else {
-            // A question, an exhausted repair, or an interrupted action: show
-            // what is being waited on, not only that something is.
-            format!("INPUT NEEDED\n{}\nReply with guidance (the task returns to Plan for re-approval), or /plan.", task.last_response)
-        },
-        Phase::Cancelled => "Interrupted; obligations are saved. /continue resumes, or send follow-up guidance.".into(),
-        Phase::Complete => "Task complete. Describe the next request to continue this conversation.".into(),
-        _ => String::new(),
+        Phase::AwaitingInput
+            if task.plan_stands_park
+                || (task.handed_back
+                    && !task.turn_finished
+                    && task.mode == super::runner::Mode::Auto) =>
+        {
+            let mut gate = Gate::new(Color::Yellow, "INPUT NEEDED");
+            gate.body(task.last_response.as_str())
+                .action("a message", "replies to continue the approved plan")
+                .action("/plan", "replans");
+            gate
+        }
+        Phase::AwaitingInput => {
+            if task.turn_finished {
+                let mut gate = Gate::default();
+                gate.note("Your turn. Ask a follow-up or describe the next change.");
+                gate
+            } else if task.last_response.is_empty() {
+                Gate::new(Color::Yellow, "Your input is needed. Reply below.")
+            } else {
+                // A question, an exhausted repair, or an interrupted action:
+                // show what is being waited on, not only that something is.
+                let mut gate = Gate::new(Color::Yellow, "INPUT NEEDED");
+                gate.body(task.last_response.as_str())
+                    .action(
+                        "a message",
+                        "replies with guidance (the task returns to Plan for re-approval)",
+                    )
+                    .action("/plan", "replans");
+                gate
+            }
+        }
+        Phase::Cancelled => {
+            let mut gate = Gate::new(Color::LightRed, "Interrupted; obligations are saved.");
+            gate.action("/continue", "resumes the work")
+                .action("a message", "sends follow-up guidance");
+            gate
+        }
+        Phase::Complete => {
+            let mut gate = Gate::new(Color::Green, "Task complete.");
+            gate.note("Describe the next request to continue this conversation.");
+            gate
+        }
+        _ => Gate::default(),
     }
 }
 
 /// Rule labels the plan gate names before counting the rest.
 const OPEN_RULES_SHOWN: usize = 8;
 
-/// What a plan leaves to the human, for its approval gate: the rules it
-/// leaves open, which approval defers (marked when its summary speaks to
-/// them), and its open choices.
-fn plan_leaves(plan: &super::runner::Plan) -> String {
-    let mut text = String::new();
+/// The plan and what it leaves to the human: the rules it leaves open, which
+/// approval defers (marked when its summary speaks to them), and its open
+/// choices.
+fn plan_gate(task: &Task, plan: &super::runner::Plan, standing: &[String]) -> Gate {
+    let or_none = |items: &[String], separator: &str| {
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join(separator)
+        }
+    };
+    let mut gate = Gate::new(Color::Yellow, "PLAN · human approval required");
+    gate.body(plan.summary.as_str())
+        .field("Files", or_none(&plan.files, ", "))
+        .block("Checks", or_none(&plan.checks, "\n"));
+    let grants = !task.permission_grants.is_empty() || !standing.is_empty();
+    if grants {
+        // Grants outlive a replan, so re-approval must not hide them, and
+        // standing paths are in force whether or not any exist.
+        gate.field(
+            "Active sandbox grants",
+            format!(
+                "{} task · {} standing",
+                task.permission_grants.len(),
+                standing.len()
+            ),
+        );
+    }
     if !plan.open_rules.is_empty() {
-        let labels: Vec<String> = plan
+        let mut labels: Vec<String> = plan
             .open_rules
             .iter()
             .take(OPEN_RULES_SHOWN)
@@ -454,161 +783,224 @@ fn plan_leaves(plan: &super::runner::Plan) -> String {
             })
             .collect();
         let more = plan.open_rules.len().saturating_sub(OPEN_RULES_SHOWN);
-        let more = if more > 0 {
-            format!(" … and {more} more")
-        } else {
-            String::new()
-        };
-        text.push_str(&format!(
-            "\nLeaves open {} rule(s): {}{more} — /approve defers them; a message revises the plan.",
-            plan.open_rules.len(),
-            labels.join("; ")
-        ));
+        if more > 0 {
+            labels.push(format!("… and {more} more"));
+        }
+        gate.block(
+            format!("Leaves open {} rule(s)", plan.open_rules.len()),
+            labels.join("\n"),
+        );
     }
     for (index, choice) in plan.open_choices.iter().enumerate() {
-        let number = index + 1;
         let chosen = choice
             .answer
             .as_ref()
             .map_or(String::new(), |answer| format!("; chosen: {answer}"));
-        text.push_str(&format!(
-            "\nOpen choice {number}: {} [{}] (default: {}{chosen}) — /choose {number} <option>",
-            choice.question,
-            choice.options.join(" / "),
-            choice.default
-        ));
+        gate.field(
+            format!("Open choice {}", index + 1),
+            format!(
+                "{} [{}] (default: {}{chosen})",
+                choice.question,
+                choice.options.join(" / "),
+                choice.default
+            ),
+        );
     }
-    text
+    gate.note(SYMBOLIC_APPROVAL).action(
+        "/approve",
+        if plan.open_rules.is_empty() {
+            "execute the plan"
+        } else {
+            "execute the plan; defers the open rules"
+        },
+    );
+    for index in 1..=plan.open_choices.len() {
+        gate.action(
+            format!("/choose {index} <option>"),
+            format!("answer open choice {index}"),
+        );
+    }
+    gate.action("a message", "sends feedback that revises the plan");
+    if grants {
+        gate.action("/permissions", "lists the active sandbox grants");
+    }
+    gate
 }
 
-fn permission_gate(request: &super::runner::PendingPermission, standing: &[String]) -> String {
-    let mut text = format!(
-        "{}\nRequest: {}\nCommand:\n  {}\nReason:\n  {}\n",
-        if request.is_refused() {
-            "PERMISSION REQUEST · cannot be granted as asked"
-        } else {
-            "PERMISSION REQUEST · human approval required"
-        },
-        request.request_id,
-        request.command.replace('\n', "\n  "),
-        request.justification.replace('\n', "\n  ")
+fn review_gate(task: &Task) -> Gate {
+    let mut gate = Gate::new(
+        Color::LightBlue,
+        format!("KNOWLEDGE REVIEW · {} operation(s)", task.reviews.len()),
     );
-    if request.read_paths.is_empty() {
-        text.push_str("Read access: none\n");
+    gate.body(
+        task.capture_reason
+            .as_deref()
+            .unwrap_or("Review the captured evidence before completion."),
+    );
+    match review_evidence(task).len() {
+        0 => {}
+        n => {
+            gate.field(
+                "Evidence",
+                format!("{n} fact(s) the harness checked, see Review"),
+            );
+        }
+    }
+    let rework = rework_state(task);
+    if rework == Some(true) {
+        gate.note("Evidence shows unfinished work.")
+            .action("/rework <note>", "sends it back to work");
+    }
+    gate.action("Tab", "view Review")
+        .action(
+            "/accept [operation]",
+            "accepts one operation, or all displayed",
+        )
+        .action(
+            "/reject [operation]",
+            "rejects one operation, or all displayed",
+        )
+        .action("/no-knowledge", "confirms the no-change assessment");
+    if rework == Some(false) {
+        gate.action("/rework <note>", "sends it back to work");
+    }
+    gate
+}
+
+fn permission_gate(request: &super::runner::PendingPermission, standing: &[String]) -> Gate {
+    let mut gate = if request.is_refused() {
+        Gate::new(
+            Color::Red,
+            "PERMISSION REQUEST · cannot be granted as asked",
+        )
     } else {
-        text.push_str(&format!(
-            "Read access:\n  {}\n",
-            request.read_paths.join("\n  ")
-        ));
+        Gate::new(
+            Color::LightRed,
+            "PERMISSION REQUEST · human approval required",
+        )
+    };
+    gate.field("Request", request.request_id.as_str())
+        .block("Command", request.command.as_str())
+        .block("Reason", request.justification.as_str());
+    if request.read_paths.is_empty() {
+        gate.field("Read access", "none");
+    } else {
+        gate.block("Read access", request.read_paths.join("\n"));
     }
     if request.write_paths.is_empty() {
-        text.push_str("Write access: none\n");
+        gate.field("Write access", "none");
     } else {
-        text.push_str(&format!(
-            "Write access (create, modify, and delete):\n  {}\n",
-            request.write_paths.join("\n  ")
-        ));
+        gate.block(
+            "Write access (create, modify, and delete)",
+            request.write_paths.join("\n"),
+        );
     }
-    text.push_str(&format!(
-        "Network: {}\n",
+    gate.field(
+        "Network",
         if request.network {
             "enabled"
         } else {
             "disabled"
-        }
-    ));
+        },
+    );
     if !standing.is_empty() {
         // What is already ambient, so the human judges the delta and not the
         // whole surface.
-        text.push_str(&format!(
-            "Already granted standing (every task): {}\n",
-            standing.join(", ")
-        ));
+        gate.field("Already granted standing (every task)", standing.join(", "));
     }
     for line in request.findings.lines() {
-        text.push_str(&format!("Note: {line}\n"));
+        gate.note(format!("Note: {line}"));
     }
     // A refused request is still shown: the human sees what was asked and why
     // it was turned down, instead of the task dying silently.
     match &request.refusal {
-        Some(refusal) => text.push_str(&format!(
-            "Refused:\n  {}\n/deny dismisses it and tells the model to ask for something narrower",
-            refusal.replace('\n', "\n  ")
-        )),
-        None => text.push_str(
-            "/approve grants this access for the current task and runs the command · /deny refuses it",
-        ),
+        Some(refusal) => {
+            gate.block("Refused", refusal.as_str()).action(
+                "/deny",
+                "dismisses it and tells the model to ask for something narrower",
+            );
+        }
+        None => {
+            gate.action(
+                "/approve",
+                "grants this access for the current task and runs the command",
+            )
+            .action("/deny", "refuses it");
+        }
     }
-    text
+    gate
 }
 
-fn choice_gate(choice: &super::runner::PendingChoice) -> String {
-    let mut text = format!("HARNESS QUESTION\n{}\n", choice.prompt);
+fn choice_gate(choice: &super::runner::PendingChoice) -> Gate {
+    let mut gate = Gate::new(Color::Magenta, "HARNESS QUESTION");
+    gate.body(choice.prompt.as_str());
     for option in &choice.options {
         let default = if option.key == choice.default {
             " (default)"
         } else {
             ""
         };
-        text.push_str(&format!(
-            "/choose {}  {}{default}\n",
-            option.key, option.label
-        ));
+        gate.action(
+            format!("/choose {}", option.key),
+            format!("{}{default}", option.label),
+        );
     }
-    text.push_str("Or send guidance: the task returns to Plan.");
-    text
+    gate.action("a message", "sends guidance: the task returns to Plan");
+    gate
 }
 
 fn spec_approval_gate(
     preview: &SpecPrepareResponse,
     uncited: &[SpecUncited],
     scoping_failed: Option<&str>,
-) -> String {
-    let mut text = format!(
-        "SPEC APPROVAL · human approval required\nSource: {}\nSHA-256: {}\nKnowledge revision: {}\n",
-        preview.path, preview.source_sha256, preview.knowledge_revision
-    );
+) -> Gate {
+    let mut gate = Gate::new(Color::Yellow, "SPEC APPROVAL · human approval required");
+    gate.field("Source", preview.path.as_str())
+        .field("SHA-256", preview.source_sha256.as_str())
+        .field("Knowledge revision", preview.knowledge_revision.as_str());
     if preview.already_approved {
-        text.push_str("\nUNCHANGED · this source and active record set are already approved\n");
+        gate.section("UNCHANGED · this source and active record set are already approved");
     }
     match &preview.component {
         Some(plan) => {
-            text.push_str(&format!(
-                "\nCOMPONENT · {} · {}\nCovers: {}\nIRI: {}\n{}\n",
+            gate.section(format!(
+                "COMPONENT · {} · {}",
                 plan.name,
-                component_state(plan),
-                plan.covers.join(" "),
-                plan.iri,
-                if preview.parts.is_empty() {
-                    "Every record below concerns this component; its rules govern the files it covers."
-                } else {
-                    "Records without a part below concern this component; its rules govern every file it covers, parts included."
-                }
-            ));
+                component_state(plan)
+            ))
+            .field("Covers", plan.covers.join(" "))
+            .field("IRI", plan.iri.as_str())
+            .note(if preview.parts.is_empty() {
+                "Every record below concerns this component; its rules govern the files it covers."
+            } else {
+                "Records without a part below concern this component; its rules govern every file it covers, parts included."
+            });
             for part in &preview.parts {
-                text.push_str(&format!(
-                    "PART · {} · {} · Covers {} · {} record(s) · stated by \"{}\"\nIRI: {}\n",
+                gate.section(format!(
+                    "PART · {} · {} · Covers {} · {} record(s) · stated by \"{}\"",
                     part.plan.name,
                     component_state(&part.plan),
                     part.plan.covers.join(" "),
                     part.records.len(),
                     part.stated_by,
-                    part.plan.iri
-                ));
+                ))
+                .field("IRI", part.plan.iri.as_str());
             }
             if let Some(diagnostic) = scoping_failed {
-                text.push_str(&format!(
-                    "SCOPING FAILED · every record governs component {}. {diagnostic}\n",
+                gate.section(format!(
+                    "SCOPING FAILED · every record governs component {}. {diagnostic}",
                     plan.name
                 ));
             }
         }
         // Floating records are findable only by lexical luck: say so before
         // the human accepts, and name the command that anchors them.
-        None => text.push_str(&format!(
-            "\nCOMPONENT · none · the records below will not be linked to any component or code, so their Constraints will not govern implementation. To anchor them, run /approve-spec {} <dir/ | file | .> instead (an unchanged batch is re-approved with the link).\n",
-            preview.path
-        )),
+        None => {
+            gate.section("COMPONENT · none").body(format!(
+                "The records below will not be linked to any component or code, so their Constraints will not govern implementation. To anchor them, run /approve-spec {} <dir/ | file | .> instead (an unchanged batch is re-approved with the link).",
+                preview.path
+            ));
+        }
     }
     for (index, entry) in preview.entries.iter().enumerate() {
         let part = preview
@@ -624,19 +1016,19 @@ fn spec_approval_gate(
                 ("SUPERSEDE", format!("{previous_iri} -> {iri}"))
             }
         };
-        text.push_str(&format!(
-            "\n{effect} · {} · {}{part}\nExtracted claim: {}\nIRI: {identity}\n",
-            entry.draft.kind, entry.draft.title, entry.draft.description
-        ));
-        text.push_str("Evidence:\n");
-        for evidence in &entry.draft.evidence {
-            text.push_str(&format!("  {evidence}\n"));
-        }
+        gate.section(format!(
+            "{effect} · {} · {}{part}",
+            entry.draft.kind, entry.draft.title
+        ))
+        .field("Extracted claim", entry.draft.description.as_str())
+        .field("IRI", identity)
+        .block("Evidence", entry.draft.evidence.join("\n"));
         if let Some(existing) = &entry.existing {
-            text.push_str(&format!(
-                "Existing accepted record: {} · {}\nExisting claim and evidence:\n{}\n",
-                existing.title, existing.iri, existing.description
-            ));
+            gate.field(
+                "Existing accepted record",
+                format!("{} · {}", existing.title, existing.iri),
+            )
+            .block("Existing claim and evidence", existing.description.as_str());
         }
     }
     for retirement in &preview.retirements {
@@ -644,36 +1036,47 @@ fn spec_approval_gate(
             SpecRetirementDisposition::Retract => "RETRACT",
             SpecRetirementDisposition::RetainShared => "RETAIN SHARED",
         };
-        text.push_str(&format!(
-            "\n{effect} · {} · {}\nIRI: {}\nExisting claim and evidence:\n{}\n",
-            retirement.kind, retirement.title, retirement.iri, retirement.description
-        ));
+        gate.section(format!(
+            "{effect} · {} · {}",
+            retirement.kind, retirement.title
+        ))
+        .field("IRI", retirement.iri.as_str())
+        .block(
+            "Existing claim and evidence",
+            retirement.description.as_str(),
+        );
     }
     if let Some(previous) = &preview.previous_approval_iri {
-        let effect = if preview.already_approved {
+        gate.section(if preview.already_approved {
             "CURRENT APPROVAL"
         } else {
             "SUPERSEDE PRIOR APPROVAL"
-        };
-        text.push_str(&format!("\n{effect}\nIRI: {previous}\n"));
+        })
+        .field("IRI", previous.as_str());
     }
     // What the batch leaves out is as much a part of the judgment as what it
     // holds: a section no record cites will never govern anything.
     if !uncited.is_empty() {
-        text.push_str(&format!(
-            "\nUNCITED · {} range(s) of {} no record above cites; they will not become project knowledge:\n",
+        gate.section(format!(
+            "UNCITED · {} range(s) of {} no record above cites; they will not become project knowledge",
             uncited.len(),
             preview.path
-        ));
-        for range in uncited {
-            text.push_str(&format!("  {}\n", range.describe()));
-        }
+        ))
+        .body(
+            uncited
+                .iter()
+                .map(|range| format!("  {}", range.describe()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
-    text.push_str(&format!(
-        "\nApproval marker: spec-approval: {}\n/approve-spec or ‘I approve the spec’ records this exact batch.\nA separate /approve is still required before code execution.",
-        preview.path
-    ));
-    text
+    gate.section(format!("Approval marker: spec-approval: {}", preview.path))
+        .note("A separate /approve is still required before code execution.")
+        .action(
+            "/approve-spec",
+            "records this exact batch (or say ‘I approve the spec’)",
+        );
+    gate
 }
 
 fn component_state(plan: &SpecComponentPlan) -> String {
@@ -782,24 +1185,27 @@ fn conversation_body(snapshot: &Snapshot, view: &View) -> Text<'static> {
             Style::default().fg(Color::DarkGray),
         );
     }
-    let mut control = String::new();
+    let mut control = snapshot.task.as_ref().map_or_else(Gate::default, |task| {
+        gate(task, &snapshot.standing_read_paths)
+    });
     if let Some(task) = &snapshot.task {
-        control.push_str(&gate(task, &snapshot.standing_read_paths));
         if !task.reviews.is_empty() && task.phase != Phase::AwaitingReview {
-            control.push_str(&format!(
-                "\n\n{} knowledge review(s) pending · /review or view Review",
-                task.reviews.len()
-            ));
+            control
+                .note(format!(
+                    "{} knowledge review(s) pending",
+                    task.reviews.len()
+                ))
+                .action("/review", "shows them, or view Review");
         }
     }
     if !snapshot.conversation.queued.is_empty() {
-        control.push_str(&format!(
-            "\n\nQUEUED · {} message(s), delivered before the next action",
+        control.note(format!(
+            "QUEUED · {} message(s), delivered before the next action",
             snapshot.conversation.queued.len()
         ));
     }
     if !control.is_empty() {
-        push_plain_lines(&mut lines, &control, Style::default().fg(Color::Yellow));
+        lines.extend(control.lines(view.content_area.width as usize));
     }
     Text::from(lines)
 }
@@ -1419,22 +1825,17 @@ fn evidence_lines(evidence: &[String]) -> String {
     text
 }
 
-/// The current capture note's evidence, if any.
-/// At the final capture review, how to send the work back instead of
-/// completing, said more firmly when the harness's evidence shows work left.
-fn rework_line(task: &Task) -> &'static str {
-    if !task.at_final_review() {
-        ""
-    } else if review_evidence(task)
-        .iter()
-        .any(|fact| fact.starts_with("Planned files not edited") || fact.starts_with("Stubs left"))
-    {
-        "\nEvidence shows unfinished work: /rework <note> sends it back."
-    } else {
-        " · /rework <note> sends it back to work"
-    }
+/// At the final review, whether its evidence shows work left unfinished;
+/// `None` elsewhere, where /rework does not apply.
+fn rework_state(task: &Task) -> Option<bool> {
+    task.at_final_review().then(|| {
+        review_evidence(task).iter().any(|fact| {
+            fact.starts_with("Planned files not edited") || fact.starts_with("Stubs left")
+        })
+    })
 }
 
+/// The current capture note's evidence, if any.
 fn review_evidence(task: &Task) -> &[String] {
     task.symbolic
         .as_ref()
@@ -1859,9 +2260,7 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
             view.follow = false;
             view.scroll = view.scroll.saturating_sub(12);
         }
-        KeyCode::PageDown => {
-            view.scroll = view.scroll.saturating_add(12).min(view.scroll_max);
-        }
+        KeyCode::PageDown => scroll_down(view, 12),
         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
             if view.tab == 3 {
                 move_knowledge_selection(view, false);
@@ -1874,7 +2273,7 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
             if view.tab == 3 {
                 move_knowledge_selection(view, true);
             } else {
-                view.scroll = view.scroll.saturating_add(1).min(view.scroll_max)
+                scroll_down(view, 1)
             }
         }
         KeyCode::Up => view.composer.vertical(false),
@@ -1889,6 +2288,15 @@ fn key(view: &mut View, key: KeyEvent) -> Option<Command> {
         _ => {}
     }
     None
+}
+
+/// Scrolls toward the tail; reaching it resumes following new output, so
+/// scrolling back down after reading history keeps the tail in view again.
+fn scroll_down(view: &mut View, lines: u16) {
+    view.scroll = view.scroll.saturating_add(lines).min(view.scroll_max);
+    if view.scroll >= view.scroll_max {
+        view.follow = true;
+    }
 }
 
 fn clear_selection(view: &mut View) {
@@ -1992,10 +2400,7 @@ fn mouse(view: &mut View, event: MouseEvent) -> bool {
             true
         }
         MouseEventKind::ScrollDown => {
-            view.scroll = view
-                .scroll
-                .saturating_add(MOUSE_SCROLL_LINES)
-                .min(view.scroll_max);
+            scroll_down(view, MOUSE_SCROLL_LINES);
             true
         }
         _ => false,
@@ -2434,23 +2839,30 @@ mod tests {
                 answer: None,
             }],
         });
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(
-            text.contains("\nLeaves open 2 rule(s): Rule 1; Rule 2 (mentioned in the summary) — /approve defers them; a message revises the plan."),
+            text.contains(
+                "\nLeaves open 2 rule(s):\n  Rule 1\n  Rule 2 (mentioned in the summary)\n"
+            ),
             "{text}"
         );
         assert!(
-            text.contains("\nOpen choice 1: Which separator? [space / dash / none] (default: space) — /choose 1 <option>"),
+            text.contains(
+                "\nOpen choice 1: Which separator? [space / dash / none] (default: space)\n"
+            ),
             "{text}"
         );
-        assert!(text.ends_with("/approve to execute · send feedback to revise"));
+        assert!(
+            text.ends_with("\n\n/approve  execute the plan; defers the open rules\n/choose 1 <option>  answer open choice 1\na message  sends feedback that revises the plan"),
+            "{text}"
+        );
 
         let plan = task.plan.as_mut().unwrap();
         plan.open_rules = (1..=10).map(rule).collect();
         plan.open_choices[0].answer = Some("dash".into());
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(
-            text.contains("Leaves open 10 rule(s): Rule 1; Rule 2 (mentioned in the summary); Rule 3; Rule 4; Rule 5; Rule 6; Rule 7; Rule 8 … and 2 more — "),
+            text.contains("Leaves open 10 rule(s):\n  Rule 1\n  Rule 2 (mentioned in the summary)\n  Rule 3\n  Rule 4\n  Rule 5\n  Rule 6\n  Rule 7\n  Rule 8\n  … and 2 more\n"),
             "{text}"
         );
         assert!(text.contains("(default: space; chosen: dash)"), "{text}");
@@ -2458,8 +2870,69 @@ mod tests {
         let plan = task.plan.as_mut().unwrap();
         plan.open_rules.clear();
         plan.open_choices.clear();
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(!text.contains("Leaves open") && !text.contains("Open choice"));
+        assert!(!text.contains("/choose") && text.contains("/approve  execute the plan\n"));
+    }
+
+    #[test]
+    fn the_plan_gate_renders_as_styled_sections_with_actions_last() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingPlan;
+        task.plan = Some(super::super::runner::Plan {
+            summary: "## Approach\nTrim label whitespace\n- strip both ends".into(),
+            files: vec!["labels.py".into()],
+            checks: vec!["pytest -q".into()],
+            addresses: vec![],
+            open_rules: vec![],
+            open_choices: vec![],
+        });
+        let lines = gate(&task, &[]).lines(40);
+        let row = |index: usize| lines[index].to_string();
+        let dim = Style::default().fg(Color::DarkGray);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+
+        assert_eq!(row(0), "PLAN · human approval required");
+        assert_eq!(lines[0].spans[0].style, bold.fg(Color::Yellow));
+        // The summary keeps its lines, in the default colour, not the accent.
+        assert_eq!(row(1), "## Approach");
+        assert_eq!(lines[1].spans[0].style, bold);
+        assert_eq!(lines[2].spans[0].style, Style::default());
+        assert_eq!(row(3), "- strip both ends");
+        assert_eq!(lines[3].spans[1].style, Style::default().fg(Color::Yellow));
+        assert_eq!(lines[3].spans[2].style, Style::default());
+        // Fields: a dim label and a plain value, block values indented.
+        assert_eq!(row(4), "Files: labels.py");
+        assert_eq!(lines[4].spans[0].style, dim);
+        assert_eq!(lines[4].spans[1].style, Style::default());
+        assert_eq!((row(5), row(6)), ("Checks:".into(), "  pytest -q".into()));
+        assert_eq!(row(7), SYMBOLIC_APPROVAL);
+        assert_eq!(lines[7].spans[0].style, dim.add_modifier(Modifier::ITALIC));
+        // The human's actions come last, after a rule, as commands in a
+        // column beside dim descriptions.
+        assert_eq!(row(8), "─".repeat(40));
+        assert_eq!(row(9), "/approve   execute the plan");
+        assert_eq!(row(10), "a message  sends feedback that revises the plan");
+        assert_eq!(lines.len(), 11);
+        let command = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        for line in &lines[9..] {
+            assert_eq!(line.spans[0].style, command);
+            assert_eq!(line.spans[2].style, dim);
+        }
+
+        // The conversation pane shows the gate the same way.
+        let mut view = View::default();
+        view.content_area.width = 40;
+        let text = text_content(&conversation_body(&snapshot_for(task), &view));
+        assert!(
+            text.ends_with(&format!(
+                "{}\n/approve   execute the plan\na message  sends feedback that revises the plan",
+                "─".repeat(40)
+            )),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2474,12 +2947,15 @@ mod tests {
             open_rules: vec![],
             open_choices: vec![],
         });
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.contains("PLAN · human approval required"));
         assert!(text.contains(SYMBOLIC_APPROVAL));
         assert!(text.contains("no model call"));
-        assert!(text.ends_with("/approve to execute · send feedback to revise"));
-        assert!(!text.contains("Active sandbox grants"));
+        assert!(text.starts_with(
+            "PLAN · human approval required\nTrim label whitespace\nFiles: labels.py\nChecks:\n  pytest -q\n"
+        ));
+        assert!(text.ends_with("a message  sends feedback that revises the plan"));
+        assert!(!text.contains("Active sandbox grants") && !text.contains("/permissions"));
 
         task.permission_grants = vec![serde_json::from_value(serde_json::json!({
             "id": "grant-1",
@@ -2490,14 +2966,14 @@ mod tests {
             "approved_at": "2026-09-21T00:00:00Z"
         }))
         .unwrap()];
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.contains("Active sandbox grants: 1 task · 0 standing"));
-        assert!(text.ends_with("/approve to execute · send feedback to revise"));
+        assert!(text.ends_with("/permissions  lists the active sandbox grants"));
         // Standing paths are in force with no approval, so re-approving a plan
         // must show them even when the task itself has been granted nothing.
         let standing = ["/opt/toolchain".to_string()];
         task.permission_grants.clear();
-        let text = gate(&task, &standing);
+        let text = gate(&task, &standing).to_plain();
         assert!(
             text.contains("Active sandbox grants: 0 task · 1 standing"),
             "{text}"
@@ -2508,20 +2984,25 @@ mod tests {
         let mut task = task_fixture(PathBuf::from("/project"));
         task.phase = Phase::AwaitingInput;
         task.last_response = "action failed validation after three attempts. Provide human guidance before retrying; pending work is preserved. replace old_text must match exactly once; found 0".into();
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.starts_with("INPUT NEEDED\naction failed validation after three attempts."));
         assert!(text.ends_with(
-            "Reply with guidance (the task returns to Plan for re-approval), or /plan."
+            "\n\na message  replies with guidance (the task returns to Plan for re-approval)\n/plan  replans"
         ));
 
         task.last_response = "Which database should the skeleton use?".into();
-        assert!(gate(&task, &[]).contains("Which database should the skeleton use?"));
+        assert!(gate(&task, &[])
+            .to_plain()
+            .contains("Which database should the skeleton use?"));
 
         task.last_response.clear();
-        assert_eq!(gate(&task, &[]), "Your input is needed. Reply below.");
+        assert_eq!(
+            gate(&task, &[]).to_plain(),
+            "Your input is needed. Reply below."
+        );
 
         task.turn_finished = true;
-        assert!(gate(&task, &[]).starts_with("Your turn."));
+        assert!(gate(&task, &[]).to_plain().starts_with("Your turn."));
 
         // A park where the approved plan stands shows its reason, not only
         // "Your turn", and says the reply continues the plan.
@@ -2529,21 +3010,28 @@ mod tests {
         task.last_response =
             "The model keeps asking to read files whose current text it already has (a.rs last)."
                 .into();
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.starts_with("INPUT NEEDED\nThe model keeps asking to read files"));
-        assert!(text.ends_with("Reply to continue the approved plan, or /plan to replan."));
+        assert!(
+            text.ends_with("\n\na message  replies to continue the approved plan\n/plan  replans")
+        );
     }
     #[test]
     fn the_final_review_gate_offers_rework_and_says_when_work_is_left() {
         let mut task = task_fixture(PathBuf::from("/project"));
         task.phase = Phase::AwaitingReview;
-        assert!(!gate(&task, &[]).contains("/rework"));
+        assert!(!gate(&task, &[]).to_plain().contains("/rework"));
         // `final_capture` is the runner's own; a journal can carry it.
         let mut value = serde_json::to_value(&task).unwrap();
         value["final_capture"] = true.into();
         let mut task: Task = serde_json::from_value(value).unwrap();
         assert!(task.at_final_review());
-        assert!(gate(&task, &[]).ends_with(" · /rework <note> sends it back to work"));
+        let text = gate(&task, &[]).to_plain();
+        assert!(
+            text.ends_with("/no-knowledge  confirms the no-change assessment\n/rework <note>  sends it back to work"),
+            "{text}"
+        );
+        assert!(!text.contains("unfinished work"));
         task.symbolic = Some(super::super::runner::SymbolicState {
             capture_note: Some(super::super::runner::CaptureNoteState {
                 operation_id: "note".into(),
@@ -2556,8 +3044,13 @@ mod tests {
             }),
             ..Default::default()
         });
-        assert!(gate(&task, &[])
-            .ends_with("\nEvidence shows unfinished work: /rework <note> sends it back."));
+        let text = gate(&task, &[]).to_plain();
+        // Unfinished work puts /rework first, under a note that says why.
+        assert!(
+            text.contains("Evidence: 1 fact(s) the harness checked, see Review\nEvidence shows unfinished work.\n\n/rework <note>  sends it back to work\nTab  view Review\n"),
+            "{text}"
+        );
+        assert!(text.ends_with("/no-knowledge  confirms the no-change assessment"));
     }
     #[test]
     fn permission_gate_displays_exact_capabilities_and_decision_commands() {
@@ -2575,15 +3068,17 @@ mod tests {
             }))
             .unwrap(),
         );
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.contains("PERMISSION REQUEST · human approval required"));
         assert!(text.contains("Request: permission-1"));
         assert!(text.contains("Command:\n  cargo install example"));
         assert!(text.contains("Read access:\n  /opt/toolchain"));
         assert!(text.contains("Write access (create, modify, and delete):\n  /tmp/tool-cache"));
         assert!(text.contains("Network: enabled"));
-        assert!(text.contains("/approve grants this access for the current task"));
-        assert!(text.contains("/deny refuses it"));
+        assert!(text.contains("Reason:\n  Install the required local tool"));
+        assert!(text.contains(
+            "\n\n/approve  grants this access for the current task and runs the command\n/deny  refuses it"
+        ));
     }
     #[test]
     fn choice_gate_lists_each_option_as_a_command_with_the_default_marked() {
@@ -2608,7 +3103,7 @@ mod tests {
             .collect(),
             default: "add".into(),
         });
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(
             text.starts_with("HARNESS QUESTION\nThe model wants to edit `src/error.rs`"),
             "{text}"
@@ -2621,7 +3116,7 @@ mod tests {
         );
         assert!(text.contains("/choose replan  Return to Plan to rework the plan\n"));
         assert!(text.contains("/choose refuse  Refuse: the model continues within the plan\n"));
-        assert!(text.ends_with("Or send guidance: the task returns to Plan."));
+        assert!(text.ends_with("a message  sends guidance: the task returns to Plan"));
     }
     #[test]
     fn spec_gate_warns_when_no_component_will_anchor_the_records() {
@@ -2648,13 +3143,13 @@ mod tests {
                 {"start": 61, "end": 61, "heading": ""}
             ]
         })).unwrap());
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(
-            text.contains("COMPONENT · none · the records below will not be linked"),
+            text.contains("\nCOMPONENT · none\nThe records below will not be linked"),
             "{text}"
         );
         assert!(
-            text.contains("UNCITED · 2 range(s) of badciv-map.md no record above cites; they will not become project knowledge:\n  lines 20-50 (## Faction Rules)\n  line 61\n"),
+            text.contains("UNCITED · 2 range(s) of badciv-map.md no record above cites; they will not become project knowledge\n  lines 20-50 (## Faction Rules)\n  line 61\n"),
             "{text}"
         );
         assert!(
@@ -2699,25 +3194,25 @@ mod tests {
                 "already_approved": false
             }
         })).unwrap());
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.contains("SPEC APPROVAL · human approval required"));
         assert!(text.contains(
-            "COMPONENT · labels · NEW\nCovers: labels/\nIRI: https://moosedev.dev/kg/SystemComponent/labels\n"
+            "\nCOMPONENT · labels · NEW\nCovers: labels/\nIRI: https://moosedev.dev/kg/SystemComponent/labels\n"
         ));
         assert!(text.contains(
             "NEW · Requirement · Preserve labels\nExtracted claim: Labels retain meaningful whitespace."
         ));
         assert!(text.contains("Evidence:\n  specs/labels.md:7-8"));
-        assert!(text.contains("Existing claim and evidence:\nProcessing remains local."));
-        assert!(text.contains("Existing claim and evidence:\nLabels had the old bound."));
-        assert!(text.contains("Existing claim and evidence:\nThe old claim."));
+        assert!(text.contains("Existing claim and evidence:\n  Processing remains local.\n\n  Evidence:\n  - specs/original.md:4"));
+        assert!(text.contains("Existing claim and evidence:\n  Labels had the old bound."));
+        assert!(text.contains("Existing claim and evidence:\n  The old claim."));
         assert!(text.contains("REUSE · Constraint · Local only"));
         assert!(text.contains("SUPERSEDE · Constraint · Bounded labels"));
         assert!(text.contains("RETRACT · Requirement · Old behavior"));
         assert!(text.contains("RETAIN SHARED · Constraint · Shared behavior"));
         assert!(text.contains("SUPERSEDE PRIOR APPROVAL\nIRI: https://moosedev.dev/kg/ArchitecturalDecision/approval-v1"));
         assert!(text.contains("Approval marker: spec-approval: specs/labels.md"));
-        assert!(text.contains("A separate /approve is still required before code execution."));
+        assert!(text.ends_with("A separate /approve is still required before code execution.\n\n/approve-spec  records this exact batch (or say ‘I approve the spec’)"));
     }
     #[test]
     fn spec_gate_shows_each_part_and_tags_the_records_it_governs() {
@@ -2739,13 +3234,13 @@ mod tests {
                            "stated_by": "sim crate responsibility", "records": [1]}]
             }
         })).unwrap());
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(
             text.contains("Records without a part below concern this component"),
             "{text}"
         );
         assert!(text.contains(
-            "PART · sim · NEW · Covers sim/ · 1 record(s) · stated by \"sim crate responsibility\"\nIRI: https://moosedev.dev/kg/SystemComponent/sim\n"
+            "\nPART · sim · NEW · Covers sim/ · 1 record(s) · stated by \"sim crate responsibility\"\nIRI: https://moosedev.dev/kg/SystemComponent/sim\n"
         ), "{text}");
         assert!(
             text.contains("NEW · Requirement · Faction weaknesses · part sim\n"),
@@ -2758,7 +3253,7 @@ mod tests {
         pending.preview.parts.clear();
         pending.scoping_failed =
             Some("part sim is stated by record 0, which does not name it".into());
-        let text = gate(&task, &[]);
+        let text = gate(&task, &[]).to_plain();
         assert!(text.contains(
             "SCOPING FAILED · every record governs component spec. part sim is stated by record 0"
         ), "{text}");
@@ -3192,6 +3687,73 @@ mod tests {
         assert!(mouse(&mut view, event(MouseEventKind::ScrollDown)));
         assert_eq!(view.scroll, 5);
         assert!(!view.follow);
+
+        // Scrolling back down to the tail resumes following it.
+        while view.scroll + MOUSE_SCROLL_LINES < view.scroll_max {
+            assert!(mouse(&mut view, event(MouseEventKind::ScrollDown)));
+            assert!(!view.follow, "not at the tail yet: {}", view.scroll);
+        }
+        assert!(mouse(&mut view, event(MouseEventKind::ScrollDown)));
+        assert_eq!(view.scroll, 10);
+        assert!(view.follow);
+        sync_scroll_bounds(&mut view, 30, 10);
+        assert_eq!(view.scroll, 20, "following keeps new output in view");
+
+        assert!(mouse(&mut view, event(MouseEventKind::ScrollUp)));
+        assert!(!view.follow);
+    }
+    #[test]
+    fn keyboard_scrolling_down_to_the_tail_resumes_following() {
+        for tab in [0, 1] {
+            let mut view = View {
+                tab,
+                follow: true,
+                ..View::default()
+            };
+            sync_scroll_bounds(&mut view, 40, 10);
+            assert_eq!(view.scroll, 30);
+
+            key(
+                &mut view,
+                KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            );
+            assert_eq!((view.scroll, view.follow), (18, false));
+            key(&mut view, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+            assert_eq!((view.scroll, view.follow), (17, false));
+            // Output arriving while scrolled up does not move the view.
+            sync_scroll_bounds(&mut view, 45, 10);
+            assert_eq!(view.scroll, 17);
+
+            key(
+                &mut view,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            );
+            assert_eq!((view.scroll, view.follow), (29, false));
+            key(&mut view, KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+            assert_eq!((view.scroll, view.follow), (30, false));
+            key(
+                &mut view,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            );
+            assert_eq!((view.scroll, view.follow), (35, true));
+            sync_scroll_bounds(&mut view, 50, 10);
+            assert_eq!(view.scroll, 40, "the tail stays in view");
+
+            // Alt-Down onto the last line resumes following too.
+            key(&mut view, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+            assert!(!view.follow);
+            key(&mut view, KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+            assert_eq!((view.scroll, view.follow), (40, true));
+        }
+        // The transcript tabs follow by default when switched to.
+        let mut view = View {
+            tab: 5,
+            ..View::default()
+        };
+        key(&mut view, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(view.tab == 0 && view.follow);
+        key(&mut view, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(view.tab == 1 && view.follow);
     }
     #[test]
     fn dragging_selects_rendered_text_scrolls_past_edges_and_requests_a_copy() {
