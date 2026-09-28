@@ -367,6 +367,27 @@ async fn a_flattened_json_schema_answer_is_folded_back_into_its_envelope() {
         .any(|event| event.kind == "json_unflattened"));
 }
 
+/// The same model also keyed a variant by its tag
+/// (`{"action":{"read":{"file":…}}}`); that is rebuilt too.
+#[tokio::test]
+async fn a_tag_keyed_json_schema_answer_is_rebuilt() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    runner.set_action_contract(ActionContract::JsonSchema);
+    fixture.reply(
+        "harness_action",
+        json!({"message":"Reading it first.","action":{"read":{"file":"code.txt"}}}),
+    );
+    runner.advance().await.unwrap();
+    assert!(runner.task.recovery.is_none(), "no repair was spent");
+    assert!(runner.task.read_files.iter().any(|file| file == "code.txt"));
+    assert!(runner
+        .task
+        .intent_events
+        .iter()
+        .any(|event| event.kind == "json_unflattened"));
+}
+
 #[tokio::test]
 async fn the_json_schema_contract_remains_selectable() {
     let fixture = Fixture::new().await;

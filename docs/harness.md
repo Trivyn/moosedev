@@ -184,8 +184,9 @@ Under `json_schema` the schema travels in the prompt, so nothing enforces its
 nesting: a model may flatten a nested object into its parent. When an answer
 fails as given, `llm::normalize::json_schema::unflatten` folds such a variant
 back into place from the schema alone (a string that is exactly one variant's
-tag, with keys only that variant allows) and the repair is journaled as
-`json_unflattened`; Qwen3.5-9B answered `{"message":…,"action":"write",
+tag, with keys only that variant allows), or rebuilds a variant keyed by its
+tag (`{"replace":{…fields}}`, or `{"apply_fix":1}` when the variant has one
+other field), and the repair is journaled as `json_unflattened`; Qwen3.5-9B answered `{"message":…,"action":"write",
 "file":…}` three times running. A builder whose native tool calls drop large
 arguments (the same model left `write` without `content` under the harness's
 long prompt) runs better on `json_schema`: set it per role with
