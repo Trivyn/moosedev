@@ -252,7 +252,7 @@ async fn a_tool_call_written_as_text_runs_and_is_journaled() {
     assert_eq!(runner.task.read_files, vec!["code.txt".to_string()]);
     let recovered = intent_details(&runner, "tool_call_from_content");
     assert_eq!(recovered.len(), 1, "{recovered:?}");
-    assert!(recovered[0].contains("read"), "{recovered:?}");
+    assert!(recovered[0].contains("read (json)"), "{recovered:?}");
     // A text call naming a tool this mode does not offer is repaired instead.
     let start = runner.task.model_requests.len();
     fixture.reply(
@@ -264,6 +264,26 @@ async fn a_tool_call_written_as_text_runs_and_is_journaled() {
     assert_eq!(intent_details(&runner, "tool_call_from_content").len(), 1);
     assert_eq!(runner.task.model_requests.len() - start, 2);
     assert!(runner.task.recovery.is_none());
+    // Gemma's own call syntax as content (badciv e3c533b4) runs too, and the
+    // journal names its dialect.
+    fixture.reply(
+        "harness_action",
+        json!({"content":"search{query:<|\"|>code<|\"|>}<tool_call|>"}),
+    );
+    runner.advance().await.unwrap();
+    let recovered = intent_details(&runner, "tool_call_from_content");
+    assert_eq!(recovered.len(), 2, "{recovered:?}");
+    assert!(recovered[1].contains("search (gemma)"), "{recovered:?}");
+    let response: Value = serde_json::from_str(
+        runner.task.model_requests.last().unwrap()["response"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response,
+        json!({"message":"","action":{"action":"search","query":"code"}})
+    );
 }
 
 #[tokio::test]

@@ -257,6 +257,31 @@ impl DiagnosticsSnapshot {
         self.errors.iter().chain(&self.warnings).chain(&self.lints)
     }
 
+    /// Why `id` names no offered fix, in words that lead somewhere: whether any
+    /// fix is offered at all, and whether `id` is a finding's line number
+    /// instead (badciv e3c533b4: a4b sent 131 and 135, a lint's lines, when no
+    /// fix was offered).
+    pub(super) fn unknown_fix(&self, id: usize) -> String {
+        let offered = self
+            .findings()
+            .map(|finding| finding.fixes.len())
+            .sum::<usize>();
+        let mut reason = if offered == 0 {
+            format!("no fix {id} is offered: no finding has a quick fix now; make the change with replace or write")
+        } else {
+            format!("no fix {id} is offered now; name a fix listed under an error or lint in the language server block")
+        };
+        if let Some(finding) = self.findings().find(|finding| finding.line as usize == id) {
+            reason.push_str(&format!(
+                "; {id} is the line of {}:{}: {}, not a fix number",
+                finding.file,
+                finding.line,
+                finding.message.lines().next().unwrap_or_default()
+            ));
+        }
+        reason
+    }
+
     /// The offered fix numbered `id`.
     pub(super) fn fix(&self, id: usize) -> Option<&OfferedFix> {
         self.findings()
@@ -1415,27 +1440,39 @@ impl super::Runner {
     /// to settle, and keep what they report as the task's diagnostics. Never
     /// fails the step: a server problem is journaled and the harness carries
     /// on without one.
+    /// True when the servers reported on this edit: a result that is about
+    /// exactly the source now on disk.
     pub(super) async fn check_applied_edit(
         &mut self,
         file: &str,
         existed: bool,
         after: Option<&str>,
-    ) {
+    ) -> bool {
         let Some(settings) = self.language_settings.filter(|settings| settings.enabled) else {
-            return;
+            return false;
         };
-        if let Err(error) = self
+        match self
             .check_applied_edit_inner(file, existed, after, settings.settle_timeout)
             .await
         {
-            self.intent_event("language_server_error", &format!("{error:#}"));
-            self.event(format!(
-                "Language server stopped: {error:#}. The task continues without it."
-            ));
-            self.language = LanguageState::Unavailable;
-            // What the server last said is about a source that no longer
-            // exists; neither the prompt nor the finish gate may use it.
-            self.task.diagnostics = None;
+            // A result settles even for a file no server reads (a fixture, a
+            // note); it is about this edit only when a server checks the file.
+            Ok(fresh) => {
+                fresh
+                    && language_servers()
+                        .any(|spec| spec.language_of(file).is_some() || spec.is_project_file(file))
+            }
+            Err(error) => {
+                self.intent_event("language_server_error", &format!("{error:#}"));
+                self.event(format!(
+                    "Language server stopped: {error:#}. The task continues without it."
+                ));
+                self.language = LanguageState::Unavailable;
+                // What the server last said is about a source that no longer
+                // exists; neither the prompt nor the finish gate may use it.
+                self.task.diagnostics = None;
+                false
+            }
         }
     }
 
@@ -1445,7 +1482,7 @@ impl super::Runner {
         existed: bool,
         after: Option<&str>,
         timeout: Duration,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let reshaped =
             language_servers().any(|spec| spec.is_project_file(file)) && existed != after.is_some();
         if reshaped {
@@ -1463,7 +1500,7 @@ impl super::Runner {
                     .any(|file| spec.language_of(file).is_some() || spec.is_project_file(file))
             });
             if !concerned {
-                return Ok(());
+                return Ok(false);
             }
             self.show_status("Starting the language server…");
             let read_paths: Vec<PathBuf> = self
@@ -1486,7 +1523,7 @@ impl super::Runner {
             };
         }
         let LanguageState::Running(servers) = &mut self.language else {
-            return Ok(());
+            return Ok(false);
         };
         let names = servers
             .servers
@@ -1502,7 +1539,7 @@ impl super::Runner {
             .map(|plan| plan.files.clone())
             .unwrap_or_default();
         let LanguageState::Running(servers) = &mut self.language else {
-            return Ok(());
+            return Ok(false);
         };
         let started = Instant::now();
         if let Some(snapshot) = servers
@@ -1545,8 +1582,9 @@ impl super::Runner {
                 ),
             );
             self.task.diagnostics = Some(snapshot);
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn show_status(&self, status: &str) {
@@ -2066,6 +2104,34 @@ mod tests {
         )
         .is_none());
         assert!(single_file_edits(&json!({})).is_none());
+    }
+
+    #[test]
+    fn an_unknown_fix_says_whether_any_fix_exists_and_names_a_line_number() {
+        let lint = Finding {
+            file: "badciv-map/src/codes.rs".into(),
+            line: 135,
+            column: 5,
+            message: "method `from_str` can be confused for the standard trait method\nmore".into(),
+            detail: None,
+            definition: None,
+            fixes: vec![],
+        };
+        let snapshot = DiagnosticsSnapshot {
+            settled: true,
+            lints: vec![lint],
+            ..Default::default()
+        };
+        let reason = snapshot.unknown_fix(135);
+        assert!(
+            reason.contains("no finding has a quick fix now"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("135 is the line of badciv-map/src/codes.rs:135: method `from_str` can be confused for the standard trait method, not a fix number"),
+            "{reason}"
+        );
+        assert!(!snapshot.unknown_fix(4).contains("is the line of"));
     }
 
     #[test]

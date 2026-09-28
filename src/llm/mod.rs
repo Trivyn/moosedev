@@ -6,6 +6,7 @@
 //! assistance to pure symbolic mode.
 
 mod completion;
+pub mod normalize;
 mod usage;
 use completion::{complete_content, complete_tool_message, CompletionStream, MAX_STREAM_BYTES};
 pub use completion::{

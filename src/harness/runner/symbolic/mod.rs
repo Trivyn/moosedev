@@ -3,11 +3,14 @@
 //! typing are derived by the daemon from the approved plan, the resolved
 //! definition scopes and the graph.
 mod associate;
+mod auto_verify;
+pub(super) use auto_verify::AUTO_VERIFY_FAILED;
 mod capture_note;
 mod coverage;
 mod grounding;
 mod scope;
 mod state;
+mod stubs;
 
 use super::actions::Step;
 use super::model::{Action, NoopEdit};
@@ -256,13 +259,25 @@ impl Runner {
             .filter(|diagnostics| diagnostics.settled && !diagnostics.errors.is_empty())
         {
             let first = &diagnostics.errors[0];
-            return Err(error.context(format!(
-                "the file already reads this way, and the language server reports {} error(s) in the current source, the first at {}:{}: {}; make an edit that fixes them",
+            let reported = format!(
+                "the file already reads this way, and the language server reports {} error(s) in the current source, the first at {}:{}: {}",
                 diagnostics.errors.len(),
                 first.file,
                 first.line,
                 first.message.lines().next().unwrap_or_default()
-            )));
+            );
+            // Errors in a file that is fine often mean code not written yet:
+            // badciv e3c533b4's lib.rs declared modules whose planned files
+            // did not exist, and naming lib.rs sent a4b back to it twice.
+            let unwritten = self.unwritten_planned_files();
+            return Err(error.context(if unwritten.is_empty() {
+                format!("{reported}; make an edit that fixes them")
+            } else {
+                format!(
+                    "{reported}. The errors may point at code not written yet: planned files {} do not exist. Write them next",
+                    unwritten.join(", ")
+                )
+            }));
         }
         let state = self.symbolic_state_mut();
         state.noop_continuations += 1;
@@ -315,6 +330,8 @@ impl Runner {
     pub(in crate::harness::runner) fn forget_failure(&mut self) {
         if let Some(state) = self.task.symbolic.as_mut() {
             state.last_failure = None;
+            // The human spoke: the next word is the model's, not a check run.
+            state.auto_verify_armed = None;
         }
     }
 }

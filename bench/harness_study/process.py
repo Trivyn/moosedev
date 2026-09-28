@@ -78,6 +78,9 @@ SYMBOLIC_EVENT_KINDS = (
     # A replace whose stray envelope junk the harness trimmed before materializing the edit; not an
     # autonomous recovery either.
     "replace_text_repair",
+    # The harness ran the required checks itself after a clean edit covering every planned file
+    # (offloading change 1), and its per-cycle limit; and a finish sent back for stub markers.
+    "auto_verify", "auto_verify_exhausted", "finish_refused_stubs",
     # Tool-call decoding under the tools action contract: repaired arguments, extra calls that did not run,
     # a call written as text, and the provider's refusal of a required tool choice. None is an autonomous
     # recovery.

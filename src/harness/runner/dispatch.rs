@@ -59,6 +59,7 @@ impl Runner {
             self.task.approved_revision = None;
             self.task.approved_change_scope = None;
             self.task.snapshots = sources;
+            self.disarm_auto_verify();
             self.task.check_results.clear();
             self.discard_pending_edit("source or accepted knowledge changed")?;
             self.discard_pending_permission("source or accepted knowledge changed")?;
@@ -246,6 +247,9 @@ impl Runner {
         }
         if self.task.phase == Phase::Verifying {
             return self.verify_next().await;
+        }
+        if self.auto_verify_due() {
+            return self.auto_finish().await;
         }
         anyhow::ensure!(
             !self.task.objective_pending,
@@ -561,8 +565,10 @@ impl Runner {
                     let (file, existed, after) =
                         (edit.file.clone(), edit.before.is_some(), edit.after.clone());
                     self.apply_edit(edit)?;
-                    self.check_applied_edit(&file, existed, after.as_deref())
+                    let fresh = self
+                        .check_applied_edit(&file, existed, after.as_deref())
                         .await;
+                    self.arm_auto_verify(fresh);
                     self.persist()?;
                 }
             }
@@ -653,45 +659,63 @@ impl Runner {
                 self.task.after_review = Phase::Planning;
             }
             Step::Finish { summary } => {
-                // Settled language-server errors or lints: send the model
-                // back once with them, before any check runs. A repeat finish
-                // on the same result goes on to the checks, which decide.
-                let refusal = self
-                    .task
-                    .diagnostics
-                    .as_mut()
-                    .filter(|d| d.blocks_finish())
-                    .map(|diagnostics| {
-                        diagnostics.finish_refused = true;
-                        (
-                            diagnostics.render(DIAGNOSTICS_BYTES),
-                            format!(
-                                "{} error(s), {} warning(s), {} lint(s)",
-                                diagnostics.errors.len(),
-                                diagnostics.warnings.len(),
-                                diagnostics.lints.len()
-                            ),
-                        )
-                    });
-                if let Some((block, counts)) = refusal {
-                    self.intent_event("finish_refused_diagnostics", &counts);
-                    self.event(format!(
-                        "Finish refused: the language server reports {counts} in the current source."
-                    ));
-                    self.task.last_response = format!(
-                        "Not finished: the language server reports problems in the current source. Errors fail the required checks; fix them, and fix the warnings and lints too unless they are wrong for this code, then finish.\n{block}"
-                    );
-                    return self.persist();
+                // The model's own finish: a failure now is its run, not the
+                // harness's.
+                if let Some(state) = self.task.symbolic.as_mut() {
+                    state.auto_verification = None;
                 }
-                self.task.last_response = summary;
-                self.refresh_code_index().await?;
-                if self.prepare_symbolic_associations().await? {
-                    return Ok(());
-                }
-                self.task.phase = Phase::Verifying;
-                self.task.check_results.clear();
+                self.begin_verification(summary).await?;
             }
         }
+        Ok(())
+    }
+
+    /// From finished work to the required checks. The language-server and
+    /// stub gates each send the model back once for a source state; then the
+    /// code index refresh and the link review, then Verifying. The model's
+    /// finish, the no-op continuation and the harness's own auto-verify all
+    /// come through here.
+    pub(super) async fn begin_verification(&mut self, summary: String) -> Result<()> {
+        // Settled language-server errors or lints: send the model back once
+        // with them, before any check runs. A repeat finish on the same
+        // result goes on to the checks, which decide.
+        let refusal = self
+            .task
+            .diagnostics
+            .as_mut()
+            .filter(|d| d.blocks_finish())
+            .map(|diagnostics| {
+                diagnostics.finish_refused = true;
+                (
+                    diagnostics.render(DIAGNOSTICS_BYTES),
+                    format!(
+                        "{} error(s), {} warning(s), {} lint(s)",
+                        diagnostics.errors.len(),
+                        diagnostics.warnings.len(),
+                        diagnostics.lints.len()
+                    ),
+                )
+            });
+        if let Some((block, counts)) = refusal {
+            self.intent_event("finish_refused_diagnostics", &counts);
+            self.event(format!(
+                "Finish refused: the language server reports {counts} in the current source."
+            ));
+            self.task.last_response = format!(
+                "Not finished: the language server reports problems in the current source. Errors fail the required checks; fix them, and fix the warnings and lints too unless they are wrong for this code, then finish.\n{block}"
+            );
+            return self.persist();
+        }
+        if self.refuse_stubbed_finish() {
+            return self.persist();
+        }
+        self.task.last_response = summary;
+        self.refresh_code_index().await?;
+        if self.prepare_symbolic_associations().await? {
+            return Ok(());
+        }
+        self.task.phase = Phase::Verifying;
+        self.task.check_results.clear();
         Ok(())
     }
 
@@ -945,7 +969,15 @@ impl Runner {
                 } else {
                     self.task.phase = Phase::Working;
                 }
-                self.task.last_response = response;
+                let by_harness =
+                    self.task.symbolic.as_ref().is_some_and(|state| {
+                        state.auto_verification == Some(self.task.edits.len())
+                    });
+                self.task.last_response = if by_harness {
+                    format!("{}\n{response}", symbolic::AUTO_VERIFY_FAILED)
+                } else {
+                    response
+                };
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
             } else if let Some(reason) = vacuous_reason(&result) {
@@ -1022,16 +1054,6 @@ fn unrunnable_exit(result: &executor::CommandResult) -> Option<i32> {
     result.exit_code.filter(|code| matches!(code, 126 | 127))
 }
 
-/// Output signatures of a test runner that executed nothing. A check that exits
-/// 0 having run no test proves only that the code builds, so the harness must
-/// not accept it as the verification its completion line claims.
-///
-/// Deterministic substring matching, like the sandbox denials below: the
-/// symbolic layer reads the runner's own report rather than asking a model
-/// whether a check meant anything.
-/// Vacuous-check returns per task before the task is allowed to finish anyway.
-/// One, matching the plan-coverage return limit: the nudge is worth sending
-/// once, and a project that genuinely has no tests must not be trapped.
 /// The error lines of a failed command's output, with the locations
 /// compilers print under them: what "the same failure" compares.
 fn error_lines(output: &str) -> std::collections::BTreeSet<&str> {
@@ -1055,10 +1077,21 @@ const INSPECT_REFUSED: &str = "Not shown again: inspect of";
 const READ_REFUSED: &str = "Not read again:";
 /// Room for the "Journal event N, bytes a..b of c:" line above a page.
 const INSPECT_HEADER_RESERVE: usize = 96;
+/// Vacuous-check returns per task before the task is allowed to finish anyway.
+/// One, matching the plan-coverage return limit: the nudge is worth sending
+/// once, and a project that genuinely has no tests must not be trapped.
 const VACUOUS_RETURN_LIMIT: usize = 1;
 
-const VACUOUS_CHECKS: [&str; 6] = [
+/// Output signatures of a test runner that executed nothing. A check that exits
+/// 0 having run no test proves only that the code builds, so the harness must
+/// not accept it as the verification its completion line claims.
+///
+/// Deterministic substring matching, like the sandbox denials below: the
+/// symbolic layer reads the runner's own report rather than asking a model
+/// whether a check meant anything.
+const VACUOUS_CHECKS: [&str; 7] = [
     "running 0 tests",
+    "0 passed",
     "no tests ran",
     "No tests found",
     "collected 0 items",
@@ -1085,9 +1118,11 @@ fn vacuous_reason(result: &executor::CommandResult) -> Option<&'static str> {
         .copied()
 }
 
-/// Whether any test-count phrase in a runner's output is above zero: cargo's
-/// "running N tests" and "N passed", pytest's "collected N items" and "N
-/// passed", mocha's "N passing", jest's "Tests: … N total".
+/// Whether any runner in the output reports a test that passed: cargo's and
+/// pytest's "N passed", mocha's "N passing", jest's "Tests: … N passed". A
+/// test that was listed but ignored or skipped verified nothing: badciv
+/// be128e71 finished with `parse_map` unimplemented because cargo's "running 1
+/// test" for an `#[ignore]`d fixture counted as a run.
 fn tests_ran(output: &str) -> bool {
     let count = |token: &str| {
         token
@@ -1097,26 +1132,17 @@ fn tests_ran(output: &str) -> bool {
     };
     output.lines().any(|line| {
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        tokens.windows(2).enumerate().any(|(index, pair)| {
-            let (word, next) = (pair[0], pair[1]);
-            let counted = match word {
-                "running" | "collected" => count(next),
-                _ if next.starts_with("passed")
-                    || next.starts_with("passing")
-                    || (next.starts_with("total") && line.trim_start().starts_with("Tests:")) =>
-                {
-                    count(word)
-                }
-                _ => None,
-            };
-            // "running 1 test" / "collected 3 items": the count must be a
-            // whole token followed by the noun, not a stray digit.
-            let noun_follows = !matches!(word, "running" | "collected")
-                || tokens
-                    .get(index + 2)
-                    .is_some_and(|noun| noun.starts_with("test") || noun.starts_with("item"));
-            counted.is_some_and(|n| n > 0) && noun_follows
-        })
+        // Python's unittest prints "Ran N tests" and then OK or FAILED, never
+        // a passed count; a failure fails the check, so N > 0 here ran.
+        let unittest = tokens.len() >= 3
+            && tokens[0] == "Ran"
+            && tokens[2].starts_with("test")
+            && count(tokens[1]).is_some_and(|n| n > 0);
+        unittest
+            || tokens.windows(2).any(|pair| {
+                (pair[1].starts_with("passed") || pair[1].starts_with("passing"))
+                    && count(pair[0]).is_some_and(|n| n > 0)
+            })
     })
 }
 
@@ -1550,6 +1576,24 @@ mod check_failure_tests {
         ] {
             assert_eq!(vacuous_reason(&passed(output)), None, "{output}");
         }
+        // codex: cargo's empty doc-test stage beside unittest's own report.
+        assert_eq!(
+            vacuous_reason(&passed(
+                "running 0 tests\ntest result: ok. 0 passed\n....\nRan 4 tests in 0.01s\n\nOK\n"
+            )),
+            None
+        );
+        // badciv be128e71: the only test was #[ignore]d. Listed is not run.
+        assert_eq!(
+            vacuous_reason(&passed(
+                "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n\n     Running tests/tiny_fixture.rs\n\nrunning 1 test\ntest test_tiny_fixture ... ignored\n\ntest result: ok. 0 passed; 0 failed; 1 ignored\n"
+            )),
+            Some("running 0 tests")
+        );
+        assert_eq!(
+            vacuous_reason(&passed("running 1 test\ntest x ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored\n")),
+            Some("0 passed")
+        );
         // A failed check is never vacuous: the failure is the signal, and
         // classify_denial owns reading that output.
         assert_eq!(

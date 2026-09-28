@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::Command;
 
 use super::file_name;
-use super::{CheckTool, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec};
+use super::{
+    CheckTool, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec, StubSyntax,
+};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::treesitter::node_text;
@@ -64,6 +66,12 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         ],
         directory_options: &["-C"],
     }],
+    stubs: Some(StubSyntax {
+        markers: &["unimplemented!(", "todo!("],
+        line_comments: &["//"],
+        block_comments: &["/*", "*"],
+        quotes: &['"'],
+    }),
 };
 
 /// A `mod tests;` broken out into its own file. The inline `#[cfg(test)] mod

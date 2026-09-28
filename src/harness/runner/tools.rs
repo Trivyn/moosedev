@@ -2,7 +2,7 @@
 //! from the mode's action schema, and a tool-contract response decoded back into
 //! the action JSON the dispatcher validates, so validation, dispatch and repair
 //! budgets are the same for both contracts.
-use crate::llm::{tool_call_from_text, ToolCompletion};
+use crate::llm::normalize::{CallSource, NormalCall, Normalized};
 use serde_json::{json, Map, Value};
 
 /// The correction every response without a usable tool call receives.
@@ -88,14 +88,11 @@ pub(super) fn definitions(schema: &Value) -> Value {
     )
 }
 
-/// A tool-contract response turned into action JSON, with what was journal-worthy.
+/// A normalized tool-contract response turned into action JSON, with what
+/// was journal-worthy.
 pub(super) struct Decoded {
     pub(super) name: String,
     pub(super) text: String,
-    /// The call was written as text content rather than sent natively.
-    pub(super) from_content: bool,
-    /// Detail when malformed arguments were repaired.
-    pub(super) repaired: Option<String>,
     /// Names of native calls after the first, which do not run.
     pub(super) ignored: Vec<String>,
     /// A `reply` call sent beside an action: its text became the message and
@@ -103,22 +100,30 @@ pub(super) struct Decoded {
     pub(super) reply_as_message: bool,
 }
 
-/// Decode the first native tool call, or a call written as text that names an
+/// Decode the first native call, or a call written as text that names an
 /// offered tool, into the action JSON shape the json_schema contract produced:
 /// `{"message", "action"}` for conversational tasks, the bare action otherwise.
-/// An `Err` is the correction for an unusable response; it spends a repair.
+/// Only harness policy lives here; the model's syntax was read by
+/// [`normalize`](crate::llm::normalize::normalize). An `Err` is the correction
+/// for an unusable response; it spends a repair.
 pub(super) fn decode(
-    completion: &ToolCompletion,
+    normalized: &Normalized,
     schema: &Value,
     conversational: bool,
 ) -> Result<Decoded, String> {
     let allowed = names(schema);
     let listing = allowed.join(", ");
+    // A text call is recognised by its shape, which ordinary content can
+    // share, so one naming a tool this mode does not offer is not a call.
+    let mut calls: Vec<&NormalCall> = normalized
+        .calls
+        .iter()
+        .filter(|call| call.source == CallSource::Native || allowed.contains(&call.name))
+        .collect();
     // A `reply` beside an action is the model narrating what it is about to
     // do: run the action and show the reply as its message. Running the reply
     // alone ended the turn with "I will …" and dropped the action (badciv
     // a2e43815: "ran reply; ignored plan", twice).
-    let mut calls: Vec<_> = completion.tool_calls.iter().collect();
     let mut narration: Option<String> = None;
     if calls.len() > 1 {
         if let Some(position) = calls
@@ -129,14 +134,12 @@ pub(super) fn decode(
                 .iter()
                 .filter(|call| call.name == "reply")
                 .filter_map(|call| {
-                    parse_arguments(&call.name, &call.arguments)
-                        .ok()
-                        .and_then(|(arguments, _)| {
-                            arguments
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        })
+                    call.arguments
+                        .as_ref()
+                        .ok()?
+                        .get("message")?
+                        .as_str()
+                        .map(str::to_owned)
                 })
                 .collect();
             if !replies.is_empty() {
@@ -148,22 +151,10 @@ pub(super) fn decode(
         }
     }
     let reply_as_message = narration.is_some();
-    let (call, from_content, ignored) = match calls.split_first() {
-        Some((first, rest)) => (
-            (*first).clone(),
-            false,
-            rest.iter().map(|call| call.name.clone()).collect(),
-        ),
-        None => match tool_call_from_text(&completion.content)
-            .filter(|call| allowed.contains(&call.name))
-        {
-            Some(call) => (call, true, vec![]),
-            None => {
-                return Err(format!(
-                    "the response contained no tool call; {ONE_TOOL} (tools now: {listing})"
-                ))
-            }
-        },
+    let Some((call, rest)) = calls.split_first() else {
+        return Err(format!(
+            "the response contained no tool call; {ONE_TOOL} (tools now: {listing})"
+        ));
     };
     if !allowed.contains(&call.name) {
         return Err(format!(
@@ -171,21 +162,20 @@ pub(super) fn decode(
             call.name
         ));
     }
-    let (arguments, repaired) = parse_arguments(&call.name, &call.arguments)?;
+    let arguments = call
+        .arguments
+        .as_ref()
+        .map_err(|error| format!("{error}; {ONE_TOOL} with a JSON object of arguments"))?;
     let mut action = Map::new();
     action.insert("action".into(), json!(call.name));
     for (key, value) in arguments {
         if key != "action" {
-            action.insert(key, value);
+            action.insert(key.clone(), value.clone());
         }
     }
     let action = Value::Object(action);
     let text = if conversational {
-        let content = if from_content {
-            ""
-        } else {
-            completion.content.trim()
-        };
+        let content = normalized.content.trim();
         let message = match &narration {
             Some(narration) if content.is_empty() => narration.trim().to_owned(),
             Some(narration) => format!("{content}\n\n{}", narration.trim()),
@@ -196,46 +186,9 @@ pub(super) fn decode(
         action.to_string()
     };
     Ok(Decoded {
-        name: call.name,
+        name: call.name.clone(),
         text,
-        from_content,
-        repaired,
-        ignored,
+        ignored: rest.iter().map(|call| call.name.clone()).collect(),
         reply_as_message,
     })
-}
-
-fn parse_arguments(name: &str, raw: &str) -> Result<(Map<String, Value>, Option<String>), String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok((Map::new(), None));
-    }
-    let (value, repaired) = match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => (value, None),
-        Err(error) => {
-            let repaired = jsonrepair::repair_json(trimmed, &jsonrepair::Options::default())
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-            match repaired {
-                Some(value) => (
-                    value,
-                    Some(format!(
-                        "{name}: {error}; repaired {}",
-                        super::bounded(trimmed, 300)
-                    )),
-                ),
-                None => {
-                    return Err(format!(
-                        "tool {name} arguments are not valid JSON ({error}); {ONE_TOOL} with a JSON object of arguments"
-                    ))
-                }
-            }
-        }
-    };
-    match value {
-        Value::Object(arguments) => Ok((arguments, repaired)),
-        _ => Err(format!(
-            "tool {name} arguments must be a JSON object; {ONE_TOOL} with a JSON object of arguments"
-        )),
-    }
 }

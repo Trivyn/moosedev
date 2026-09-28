@@ -29,6 +29,27 @@ pub struct SymbolicState {
     pub scope_escapes: usize,
     #[serde(default)]
     pub noop_continuations: usize,
+    /// The edit count at which a finish was sent back for stub markers: once
+    /// per source state, like the language-server gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stub_refused_at: Option<usize>,
+    /// The edit count a clean, freshly checked edit armed auto-verify at; taken
+    /// by the next advance whether it fires or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_verify_armed: Option<usize>,
+    /// The edit count the harness last ran the required checks at by itself,
+    /// so a failure there is told as the harness's run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_verification: Option<usize>,
+    /// Auto-verify runs in the current approval cycle; reset when a plan is
+    /// approved.
+    #[serde(default)]
+    pub auto_verifications: usize,
+    /// `Task::edits` index where the current approval cycle began. Unlike an
+    /// approved plan's `edit_start`, it moves on every approval, even of the
+    /// same plan.
+    #[serde(default)]
+    pub cycle_edit_start: usize,
     #[serde(default)]
     pub retypes: usize,
     /// Model replans answered by continuing the approved plan because nothing

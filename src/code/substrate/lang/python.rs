@@ -7,7 +7,7 @@ use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
 use super::file_name;
-use super::{first_matching_subdir, FallbackSpec, LanguageSpec, ProducerHooks};
+use super::{first_matching_subdir, FallbackSpec, LanguageSpec, ProducerHooks, StubSyntax};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::symbols;
@@ -39,6 +39,12 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     server: None,
     // pytest and python need no manifest to run.
     checks: &[],
+    stubs: Some(StubSyntax {
+        markers: &["raise NotImplementedError"],
+        line_comments: &["#"],
+        block_comments: &[],
+        quotes: &['"', '\''],
+    }),
 };
 
 /// pytest's default discovery: `test_*.py` and `*_test.py`, plus the `conftest`

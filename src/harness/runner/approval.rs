@@ -46,9 +46,15 @@ impl Runner {
         }
         self.derive_symbolic_scope(&context).await?;
         self.record_approved_plan(&context);
+        let edits = self.task.edits.len();
         let state = self.symbolic_state_mut();
         state.unchanged_since_approval = true;
         state.cycle_replan_continuations = 0;
+        state.auto_verifications = 0;
+        // A new approval starts a new cycle: only edits made under it count,
+        // and no arm from before it may fire.
+        state.auto_verify_armed = None;
+        state.cycle_edit_start = edits;
         state.plan_grounded = false;
         self.task.approved_revision = Some(context.revision);
         self.task.completion_pending = false;
@@ -94,8 +100,10 @@ impl Runner {
         ));
         let (file, existed, after) = (edit.file.clone(), edit.before.is_some(), edit.after.clone());
         self.apply_edit(edit)?;
-        self.check_applied_edit(&file, existed, after.as_deref())
+        let fresh = self
+            .check_applied_edit(&file, existed, after.as_deref())
             .await;
+        self.arm_auto_verify(fresh);
         self.persist()
     }
 

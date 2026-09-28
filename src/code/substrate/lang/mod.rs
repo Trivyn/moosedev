@@ -47,6 +47,28 @@ pub(crate) struct LanguageSpec {
     /// manifest, searching upward from where they run.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub checks: &'static [CheckTool],
+    /// How this language marks code as not written yet, and how to tell such
+    /// a marker in code from one in a comment or a string. None when the
+    /// language has no stub idiom: the finish gate then says nothing.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub stubs: Option<StubSyntax>,
+}
+
+/// A language's stub idiom (`unimplemented!(`, `raise NotImplementedError`)
+/// with just enough lexical syntax to read a line: a marker after a comment
+/// opener or inside a string is not code. A finish with a stub left in a
+/// planned file is sent back (badciv be128e71 finished with `parse_map`
+/// stubbed).
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StubSyntax {
+    pub markers: &'static [&'static str],
+    /// Openers of a comment that runs to the end of the line (`//`, `#`).
+    pub line_comments: &'static [&'static str],
+    /// Openers of a block comment, and a line that continues one (`/*`, `*`).
+    pub block_comments: &'static [&'static str],
+    /// String delimiters (`"`, `'`, `` ` ``).
+    pub quotes: &'static [char],
 }
 
 /// A program a check runs that finds its project by a manifest at or above
@@ -239,6 +261,13 @@ fn language_for_path(path: &str) -> Option<&'static LanguageSpec> {
     })
 }
 
+/// The stub idiom of the language owning a path; None for an unknown language
+/// or one without stubs.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn stub_syntax_for(path: &str) -> Option<&'static StubSyntax> {
+    language_for_path(path).and_then(|language| language.stubs.as_ref())
+}
+
 pub(crate) fn fallback_for_path(path: &Path) -> Option<&'static FallbackSpec> {
     let extension = path.extension()?.to_str()?;
     LANGUAGES
@@ -284,6 +313,29 @@ pub(crate) fn first_matching_subdir(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stub_syntax_follows_the_language_of_the_path() {
+        let markers = |path| super::stub_syntax_for(path).map(|syntax| syntax.markers);
+        assert!(markers("src/parse.rs")
+            .unwrap()
+            .contains(&"unimplemented!("));
+        assert!(markers("pkg/labels.py")
+            .unwrap()
+            .contains(&"raise NotImplementedError"));
+        assert!(markers("web/app.ts").is_some());
+        assert!(markers("notes.md").is_none());
+        assert!(markers("Makefile").is_none());
+        // Rust has no `#` comment; Python has no `//` one.
+        assert!(!super::stub_syntax_for("a.rs")
+            .unwrap()
+            .line_comments
+            .contains(&"#"));
+        assert!(!super::stub_syntax_for("a.py")
+            .unwrap()
+            .line_comments
+            .contains(&"//"));
+    }
+
     use super::*;
 
     /// `clients/zed/extension.toml` must carry exactly the registry's Zed

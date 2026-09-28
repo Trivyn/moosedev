@@ -192,21 +192,10 @@ pub(super) fn complete_tool_message(
     })
 }
 
-/// A tool call some models write as text instead of a native call, e.g.
-/// `{"type":"function","name":"read","parameters":{...}}`. The whole text (after
-/// stripping a code fence) or its first balanced JSON object is tried. Accepted
-/// shapes: `{name, parameters}`, `{name, arguments}` (an object or a JSON-encoded
-/// string) and `{function: {name, arguments}}`. The name is not checked here.
+/// A tool call written as text in any supported dialect
+/// ([`super::normalize::DIALECTS`]); the name is not checked here.
 pub fn tool_call_from_text(text: &str) -> Option<ToolCall> {
-    let text = strip_code_fence(text.trim());
-    [Some(text), first_json_object(text)]
-        .into_iter()
-        .flatten()
-        .find_map(|candidate| {
-            serde_json::from_str::<serde_json::Value>(candidate)
-                .ok()
-                .and_then(|value| call_from_value(&value))
-        })
+    super::normalize::text_call(text).map(|(_, call)| call)
 }
 
 /// How [`parse_model_json`] got a value out of text that was not exactly JSON.
@@ -269,7 +258,7 @@ pub fn parse_model_json<T: serde::de::DeserializeOwned>(
     }
 }
 
-fn strip_code_fence(text: &str) -> &str {
+pub(super) fn strip_code_fence(text: &str) -> &str {
     let Some(rest) = text.strip_prefix("```") else {
         return text;
     };
@@ -277,7 +266,7 @@ fn strip_code_fence(text: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
-fn first_json_object(text: &str) -> Option<&str> {
+pub(super) fn first_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
     for (offset, byte) in text.as_bytes()[start..].iter().enumerate() {
@@ -303,41 +292,6 @@ fn first_json_object(text: &str) -> Option<&str> {
         }
     }
     None
-}
-
-fn call_from_value(value: &serde_json::Value) -> Option<ToolCall> {
-    let object = value.as_object()?;
-    let (name, arguments) = match object.get("function").and_then(|f| f.as_object()) {
-        Some(function) => (
-            function.get("name")?,
-            function
-                .get("arguments")
-                .or_else(|| function.get("parameters"))?,
-        ),
-        None => (
-            object.get("name")?,
-            object
-                .get("parameters")
-                .or_else(|| object.get("arguments"))?,
-        ),
-    };
-    let name = name.as_str()?.trim();
-    if name.is_empty() {
-        return None;
-    }
-    let arguments = match arguments {
-        serde_json::Value::Object(_) => arguments.to_string(),
-        serde_json::Value::String(text) => {
-            let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
-            parsed.is_object().then(|| parsed.to_string())?
-        }
-        _ => return None,
-    };
-    Some(ToolCall {
-        id: None,
-        name: name.to_owned(),
-        arguments,
-    })
 }
 
 pub(super) const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;

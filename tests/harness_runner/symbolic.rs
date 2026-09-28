@@ -572,6 +572,87 @@ async fn symbolic_noop_edit_is_repaired_while_the_language_server_reports_errors
 }
 
 #[tokio::test]
+async fn a_finish_with_stubs_in_planned_files_is_sent_back_once() {
+    // badciv be128e71: a4b stubbed parse_map with unimplemented!() and
+    // finished; an ignored test let the checks pass.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    raise NotImplementedError\n"}));
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    let calls = fixture.model_calls();
+    while fixture.model_calls() < calls + 2 {
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        intent_details(&runner, "finish_refused_stubs"),
+        vec!["labels.py:2 raise NotImplementedError"]
+    );
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("Not finished: planned files still hold code"));
+
+    // The same source finished again goes on to the checks, which decide.
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    runner.advance().await.unwrap();
+    assert_ne!(runner.task.phase, Phase::Working);
+    assert_eq!(intent_details(&runner, "finish_refused_stubs").len(), 1);
+}
+
+#[tokio::test]
+async fn a_replace_already_applied_is_a_noop_that_runs_the_checks() {
+    // badciv e3c533b4: a4b re-sent the `#[ignore]` it had already added;
+    // "found 0" three times spent the repairs and parked the task.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let edit = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"});
+    fixture.conversational(edit.clone());
+    fixture.conversational(edit);
+    let calls = fixture.model_calls();
+    while fixture.model_calls() < calls + 2 {
+        runner.advance().await.unwrap();
+    }
+    assert!(
+        runner.task.recovery.is_none(),
+        "{:?}",
+        runner.task.last_error
+    );
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(intent_details(&runner, "noop_edit_continuation").len(), 1);
+    assert_ne!(runner.task.phase, Phase::Working);
+}
+
+#[tokio::test]
+async fn the_noop_repair_names_planned_files_not_written_yet() {
+    // badciv e3c533b4: lib.rs declared modules whose planned files did not
+    // exist, and a repair naming only lib.rs sent a4b back to it twice.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper module","files":["labels.py","codes.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    let mut snapshot = diagnostics(1);
+    snapshot.errors[0].file = "labels.py".into();
+    runner.task.diagnostics = Some(snapshot);
+    for _ in 0..3 {
+        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+    }
+    let rendered = format!("{:#}", runner.advance().await.unwrap_err());
+    assert!(
+        rendered.contains("planned files codes.py do not exist. Write them next"),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
 async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
@@ -1843,4 +1924,181 @@ async fn a_reply_that_continues_asks_for_the_next_action_once() {
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
     assert!(intent_details(&runner, "reply_continued").is_empty());
+}
+
+/// Apply `edit` in an approved symbolic task, then give it the clean, settled
+/// language-server result the harness arms auto-verify on. The fixture has no
+/// language server, so the arm is set as `arm_auto_verify` would set it.
+async fn clean_edit(fixture: &Fixture, runner: &mut Runner, edit: Value) {
+    fixture.conversational(edit);
+    let calls = fixture.model_calls();
+    while fixture.model_calls() == calls {
+        runner.advance().await.unwrap();
+    }
+    runner.task.diagnostics = Some(diagnostics(0));
+    let at = runner.task.edits.len();
+    runner.task.symbolic.as_mut().unwrap().auto_verify_armed = Some(at);
+}
+
+/// Advance while the task works without calling the model; true when it left
+/// Working that way. A queued reply answers if the model is asked.
+async fn leaves_working_without_the_model(fixture: &Fixture, runner: &mut Runner) -> bool {
+    fixture.conversational(json!({"action":"reply","message":"Working.","then":"wait"}));
+    let calls = fixture.model_calls();
+    for _ in 0..6 {
+        if runner.task.phase != Phase::Working || fixture.model_calls() > calls {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    fixture.model_calls() == calls && runner.task.phase != Phase::Working
+}
+
+#[tokio::test]
+async fn a_clean_edit_covering_every_planned_file_runs_the_checks_without_a_model_call() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    assert!(leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert_eq!(intent_details(&runner, "auto_verify").len(), 1);
+    assert!(runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("All planned files are edited")));
+}
+
+#[tokio::test]
+async fn auto_verify_waits_for_every_planned_file_and_for_a_clean_result() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    // A planned file not written yet: the model keeps working.
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior while adding a helper module","files":["labels.py","codes.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert!(intent_details(&runner, "auto_verify").is_empty());
+
+    // Any finding, or a stub left in a planned file: the model keeps working.
+    for (after, findings) in [
+        ("    return name.strip()\n", 1),
+        ("    raise NotImplementedError\n", 0),
+    ] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = planned_symbolic_runner(&fixture).await;
+        runner.approve_plan().await.unwrap();
+        clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":after})).await;
+        runner.task.diagnostics = Some(diagnostics(findings));
+        assert!(
+            !leaves_working_without_the_model(&fixture, &mut runner).await,
+            "{after}"
+        );
+        assert!(intent_details(&runner, "auto_verify").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_failed_auto_verify_says_so_and_does_not_rerun_on_the_same_source() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.task.plan.as_mut().unwrap().checks = vec!["false".into()];
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    assert!(leaves_working_without_the_model(&fixture, &mut runner).await);
+    while runner.task.phase == Phase::Verifying {
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("The harness ran the plan's required checks"),
+        "{}",
+        runner.task.last_response
+    );
+    // The arm was taken: the next step is the model's.
+    assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert_eq!(intent_details(&runner, "auto_verify").len(), 1);
+}
+
+#[tokio::test]
+async fn auto_verify_is_bounded_disarmed_by_the_human_and_can_be_switched_off() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    // At the limit: journaled once, and the model finishes.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    runner.task.symbolic.as_mut().unwrap().auto_verifications = 3;
+    assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert_eq!(intent_details(&runner, "auto_verify_exhausted").len(), 1);
+
+    // A human message takes the arm: the next word is the model's.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    runner
+        .submit_message("Keep the helper private.".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().auto_verify_armed,
+        None
+    );
+
+    // Switched off for a study variant.
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    std::env::set_var("MOOSEDEV_HARNESS_AUTO_VERIFY", "off");
+    let fired = leaves_working_without_the_model(&fixture, &mut runner).await;
+    std::env::remove_var("MOOSEDEV_HARNESS_AUTO_VERIFY");
+    assert!(!fired);
+    assert!(intent_details(&runner, "auto_verify").is_empty());
+}
+
+#[tokio::test]
+async fn a_new_approval_drops_the_arm_and_counts_only_its_own_edits() {
+    // codex: an arm or an edit from before a re-approval must not let the
+    // harness run the checks under the new approval.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    clean_edit(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    // The source changes outside the harness: the approval is withdrawn.
+    std::fs::write(
+        fixture.root.join("labels.py"),
+        "def render_name(name):\n    return name.lower()\n",
+    )
+    .unwrap();
+    for _ in 0..4 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    let state = runner.task.symbolic.as_ref().unwrap();
+    assert_eq!(state.auto_verify_armed, None);
+    runner.approve_plan().await.unwrap();
+    let state = runner.task.symbolic.as_ref().unwrap();
+    assert_eq!(state.auto_verify_armed, None);
+    assert_eq!(state.cycle_edit_start, runner.task.edits.len());
+    // With no edit under this approval, a stray arm would not fire either.
+    let at = runner.task.edits.len();
+    runner.task.symbolic.as_mut().unwrap().auto_verify_armed = Some(at);
+    runner.task.diagnostics = Some(diagnostics(0));
+    assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert!(intent_details(&runner, "auto_verify").is_empty());
 }

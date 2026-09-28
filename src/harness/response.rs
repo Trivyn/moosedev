@@ -1,9 +1,10 @@
 //! Negotiate the content channel before a model can participate in a task.
 //! Probes are neutral, bounded, and cancellation-safe: dropping this future drops
 //! its HTTP request. No probe response is dispatched as a harness action.
+use crate::llm::normalize::normalize;
 use crate::llm::{
-    tool_call_from_text, CompletionError, LlmConfig, OpenAiCompatClient, StructuredOutputMode,
-    UsageContext, UsageObserver,
+    CompletionError, LlmConfig, OpenAiCompatClient, StructuredOutputMode, UsageContext,
+    UsageObserver,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -300,24 +301,23 @@ async fn probe_tools(
             bound.as_secs()
         ))
     })??;
-    // A model that writes its call as text is still usable: the runner reads
-    // such calls too.
-    let call = completion
-        .tool_calls
-        .first()
-        .cloned()
-        .or_else(|| tool_call_from_text(&completion.content))
+    // The probe reads the call the way the runner does, so a model that
+    // writes its call as text, in any supported dialect, is still usable.
+    let call = normalize(&completion)
+        .calls
+        .into_iter()
+        .next()
         .ok_or_else(|| {
             CompletionError::InvalidResponse(
                 "Neutral response probe did not call the ready tool".into(),
             )
         })?;
-    let arguments: serde_json::Value = serde_json::from_str(&call.arguments).map_err(|_| {
+    let arguments = call.arguments.map_err(|_| {
         CompletionError::InvalidResponse(
             "Neutral response probe tool arguments were not valid JSON".into(),
         )
     })?;
-    if call.name != "ready" || arguments != json!({"status":"ok"}) {
+    if call.name != "ready" || serde_json::Value::Object(arguments) != json!({"status":"ok"}) {
         return Err(CompletionError::InvalidResponse(
             "Neutral response probe did not call ready with status ok".into(),
         ));

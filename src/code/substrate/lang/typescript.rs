@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::file_name;
-use super::{first_matching_subdir, CheckTool, LanguageSpec, ProducerHooks};
+use super::{first_matching_subdir, CheckTool, LanguageSpec, ProducerHooks, StubSyntax};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::symbols;
@@ -40,6 +40,12 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         subcommands: &["test", "run", "start", "ci"],
         directory_options: &["--prefix", "-C"],
     }],
+    stubs: Some(StubSyntax {
+        markers: &["throw new Error(\"Not implemented\")"],
+        line_comments: &["//"],
+        block_comments: &["/*", "*"],
+        quotes: &['"', '\'', '`'],
+    }),
 };
 
 /// The `*.test.*` / `*.spec.*` infix every JS test runner recognizes. A JS

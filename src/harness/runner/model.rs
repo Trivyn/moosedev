@@ -8,6 +8,7 @@ use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningRule;
 use crate::harness::response::{self, ActionContract};
 use crate::harness::startup::RoleSettings;
+use crate::llm::normalize::{normalize, Note};
 use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion, UsageContext};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -622,20 +623,24 @@ impl Runner {
         if let Some(entry) = self.task.model_requests.last_mut() {
             entry["tool_calls"] = json!(completion.tool_calls);
         }
-        match tools::decode(&completion, schema, self.task.batch_capture) {
+        let normalized = normalize(&completion);
+        match tools::decode(&normalized, schema, self.task.batch_capture) {
             Ok(decoded) => {
-                if let Some(detail) = &decoded.repaired {
-                    self.intent_event("tool_arguments_repaired", detail);
-                }
-                if decoded.from_content {
-                    self.intent_event(
-                        "tool_call_from_content",
-                        &format!(
-                            "{}: {}",
-                            decoded.name,
-                            super::bounded(&completion.content, 400)
+                for note in &normalized.notes {
+                    match note {
+                        Note::ArgumentsRepaired { tool, detail } => self.intent_event(
+                            "tool_arguments_repaired",
+                            &format!("{tool}: {}", super::bounded(detail, 400)),
                         ),
-                    );
+                        Note::TextCall { dialect } => self.intent_event(
+                            "tool_call_from_content",
+                            &format!(
+                                "{} ({dialect}): {}",
+                                decoded.name,
+                                super::bounded(&completion.content, 400)
+                            ),
+                        ),
+                    }
                 }
                 if decoded.reply_as_message {
                     self.intent_event("reply_as_message", &decoded.name);
@@ -1179,11 +1184,26 @@ pub(super) enum Action {
         summary: String,
     },
 }
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub(super) enum ModelOutput {
     Conversational(SpokenOutput),
     Legacy(Action),
+}
+/// Conversational when `action` is an object, the bare action otherwise. The
+/// shape picks the variant rather than `#[serde(untagged)]`, whose only error
+/// is "did not match any variant", so a correction names the actual fault
+/// (badciv e3c533b4: a native reply with `then: "finish"`, corrected without
+/// saying why, came back as the same reply written as text).
+impl<'de> Deserialize<'de> for ModelOutput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let output = if value.get("action").is_some_and(Value::is_object) {
+            SpokenOutput::deserialize(value).map(Self::Conversational)
+        } else {
+            Action::deserialize(value).map(Self::Legacy)
+        };
+        output.map_err(serde::de::Error::custom)
+    }
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1811,5 +1831,38 @@ mod tests {
             r#"{"message":"x","action":{"action":"read","file":"code.txt"},"approved":true}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_model_output_error_names_the_fault_in_either_shape() {
+        let error = |text: &str| {
+            serde_json::from_str::<ModelOutput>(text)
+                .unwrap_err()
+                .to_string()
+        };
+        // badciv e3c533b4 request 31, decoded from a native reply call.
+        assert!(error(
+            r#"{"message":"","action":{"action":"reply","message":"Done.","then":"finish"}}"#
+        )
+        .contains("unknown variant `finish`, expected `wait` or `continue`"));
+        assert!(
+            error(r#"{"action":"reply","message":"Done.","then":"finish"}"#)
+                .contains("unknown variant `finish`")
+        );
+        assert!(error(r#"{"action":"read"}"#).contains("missing field `file`"));
+        assert!(
+            error(r#"{"message":"x","action":{"action":"read","file":"a"},"approved":true}"#)
+                .contains("unknown field `approved`")
+        );
+        assert!(matches!(
+            serde_json::from_str::<ModelOutput>(r#"{"action":"reply","message":"hi"}"#),
+            Ok(ModelOutput::Legacy(Action::Reply { .. }))
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ModelOutput>(
+                r#"{"message":"hi","action":{"action":"read","file":"a"}}"#
+            ),
+            Ok(ModelOutput::Conversational(_))
+        ));
     }
 }

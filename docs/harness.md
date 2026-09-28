@@ -202,12 +202,23 @@ Gemma chose `reply` 6 of 6 times, marked it `continue` 6 of 6 times (and `wait`
 6 of 6 for a question), and proposed the plan 6 of 6 times on the continued
 turn. Arguments that are not valid
 JSON are repaired when possible (`tool_arguments_repaired`); otherwise the
-candidate is invalid output and spends a repair. Some models write the call as
-text instead, as Llama 3.3 does on LM Studio. When a response has no native call,
-the harness reads a JSON object from the text, fenced or not, in the
-`{"name", "parameters"}`, `{"name", "arguments"}` or `{"function": {...}}` shape.
-If the object names an offered tool, the call runs and `tool_call_from_content` is
-journaled. A response with no usable call spends a repair with the correction to
+candidate is invalid output and spends a repair. Every completion passes
+through one model-agnostic normalization layer (`src/llm/normalize/`) before
+harness logic sees it: native calls pass through, each call's arguments are
+parsed (and repaired) into a JSON object, and a call written as text is
+recovered by the first dialect that recognises it. Model-family quirks live in
+the dialects, and the harness keeps only its own policy (offered tools, one
+action per step). Some models write the call as text instead of a native call:
+the `json` dialect reads a JSON object, fenced or not, in the
+`{"name", "parameters"}`, `{"name", "arguments"}` or `{"function": {...}}` shape
+(Llama 3.3 on LM Studio); the `gemma` dialect reads Gemma's native syntax,
+`reply{message:<|"|>…<|"|>}` with an optional `<|tool_call>`/`call:` prefix and
+`<tool_call|>` suffix (gemma-4-26b-a4b in badciv e3c533b4). Text is read as a
+call only when the response has no native call. If the call names an offered
+tool, it runs and `tool_call_from_content` is journaled with the dialect's
+name. A candidate that fails validation is corrected with the specific fault
+(``unknown variant `finish`, expected `wait` or `continue` ``), not a
+generic "did not match". A response with no usable call spends a repair with the correction to
 call exactly one tool, including an empty response that finished with
 `tool_calls`. A tool the mode does not offer is corrected with the tools
 available now. A decoded call becomes the same action JSON the `json_schema`
@@ -1091,26 +1102,57 @@ contract 3 and intent contract 2.
 - Vacuous checks. A required check is passed on its exit status, so a test
   command that runs no test passes it while proving only that the code builds.
   When a check succeeds and its output carries a runner's own "ran nothing"
-  signature (`running 0 tests`, `no tests ran`, `No tests found`,
+  signature (`running 0 tests`, `0 passed`, `no tests ran`, `No tests found`,
   `collected 0 items`, `0 passing`, `Tests:       0 total`), the runner
   journals `check_vacuous` and returns the check to the model once, naming it
   and asking for a test that fails without the change. A zero signature does
-  not count when any count in the same output shows a test ran (`running 14
-  tests`, `3 passed`, `2 passing`, `Tests: 5 total`): `cargo test` prints one
-  "running N tests" line per test binary, and its empty doc-test stage made a
-  crate with 14 passing integration tests look untested (badciv 3ba41310). A
+  not count when the same output shows a test **passed** (`14 passed`, `2
+  passing`, `Tests: 5 passed`): `cargo test` prints one result line per test
+  binary, and its empty doc-test stage made a crate with 14 passing
+  integration tests look untested (badciv 3ba41310). A test that was listed
+  but ignored or skipped passed nothing: `running 1 test` for an `#[ignore]`d
+  fixture let badciv be128e71 finish with its parser unimplemented. A
   failed check is never vacuous: its failure is the signal, and the sandbox-denial classifier already
   owns that output. After one return the task may finish anyway — a project
   with no tests yet is not trapped — but `check_vacuous_unmet` is journaled and
   the completion line says the checks passed while verifying nothing, instead
   of claiming verification that did not happen.
+- Stubs. A finish while a planned file still holds a stub marker of its
+  language is sent back once for that source, naming each file and line
+  (`finish_refused_stubs`); a repeat finish goes on to the checks. Each
+  language's stub idiom lives in the registry (`stubs: Option<StubSyntax>`):
+  its markers (Rust `unimplemented!(`, `todo!(`; Python `raise
+  NotImplementedError`; TypeScript `throw new Error("Not implemented")`) and
+  the comment openers and string quotes to read a line with, so a marker in a
+  comment or a string is not code. A language with no stub idiom has `None`
+  and the gate says nothing; test files are not judged. The model's
+  finish, a no-op edit and auto-verify all pass the language-server gate and
+  this one before Verifying (`begin_verification`).
+- Auto-verify (offloading change 1). The harness runs the required checks
+  itself, without a model step, when an applied edit's language-server result
+  was settled with no errors, warnings or lints, every planned file exists and
+  was edited since approval, no stub marker is left and no required check
+  already failed against this source (`auto_verify`). It fires once per source
+  state, at most three times per approval cycle (`auto_verify_exhausted`), never
+  without a fresh language-server result, and never right after a human
+  message. A failure it finds returns to the model as "The harness ran the
+  plan's required checks after your last edit …". A plan that lists a file
+  needing no change never fires it: the model finishes as before.
+  `MOOSEDEV_HARNESS_AUTO_VERIFY=off` switches it off for study variants.
 - Scope. An edit outside the plan files is discarded and the task re-enters Plan
   mode naming the file (`scope_escape_replan`, three per task; the fourth parks
   for guidance as `scope_escape_exhausted`). A no-op edit (the result equals
   the current source) runs the required checks instead of consuming the repair
   budget (`noop_edit_continuation`), unless the language server has settled
   errors in that source: then the edit is repaired with their count and the
-  first one, since the source is not done whatever the restated file says.
+  first one, since the source is not done whatever the restated file says, and
+  names any planned files that do not exist yet (errors in a file that is fine
+  often point at code not written: badciv e3c533b4's `lib.rs` declared modules
+  whose files were missing). A `replace` whose old text is gone but whose new
+  text is already in the file exactly once is the same no-op: the edit was made
+  earlier (badciv e3c533b4 re-sent an `#[ignore]` it had added and parked). An
+  `apply_fix` with an unknown number says whether any fix is offered at all, and
+  when the number is a finding's line (a4b sent 131 and 135), says so.
   Neither a no-op edit nor a finish reruns
   the required checks while the last failed required check ran against exactly
   this source (no edit since): the rerun would only repeat the result, so the

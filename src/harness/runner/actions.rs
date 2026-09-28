@@ -321,6 +321,12 @@ impl Runner {
                     .flatten();
                 let (old_text, new_text) = if count == 1 {
                     (old_text, new_text)
+                } else if count == 0 && already_applied(source, &old_text, &new_text) {
+                    // The model is proposing an edit it applied earlier (badciv
+                    // e3c533b4 re-sent an `#[ignore]` it had added, three times,
+                    // and parked). That is a no-op, which runs the checks, not a
+                    // failed match.
+                    return Err(anyhow::Error::new(super::model::NoopEdit));
                 } else if let (0, Some(repair)) = (count, repair_literal_span(source, &old_text)) {
                     let trimmed_new = strip_same_junk(&new_text, &repair);
                     let detail = super::bounded(
@@ -469,13 +475,14 @@ impl Runner {
     /// whole-file edit, so it goes through the same approval, grounding,
     /// policy and checking as one the model wrote.
     fn materialize_fix(&mut self, id: usize) -> Result<Step> {
-        let fix = self
-            .task
-            .diagnostics
-            .as_ref()
+        let diagnostics = self.task.diagnostics.as_ref();
+        let fix = diagnostics
             .and_then(|diagnostics| diagnostics.fix(id))
             .cloned()
-            .with_context(|| format!("no fix {id} is offered now; name a fix listed under an error or lint in the language server block"))?;
+            .with_context(|| match diagnostics {
+                Some(diagnostics) => diagnostics.unknown_fix(id),
+                None => format!("no fix {id} is offered: no finding has a quick fix now; make the change with replace or write"),
+            })?;
         let file = fix.file.clone();
         if !self.task.read_files.contains(&file) || self.task.source_outlined.contains(&file) {
             // As for any edit: never change a file whose source and dossier
@@ -591,6 +598,24 @@ fn whole_file_rewrite(source: &str, old_text: &str, new_text: &str) -> Option<St
             source.len()
         )
     })
+}
+
+/// Whether a replace whose `old_text` is gone has already been made: its
+/// `new_text` is in the file exactly once, keeps every line of `old_text`
+/// (the edit added or wrapped text, as badciv e3c533b4's `#[ignore]` did), and
+/// anything a junk trim would match of `old_text` lies within that change. A
+/// `new_text` that merely occurs elsewhere is not evidence: that replace stays
+/// a miss.
+fn already_applied(source: &str, old_text: &str, new_text: &str) -> bool {
+    !new_text.trim().is_empty()
+        && occurrences(source, new_text) == 1
+        && old_text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .all(|line| new_text.contains(line))
+        && repair_literal_span(source, old_text)
+            .is_none_or(|repair| new_text.contains(&repair.span))
 }
 
 /// Occurrences of `literal` in `source`, counting overlaps, capped at two:
@@ -838,6 +863,35 @@ mod tests {
 
     /// badciv-map's shape: nine replaces whose old_text was the whole file,
     /// the last six changing 12 to 308 bytes of about 16 KB.
+    #[test]
+    fn a_replace_whose_change_is_already_in_the_file_is_recognised() {
+        // badciv e3c533b4, verbatim.
+        let source = "use badciv_map::Map;\n\n#[test]\n#[ignore]\nfn test_tiny_fixture() {\n    let input = 1;\n}\n";
+        assert!(already_applied(
+            source,
+            "#[test]\nfn test_tiny_fixture() {",
+            "#[test]\n#[ignore]\nfn test_tiny_fixture() {"
+        ));
+        // Junk around a real old_text elsewhere: the trim, not a no-op.
+        assert!(!already_applied(
+            "let a = foo();\nlet b = bar();\n",
+            "foo()}}",
+            "bar()"
+        ));
+        // codex: new_text found elsewhere, old_text a different line entirely.
+        assert!(!already_applied(
+            "let a = 1;\nlet b = 2;\n",
+            "let a = 3;",
+            "let b = 2;"
+        ));
+        // A new_text that is not in the file is an ordinary miss.
+        assert!(!already_applied(
+            source,
+            "#[test]\nfn gone() {",
+            "#[test]\nfn other() {"
+        ));
+    }
+
     #[test]
     fn a_replace_that_resends_the_file_to_change_little_is_named() {
         let body = "fn item() -> u32 { 0 }\n".repeat(200);
