@@ -4921,3 +4921,38 @@ async fn a_completed_plans_rules_are_kept_when_the_current_plan_leaves_a_stub() 
         vec!["1 of 2 addressed rules; stubs left in labels.py"]
     );
 }
+
+/// Qwen3.5-9B on badciv sent `write` without `content` for a planned file
+/// that did not exist yet; it read as deleting an absent file, a no-op, so a
+/// finish, and the unfinished-plan gate asked about every planned file.
+#[tokio::test]
+async fn a_write_without_content_is_repaired_not_a_finish() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"write","file":"labels.py"}));
+    fixture.conversational(json!({"action":"write","file":"labels.py","content":"def render_name(name):\n    return name.strip()\n"}));
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "noop_edit_continuation").is_empty());
+    assert!(intent_details(&runner, "finish_refused_unfinished").is_empty());
+    assert_eq!(runner.task.edits.len(), 1, "the repaired write applied");
+
+    // Deleting a file that does not exist is not a no-op finish either.
+    // codes.py is planned and not written yet.
+    let fixture = symbolic_fixture().await;
+    let mut runner = missing_module_runner(&fixture).await;
+    fixture.conversational(json!({"action":"write","file":"codes.py","content":null}));
+    fixture.conversational(json!({"action":"write","file":"codes.py","content":"CODES = {}\n"}));
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "noop_edit_continuation").is_empty());
+    assert!(
+        runner
+            .task
+            .events
+            .iter()
+            .any(|event| event.message.contains("nothing to delete")),
+        "the repair names the absent file"
+    );
+    assert!(runner.task.edits.iter().any(|edit| edit.file == "codes.py"));
+}
