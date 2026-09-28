@@ -3,13 +3,35 @@
 //! A step's prompt shows a bounded view chosen by what the step is about,
 //! the way source and rules are bounded, instead of the planner being told to
 //! write less (badciv e948c9c7).
-use super::Runner;
+use super::{Mode, Runner};
 
 /// Summary bytes a step prompt shows of the plan.
 pub(super) const PLAN_VIEW_BYTES: usize = 4_000;
 
+/// Summary bytes a replanning prompt shows of the approved plan it amends.
+pub(super) const AMEND_VIEW_BYTES: usize = 6_000;
+
 /// Escaped bytes of the blank line between two shown paragraphs.
 const SEPARATOR: usize = 4;
+
+/// `summary` whole up to `budget` bytes; past that its first `budget` bytes,
+/// cut on a character boundary, and a line counting what was left out and
+/// naming `route`.
+pub(super) fn bounded_whole(summary: &str, budget: usize, route: &str) -> String {
+    if summary.len() <= budget {
+        return summary.to_owned();
+    }
+    let mut end = budget;
+    while !summary.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[Plan cut: {} of {} bytes left out; {route}]",
+        &summary[..end],
+        summary.len() - end,
+        summary.len()
+    )
+}
 
 /// `summary` within `budget` bytes as the prompt carries it (JSON-escaped).
 /// A summary that fits is shown whole. Otherwise whole paragraphs are
@@ -178,6 +200,31 @@ impl Runner {
         ))
     }
 
+    /// Whether the planner is revising a plan the human approved: Plan mode
+    /// with the stored plan still the latest approved one (a replan, human
+    /// guidance or /plan after approval), not a new proposal under review.
+    pub(super) fn amending_approved_plan(&self) -> bool {
+        self.task.mode == Mode::Plan
+            && self.task.plan.as_ref().is_some_and(|plan| {
+                self.task
+                    .approved_plans
+                    .last()
+                    .is_some_and(|approved| approved.summary == plan.summary)
+            })
+    }
+
+    /// The approved plan's whole summary for the planner amending it, up to
+    /// `AMEND_VIEW_BYTES`: the condensed step view left the planner paging
+    /// its own plan from the journal (badciv P5, one replan parked that way).
+    pub(super) fn approved_plan_view(&self) -> Option<String> {
+        let plan = self.task.plan.as_ref()?;
+        Some(bounded_whole(
+            &plan.summary,
+            AMEND_VIEW_BYTES,
+            &self.plan_route(),
+        ))
+    }
+
     /// Where the whole current plan can be read: the journaled action that
     /// proposed it.
     pub(super) fn plan_route(&self) -> String {
@@ -239,6 +286,23 @@ mod tests {
             runner.plan_route()
         );
         server.abort();
+    }
+
+    #[test]
+    fn an_approved_plan_is_shown_whole_up_to_its_bound_and_cut_on_a_character() {
+        assert_eq!(bounded_whole("Keep it.", 100, "route"), "Keep it.");
+        let summary = format!("{}é tail", "a".repeat(9));
+        let cut = bounded_whole(&summary, 10, "see event 4");
+        assert!(cut.starts_with(&"a".repeat(9)), "{cut}");
+        assert!(!cut.contains('é'), "cut before a split character: {cut}");
+        assert!(
+            cut.ends_with(&format!(
+                "\n[Plan cut: {} of {} bytes left out; see event 4]",
+                summary.len() - 9,
+                summary.len()
+            )),
+            "{cut}"
+        );
     }
 
     #[test]

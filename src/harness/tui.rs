@@ -58,6 +58,8 @@ pub enum Action {
     ApprovePolicy,
     ApprovePermission,
     DenyPermission,
+    /// Answer the pending harness question with an option key.
+    Choose(String),
     Permissions,
     RevokePermission(String),
     Accept,
@@ -67,6 +69,7 @@ pub enum Action {
     Cancel,
     Resume,
     Answer(String),
+    Rework(String),
 }
 
 fn can_advance(phase: &Phase) -> bool {
@@ -95,6 +98,7 @@ pub async fn execute(runner: &mut Runner, action: Action) -> Result<()> {
             runner.advance().await
         }
         Action::DenyPermission => runner.deny_permission(),
+        Action::Choose(key) => runner.choose(&key).await,
         Action::Permissions => Ok(()),
         Action::RevokePermission(id) => runner.revoke_permission(&id),
         Action::Accept => runner.review(true).await,
@@ -103,7 +107,17 @@ pub async fn execute(runner: &mut Runner, action: Action) -> Result<()> {
         Action::Plan => runner.mode_plan().await,
         Action::Cancel => runner.cancel().await,
         Action::Resume => runner.resume().await,
-        Action::Answer(text) => runner.answer(text).await,
+        // The same judgment as a message in the interactive session: an
+        // answer to a handback or to a park where the approved plan stands
+        // continues it, anything else is guidance that returns to Plan.
+        Action::Answer(text) => {
+            anyhow::ensure!(
+                runner.task.phase == Phase::AwaitingInput,
+                "no question awaiting an answer"
+            );
+            runner.submit_message(text).await
+        }
+        Action::Rework(note) => runner.rework(note).await,
     }
 }
 
@@ -389,7 +403,15 @@ fn gate(task: &Task, standing: &[String]) -> String {
             .unwrap_or_else(|| {
                 "PERMISSION REQUEST · details unavailable; deny it and retry the task.".into()
             }),
-        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion."),match review_evidence(task).len() { 0 => String::new(), n => format!("\nEvidence: {n} fact(s) the harness checked, see Review") }),
+        Phase::AwaitingChoice => task
+            .pending_choice
+            .as_ref()
+            .map(choice_gate)
+            .unwrap_or_else(|| "HARNESS QUESTION · details unavailable; send guidance to replan.".into()),
+        Phase::AwaitingReview => format!("KNOWLEDGE REVIEW · {} operation(s)\n{}{}\nView Review (Tab) · /accept [operation] · /reject [operation] · /no-knowledge{}",task.reviews.len(),task.capture_reason.as_deref().unwrap_or("Review the captured evidence before completion."),match review_evidence(task).len() { 0 => String::new(), n => format!("\nEvidence: {n} fact(s) the harness checked, see Review") },rework_line(task)),
+        // A park where the approved plan stands, or a question the model
+        // asked under it: the reply is judged against the plan.
+        Phase::AwaitingInput if task.plan_stands_park || (task.handed_back && !task.turn_finished && task.mode == super::runner::Mode::Auto) => format!("INPUT NEEDED\n{}\nReply to continue the approved plan, or /plan to replan.", task.last_response),
         Phase::AwaitingInput => if task.turn_finished {
             "Your turn. Ask a follow-up or describe the next change.".into()
         } else if task.last_response.is_empty() {
@@ -463,6 +485,23 @@ fn permission_gate(request: &super::runner::PendingPermission, standing: &[Strin
             "/approve grants this access for the current task and runs the command · /deny refuses it",
         ),
     }
+    text
+}
+
+fn choice_gate(choice: &super::runner::PendingChoice) -> String {
+    let mut text = format!("HARNESS QUESTION\n{}\n", choice.prompt);
+    for option in &choice.options {
+        let default = if option.key == choice.default {
+            " (default)"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "/choose {}  {}{default}\n",
+            option.key, option.label
+        ));
+    }
+    text.push_str("Or send guidance: the task returns to Plan.");
     text
 }
 
@@ -1327,6 +1366,21 @@ fn evidence_lines(evidence: &[String]) -> String {
 }
 
 /// The current capture note's evidence, if any.
+/// At the final capture review, how to send the work back instead of
+/// completing, said more firmly when the harness's evidence shows work left.
+fn rework_line(task: &Task) -> &'static str {
+    if !task.at_final_review() {
+        ""
+    } else if review_evidence(task)
+        .iter()
+        .any(|fact| fact.starts_with("Planned files not edited") || fact.starts_with("Stubs left"))
+    {
+        "\nEvidence shows unfinished work: /rework <note> sends it back."
+    } else {
+        " · /rework <note> sends it back to work"
+    }
+}
+
 fn review_evidence(task: &Task) -> &[String] {
     task.symbolic
         .as_ref()
@@ -2234,6 +2288,7 @@ mod tests {
                     message: "mismatched types".into(),
                     detail: None,
                     definition: None,
+                    declared: Vec::new(),
                     fixes: vec![],
                     fixes_complete: false,
                 })
@@ -2360,6 +2415,42 @@ mod tests {
 
         task.turn_finished = true;
         assert!(gate(&task, &[]).starts_with("Your turn."));
+
+        // A park where the approved plan stands shows its reason, not only
+        // "Your turn", and says the reply continues the plan.
+        task.plan_stands_park = true;
+        task.last_response =
+            "The model keeps asking to read files whose current text it already has (a.rs last)."
+                .into();
+        let text = gate(&task, &[]);
+        assert!(text.starts_with("INPUT NEEDED\nThe model keeps asking to read files"));
+        assert!(text.ends_with("Reply to continue the approved plan, or /plan to replan."));
+    }
+    #[test]
+    fn the_final_review_gate_offers_rework_and_says_when_work_is_left() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingReview;
+        assert!(!gate(&task, &[]).contains("/rework"));
+        // `final_capture` is the runner's own; a journal can carry it.
+        let mut value = serde_json::to_value(&task).unwrap();
+        value["final_capture"] = true.into();
+        let mut task: Task = serde_json::from_value(value).unwrap();
+        assert!(task.at_final_review());
+        assert!(gate(&task, &[]).ends_with(" · /rework <note> sends it back to work"));
+        task.symbolic = Some(super::super::runner::SymbolicState {
+            capture_note: Some(super::super::runner::CaptureNoteState {
+                operation_id: "note".into(),
+                capture_operation_id: "capture".into(),
+                note_event: 0,
+                note: "Done.".into(),
+                status: "captured".into(),
+                response: None,
+                evidence: vec!["Planned files not edited: b.rs.".into()],
+            }),
+            ..Default::default()
+        });
+        assert!(gate(&task, &[])
+            .ends_with("\nEvidence shows unfinished work: /rework <note> sends it back."));
     }
     #[test]
     fn permission_gate_displays_exact_capabilities_and_decision_commands() {
@@ -2386,6 +2477,44 @@ mod tests {
         assert!(text.contains("Network: enabled"));
         assert!(text.contains("/approve grants this access for the current task"));
         assert!(text.contains("/deny refuses it"));
+    }
+    #[test]
+    fn choice_gate_lists_each_option_as_a_command_with_the_default_marked() {
+        let mut task = task_fixture(PathBuf::from("/project"));
+        task.phase = Phase::AwaitingChoice;
+        task.pending_choice = Some(super::super::runner::PendingChoice {
+            id: "choice-1".into(),
+            kind: super::super::runner::ChoiceKind::ScopeAdd {
+                file: "src/error.rs".into(),
+            },
+            prompt: "The model wants to edit `src/error.rs`, which is outside the approved plan (src/codes.rs).".into(),
+            options: [
+                ("add", "Add src/error.rs to the approved plan; the model makes its edit"),
+                ("replan", "Return to Plan to rework the plan"),
+                ("refuse", "Refuse: the model continues within the plan"),
+            ]
+            .into_iter()
+            .map(|(key, label)| super::super::runner::ChoiceOption {
+                key: key.into(),
+                label: label.into(),
+            })
+            .collect(),
+            default: "add".into(),
+        });
+        let text = gate(&task, &[]);
+        assert!(
+            text.starts_with("HARNESS QUESTION\nThe model wants to edit `src/error.rs`"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "/choose add  Add src/error.rs to the approved plan; the model makes its edit (default)\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("/choose replan  Return to Plan to rework the plan\n"));
+        assert!(text.contains("/choose refuse  Refuse: the model continues within the plan\n"));
+        assert!(text.ends_with("Or send guidance: the task returns to Plan."));
     }
     #[test]
     fn spec_gate_warns_when_no_component_will_anchor_the_records() {

@@ -451,7 +451,11 @@ async fn symbolic_scope_escape_replans_naming_the_file_then_edits_after_approval
     fixture.conversational(
         json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
     );
-    runner.advance().await.unwrap();
+    // The off switch keeps the automatic replan.
+    std::env::set_var("MOOSEDEV_HARNESS_SCOPE_CHOICE", "off");
+    let advanced = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_SCOPE_CHOICE");
+    advanced.unwrap();
     assert_eq!(runner.task.mode, Mode::Plan);
     assert_eq!(runner.task.phase, Phase::Planning);
     assert!(runner.task.last_error.is_none());
@@ -498,6 +502,81 @@ async fn symbolic_scope_escape_replans_naming_the_file_then_edits_after_approval
     );
 }
 
+/// badciv P5: a4b sent `write` with file `command` and a shell script as its
+/// content. That is a misrouted action, corrected by the repair budget, not an
+/// escape from the plan that replans.
+#[tokio::test]
+async fn symbolic_a_write_to_an_action_name_is_corrected_not_a_scope_escape() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"write","file":"command","content":"mkdir -p badciv-map/tests\ntouch badciv-map/tests/tiny_fixture.rs"}));
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    let calls = fixture.model_calls();
+    for _ in 0..3 {
+        if fixture.model_calls() < calls + 2 {
+            runner.advance().await.unwrap();
+        }
+    }
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(intent_details(&runner, "scope_escape_replan").is_empty());
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 0);
+    assert!(!fixture.root.join("command").exists());
+    assert!(
+        runner.task.events.iter().any(|event| {
+            event
+                .message
+                .starts_with("Correcting action, attempt 2 of 3")
+                && event.message.contains(
+                    "`command` is an action, not a file. To run a shell command use the command action; write creates missing parent directories itself.",
+                )
+        }),
+        "{:?}",
+        runner
+            .task
+            .events
+            .iter()
+            .rev()
+            .take(4)
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// An action name the plan itself names is a file: a planned `command`
+/// script is written, not refused as a misrouted action.
+#[tokio::test]
+async fn a_planned_file_named_like_an_action_is_written() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    act(&fixture, &mut runner, json!({"action":"plan","summary":"Preserve display behavior and add a command script","files":["command"],"checks":["true"]})).await;
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    runner.approve_plan().await.unwrap();
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"write","file":"command","content":"#!/bin/sh\necho ok\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("command")).unwrap(),
+        "#!/bin/sh\necho ok\n"
+    );
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.contains("is an action, not a file")));
+}
+
 #[tokio::test]
 async fn symbolic_scope_escapes_are_bounded_per_task_and_park_for_guidance() {
     let _env_lock = ENVIRONMENT.lock().await;
@@ -510,7 +589,11 @@ async fn symbolic_scope_escapes_are_bounded_per_task_and_park_for_guidance() {
         json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
     );
     let calls = fixture.model_calls();
-    runner.advance().await.unwrap();
+    // The bound belongs to the automatic replan, which the off switch keeps.
+    std::env::set_var("MOOSEDEV_HARNESS_SCOPE_CHOICE", "off");
+    let advanced = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_SCOPE_CHOICE");
+    advanced.unwrap();
     assert_eq!(fixture.model_calls(), calls + 1);
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
     assert_eq!(runner.task.mode, Mode::Auto);
@@ -570,8 +653,12 @@ async fn symbolic_noop_edit_is_repaired_while_the_language_server_reports_errors
     let mut unsettled = diagnostics(2);
     unsettled.settled = false;
     runner.task.diagnostics = Some(unsettled);
-    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first no-op is sent back once for the unedited
+    // planned file, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+        runner.advance().await.unwrap();
+    }
     assert_eq!(runner.task.phase, Phase::Verifying);
 }
 
@@ -666,14 +753,23 @@ async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
-    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first no-op is sent back once for the unedited
+    // planned file, without spending a repair, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
+        runner.advance().await.unwrap();
+        assert!(runner.task.recovery.is_none());
+    }
     assert_eq!(runner.task.phase, Phase::Verifying);
     assert!(runner.task.recovery.is_none());
     assert!(runner.task.last_error.is_none());
     assert!(runner.task.edits.is_empty());
-    assert_eq!(intent_details(&runner, "noop_edit_continuation").len(), 1);
-    assert_eq!(runner.task.symbolic.as_ref().unwrap().noop_continuations, 1);
+    assert_eq!(intent_details(&runner, "noop_edit_continuation").len(), 2);
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished").len(),
+        1
+    );
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().noop_continuations, 2);
 
     // Exactly this source already failed a check: retesting it proves
     // nothing, so the no-op is repaired and the failure is named.
@@ -942,8 +1038,12 @@ async fn a_failed_free_command_does_not_refuse_the_finish() {
         .unwrap()
         .last_failure
         .is_none());
-    fixture.conversational(json!({"action":"finish","summary":"Nothing to change."}));
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first finish is sent back once for the unedited
+    // planned file, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"finish","summary":"Nothing to change."}));
+        runner.advance().await.unwrap();
+    }
     assert_eq!(runner.task.phase, Phase::Verifying);
     assert!(intent_details(&runner, "finish_retest_refused").is_empty());
 }
@@ -1984,6 +2084,9 @@ async fn a_clean_edit_covering_every_planned_file_runs_the_checks_without_a_mode
         .events
         .iter()
         .any(|event| event.message.starts_with("All planned files are edited")));
+    // Auto-verify fires only on finished work, so the unfinished-plan gate
+    // never sends it back.
+    assert!(intent_details(&runner, "finish_refused_unfinished").is_empty());
 }
 
 #[tokio::test]
@@ -2119,6 +2222,528 @@ async fn a_new_approval_drops_the_arm_and_counts_only_its_own_edits() {
     assert!(intent_details(&runner, "auto_verify").is_empty());
 }
 
+/// An approved plan over labels.py whose action repair parked early: the
+/// model sent the same rejected replace twice (badciv P5).
+async fn repeat_parked_runner(fixture: &Fixture) -> Runner {
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.approve_plan().await.unwrap();
+    let miss =
+        json!({"action":"replace","file":"labels.py","old_text":"no such text","new_text":"x"});
+    fixture.conversational(miss.clone());
+    fixture.conversational(miss);
+    assert!(runner.advance().await.is_err());
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "repair_repeat_parked").len(), 1);
+    assert!(runner.task.plan_stands_park);
+    runner
+}
+
+/// Advance until the model is asked once (checkpoints journal first).
+async fn until_model_called(fixture: &Fixture, runner: &mut Runner) {
+    let calls = fixture.model_calls();
+    for _ in 0..6 {
+        if fixture.model_calls() > calls {
+            return;
+        }
+        runner.advance().await.unwrap();
+    }
+    panic!("the model was never asked");
+}
+
+#[tokio::test]
+async fn a_hint_answering_a_repeat_park_continues_the_approved_plan() {
+    // badciv P5: "The enums are defined in codes.rs…" answered a repeat park
+    // and cost a ~5-minute replan and a plan approval, twice.
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = repeat_parked_runner(&fixture).await;
+    runner
+        .submit_message("The function body in labels.py is `return name`; replace that.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.recovery.is_none(), "a fresh repair budget");
+    assert!(!runner.task.plan_stands_park);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["unclear"]
+    );
+    // The approval stands: the next edit applies without a new plan.
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}));
+    until_model_called(&fixture, &mut runner).await;
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(intent_details(&runner, "plan_approved").len() == 1);
+}
+
+/// A park answer explains with negations ("does not re-export"), which
+/// must not read as stopping; turning words still replan.
+#[tokio::test]
+async fn a_negated_hint_continues_a_park_but_a_turning_word_replans() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = repeat_parked_runner(&fixture).await;
+    runner
+        .submit_message("labels.py does not strip the name; don't change anything else.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+
+    // A quoted hint (`▎`, as a terminal pastes one) that negates mid-sentence
+    // still explains.
+    let fixture = symbolic_fixture().await;
+    let mut runner = repeat_parked_runner(&fixture).await;
+    runner
+        .submit_message(
+            "▎ The render_name body is in labels.py, and labels.py does not strip the name.".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = repeat_parked_runner(&fixture).await;
+    runner
+        .submit_message("Stop and lowercase it instead.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["replan: your message says \"stop\", which may change or stop the approved work."]
+    );
+
+    // An answer that opens with a refusal refuses the work (it used to
+    // continue: neither "not" nor "wait" turned a park answer).
+    let fixture = symbolic_fixture().await;
+    let mut runner = repeat_parked_runner(&fixture).await;
+    runner
+        .submit_message("Do not make this change; wait.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["replan: your message says \"do not\", which may change or stop the approved work."]
+    );
+}
+
+#[tokio::test]
+async fn a_park_answer_naming_a_file_outside_the_plan_replans() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = repeat_parked_runner(&fixture).await;
+    runner
+        .submit_message("Put the helper in src/other.py.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(!runner.task.plan_stands_park);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["replan: your message names src/other.py, which the approved plan does not cover."]
+    );
+}
+
+/// Keep the automatic scope-escape replan for a test about what follows it;
+/// the switch is cleared on drop, even when the test fails.
+struct ScopeChoiceOff;
+
+impl ScopeChoiceOff {
+    fn new() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_SCOPE_CHOICE", "off");
+        Self
+    }
+}
+
+impl Drop for ScopeChoiceOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_SCOPE_CHOICE");
+    }
+}
+
+/// A park that questions the plan is not judged: the answer replans.
+#[tokio::test]
+async fn answering_a_scope_exhausted_park_still_replans() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _scope_choice = ScopeChoiceOff::new();
+    let fixture = symbolic_fixture().await;
+    std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    runner.task.symbolic.as_mut().unwrap().scope_escapes = 3;
+    fixture.conversational(
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(!runner.task.plan_stands_park);
+    runner.submit_message("continue".into()).await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(intent_details(&runner, "message_disposition").is_empty());
+}
+
+/// Headless `answer` and a message in the conversation take the same path:
+/// a park answer continues the plan in both, and a scope-exhausted park's
+/// answer replans in both (headless `answer` used to continue it).
+#[tokio::test]
+async fn headless_answer_and_a_conversation_message_agree() {
+    use moosedev::harness::tui::{execute, Action};
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _scope_choice = ScopeChoiceOff::new();
+    let hint = "The body is `return name`; replace exactly that.";
+    let mut outcomes = Vec::new();
+    for headless in [false, true] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = repeat_parked_runner(&fixture).await;
+        if headless {
+            execute(&mut runner, Action::Answer(hint.into()))
+                .await
+                .unwrap();
+        } else {
+            runner.submit_message(hint.into()).await.unwrap();
+        }
+        outcomes.push((
+            runner.task.mode,
+            runner.task.phase,
+            intent_details(&runner, "message_disposition"),
+        ));
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+    assert_eq!(outcomes[0].1, Phase::Working);
+
+    let fixture = symbolic_fixture().await;
+    std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    runner.task.symbolic.as_mut().unwrap().scope_escapes = 3;
+    fixture.conversational(
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    );
+    runner.advance().await.unwrap();
+    execute(&mut runner, Action::Answer("continue".into()))
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    // Headless answer still needs something to answer.
+    assert!(execute(&mut runner, Action::Answer("continue".into()))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn answering_a_stall_park_or_a_read_repeat_park_continues_the_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    for variant in ["a", "b", "c", "d"] {
+        act(&fixture, &mut runner, failing_test_command(variant)).await;
+    }
+    assert_eq!(intent_details(&runner, "stalled_failure_parked").len(), 1);
+    assert!(runner.task.plan_stands_park);
+    runner
+        .submit_message("Strip the name before returning it.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    for _ in 0..2 {
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"read","file":"labels.py"}),
+        )
+        .await;
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner.task.last_response.contains("Guidance is needed"));
+    assert!(runner.task.plan_stands_park);
+    runner.submit_message("go ahead".into()).await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["continue"]
+    );
+}
+
+/// A reply may continue the turn again once the model made progress since the
+/// last continued one; with nothing done in between it hands the turn back.
+#[tokio::test]
+async fn a_reply_after_an_edit_continues_again() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let reply = json!({"action":"reply","message":"Now the next change."});
+    act(&fixture, &mut runner, reply.clone()).await;
+    assert_eq!(intent_details(&runner, "reply_continued").len(), 1);
+    act(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    assert_eq!(runner.task.edits.len(), 1);
+    act(&fixture, &mut runner, reply.clone()).await;
+    assert_eq!(intent_details(&runner, "reply_continued").len(), 2);
+    assert_eq!(runner.task.phase, Phase::Working);
+    act(&fixture, &mut runner, reply).await;
+    assert_eq!(intent_details(&runner, "reply_continued").len(), 2);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+}
+
+/// badciv P5: a scope-escape replan that only added a file reset the cycle,
+/// so auto-verify waited for every planned file to be edited again.
+#[tokio::test]
+async fn an_additive_reapproval_keeps_the_edits_made_under_the_earlier_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _scope_choice = ScopeChoiceOff::new();
+    let fixture = symbolic_fixture().await;
+    std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    act(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    assert_eq!(runner.task.edits.len(), 1);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    )
+    .await;
+    assert_eq!(runner.task.mode, Mode::Plan);
+    act(&fixture, &mut runner, json!({"action":"plan","summary":"Preserve display behavior and update the constant","files":["labels.py","other.py"],"checks":["true"]})).await;
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    runner.approve_plan().await.unwrap();
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().cycle_edit_start,
+        0,
+        "the earlier plan's edit still counts"
+    );
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"read","file":"other.py"}),
+    )
+    .await;
+    clean_edit(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    )
+    .await;
+    assert!(leaves_working_without_the_model(&fixture, &mut runner).await);
+    assert_eq!(intent_details(&runner, "auto_verify").len(), 1);
+}
+
+#[tokio::test]
+async fn a_reapproval_that_drops_a_file_counts_afresh() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    act(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+    runner.mode_plan().await.unwrap();
+    act(&fixture, &mut runner, json!({"action":"plan","summary":"Preserve display behavior and update the constant","files":["other.py"],"checks":["true"]})).await;
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    runner.approve_plan().await.unwrap();
+    assert_eq!(
+        runner.task.symbolic.as_ref().unwrap().cycle_edit_start,
+        runner.task.edits.len()
+    );
+}
+
+/// A replan the human asked for (`/plan`) re-approves different work even
+/// over the same files: only the very same plan (files and summary) keeps
+/// the edits made under the earlier approval.
+#[tokio::test]
+async fn a_human_replan_over_the_same_files_counts_afresh_unless_the_plan_is_unchanged() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for (summary, kept) in [
+        ("Preserve display behavior and strip each name", false),
+        ("Preserve display behavior while adding a helper", true),
+    ] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = planned_symbolic_runner(&fixture).await;
+        runner.approve_plan().await.unwrap();
+        act(&fixture, &mut runner, json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"})).await;
+        assert_eq!(runner.task.edits.len(), 1);
+        runner.mode_plan().await.unwrap();
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"plan","summary":summary,"files":["labels.py"],"checks":["true"]}),
+        )
+        .await;
+        for _ in 0..3 {
+            if runner.task.phase == Phase::AwaitingPlan {
+                break;
+            }
+            runner.advance().await.unwrap();
+        }
+        runner.approve_plan().await.unwrap();
+        let start = runner.task.symbolic.as_ref().unwrap().cycle_edit_start;
+        assert_eq!(start, if kept { 0 } else { 1 }, "{summary}");
+    }
+}
+
+/// An approved task that edited labels.py to a stub, passed its checks and
+/// captured one proposal: the final review badciv P5 could only reject.
+async fn at_final_review(fixture: &Fixture) -> Runner {
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    raise NotImplementedError\n"}));
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    fixture.note("Rendering is stubbed for now.");
+    fixture.typed_one("Lesson", "Rendering is stubbed");
+    for _ in 0..16 {
+        if runner.task.at_final_review() {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert!(runner.task.at_final_review());
+    assert_eq!(runner.task.reviews.len(), 1);
+    runner
+}
+
+#[tokio::test]
+async fn rework_at_the_final_review_returns_to_work_and_captures_again() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = at_final_review(&fixture).await;
+    let rejected = runner.task.reviews[0].request.operation_id.clone();
+    let notes = fixture.note_calls();
+    runner
+        .rework("render_name is still a stub; implement it.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(!runner.task.at_final_review());
+    assert!(runner.task.reviews.is_empty());
+    assert!(runner.task.check_results.is_empty());
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .capture_note
+        .is_none());
+    assert_eq!(
+        intent_details(&runner, "review_rework"),
+        vec!["render_name is still a stub; implement it."]
+    );
+    assert_eq!(
+        intent_details(&runner, "review_interaction"),
+        vec![format!("rejected batch [{rejected}]")]
+    );
+    assert!(intent_details(&runner, "record_review")
+        .iter()
+        .all(|detail| detail.starts_with("rejected ")));
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("The human sent the work back at review:"));
+    // The work goes on under the same approval; the next finish verifies and
+    // asks for the final note again.
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    raise NotImplementedError\n","new_text":"    return name.strip()\n"}));
+    fixture.conversational(json!({"action":"finish","summary":"Implemented."}));
+    fixture.note("render_name strips surrounding whitespace.");
+    fixture.typed_one("Lesson", "Names are stripped");
+    for _ in 0..16 {
+        if runner.task.at_final_review() {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(fixture.note_calls(), notes + 1, "a second note was asked");
+    assert_eq!(intent_details(&runner, "plan_approved").len(), 1);
+    runner.review(true).await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Complete);
+}
+
+/// A rework note that refuses the work is judged as a park answer is: it
+/// rejects the capture and returns the task to Plan with the note as
+/// guidance, as a steering message does.
+#[tokio::test]
+async fn a_rework_note_that_changes_the_plan_returns_to_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = at_final_review(&fixture).await;
+    let rejected = runner.task.reviews[0].request.operation_id.clone();
+    let note = "Do not keep the stub; render names through a lookup table.";
+    runner.rework(note.into()).await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(!runner.task.at_final_review());
+    assert!(runner.task.reviews.is_empty());
+    assert!(journal_value(&runner)["approved_revision"].is_null());
+    assert_eq!(journal_value(&runner)["guidance"], note);
+    assert_eq!(runner.task.last_response, note);
+    assert_eq!(
+        intent_details(&runner, "review_rework"),
+        vec!["replan: your message says \"do not\", which may change or stop the approved work."]
+    );
+    assert_eq!(
+        intent_details(&runner, "review_interaction"),
+        vec![format!("rejected batch [{rejected}]")]
+    );
+    assert!(runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .capture_note
+        .is_none());
+    // The next plan is a plan under review, approved again.
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior through a lookup table","files":["labels.py"],"checks":["true"]}));
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+}
+
+#[tokio::test]
+async fn rework_is_refused_outside_the_final_review() {
+    use moosedev::harness::tui::{execute, Action};
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    assert!(runner.rework("more".into()).await.is_err());
+    runner.approve_plan().await.unwrap();
+    let error = execute(&mut runner, Action::Rework("more".into()))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("final capture review"),
+        "{error}"
+    );
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(intent_details(&runner, "review_rework").is_empty());
+}
+
 /// A plan over labels.py and a codes.py not written yet, approved, with a
 /// settled language-server error: the state badciv c83c10f8 was in.
 async fn missing_module_runner(fixture: &Fixture) -> Runner {
@@ -2246,6 +2871,7 @@ fn offer_preferred_fix(fixture: &Fixture, runner: &mut Runner, file: &str, from:
         message: "a lint with a machine-applicable suggestion".into(),
         detail: None,
         definition: None,
+        declared: Vec::new(),
         fixes: vec![fix],
         fixes_complete: true,
     }];
@@ -2588,6 +3214,9 @@ async fn a_required_check_failing_the_same_way_is_focused() {
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     runner.approve_plan().await.unwrap();
     act(&fixture, &mut runner, failing_test_command("a")).await;
+    // Nothing is edited: the first finish is sent back once for the unedited
+    // planned file, and the repeat goes on.
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
     fixture.conversational(json!({"action":"finish","summary":"Done."}));
     for _ in 0..6 {
         if runner
@@ -2704,4 +3333,597 @@ async fn a_panic_outside_the_test_shows_where_it_panicked() {
         "{response}"
     );
     assert!(!response.contains("(the test)"), "{response}");
+}
+
+// ---- Harness questions (PendingChoice): scope escapes and missing planned
+// files ask the human instead of replanning or verifying a false completion.
+
+fn choice_keys(runner: &Runner) -> Vec<String> {
+    runner
+        .task
+        .pending_choice
+        .as_ref()
+        .unwrap()
+        .options
+        .iter()
+        .map(|option| option.key.clone())
+        .collect()
+}
+
+/// The approved labels.py plan, and a model edit to other.py outside it,
+/// parked on the scope question.
+async fn escaped_to_other(fixture: &Fixture) -> Runner {
+    std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.approve_plan().await.unwrap();
+    // An invalid candidate first: the escape that follows is valid output and
+    // closes the repair it opened instead of spending another attempt.
+    fixture.conversational(
+        json!({"action":"replace","file":"labels.py","old_text":"absent text","new_text":"x"}),
+    );
+    fixture.conversational(
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    );
+    runner.advance().await.unwrap();
+    runner
+}
+
+#[tokio::test]
+async fn a_scope_escape_asks_the_human_and_add_amends_the_approved_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = escaped_to_other(&fixture).await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(runner.task.recovery.is_none(), "no repair is spent");
+    assert!(runner.task.last_error.is_none());
+    assert!(runner.task.edits.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("other.py")).unwrap(),
+        "x = 1\n"
+    );
+    let pending = runner.task.pending_choice.clone().unwrap();
+    assert_eq!(
+        pending.kind,
+        moosedev::harness::runner::ChoiceKind::ScopeAdd {
+            file: "other.py".into()
+        }
+    );
+    assert_eq!(
+        pending.prompt,
+        "The model wants to edit `other.py`, which is outside the approved plan (labels.py)."
+    );
+    assert_eq!(choice_keys(&runner), ["add", "replan", "refuse"]);
+    assert_eq!(pending.default, "add");
+    assert_eq!(
+        intent_details(&runner, "choice_asked"),
+        vec!["scope_add other.py: add, replan, refuse (default add)"]
+    );
+    assert!(intent_details(&runner, "scope_escape_replan").is_empty());
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 0);
+    assert!(
+        runner.advance().await.is_err(),
+        "parked until the human chooses"
+    );
+
+    // The question survives a restart.
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(runner.task.pending_choice.as_ref(), Some(&pending));
+
+    let error = runner.choose("maybe").await.unwrap_err().to_string();
+    assert!(error.contains("add, replan, refuse"), "{error}");
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+
+    let approved = journal_value(&runner)["approved_revision"].clone();
+    let calls = fixture.model_calls();
+    runner.choose("add").await.unwrap();
+    assert_eq!(fixture.model_calls(), calls, "the model is asked nothing");
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(journal_value(&runner)["approved_revision"], approved);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().files,
+        ["labels.py", "other.py"]
+    );
+    assert_eq!(
+        runner.task.approved_plans.last().unwrap().files,
+        ["labels.py", "other.py"]
+    );
+    let scope = runner.task.approved_change_scope.as_ref().unwrap();
+    assert!(scope.files.contains_key("other.py"));
+    let state = runner.task.symbolic.as_ref().unwrap();
+    assert!(state.obligations.contains_key("other.py"));
+    assert_eq!(state.scope_escapes, 0);
+    assert_eq!(intent_details(&runner, "obligations_derived").len(), 2);
+    assert_eq!(intent_details(&runner, "scope_added"), vec!["other.py"]);
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["scope_add:add"]
+    );
+    assert_eq!(
+        runner.task.last_response,
+        "`other.py` was added to the approved plan. Make your edit."
+    );
+
+    // The approval stands for the amended plan: the edit applies without a
+    // replan or a second approval.
+    fixture.conversational(json!({"action":"read","file":"other.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("other.py")).unwrap(),
+        "x = 2\n"
+    );
+}
+
+#[tokio::test]
+async fn choosing_replan_at_a_scope_escape_replans_and_the_planner_amends_the_approved_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = escaped_to_other(&fixture).await;
+    runner.choose("replan").await.unwrap();
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner.task.pending_choice.is_none());
+    assert!(journal_value(&runner)["approved_revision"].is_null());
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 1);
+    assert_eq!(
+        intent_details(&runner, "scope_escape_replan"),
+        vec!["other.py: escape 1, chosen by the human"]
+    );
+    assert!(runner.task.symbolic.as_ref().unwrap().scope_replan);
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["scope_add:replan"]
+    );
+    assert_eq!(
+        runner.task.last_response,
+        "Edit to other.py is outside the approved plan files [labels.py]; replan with every file the change needs."
+    );
+    assert_eq!(
+        runner.task.read_files,
+        ["labels.py"],
+        "the working set stays"
+    );
+
+    // The planner sees the plan it amends, whole and labelled as approved.
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display behavior and update the constant","files":["labels.py","other.py"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    let prompt = fixture.last_model_prompt("harness_action");
+    let plan = prompt
+        .split("\nApproved plan (amend it; keep what still holds): ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no amend label: {prompt}"));
+    assert!(
+        plan.starts_with("{\"summary\":\"Preserve display behavior while adding a helper\""),
+        "{plan}"
+    );
+    assert!(!prompt.contains("\nPlan: {"), "labelled once");
+
+    // Once the new plan is proposed it is a plan under review, not an
+    // amendment.
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"read","file":"other.py"}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("\nPlan: {"), "{prompt}");
+    assert!(!prompt.contains("Approved plan (amend it"));
+}
+
+/// `add` cannot stand on an approval that never saw the rules governing the
+/// added file: the amendment is undone and the task replans, naming them.
+#[tokio::test]
+async fn adding_a_file_governed_by_rules_the_plan_does_not_address_replans() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().file_rules = vec![(
+        "other.py".into(),
+        GoverningRule {
+            iri: "urn:rule:frozen-constants".into(),
+            label: "Module constants are frozen".into(),
+            kind: "Constraint".into(),
+            claim: "hasDescription: A module-level constant is never reassigned.\n".into(),
+            via: "via: linked to other.py".into(),
+        },
+    )];
+    let mut runner = escaped_to_other(&fixture).await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    let calls = fixture.model_calls();
+    runner.choose("add").await.unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner.task.pending_choice.is_none());
+    assert!(journal_value(&runner)["approved_revision"].is_null());
+    assert_eq!(runner.task.plan.as_ref().unwrap().files, ["labels.py"]);
+    assert_eq!(
+        runner.task.approved_plans.last().unwrap().files,
+        ["labels.py"]
+    );
+    assert!(journal_value(&runner)["snapshots"]
+        .get("other.py")
+        .is_none());
+    let state = runner.task.symbolic.as_ref().unwrap();
+    assert!(!state.obligations.contains_key("other.py"));
+    assert_eq!(state.scope_escapes, 1);
+    assert!(state.scope_replan);
+    assert_eq!(
+        intent_details(&runner, "scope_add_needs_replan"),
+        vec!["other.py: Module constants are frozen"]
+    );
+    assert_eq!(
+        intent_details(&runner, "scope_escape_replan"),
+        vec!["other.py: escape 1, rules the approved plan does not address"]
+    );
+    assert!(intent_details(&runner, "scope_added").is_empty());
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["scope_add:add"]
+    );
+    assert_eq!(
+        runner.task.last_response,
+        "`other.py` is governed by rules the approved plan does not address (Module constants are frozen); replanning so the plan can address them."
+    );
+}
+
+#[tokio::test]
+async fn choosing_refuse_keeps_the_plan_and_a_message_replaces_the_question() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = escaped_to_other(&fixture).await;
+    runner.choose("refuse").await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(runner.task.plan.as_ref().unwrap().files, ["labels.py"]);
+    assert_eq!(runner.task.symbolic.as_ref().unwrap().scope_escapes, 0);
+    assert_eq!(
+        runner.task.last_response,
+        "`other.py` is outside the approved plan and the human declined to add it. Continue within the plan files: labels.py."
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["scope_add:refuse"]
+    );
+
+    // A plain message while a question waits is new guidance: it replans and
+    // the question is discarded.
+    fixture.conversational(
+        json!({"action":"replace","file":"other.py","old_text":"x = 1","new_text":"x = 2"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    runner
+        .submit_message("Leave other.py alone and rename the helper instead.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert!(runner.task.pending_choice.is_none());
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .starts_with("Discarded pending harness question")));
+    assert!(runner.choose("add").await.is_err());
+}
+
+#[tokio::test]
+async fn scope_choice_off_keeps_the_automatic_replan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    std::env::set_var("MOOSEDEV_HARNESS_SCOPE_CHOICE", "off");
+    let runner = escaped_to_other(&fixture).await;
+    std::env::remove_var("MOOSEDEV_HARNESS_SCOPE_CHOICE");
+    assert_eq!(runner.task.mode, Mode::Plan);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner.task.pending_choice.is_none());
+    assert!(runner.task.recovery.is_none());
+    assert!(intent_details(&runner, "choice_asked").is_empty());
+    assert_eq!(
+        intent_details(&runner, "scope_escape_replan"),
+        vec!["other.py: escape 1 of 3"]
+    );
+}
+
+/// code.txt and a notes.txt that does not exist, approved, with code.txt
+/// edited.
+async fn edited_with_notes_missing(fixture: &Fixture) -> Runner {
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Repair code.txt and record the reasoning in notes.txt","files":["code.txt","notes.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"replace","file":"code.txt","old_text":"original\n","new_text":"changed\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 1);
+    runner
+}
+
+/// Finish twice: sent back once naming notes.txt, then the question.
+async fn finished_with_notes_missing(fixture: &Fixture) -> Runner {
+    let mut runner = edited_with_notes_missing(fixture).await;
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.recovery.is_none(), "no repair is spent");
+    assert_eq!(
+        runner.task.last_response,
+        "Not finished: planned file(s) notes.txt do not exist yet. Write what the plan still needs, then finish. A planned file that needs no change can stay as it is: finish again."
+    );
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished"),
+        vec!["missing: [notes.txt]; unedited: []"]
+    );
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().kind,
+        moosedev::harness::runner::ChoiceKind::MissingPlannedFile {
+            files: vec!["notes.txt".into()]
+        }
+    );
+    assert_eq!(choice_keys(&runner), ["write", "drop", "finish"]);
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().default,
+        "write"
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_asked"),
+        vec!["missing_planned_file notes.txt: write, drop, finish (default write)"]
+    );
+    assert!(runner.task.check_results.is_empty(), "nothing verified");
+    runner
+}
+
+#[tokio::test]
+async fn a_finish_with_a_planned_file_missing_is_sent_back_then_asks_and_write_returns_to_the_model(
+) {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_missing(&fixture).await;
+    runner.choose("write").await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(
+        runner.task.last_response,
+        "Write the missing planned file(s): notes.txt."
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["missing_planned_file:write"]
+    );
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"write","file":"notes.txt","content":"Why the repair.\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 2);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_missing_planned_file_verifies_the_amended_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_missing(&fixture).await;
+    let calls = fixture.model_calls();
+    runner.choose("drop").await.unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(runner.task.plan.as_ref().unwrap().files, ["code.txt"]);
+    assert_eq!(
+        runner.task.approved_plans.last().unwrap().files,
+        ["code.txt"]
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["missing_planned_file:drop"]
+    );
+    assert!(intent_details(&runner, "finish_forced_missing").is_empty());
+    // The approval stands for the amended plan: the checks run.
+    runner.advance().await.unwrap();
+    assert_ne!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(runner.task.check_results.len(), 1);
+    assert!(runner.task.check_results[0].success);
+}
+
+#[tokio::test]
+async fn verifying_anyway_with_a_planned_file_missing_is_journaled() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_missing(&fixture).await;
+    runner.choose("finish").await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().files,
+        ["code.txt", "notes.txt"]
+    );
+    assert_eq!(
+        intent_details(&runner, "finish_forced_missing"),
+        vec!["notes.txt"]
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["missing_planned_file:finish"]
+    );
+    runner.advance().await.unwrap();
+    assert_ne!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(runner.task.check_results.len(), 1);
+}
+
+/// Verifying anyway answers one finish. A new approval, or work sent back at
+/// review, gates the next finish at the same source again.
+#[tokio::test]
+async fn verifying_anyway_does_not_outlive_a_new_approval_or_a_rework() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let accepted = |runner: &Runner| {
+        runner
+            .task
+            .symbolic
+            .as_ref()
+            .unwrap()
+            .unfinished_accepted_at
+    };
+
+    // A new approval of the same plan.
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_missing(&fixture).await;
+    runner.choose("finish").await.unwrap();
+    assert_eq!(accepted(&runner), Some(1));
+    runner.mode_plan().await.unwrap();
+    act(&fixture, &mut runner, json!({"action":"plan","summary":"Repair code.txt and record the reasoning in notes.txt","files":["code.txt","notes.txt"],"checks":["true"]})).await;
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    runner.approve_plan().await.unwrap();
+    assert_eq!(accepted(&runner), None);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice, "asked again");
+
+    // Work sent back at the final review.
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_missing(&fixture).await;
+    runner.choose("finish").await.unwrap();
+    fixture.note("notes.txt is left for later.");
+    fixture.typed_one("Lesson", "Notes come later");
+    for _ in 0..16 {
+        if runner.task.at_final_review() {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert!(runner.task.at_final_review());
+    runner
+        .rework("Write notes.txt as the plan says.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(accepted(&runner), None);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice, "asked again");
+}
+
+#[tokio::test]
+async fn a_planned_file_left_unedited_is_sent_back_once_then_verified() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("notes.txt"), "Earlier notes.\n").unwrap();
+    let mut runner = edited_with_notes_missing(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        runner.task.last_response,
+        "Not finished: planned file(s) notes.txt have no edit since the plan was approved. Write what the plan still needs, then finish. A planned file that needs no change can stay as it is: finish again."
+    );
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished"),
+        vec!["missing: []; unedited: [notes.txt]"]
+    );
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert!(intent_details(&runner, "choice_asked").is_empty());
+}
+
+#[tokio::test]
+async fn a_journal_from_before_harness_questions_loads() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let runner = fixture.approved_interactive().await;
+    let mut journal = journal_value(&runner);
+    assert!(
+        journal.get("pending_choice").is_none(),
+        "absent is not written"
+    );
+    // Written by an older build: none of the new fields.
+    journal.as_object_mut().unwrap().remove("pending_choice");
+    let state = journal["symbolic"].as_object_mut().unwrap();
+    state.remove("unfinished_refused_at");
+    state.remove("unfinished_accepted_at");
+    let legacy: moosedev::harness::runner::Task = serde_json::from_value(journal).unwrap();
+    assert!(legacy.pending_choice.is_none());
+    let state = legacy.symbolic.unwrap();
+    assert_eq!(state.unfinished_refused_at, None);
+    assert_eq!(state.unfinished_accepted_at, None);
+}
+
+#[tokio::test]
+async fn a_choice_relying_on_a_withdrawn_approval_is_refused_and_the_question_discarded() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = escaped_to_other(&fixture).await;
+    // The source changes outside the harness while the question waits.
+    std::fs::write(
+        fixture.root.join("labels.py"),
+        "def render_name(name):\n    return name.lower()\n",
+    )
+    .unwrap();
+    let error = runner.choose("add").await.unwrap_err().to_string();
+    assert!(error.contains("plan evidence changed"), "{error}");
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(runner.task.plan.as_ref().unwrap().files, ["labels.py"]);
+    assert!(intent_details(&runner, "choice_made").is_empty());
 }

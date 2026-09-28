@@ -6,7 +6,7 @@ use std::process::Command;
 use scip::symbol::{format_symbol, parse_symbol};
 use scip::types::descriptor;
 
-use super::{file_name, note_failed};
+use super::{backticked, file_name, note_failed, STUB_MESSAGES};
 use super::{
     first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, StubSyntax,
 };
@@ -43,12 +43,32 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     checks: &[],
     stubs: Some(StubSyntax {
         markers: &["raise NotImplementedError"],
+        stub_messages: STUB_MESSAGES,
+        failure_constructs: &["raise "],
         line_comments: &["#"],
         block_comments: &[],
         quotes: &['"', '\''],
     }),
     test_failures: Some(test_failures),
+    unresolved_names: Some(unresolved_names),
 };
+
+/// The name ruff's F821 ("Undefined name `X`") or pyright ("\"X\" is not
+/// defined") says is not defined.
+fn unresolved_names(message: &str) -> Vec<String> {
+    let first = message.lines().next().unwrap_or_default().trim();
+    let name = if first.to_ascii_lowercase().starts_with("undefined name ") {
+        backticked(first).next()
+    } else {
+        first
+            .strip_suffix(" is not defined")
+            .and_then(|quoted| quoted.strip_prefix('"')?.strip_suffix('"'))
+    };
+    name.map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| vec![name.to_owned()])
+        .unwrap_or_default()
+}
 
 /// pytest's and unittest's reports of failed tests. pytest names a node id in
 /// its short summary (`FAILED tests/test_map.py::test_grid - AssertionError`)
@@ -199,6 +219,14 @@ fn declaration_kind(node_kind: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn undefined_names_are_read_from_ruff_and_pyright() {
+        assert_eq!(super::unresolved_names("Undefined name `Grid`"), ["Grid"]);
+        assert_eq!(super::unresolved_names("\"Grid\" is not defined"), ["Grid"]);
+        assert!(super::unresolved_names("\"Grid\" is not accessed").is_empty());
+        assert!(super::unresolved_names("Import \"os\" could not be resolved").is_empty());
+    }
+
     #[test]
     fn pytest_and_unittest_failures_are_named() {
         let pytest = "tests/test_map.py::test_ok PASSED                    [ 33%]

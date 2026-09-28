@@ -118,8 +118,16 @@ async fn steering_during_link_review_rederives_associations() {
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     runner.approve_plan().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Working);
-    finish(&fixture);
-    runner.advance().await.unwrap();
+    // The edit was made under the earlier approval: the first finish is sent
+    // back once for the unedited planned file, and the repeat goes on.
+    for _ in 0..2 {
+        finish(&fixture);
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished"),
+        vec!["missing: []; unedited: [labels.py]"]
+    );
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     assert_eq!(runner.task.reviews.len(), 1);
     let fresh = runner.task.reviews[0]
@@ -371,8 +379,16 @@ async fn no_persisted_state_is_awaiting_plan_with_capture_due() {
     assert_journal_invariant(&fixture, "replan after steering");
     runner.approve_plan().await.unwrap();
     assert_journal_invariant(&fixture, "second approval");
-    finish(&fixture);
-    runner.advance().await.unwrap();
+    // The edit was made under the earlier approval: the first finish is sent
+    // back once for the unedited planned file, and the repeat goes on.
+    for _ in 0..2 {
+        finish(&fixture);
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished"),
+        vec!["missing: []; unedited: [labels.py]"]
+    );
     assert_eq!(
         runner.task.phase,
         Phase::Verifying,

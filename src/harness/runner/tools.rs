@@ -38,7 +38,7 @@ fn description(name: &str) -> &'static str {
         "inspect" => "Page the complete output of a journal event.",
         "plan" => "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses).",
         "replace" => "Replace exactly one unique literal occurrence of old_text in a file.",
-        "write" => "Write a file's whole UTF-8 content; null content requests deletion.",
+        "write" => "Write a file's whole UTF-8 content, creating missing parent directories; null content requests deletion.",
         "apply_fix" => "Apply a quick fix the language server offered, by the number listed under an error or lint.",
         "command" => "Run a shell command in the read-only source snapshot.",
         "request_permission" => {

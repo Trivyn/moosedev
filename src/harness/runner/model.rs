@@ -57,7 +57,7 @@ const CONVERSATIONAL_OUTPUT: &str = "Return one JSON object with message (brief 
 const SINGLE_ACTION_OUTPUT: &str = "Return exactly one JSON action.\n";
 const TOOLS_CONVERSATIONAL_OUTPUT: &str = "Call exactly one tool for your next action; put any brief user-facing message in your reply text beside the call. Use reply(message) for discussion without declaring a code task complete. Do not invent plans or checks for read-only questions.\n";
 const TOOLS_SINGLE_ACTION_OUTPUT: &str = "Call exactly one tool for your next action.\n";
-const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message,then), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A reply's then is wait when it answers the human and the turn should end, and continue when you are about to act and want your next action requested. A plan lists explicit permitted files and required shell verification commands; its summary may be as long as the work needs, and each later step is shown the parts of it relevant to that step. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; source supplied in full below counts as already read, and a file listed only under Source outlines must be read before it is edited. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
+const ACTION_MEANINGS: &str = "\nAction meanings: read(file), search(query), inspect(event,offset), plan(summary,files,checks,addresses), replace(file,old_text,new_text), write(file,content), command(command), request_permission(command,justification,read_paths,write_paths,network), question(question), reply(message,then), replan(reason), finish(summary). search(query) returns matching accepted knowledge first, then repository matches; its query is matched as LITERAL text, so quotes, OR and other operators match themselves and never broaden a search. If a search returns nothing, a reworded search of the same idea usually returns nothing too, because the knowledge is not recorded: say so with reply, or ask the human with question. A reply's then is wait when it answers the human and the turn should end, and continue when you are about to act and want your next action requested. A plan lists explicit permitted files and required shell verification commands; its summary may be as long as the work needs, and each later step is shown the parts of it relevant to that step. Its addresses lists the label of each project rule this plan's change implements; leave out rules it defers or that do not apply, and leave it empty when there are none. replace changes exactly one literal occurrence: old_text must be nonempty and unique. write supplies whole UTF-8 content and creates missing parent directories itself; null explicitly requests deletion. The harness owns source-version preconditions; do not reproduce the whole source merely as a precondition. Read a target before editing; source supplied in full below counts as already read, and a file listed only under Source outlines must be read before it is edited. Commands run in a filtered read-only source snapshot with writable build scratch. Existing task grants apply automatically. When a command needs a new external read path, external write path, or network access, use request_permission with the exact command, a concise justification, canonical absolute paths, and only the missing capabilities; the human approves or denies it. A failed command grants nothing: when it failed because the sandbox blocked a path or the network, request_permission is the answer, not a reply that it cannot be done, a replan or a weaker check; when its output names neither a path nor the network, no grant can help, so ask the human with question instead. Use project-relative paths for ordinary source work; protected project files and filesystem aliases remain unavailable. Use replan when an edit, a check result or a human answer shows the approved files or checks must change. Use finish when the requested changes are applied: the harness will run required checks and request human capture review. You do not need to run those checks yourself first.\n";
 /// Shown with `apply_fix` in the schema ([`Runner::fixes_offerable`]).
 const FIX_MEANING: &str = "apply_fix(fix) applies a quick fix the language server offered, by the number listed under an error or lint (\"fix 3: …\"): the harness makes the edit, so there is no text to copy. It is refused when the file has changed since the fix was offered.\n";
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
@@ -799,15 +799,28 @@ impl Runner {
         // state below changes on most steps, and below the conversation it was
         // resent on nearly every step (about 4 KB of prefill a step over badciv
         // runs 8-10).
+        // Replanning approved work, the planner amends the approved plan and
+        // sees it whole (bounded), so it does not page it from the journal.
+        let amending = self.amending_approved_plan();
         let plan = self.task.plan.clone().map(|mut plan| {
-            plan.summary = self.plan_summary_view().unwrap_or_default();
+            plan.summary = if amending {
+                self.approved_plan_view()
+            } else {
+                self.plan_summary_view()
+            }
+            .unwrap_or_default();
             plan
         });
         prompt.push_str(&format!(
-            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\nPlan: {}\n",
+            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n{}: {}\n",
             config.model,
             self.task.objective,
             context.context,
+            if amending {
+                "Approved plan (amend it; keep what still holds)"
+            } else {
+                "Plan"
+            },
             serde_json::to_string(&plan)?,
         ));
         // After the source, not before it: a dossier changes when the graph
@@ -1411,6 +1424,17 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
         retain_actions(&mut actions, |name| name != "apply_fix");
     }
     actions
+}
+/// Whether `name` is one of the action names the schema can offer, so a
+/// `file` spelled that way is a misrouted action rather than a path.
+pub(super) fn is_action_name(name: &str) -> bool {
+    action_schema(Mode::Auto, true)["oneOf"]
+        .as_array()
+        .is_some_and(|variants| {
+            variants
+                .iter()
+                .any(|variant| variant["properties"]["action"]["const"] == name)
+        })
 }
 #[cfg(test)]
 mod tests {

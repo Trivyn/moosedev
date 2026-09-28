@@ -60,9 +60,13 @@ impl Runner {
             self.task.approved_change_scope = None;
             self.task.snapshots = sources;
             self.disarm_harness_arms();
+            // Edits made under the withdrawn approval were checked against
+            // source or knowledge that has since changed.
+            self.symbolic_state_mut().coverage_reset = true;
             self.task.check_results.clear();
             self.discard_pending_edit("source or accepted knowledge changed")?;
             self.discard_pending_permission("source or accepted knowledge changed")?;
+            self.discard_pending_choice("source or accepted knowledge changed")?;
             self.abandon_pending_intent("source or accepted knowledge changed")
                 .await?;
             self.invalidate_capture_typing("source or accepted knowledge changed");
@@ -77,7 +81,7 @@ impl Runner {
 
     /// The approved step's context: dossiers for the files read, governing
     /// rules for those and the plan's other files.
-    async fn refresh_approved_scope(&mut self) -> Result<ContextResponse> {
+    pub(super) async fn refresh_approved_scope(&mut self) -> Result<ContextResponse> {
         let files = self
             .task
             .plan
@@ -365,6 +369,7 @@ impl Runner {
         }
         self.task.steps += 1;
         self.task.handed_back = false;
+        self.task.plan_stands_park = false;
         self.event(format!("Model action: {}", serde_json::to_string(&step)?));
         self.persist()?;
         self.task.last_response_observation = matches!(
@@ -648,16 +653,7 @@ impl Runner {
                 if proposed_replan {
                     self.intent_event("model_replan", &reason);
                 }
-                self.end_unchanged_window();
-                self.end_intent_cycle("model replan");
-                self.task.mode = Mode::Plan;
-                self.task.phase = Phase::Planning;
-                self.task.approved_revision = None;
-                self.task.last_response = reason;
-                // The working set stays: the next plan keeps only its own files,
-                // and a file outside them comes back through the first-edit guard.
-                self.task.capture_due = true;
-                self.task.after_review = Phase::Planning;
+                self.enter_replan(reason);
             }
             Step::Finish { summary } => {
                 // The model's own finish: a failure now is its run, not the
@@ -669,6 +665,21 @@ impl Runner {
             }
         }
         Ok(())
+    }
+
+    /// Leave approved work for planning with `reason` as the planner's last
+    /// result: the model's replan, or the human's choice at a scope escape.
+    pub(super) fn enter_replan(&mut self, reason: String) {
+        self.end_unchanged_window();
+        self.end_intent_cycle("model replan");
+        self.task.mode = Mode::Plan;
+        self.task.phase = Phase::Planning;
+        self.task.approved_revision = None;
+        self.task.last_response = reason;
+        // The working set stays: the next plan keeps only its own files,
+        // and a file outside them comes back through the first-edit guard.
+        self.task.capture_due = true;
+        self.task.after_review = Phase::Planning;
     }
 
     /// After an applied edit: check it with the language servers, then arm
@@ -690,9 +701,10 @@ impl Runner {
         self.arm_auto_verify(fresh);
     }
 
-    /// From finished work to the required checks. The language-server and
-    /// stub gates each send the model back once for a source state; then the
-    /// code index refresh and the link review, then Verifying. The model's
+    /// From finished work to the required checks. The language-server,
+    /// unfinished-plan and stub gates each send the model back once for a
+    /// source state (planned files still missing then ask the human); then
+    /// the code index refresh and the link review, then Verifying. The model's
     /// finish, the no-op continuation and the harness's own auto-verify all
     /// come through here.
     pub(super) async fn begin_verification(&mut self, summary: String) -> Result<()> {
@@ -726,7 +738,10 @@ impl Runner {
             );
             return self.persist();
         }
-        if self.refuse_stubbed_finish() {
+        // Planned files missing or unedited, then stubs: each sends the model
+        // back once for a source state; files still missing then ask the
+        // human.
+        if self.refuse_unfinished_plan()? || self.refuse_stubbed_finish() {
             return self.persist();
         }
         self.task.last_response = summary;
@@ -1419,6 +1434,7 @@ impl Runner {
             );
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
+            self.park_under_approved_plan();
             return true;
         }
         let message = format!(
@@ -1468,6 +1484,7 @@ impl Runner {
             );
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
+            self.park_under_approved_plan();
             return;
         }
         let message = format!("{READ_REFUSED} {reason}");
@@ -1500,6 +1517,7 @@ impl Runner {
             self.task.last_response = message;
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
+            self.park_under_approved_plan();
             return true;
         }
         let message = format!(
@@ -1516,8 +1534,11 @@ impl Runner {
     /// continue`): it is about to act. Without this the turn ended on "I will
     /// now begin…" and the human had to say "ok" (badciv, six runs; replayed,
     /// Gemma chose reply on that prompt 6 of 6 times). Show the reply and ask
-    /// for the next action. Once per human message, so a model that keeps
-    /// replying still hands the turn back. True when the turn continues.
+    /// for the next action. Once per human message or per progress (an edit
+    /// or a required-check result since the last continued reply: badciv P5's
+    /// a4b made four edits between two replies and was handed back), so a
+    /// model that only keeps replying still hands the turn back. True when
+    /// the turn continues.
     fn continue_after_reply(&mut self, reply: &str) -> bool {
         if !matches!(self.task.phase, Phase::Planning | Phase::Working) {
             return false;
@@ -1528,12 +1549,21 @@ impl Runner {
             .iter()
             .rposition(|event| event.message.starts_with("Human "))
             .map_or(0, |index| index + 1);
-        if self.task.events[since_human..]
-            .iter()
-            .any(|event| event.message.starts_with(REPLY_CONTINUED))
+        let now = (self.task.edits.len(), self.task.check_results.len());
+        let progressed = self
+            .task
+            .symbolic
+            .as_ref()
+            .and_then(|state| state.reply_continued_at)
+            .is_some_and(|(edits, checks)| now.0 > edits || now.1 > checks);
+        if !progressed
+            && self.task.events[since_human..]
+                .iter()
+                .any(|event| event.message.starts_with(REPLY_CONTINUED))
         {
             return false;
         }
+        self.symbolic_state_mut().reply_continued_at = Some(now);
         self.intent_event("reply_continued", &bounded(reply, 200));
         let next = if self.task.mode == Mode::Plan {
             "in Plan mode the next action is plan"
@@ -1551,7 +1581,7 @@ impl Runner {
     }
 }
 
-/// Journal marker of a continued reply; one per human message.
+/// Journal marker of a continued reply; one per human message or progress.
 const REPLY_CONTINUED: &str = "Continuing after a reply:";
 
 #[cfg(test)]

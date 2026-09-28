@@ -90,10 +90,19 @@ SYMBOLIC_EVENT_KINDS = (
     # autonomous recovery.
     "repair_narrowed", "repair_repeat_parked", "fix_auto_applied", "fix_auto_held", "auto_fix_exhausted",
     "review_evidence",
+    # The human sent the work back from the final review instead of completing; a human decision, not an
+    # autonomous recovery.
+    "review_rework",
     # Tool-call decoding under the tools action contract: repaired arguments, extra calls that did not run,
     # a call written as text, and the provider's refusal of a required tool choice. None is an autonomous
     # recovery.
-    "tool_arguments_repaired", "extra_tool_calls_ignored", "tool_call_from_content", "tool_choice_fallback")
+    "tool_arguments_repaired", "extra_tool_calls_ignored", "tool_call_from_content", "tool_choice_fallback",
+    # Harness questions to the human (a scope escape, a finish with planned files missing), the scope amendment
+    # the human chose (or the replan it became when the added file brought rules the plan does not address), and
+    # the unfinished-plan gate's send-back and forced verification. None is an autonomous recovery: the human
+    # decides.
+    "choice_asked", "choice_made", "scope_added", "scope_add_needs_replan", "finish_refused_unfinished",
+    "finish_forced_missing")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")
@@ -129,8 +138,13 @@ def symbolic_metrics(events, model_requests):
     metrics["structured_model_decisions"] = sum(
         1 for request in model_requests if isinstance(request, dict)
         and request.get("purpose") in SYMBOLIC_STRUCTURED_PURPOSES)
-    metrics["autonomous_recoveries"] = (metrics["scope_escape_replan"] + metrics["noop_edit_continuation"]
-                                        + metrics["replan_continuation"])
+    # A scope-escape replan the human chose at a harness question is not autonomous, nor is the one an `add`
+    # became (each `scope_add_needs_replan` journals exactly one such replan).
+    chosen_replans = sum(1 for event in unique.values() if event.get("kind") == "scope_escape_replan"
+                         and "chosen by the human" in str(event.get("detail", "")))
+    metrics["autonomous_recoveries"] = (metrics["scope_escape_replan"] - chosen_replans
+                                        - metrics["scope_add_needs_replan"]
+                                        + metrics["noop_edit_continuation"] + metrics["replan_continuation"])
     return metrics
 
 

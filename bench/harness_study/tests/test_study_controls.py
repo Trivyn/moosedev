@@ -331,6 +331,17 @@ class ReviewerControls(unittest.TestCase):
         edit = self.state("AwaitingPolicy", pending_edit={"file": "service.py", "before": "old", "after": "new"})
         self.assertEqual(reviewer.review_input(edit, self.episode)["input"], "/approve")
 
+    def test_harness_questions_are_answered_by_allowance_or_default(self):
+        def asked(kind, default):
+            return self.state("AwaitingChoice", pending_choice={"id": "c1", "kind": kind, "prompt": "?",
+                                                                "options": [], "default": default})
+        self.assertEqual(reviewer.review_input(asked({"scope_add": {"file": "service.py"}}, "add"),
+                                               self.episode)["input"], "/choose add")
+        self.assertEqual(reviewer.review_input(asked({"scope_add": {"file": "setup.cfg"}}, "add"),
+                                               self.episode)["input"], "/choose refuse")
+        self.assertEqual(reviewer.review_input(asked({"missing_planned_file": {"files": ["a.py"]}}, "write"),
+                                               self.episode)["input"], "/choose write")
+
     def test_scope_review_does_not_grade_false_or_stale_claims(self):
         # Deliberately wrong claim: valid simulation acceptance must earn no semantic credit.
         request = {"operation_id": "capture-1", "proposals": [{"kind": "Constraint", "title": "Global IDs forever",

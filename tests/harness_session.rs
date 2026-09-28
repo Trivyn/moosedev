@@ -864,3 +864,45 @@ async fn invalid_action_is_repaired_without_another_human_message_or_reprobe() {
     input.send(Command::Quit).unwrap();
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn rework_outside_the_final_review_is_refused_with_where_it_applies() {
+    let fixture = Fixture::new().await;
+    fixture.state.release.add_permits(1);
+    let (input, mut updates, handle) = fixture.controller(Conversation::new(fixture.root.clone()));
+    until(&mut updates, |state| !state.busy).await;
+    input
+        .send(Command::Input("Explain the project.".into()))
+        .unwrap();
+    until(&mut updates, |state| {
+        !state.busy
+            && state
+                .task
+                .as_ref()
+                .is_some_and(|task| task.phase == Phase::AwaitingInput)
+    })
+    .await;
+    input.send(Command::Input("/rework".into())).unwrap();
+    until(&mut updates, |state| {
+        state.conversation.messages.iter().any(|message| {
+            message.role == "system"
+                && message.text == "Use /rework <note>: say what is left to do."
+        })
+    })
+    .await;
+    input
+        .send(Command::Input("/rework Finish the parser.".into()))
+        .unwrap();
+    let refused = until(&mut updates, |state| {
+        state.conversation.messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .text
+                    .contains("rework applies at the final capture review")
+        })
+    })
+    .await;
+    assert_eq!(refused.task.unwrap().phase, Phase::AwaitingInput);
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+}

@@ -1474,11 +1474,15 @@ async fn completed_verification_requires_human_confirmation_and_durable_checkpoi
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     runner.confirm_no_knowledge().await.unwrap();
     runner.approve_plan().await.unwrap();
-    fixture.reply(
-        "harness_action",
-        json!({"action":"finish","summary":"Inspection complete; require verification."}),
-    );
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first finish is sent back once for the unedited
+    // planned file, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.reply(
+            "harness_action",
+            json!({"action":"finish","summary":"Inspection complete; require verification."}),
+        );
+        runner.advance().await.unwrap();
+    }
     // The executor's correctness is independent; provide its completed result
     // as the starting state for this completion-gate scenario.
     runner.task.check_results = vec![passed_check()];
@@ -1808,8 +1812,14 @@ async fn steering_after_no_change_confirmation_is_journaled_for_the_next_checkpo
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;
-    fixture.conversational(json!({"action":"finish","summary":"Ready for required verification."}));
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first finish is sent back once for the unedited
+    // planned file, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.conversational(
+            json!({"action":"finish","summary":"Ready for required verification."}),
+        );
+        runner.advance().await.unwrap();
+    }
     runner.task.check_results = vec![passed_check()];
     fixture.note("nothing beyond the diff");
     fixture.typed(vec![]);
@@ -2081,11 +2091,15 @@ async fn headless_final_no_change_review_requests_one_confirmation() {
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert!(runner.confirm_no_knowledge().await.is_err());
     runner.approve_plan().await.unwrap();
-    fixture.reply(
-        "harness_action",
-        json!({"action":"finish","summary":"Reviewed; run the required check."}),
-    );
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first finish is sent back once for the unedited
+    // planned file, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.reply(
+            "harness_action",
+            json!({"action":"finish","summary":"Reviewed; run the required check."}),
+        );
+        runner.advance().await.unwrap();
+    }
     runner.task.check_results = vec![passed_check()];
     fixture.note("nothing beyond the diff");
     fixture.typed(vec![]);
@@ -2550,6 +2564,7 @@ fn diagnostics(errors: usize) -> moosedev::harness::runner::DiagnosticsSnapshot 
                 message: format!("mismatched types {n}"),
                 detail: None,
                 definition: None,
+                declared: Vec::new(),
                 fixes: vec![],
                 fixes_complete: false,
             })
@@ -2581,7 +2596,15 @@ async fn settled_language_server_errors_are_shown_and_send_finish_back_once() {
     );
     assert_eq!(runner.task.phase, Phase::Working);
 
-    // The same errors again: the required checks decide.
+    // The same errors again: the next gate, for code.txt unedited, sends it
+    // back once too; then the required checks decide.
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_response.contains("code.txt have no edit"),
+        "{}",
+        runner.task.last_response
+    );
     fixture.conversational(json!({"action":"finish","summary":"Done."}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Verifying);
@@ -2879,9 +2902,14 @@ async fn unsettled_diagnostics_never_gate_finish() {
     let mut snapshot = diagnostics(2);
     snapshot.settled = false;
     runner.task.diagnostics = Some(snapshot);
-    fixture.conversational(json!({"action":"finish","summary":"Done."}));
-    runner.advance().await.unwrap();
+    // Nothing is edited: the first finish is sent back once for the unedited
+    // planned file, not for the unsettled result, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"finish","summary":"Done."}));
+        runner.advance().await.unwrap();
+    }
     assert_eq!(runner.task.phase, Phase::Verifying);
+    assert!(intent_details(&runner, "finish_refused_diagnostics").is_empty());
     let prompt = fixture.last_model_prompt("harness_action");
     assert!(prompt.contains("not settled in time"));
 }
@@ -4269,10 +4297,14 @@ async fn accepted_governing_capture_is_not_retyped_after_approval_invalidation()
         "unattested knowledge change"
     );
     runner.approve_plan().await.unwrap();
-    fixture.conversational(
-        json!({"action":"finish","summary":"Verify again under the accepted constraint."}),
-    );
-    runner.advance().await.unwrap();
+    // The edit was made under the earlier approval: the first finish is sent
+    // back once for the unedited planned file, and the repeat goes on.
+    for _ in 0..2 {
+        fixture.conversational(
+            json!({"action":"finish","summary":"Verify again under the accepted constraint."}),
+        );
+        runner.advance().await.unwrap();
+    }
     assert_eq!(runner.task.phase, Phase::Verifying);
     runner.task.check_results = vec![passed_check()];
     runner.advance().await.unwrap();

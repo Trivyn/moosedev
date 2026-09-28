@@ -25,6 +25,7 @@ use crate::harness::digest::sha256_hex;
 mod actions;
 mod approval;
 mod capture;
+mod choice;
 mod dispatch;
 mod finish;
 mod index;
@@ -56,10 +57,10 @@ pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
 pub use symbolic::{CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicState};
 use task::{bounded, fingerprint, Intent};
 pub use task::{
-    ApprovedPlan, CheckResult, Event, KnowledgeContextSnapshot, KnowledgeFileDossier,
-    KnowledgeSearchResult, KnowledgeTurn, Mode, PendingEdit, PendingPermission,
-    PendingSpecApproval, PermissionGrant, Phase, Plan, ReviewItem, SpecUncited, StandingGuidance,
-    Task,
+    ApprovedPlan, CheckResult, ChoiceKind, ChoiceOption, Event, KnowledgeContextSnapshot,
+    KnowledgeFileDossier, KnowledgeSearchResult, KnowledgeTurn, Mode, PendingChoice, PendingEdit,
+    PendingPermission, PendingSpecApproval, PermissionGrant, Phase, Plan, ReviewItem, SpecUncited,
+    StandingGuidance, Task,
 };
 use transport::{error_kind, HttpFailure};
 pub use usage::UsageLedger;
@@ -332,6 +333,7 @@ impl Runner {
             capture_reason: None,
             pending_edit: None,
             pending_permission: None,
+            pending_choice: None,
             permission_grants: vec![],
             pending_spec: None,
             edits: vec![],
@@ -343,6 +345,7 @@ impl Runner {
             last_response: String::new(),
             last_response_observation: false,
             handed_back: false,
+            plan_stands_park: false,
             diagnostics: None,
             knowledge_revision: String::new(),
             knowledge_turn_sequence: 0,

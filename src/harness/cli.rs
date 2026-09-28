@@ -26,6 +26,7 @@ Usage: moosedev code [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] 
   approve-policy ID        Approve the pending policy-gated edit
   approve-permission ID    Approve the pending sandbox permission request
   deny-permission ID       Deny the pending sandbox permission request
+  choose ID KEY            Answer the pending harness question with an option
   permissions ID           List active task-scoped permission grants
   revoke-permission ID GRANT
                             Revoke an active permission grant
@@ -34,7 +35,8 @@ Usage: moosedev code [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] 
   plan ID                  Return to planning
   cancel ID                Cancel while preserving task state
   resume ID                Resume an interrupted or cancelled task
-  answer ID TEXT           Answer the runner's pending question
+  answer ID TEXT           Answer the runner's pending question or park
+  rework ID TEXT           At the final review, send the work back with a note
   tui ID                   Open the interactive task interface
 
 Headless commands print JSON and require a running daemon.
@@ -99,12 +101,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
 fn action(command: &str, args: &[String]) -> Result<Action> {
     let expected = match command {
         "review" => 2,
-        "answer" => 2,
+        "answer" | "rework" => 2,
         "revoke-permission" => 2,
+        "choose" => 2,
         _ => 1,
     };
-    if command == "answer" {
-        anyhow::ensure!(args.len() >= expected, "answer requires ID and text");
+    if matches!(command, "answer" | "rework") {
+        anyhow::ensure!(args.len() >= expected, "{command} requires ID and text");
     } else {
         anyhow::ensure!(
             args.len() == expected,
@@ -120,6 +123,7 @@ fn action(command: &str, args: &[String]) -> Result<Action> {
         "deny-permission" => Action::DenyPermission,
         "permissions" => Action::Permissions,
         "revoke-permission" => Action::RevokePermission(args[1].clone()),
+        "choose" => Action::Choose(args[1].clone()),
         "review" => match args[1].as_str() {
             "accept" => Action::Accept,
             "reject" => Action::Reject,
@@ -130,6 +134,7 @@ fn action(command: &str, args: &[String]) -> Result<Action> {
         "cancel" => Action::Cancel,
         "resume" => Action::Resume,
         "answer" => Action::Answer(args[1..].join(" ")),
+        "rework" => Action::Rework(args[1..].join(" ")),
         _ => bail!("unknown command {command}; use --help"),
     })
 }
@@ -309,6 +314,7 @@ mod tests {
             "step",
             "approve",
             "answer",
+            "rework",
             "resume",
             "tui",
         ] {
@@ -350,6 +356,11 @@ mod tests {
         assert!(matches!(
             action("revoke-permission", &["task".into(), "grant-1".into()]).unwrap(),
             Action::RevokePermission(id) if id == "grant-1"
+        ));
+        assert!(action("choose", &["task".into()]).is_err());
+        assert!(matches!(
+            action("choose", &["task".into(), "add".into()]).unwrap(),
+            Action::Choose(key) if key == "add"
         ));
         assert!(action("no-knowledge", &[]).is_err());
         assert!(action("run", &["task".into()]).is_ok());

@@ -12,7 +12,7 @@
 //! What the server can do beyond reporting is offered as choices, not tools:
 //! its quick fixes are numbered under their findings, and `apply_fix` turns
 //! one into an ordinary edit.
-use crate::code::substrate::lang::{language_servers, LinterSpec, ServerSpec};
+use crate::code::substrate::lang::{language_servers, unresolved_names, LinterSpec, ServerSpec};
 use crate::harness::digest::sha256_hex;
 use crate::harness::executor::{resolve_program, ServerDirectory};
 use anyhow::{Context, Result};
@@ -82,6 +82,12 @@ pub struct Finding {
     /// project: "file:line: <that line>".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// For a name the error says is unresolved and the server located nowhere:
+    /// declarations of that NAME in the task's files, "a `Terrain` is declared
+    /// at file:line: <that line>". A lexical match, never presented as where
+    /// the symbol is defined (Constraint 6bf5ef13).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared: Vec<String>,
     /// Quick fixes the server offers for it, numbered for `apply_fix`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixes: Vec<OfferedFix>,
@@ -395,6 +401,9 @@ impl DiagnosticsSnapshot {
                 Some(definition) => format!("{chosen}  defined at {definition}\n"),
                 None => chosen,
             };
+            let chosen = finding.declared.iter().fold(chosen, |out, declared| {
+                format!("{out}  found by name: {declared}\n")
+            });
             let chosen = chosen + &finding.fix_lines();
             if out.len() + chosen.len() > budget {
                 break;
@@ -823,9 +832,10 @@ impl LanguageServer {
     }
 
     /// The quick fixes the server offers for `finding`, at most
-    /// [`FIXES_PER_FINDING`], with ids still to assign. Only fixes the harness
-    /// can apply as one ordinary edit are kept: text edits to a single file
-    /// among `editable` that change it. Any failure is no fixes.
+    /// [`fix_cap`] of the diagnostics it stands for, with ids still to
+    /// assign. Only fixes the harness can apply as one ordinary edit are
+    /// kept: text edits to a single file among `editable` that change it.
+    /// Any failure is no fixes.
     /// The fixes offered for `finding`, and whether that is the whole list:
     /// false when the cap, the deadline or a failed request cut it short.
     async fn fixes(
@@ -837,7 +847,9 @@ impl LanguageServer {
         let deadline = Instant::now() + timeout;
         let mut fixes: Vec<OfferedFix> = Vec::new();
         let mut complete = true;
-        for (file, diagnostic) in self.fix_targets(finding) {
+        let (targets, merged) = self.fix_targets(finding);
+        let cap = fix_cap(merged);
+        for (file, diagnostic) in targets {
             let Ok(uri) = uri(&self.mirror.join(&file)) else {
                 continue;
             };
@@ -857,7 +869,7 @@ impl LanguageServer {
                 }
             };
             for action in actions {
-                if fixes.len() == FIXES_PER_FINDING || Instant::now() >= deadline {
+                if fixes.len() == cap || Instant::now() >= deadline {
                     return (fixes, false);
                 }
                 // The same fix arrives for the error and for its related
@@ -967,82 +979,116 @@ impl LanguageServer {
         })
     }
 
-    /// The server's diagnostics to ask for fixes of `finding`: its own, then
-    /// those at its related locations. A compiler suggestion often sits
-    /// away from the error (rustc's `mut` goes on the `let`, not the borrow),
-    /// and rust-analyzer publishes it there as a hint carrying the fix.
-    fn fix_targets(&self, finding: &Finding) -> Vec<(String, lsp_types::Diagnostic)> {
+    /// The server's diagnostics to ask for fixes of `finding`, and how many
+    /// diagnostics it stands for.
+    fn fix_targets(&self, finding: &Finding) -> (Vec<(String, lsp_types::Diagnostic)>, usize) {
         let Ok(seen) = self.seen.lock() else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
-        let Some(own) = seen.diagnostics.get(&finding.file).and_then(|diagnostics| {
-            diagnostics.iter().find(|diagnostic| {
-                diagnostic.range.start.line + 1 == finding.line
-                    && diagnostic.range.start.character + 1 == finding.column
-                    && diagnostic.message == finding.message
-            })
-        }) else {
-            return Vec::new();
+        fix_targets(&seen.diagnostics, finding, &self.mirror)
+    }
+
+    /// Current errors, other warnings, and the linter's findings.
+    pub(super) fn findings(&self) -> Findings {
+        let Ok(seen) = self.seen.lock() else {
+            return Findings::default();
         };
-        let mut targets = vec![(finding.file.clone(), own.clone())];
-        for related in own.related_information.iter().flatten().take(3) {
-            let Some(file) = relative(related.location.uri.as_str(), &self.mirror) else {
+        findings(&seen.diagnostics, self.linter, &self.mirror)
+    }
+}
+
+/// The diagnostics to ask for fixes of `finding`: every one it stands for,
+/// then those at their related locations, and how many it stands for. A
+/// compiler suggestion often sits away from the error (rustc's `mut` goes on
+/// the `let`, not the borrow), and rust-analyzer publishes it there as a hint
+/// carrying the fix. A finding stands for each diagnostic of its line and
+/// message, whatever the column (the key [`findings`] merges them by):
+/// rust-analyzer publishes "unresolved imports `a::B`, `a::C`" once per
+/// name, each with that name's own fix.
+fn fix_targets(
+    diagnostics: &HashMap<String, Vec<lsp_types::Diagnostic>>,
+    finding: &Finding,
+    mirror: &Path,
+) -> (Vec<(String, lsp_types::Diagnostic)>, usize) {
+    let own: Vec<&lsp_types::Diagnostic> = diagnostics
+        .get(&finding.file)
+        .into_iter()
+        .flatten()
+        .filter(|diagnostic| {
+            diagnostic.range.start.line + 1 == finding.line && diagnostic.message == finding.message
+        })
+        .collect();
+    let merged = own.len();
+    let mut targets: Vec<(String, lsp_types::Diagnostic)> = own
+        .iter()
+        .map(|diagnostic| (finding.file.clone(), (*diagnostic).clone()))
+        .collect();
+    for diagnostic in own {
+        for related in diagnostic.related_information.iter().flatten().take(3) {
+            let Some(file) = relative(related.location.uri.as_str(), mirror) else {
                 continue;
             };
-            let at = seen
-                .diagnostics
+            let at = diagnostics
                 .get(&file)
                 .into_iter()
                 .flatten()
                 .filter(|diagnostic| diagnostic.range == related.location.range);
             for diagnostic in at.take(2) {
-                targets.push((file.clone(), diagnostic.clone()));
-            }
-        }
-        targets
-    }
-
-    /// Current errors, other warnings, and the linter's findings.
-    pub(super) fn findings(&self) -> Findings {
-        let mut found = Findings::default();
-        let Ok(seen) = self.seen.lock() else {
-            return found;
-        };
-        let files: BTreeMap<&String, &Vec<lsp_types::Diagnostic>> =
-            seen.diagnostics.iter().collect();
-        for (file, diagnostics) in files {
-            for diagnostic in diagnostics {
-                let finding = || Finding {
-                    file: file.clone(),
-                    line: diagnostic.range.start.line + 1,
-                    column: diagnostic.range.start.character + 1,
-                    message: diagnostic.message.clone(),
-                    detail: detail(diagnostic, &self.mirror),
-                    definition: None,
-                    fixes: Vec::new(),
-                    fixes_complete: false,
-                };
-                let lint = self
-                    .linter
-                    .is_some_and(|linter| diagnostic.source.as_deref() == Some(linter.source));
-                match diagnostic.severity {
-                    Some(lsp_types::DiagnosticSeverity::ERROR) | None => {
-                        found.errors.push(finding())
-                    }
-                    Some(lsp_types::DiagnosticSeverity::WARNING) if lint => {
-                        found.lints.push(finding())
-                    }
-                    Some(lsp_types::DiagnosticSeverity::WARNING) => found.warnings.push(finding()),
-                    _ => {}
+                let target = (file.clone(), diagnostic.clone());
+                if !targets.contains(&target) {
+                    targets.push(target);
                 }
             }
         }
-        for list in [&mut found.errors, &mut found.warnings, &mut found.lints] {
-            list.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
-            list.dedup();
-        }
-        found
     }
+    (targets, merged)
+}
+
+/// Errors, other warnings, and the linter's findings of `diagnostics`, one
+/// finding per file, line and message: rust-analyzer published badciv P5's
+/// "unresolved imports `badciv_map::Terrain`, …" four times, once per name's
+/// column, and the prompt listed it four times. The lowest column is kept;
+/// [`fix_targets`] still asks for every column's fixes.
+fn findings(
+    diagnostics: &HashMap<String, Vec<lsp_types::Diagnostic>>,
+    linter: Option<LinterSpec>,
+    mirror: &Path,
+) -> Findings {
+    let mut found = Findings::default();
+    let files: BTreeMap<&String, &Vec<lsp_types::Diagnostic>> = diagnostics.iter().collect();
+    for (file, diagnostics) in files {
+        for diagnostic in diagnostics {
+            let finding = || Finding {
+                file: file.clone(),
+                line: diagnostic.range.start.line + 1,
+                column: diagnostic.range.start.character + 1,
+                message: diagnostic.message.clone(),
+                detail: detail(diagnostic, mirror),
+                definition: None,
+                declared: Vec::new(),
+                fixes: Vec::new(),
+                fixes_complete: false,
+            };
+            let lint =
+                linter.is_some_and(|linter| diagnostic.source.as_deref() == Some(linter.source));
+            match diagnostic.severity {
+                Some(lsp_types::DiagnosticSeverity::ERROR) | None => found.errors.push(finding()),
+                Some(lsp_types::DiagnosticSeverity::WARNING) if lint => found.lints.push(finding()),
+                Some(lsp_types::DiagnosticSeverity::WARNING) => found.warnings.push(finding()),
+                _ => {}
+            }
+        }
+    }
+    for list in [&mut found.errors, &mut found.warnings, &mut found.lints] {
+        list.sort_by(|a, b| {
+            (&a.file, a.line, &a.message, a.column).cmp(&(&b.file, b.line, &b.message, b.column))
+        });
+        list.dedup_by(|later, kept| {
+            later.file == kept.file && later.line == kept.line && later.message == kept.message
+        });
+        list.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
+    }
+    found
 }
 
 #[derive(Default)]
@@ -1506,13 +1552,24 @@ impl LanguageServers {
 
 /// Errors per result that get their definition looked up.
 const DEFINED_ERRORS: usize = 5;
+/// Declarations found by name listed per error at most.
+const DECLARED_BY_NAME: usize = 2;
 /// All definition lookups of one result share this deadline.
 const DEFINITION_TIME: Duration = Duration::from_secs(4);
 /// Errors, warnings and lints, each, per result whose quick fixes are asked
 /// for.
 const FIXED_FINDINGS: usize = 5;
-/// Quick fixes kept per finding.
+/// Quick fixes kept per diagnostic a finding stands for.
 const FIXES_PER_FINDING: usize = 3;
+/// Quick fixes kept per finding at most, however many diagnostics it merged.
+const FIXES_PER_MERGED_FINDING: usize = 8;
+
+/// The quick fixes kept for a finding that stands for `merged` diagnostics:
+/// each merged diagnostic (one per name of an unresolved-imports error) may
+/// carry its own fix, so the cap grows with them, within a bound.
+fn fix_cap(merged: usize) -> usize {
+    (FIXES_PER_FINDING * merged.max(1)).min(FIXES_PER_MERGED_FINDING)
+}
 /// All quick-fix requests of one result share this deadline.
 const FIX_TIME: Duration = Duration::from_secs(4);
 
@@ -1689,10 +1746,68 @@ impl super::Runner {
                         .count()
                 ),
             );
+            let mut snapshot = snapshot;
+            self.declare_unresolved_names(&mut snapshot);
             self.task.diagnostics = Some(snapshot);
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// For each of the first errors the server located nowhere whose message
+    /// names unresolved names (badciv P5: "unresolved imports
+    /// `badciv_map::Terrain`, …" while `Terrain` sat in `codes.rs`), the
+    /// declarations of those names in the task's files: those read, edited or
+    /// planned, at their current text. Found by name, so reported as such.
+    fn declare_unresolved_names(&self, snapshot: &mut DiagnosticsSnapshot) {
+        if !snapshot.settled {
+            return;
+        }
+        let mut files: Vec<&str> = self
+            .task
+            .read_files
+            .iter()
+            .chain(self.task.edits.iter().map(|edit| &edit.file))
+            .chain(self.task.plan.iter().flat_map(|plan| plan.files.iter()))
+            .map(String::as_str)
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        let mut outlines: HashMap<&str, Vec<crate::code::substrate::OutlineEntry>> = HashMap::new();
+        for error in snapshot.errors.iter_mut().take(DEFINED_ERRORS) {
+            if error.definition.is_some() {
+                continue;
+            }
+            let names = unresolved_names(&error.message);
+            if names.is_empty() {
+                continue;
+            }
+            'names: for name in &names {
+                for file in &files {
+                    let outline =
+                        outlines
+                            .entry(file)
+                            .or_insert_with(|| match self.workspace.read(file) {
+                                Ok(Some(text)) => {
+                                    crate::code::substrate::outline(file, &text).unwrap_or_default()
+                                }
+                                _ => Vec::new(),
+                            });
+                    for entry in outline
+                        .iter()
+                        .filter(|entry| entry.name.as_deref() == Some(name.as_str()))
+                    {
+                        if error.declared.len() == DECLARED_BY_NAME {
+                            break 'names;
+                        }
+                        error.declared.push(format!(
+                            "a `{name}` is declared at {file}:{}: {}",
+                            entry.line, entry.text
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     fn show_status(&self, status: &str) {
@@ -1999,6 +2114,150 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    fn diagnostic(line: u32, column: u32, message: &str) -> lsp_types::Diagnostic {
+        let at = lsp_types::Position::new(line - 1, column - 1);
+        lsp_types::Diagnostic {
+            range: lsp_types::Range::new(at, at),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    /// badciv P5: rust-analyzer published one unresolved-imports error four
+    /// times, once per name's column. One finding stands for them, at the
+    /// lowest column, and asks for every column's fixes.
+    #[test]
+    fn one_finding_per_line_and_message_asks_for_every_columns_fixes() {
+        let message = "unresolved imports `badciv_map::Terrain`, `badciv_map::Climate`, `badciv_map::Resource`, `badciv_map::Faction`";
+        let file = "badciv-map/tests/tiny_fixture.rs".to_string();
+        let mirror = Path::new("/tmp/mirror");
+        let published = vec![
+            diagnostic(1, 60, message),
+            diagnostic(1, 17, message),
+            diagnostic(1, 40, message),
+            diagnostic(1, 26, message),
+            diagnostic(1, 5, "another error on the line"),
+            diagnostic(3, 9, message),
+        ];
+        let diagnostics = HashMap::from([(file.clone(), published)]);
+        let found = findings(&diagnostics, None, mirror);
+        let listed: Vec<(u32, u32, &str)> = found
+            .errors
+            .iter()
+            .map(|finding| (finding.line, finding.column, finding.message.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (1, 5, "another error on the line"),
+                (1, 17, message),
+                (3, 9, message)
+            ]
+        );
+        let (targets, merged) = fix_targets(&diagnostics, &found.errors[1], mirror);
+        assert_eq!(merged, 4, "the four columns merged into one finding");
+        // Each merged diagnostic may bring its own fix: four names keep up
+        // to eight fixes, not three; a lone diagnostic keeps three.
+        assert_eq!(fix_cap(merged), 8);
+        assert_eq!(fix_cap(2), 6);
+        assert_eq!(fix_cap(1), FIXES_PER_FINDING);
+        assert_eq!(fix_cap(0), FIXES_PER_FINDING);
+        let mut columns: Vec<u32> = targets
+            .iter()
+            .map(|(target, diagnostic)| {
+                assert_eq!(target, &file);
+                diagnostic.range.start.character + 1
+            })
+            .collect();
+        columns.sort_unstable();
+        assert_eq!(columns, [17, 26, 40, 60], "every column, not line 3's");
+        // A finding whose diagnostic is gone asks for nothing.
+        let mut gone = found.errors[1].clone();
+        gone.message = "changed".into();
+        assert!(fix_targets(&diagnostics, &gone, mirror).0.is_empty());
+    }
+
+    /// An unresolved name the server located nowhere is pointed at its
+    /// declarations in the task's files, found by name and said so.
+    #[tokio::test]
+    async fn an_unresolved_name_points_at_a_declaration_found_by_name() {
+        use super::super::test_support::{context_router, serve, Project};
+        let project = Project::new("declared-by-name");
+        std::fs::create_dir_all(project.0.join("badciv-map/src")).unwrap();
+        std::fs::write(
+            project.0.join("badciv-map/src/codes.rs"),
+            "#[derive(Debug)]\npub enum Terrain {\n    Plains,\n}\n\npub enum Climate {}\n",
+        )
+        .unwrap();
+        std::fs::write(project.0.join("badciv-map/src/lib.rs"), "mod codes;\n").unwrap();
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = super::super::Runner::create(project.0.clone(), daemon, "Fix it".into())
+            .await
+            .unwrap();
+        runner.task.read_files = vec![
+            "badciv-map/src/lib.rs".into(),
+            "badciv-map/src/codes.rs".into(),
+        ];
+        let error = |line, message: &str, definition: Option<&str>| Finding {
+            file: "badciv-map/tests/tiny_fixture.rs".into(),
+            line,
+            column: 5,
+            message: message.into(),
+            detail: None,
+            definition: definition.map(str::to_owned),
+            declared: Vec::new(),
+            fixes: vec![],
+            fixes_complete: false,
+        };
+        let mut snapshot = DiagnosticsSnapshot {
+            servers: vec!["rust-analyzer".into()],
+            settled: true,
+            errors: vec![
+                error(
+                    1,
+                    "unresolved imports `badciv_map::Terrain`, `badciv_map::Climate`, `badciv_map::Faction`",
+                    None,
+                ),
+                // The server located it: its answer stands alone.
+                error(2, "cannot find type `Terrain` in this scope", Some("x.rs:1: y")),
+                error(3, "mismatched types", None),
+            ],
+            ..Default::default()
+        };
+        runner.declare_unresolved_names(&mut snapshot);
+        assert_eq!(
+            snapshot.errors[0].declared,
+            [
+                "a `Terrain` is declared at badciv-map/src/codes.rs:2: pub enum Terrain {",
+                "a `Climate` is declared at badciv-map/src/codes.rs:6: pub enum Climate {}",
+            ]
+        );
+        assert!(snapshot.errors[1].declared.is_empty());
+        assert!(snapshot.errors[2].declared.is_empty());
+        let block = snapshot.render(3_000);
+        assert!(
+            block.contains("  found by name: a `Terrain` is declared at badciv-map/src/codes.rs:2: pub enum Terrain {\n"),
+            "{block}"
+        );
+        assert!(
+            !block.contains("defined at badciv-map/src/codes.rs"),
+            "{block}"
+        );
+        // An unsettled result is not looked at, and an old journal loads.
+        let mut unsettled = snapshot.clone();
+        unsettled.settled = false;
+        unsettled.errors[0].declared.clear();
+        runner.declare_unresolved_names(&mut unsettled);
+        assert!(unsettled.errors[0].declared.is_empty());
+        let old: Finding = serde_json::from_value(json!({
+            "file": "a.rs", "line": 1, "column": 1, "message": "m"
+        }))
+        .unwrap();
+        assert!(old.declared.is_empty());
+        server.abort();
+    }
+
     #[test]
     fn a_plan_is_checked_when_a_server_covers_one_of_its_files() {
         let files = |names: &[&str]| {
@@ -2035,6 +2294,7 @@ mod tests {
             message: "mismatched types\nexpected `u8`".into(),
             detail: None,
             definition: None,
+            declared: Vec::new(),
             fixes: vec![],
             fixes_complete: false,
         };
@@ -2078,6 +2338,7 @@ mod tests {
                 "warning: accessing first element\n  |     ^^^^ help: try: `v.first()`".into(),
             ),
             definition: None,
+            declared: Vec::new(),
             fixes: vec![],
             fixes_complete: false,
         }];
@@ -2120,6 +2381,7 @@ mod tests {
                     "warning: unused import: `Terrain`\nhelp: remove the unused import".into(),
                 ),
                 definition: None,
+                declared: Vec::new(),
                 fixes: vec![],
                 fixes_complete: false,
             }],
@@ -2274,6 +2536,7 @@ mod tests {
             message: "problem".into(),
             detail: None,
             definition: None,
+            declared: Vec::new(),
             fixes,
             fixes_complete: complete,
         };
@@ -2376,6 +2639,7 @@ mod tests {
             message: "method `from_str` can be confused for the standard trait method\nmore".into(),
             detail: None,
             definition: None,
+            declared: Vec::new(),
             fixes: vec![],
             fixes_complete: false,
         };
@@ -2413,6 +2677,7 @@ mod tests {
             message: "problem".into(),
             detail: None,
             definition: None,
+            declared: Vec::new(),
             fixes,
             fixes_complete: false,
         };

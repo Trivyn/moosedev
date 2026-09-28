@@ -875,7 +875,7 @@ impl Controller {
                             break None;
                         },
                         Some(Command::Input(text)) => {
-                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/deny" | "/accept" | "/reject" | "/drop" | "/keep" | "/no-knowledge")) {
+                            if matches!(text.split_whitespace().next(), Some("/approve" | "/approve-spec" | "/deny" | "/choose" | "/accept" | "/reject" | "/drop" | "/keep" | "/no-knowledge" | "/rework")) {
                                 self.status = "Review commands must be submitted while the gate is displayed. Your command is retained for resubmission.".into();
                                 let _ = self.output.send(Update::RestoreInput(text));
                             } else {
@@ -1171,8 +1171,8 @@ impl Controller {
                 }
             }
             "/approve" | "/approve-spec" | "/deny" | "/permissions" | "/revoke-permission"
-            | "/accept" | "/reject" | "/drop" | "/keep" | "/no-knowledge" | "/plan" | "/review"
-            | "/continue" => {
+            | "/accept" | "/reject" | "/drop" | "/keep" | "/no-knowledge" | "/rework" | "/plan"
+            | "/review" | "/continue" => {
                 // A spec approval is planning work in its own right: it needs
                 // no prior description of work, so the spec names the task.
                 if command == "/approve-spec" {
@@ -1298,6 +1298,20 @@ impl Controller {
                         };
                     }
                     "/no-knowledge" => runner.confirm_no_knowledge().await?,
+                    "/rework" => {
+                        // Verbatim after the command, line breaks included.
+                        let note = text
+                            .trim_start()
+                            .strip_prefix("/rework")
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        anyhow::ensure!(
+                            !note.is_empty(),
+                            "Use /rework <note>: say what is left to do."
+                        );
+                        runner.rework(note).await?;
+                    }
                     "/plan" => runner.mode_plan().await?,
                     "/review" => runner.request_review()?,
                     "/continue" => match runner.task.phase {
@@ -1312,6 +1326,7 @@ impl Controller {
                         Phase::AwaitingPlan => bail!("Nothing is interrupted; /approve the displayed plan or send feedback."),
                         Phase::AwaitingSpecApproval => bail!("Nothing is interrupted; /approve-spec accepts the displayed spec preview, or send feedback."),
                         Phase::AwaitingPolicy | Phase::AwaitingPermission => bail!("Nothing is interrupted; /approve or /deny the displayed request."),
+                        Phase::AwaitingChoice => bail!("Nothing is interrupted; /choose answers the displayed question, or send guidance."),
                         Phase::AwaitingReview => bail!("Nothing is interrupted; /accept, /reject or /no-knowledge resolves the displayed review."),
                         Phase::Complete => bail!("Task complete. Describe the next request to continue this conversation."),
                     },
@@ -1320,6 +1335,22 @@ impl Controller {
                 self.conversation.sync_task(&runner.task);
                 self.save_conversation()?;
                 self.auto = !matches!(command, "/review" | "/permissions" | "/revoke-permission");
+            }
+            "/choose" => {
+                let key = parts.next().unwrap_or_default();
+                anyhow::ensure!(parts.next().is_none(), "Use /choose <option>.");
+                let runner = self
+                    .runner
+                    .as_mut()
+                    .context("No active task. Describe work first.")?;
+                anyhow::ensure!(
+                    runner.task.phase == Phase::AwaitingChoice,
+                    "There is no harness question pending."
+                );
+                runner.choose(key).await?;
+                self.conversation.sync_task(&runner.task);
+                self.save_conversation()?;
+                self.auto = true;
             }
             "/quit" => {
                 self.quitting = true;
@@ -1422,7 +1453,7 @@ fn assistant_suffix(
     }
 }
 
-pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/drop <proposal> · /keep <proposal> — leave one numbered proposal out of the capture you accept (or <review>.<proposal>)\n/no-knowledge — confirm the consolidated no-change assessment\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
+pub const HELP: &str = "Describe work or ask about the project. Plan approval is required before changes.\n/approve — approve the displayed plan, exact edit, or permission request\n/approve-spec <path> [covered paths] — preview a repository spec for graph approval, anchored to the component covering those paths (dir/, file, or .); repeat without a path to accept\n/deny — deny the displayed permission request\n/choose [option] — answer the displayed harness question (alone: its default)\n/permissions · /revoke-permission <grant ID> — inspect or revoke task-scoped access\n/review — review accumulated knowledge\n/accept [operation] · /reject [operation] — review one operation, or all displayed operations\n/drop <proposal> · /keep <proposal> — leave one numbered proposal out of the capture you accept (or <review>.<proposal>)\n/no-knowledge — confirm the consolidated no-change assessment\n/rework <note> — at the final review, reject the capture and send the work back with the note\n/plan — return to planning · /continue — resume interrupted work\n/new · /resume [conversation ID | last] — list saved conversations, or reopen one · /model [endpoint] [model ID]\n/connect — reconnect · /init — initialize this project · /expand — toggle activity · /help · /quit\nEnter submits · Ctrl-J inserts a newline · Alt-Enter and Shift-Enter are terminal-dependent aliases · Esc/Ctrl-C interrupts · Ctrl-D quits when the composer is empty · Ctrl-A/E moves to line start/end · Ctrl-U clears input · Tab switches views · Mouse wheel, PageUp/PageDown, and Alt-Up/Down scroll · Dragging selects text and copies it on release.";
 
 #[cfg(test)]
 mod tests {

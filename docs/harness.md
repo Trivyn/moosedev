@@ -190,9 +190,13 @@ A `reply` carries `then`: `wait` (the default) when it answers the human and
 the turn ends, `continue` when the model is about to act. On `continue` the
 reply is shown with a note and the turn continues, asking for the plan in Plan
 mode or the next step (or `finish`) while working (`reply_continued`). This
-happens once per human message; a second continuing reply hands the turn back.
+happens once per human message, and again once the task has made progress since
+the last continued reply (an applied edit or a new required-check result,
+`symbolic.reply_continued_at`): badciv P5's a4b made four edits between two
+replies and was handed back. A second continuing reply with nothing done in
+between hands the turn back.
 While approved work is under way (Auto, Working), a reply that says `wait`
-continues the same way, once per human message: it asks the human nothing,
+continues the same way, under the same rule: it asks the human nothing,
 which is what `question` is for (badciv 1e6cd3e7's a4b wrote "Let's fix
 badciv-sim/Cargo.toml first" and the turn ended).
 The field is typed because neither the reply's wording ("I have read the
@@ -359,7 +363,19 @@ line and column.
   `help:` lines, up to 800 bytes each, else its related spans) and the
   definition behind it ("defined at file:line: …", at most two targets, for the
   first five errors: a field's `&'static str` next to the `&str` binding that
-  fails it), then the compiler's warnings and the linter's findings, each with its
+  fails it). An error among those five that the server located nowhere and
+  whose message names an unresolved name (each language's
+  `unresolved_names` hook in the registry: rustc's "unresolved import(s)",
+  "cannot find type/value/function …", "use of undeclared type"; ruff's
+  "Undefined name", pyright's "is not defined") is instead pointed at
+  declarations of that name in the task's read, edited and planned files, at
+  most two, from the outline of their current text: "found by name: a
+  `Terrain` is declared at badciv-map/src/codes.rs:2: pub enum Terrain {". It
+  is a lexical match and never worded as where the symbol is defined
+  (Constraint 6bf5ef13); badciv P5's tests imported four names `lib.rs` did not
+  re-export. One finding stands for each file, line and message (at the lowest
+  column): rust-analyzer published that unresolved-imports error once per name.
+  Then the compiler's warnings and the linter's findings, each with its
   suggestion (warnings were once only counted, and qwen ran `cargo build` to
   read them). Files with
   errors are ranked into full source after the latest touch and the files a
@@ -367,10 +383,12 @@ line and column.
 - **Quick fixes, as numbered choices.** For the first five errors, five
   warnings and five lints of a settled result, the harness asks the server for its quick fixes
   (`textDocument/codeAction`, `only: quickfix`, resolved when sent without an
-  edit), also at each error's related locations: rustc's missing `mut` is a
+  edit), for every diagnostic the finding stands for (each column's per-name
+  fix) and at each one's related locations: rustc's missing `mut` is a
   hint on the `let`, not on the failed borrow. It keeps at most three per
-  finding, and only those it can apply as one ordinary edit: text edits to a
-  single plan file that change it. Each is listed under its finding
+  diagnostic the finding stands for, and at most eight per finding (four
+  unresolved names each bring their own fix), and only those it can apply as
+  one ordinary edit: text edits to a single plan file that change it. Each is listed under its finding
   (`fix 3: consider changing this to be mutable`). The Auto schema offers
   `apply_fix(fix)` from the first Auto step whenever a language server could
   check the plan (servers on, none failed, a planned file one a server checks),
@@ -473,6 +491,9 @@ restart/resume, and expires when that task completes. Grants also survive a
 return to planning, so the plan gate shows how many are still active.
 `/permissions` lists grants with their IDs; `/revoke-permission ID` removes one
 before later commands run.
+A harness question (see "How the harness decides") lists its options as
+`/choose <option>` commands; `/choose` alone takes the marked default, and a
+plain message instead returns the task to Plan.
 The Knowledge tab shows chronological graph context grouped by the exact human query
 that caused it, without adding retrieval payloads to Conversation. Each query
 contains typed record cards (kind, title, full supplied claim, provenance, and
@@ -483,7 +504,20 @@ expand it; expanded sections are independent. The Review tab holds derived
 obligations, verification, and pending knowledge operations.
 `/review` opens outstanding knowledge; `/accept NUMBER` or `/reject NUMBER` reviews an
 operation, and omitting the number reviews all displayed operations.
-`/no-knowledge` confirms a consolidated no-change assessment. Tab switches views;
+`/no-knowledge` confirms a consolidated no-change assessment. At the final
+review, `/rework <note>` sends the work back instead of completing: the pending
+capture is rejected as `/reject` records it, and the note is judged against the
+approved plan as a park answer is (`message_disposition`, below). A note that
+changes the plan (it opens with a refusal, holds a word that turns the work
+around, or names a file or rule the plan leaves out) returns the task to Plan
+with the note as guidance, as a steering message does (`review_rework`,
+`replan: <reason>`). Otherwise the task returns to Working in Auto under the
+approval it had (the next step still checks that source and knowledge are
+unchanged), with the note as guidance (`review_rework`). The next finish
+verifies again and asks for a new final note, and a planned file still missing
+is asked about again even if `finish` verified without it before. The gate offers it, and
+says "Evidence shows unfinished work" when the review evidence lists planned
+files not edited or stubs left. Tab switches views;
 the mouse wheel scrolls one line at a time within the current pane, while Page
 Up/Down provides keyboard scrolling (Alt-Up/Down selects queries in Knowledge).
 Dragging with the left button selects text in the content pane and copies it to
@@ -601,24 +635,45 @@ files stay in the working set and are re-read from disk before the next
 prompt. Only a task stopped because its prompt outgrew the budget starts its
 next plan with an empty working set. When the model itself handed approved
 work back with a `reply` or a `question` (`handed_back`, cleared by the next
-model action or human message), the harness judges the message against the
-approved plan, without a model (`message_disposition`):
+model action or human message), or the harness parked approved work while the
+approved plan still stands (`plan_stands_park`: a spent or repeated repair of
+an action, a stalled failure, a repeated read, inspect or command; cleared the
+same way and by an approval or `/plan`), the harness judges the message against
+the approved plan, without a model (`message_disposition`):
 - only a request to carry on ("continue", "go ahead", "yes, proceed with the
   plan"): the task continues in Auto with its approval;
-- it names a repository path the plan's files do not cover, or a delivered
-  rule the plan does not implement: the task returns to Plan, saying which
-  ("Returning to Plan: your message names …");
+- it names a repository path the plan's files do not cover (a bare file name
+  or a trailing part of a path counts as naming the plan file it ends, so
+  "codes.rs" names `crates/sim/src/codes.rs`), a delivered rule the plan does
+  not implement, or a word that stops or changes course ("no", "not",
+  "instead", …): the task returns to Plan, saying which ("Returning to Plan:
+  your message names …"). Answering a park is explaining what went wrong, so
+  there a negation mid-sentence ("lib.rs does not re-export them", "labels.py
+  does not strip the name; don't change anything else") does not count. An
+  answer that opens with a refusal does (its first word, after punctuation and
+  quote marks such as `>` or `▎`, is "no", "don't", "stop", "wait", "hold",
+  "halt", "cancel", "never" or "skip", or it opens "do not": "Do not make this
+  change; wait."), and so does a word anywhere that turns the work around
+  ("stop", "halt", "hold", "wait", "cancel", "abort", "instead", "undo",
+  "revert", "rather");
 - anything else: the task continues under the approval, the human is told
   "Continuing under the approved plan. If your message changes what the plan
   does, /plan replans.", and the model's guidance says to replan if the
   message changes the plan. Edits stay within the plan's files either way.
 
-A harness park during approved work (scope escapes spent, a check nothing can
-grant) and any message in Plan are guidance and return the task to Plan, as
-`/plan` does. When the task is waiting on the human instead — a
-question, a spent repair budget, or an interrupted action with an unknown
-outcome — the gate shows the request itself, and `/continue` repeats it rather
-than retrying: only new guidance re-arms a repair. `/resume` lists saved
+A continued answer to a park is the human's answer: the repair budget starts
+afresh and the task stays in Working. badciv P5 answered two repeat parks with
+one-line hints, and each cost a ~5-minute replan and a plan approval. The gate
+of such a park shows its reason and "Reply to continue the approved plan, or
+/plan to replan." A park that questions the plan (scope escapes spent, a check
+nothing can grant, a context overflow, capture retypes spent, a capture-note
+repair spent) and any message in Plan are guidance and return the task to Plan,
+as `/plan` does; an interrupted action's answer returns to Plan too. Headless
+`answer ID TEXT` goes through the same judgment as a message in the
+conversation, so both frontends agree. When the task is waiting on the human
+— a question, a park, or an interrupted action with an unknown outcome — the
+gate shows the request itself, and `/continue` repeats it rather than
+retrying: only the human's answer re-arms a repair. `/resume` lists saved
 conversations newest first with their objective and task standing; `/resume ID`
 opens one and `/resume last` opens the newest with unfinished work. `/connect`
 retries a failed daemon connection. `/quit` exits while preserving unfinished
@@ -691,7 +746,10 @@ journaled once as `review_evidence`. How many tests the passing required checks
 passed ("no test passed" when the only test was ignored or skipped), stub
 markers left in planned files, planned files no edit touched, and code names the
 note mentions (in backticks, or written as a call) that no edit in the task
-added or changed. badciv be128e71 finished with two functions stubbed and one
+added or changed. A name that is a file is not code: one of the task's read,
+edited or planned files or its base name, or anything with a registered
+language's extension (badciv P5's review said "The note names `lib.rs`, which
+no edit in this task added or changed" of an edited file). badciv be128e71 finished with two functions stubbed and one
 ignored test, and a note describing validation code that did not exist was
 accepted with nothing shown against it. The gate line counts the facts; the
 Review tab lists them, and headless callers read `symbolic.capture_note.evidence`.
@@ -1138,22 +1196,72 @@ contract 3 and intent contract 2.
   with no tests yet is not trapped — but `check_vacuous_unmet` is journaled and
   the completion line says the checks passed while verifying nothing, instead
   of claiming verification that did not happen.
+- Harness questions. When the symbolic layer cannot default a decision (Constraint
+  cd9f1a96 keeps such decisions from the model), the task parks in
+  `AwaitingChoice` with a `pending_choice`: an id, its kind (`scope_add` with
+  the file, or `missing_planned_file` with the files), a prompt, options by key
+  and label, and a default (`choice_asked` journals the kind, the keys and the
+  default). The TUI shows it under "HARNESS QUESTION" with each option as
+  `/choose <key>`, the default marked; `/choose` alone takes the default, and
+  headless `choose ID KEY` answers it. A key not offered is refused and the
+  question stays. The answer is journaled (`choice_made`, `kind:key`) and
+  carried out; one that relies on the approval (`add`, `drop`, `finish`) first
+  checks it, as a permission approval does. A plain message instead is new
+  guidance and returns the task to Plan, discarding the question, as `/plan`
+  and a withdrawn approval do. Headless `run` stops at it like any gate.
+- Unfinished plan. A finish while a planned file does not exist, or exists with
+  no edit of the model's in this approval cycle (a fix the harness applied is
+  not the model's), is sent back once for that source state, naming the
+  missing files and the unedited files separately and saying that a planned
+  file needing no change can stay as it is (`finish_refused_unfinished`); no
+  repair is spent. A repeat finish at the same source state with only unedited
+  files goes on to the checks, and review evidence lists them. One with a
+  planned file still missing asks the human (`missing_planned_file`): `write`
+  returns to the model ("Write the missing planned file(s): …"), `drop` takes
+  the files out of the plan and the latest approved plan and verifies, and
+  `finish` verifies anyway (`finish_forced_missing`) for that finish only: a
+  new approval or `/rework` gates the next finish again. badciv P5 finished step 2
+  through a no-op edit with 2 of 11 planned files edited and 4 planned test
+  files never written; the checks passed on older tests and it reached final
+  review as a false completion. Auto-verify never meets this gate: it fires
+  only when every planned file exists and was edited.
 - Stubs. A finish while a planned file still holds a stub marker of its
   language is sent back once for that source, naming each file and line
   (`finish_refused_stubs`); a repeat finish goes on to the checks. Each
   language's stub idiom lives in the registry (`stubs: Option<StubSyntax>`):
   its markers (Rust `unimplemented!(`, `todo!(`; Python `raise
-  NotImplementedError`; TypeScript `throw new Error("Not implemented")`) and
-  the comment openers and string quotes to read a line with, so a marker in a
-  comment or a string is not code. A language with no stub idiom has `None`
+  NotImplementedError`; TypeScript `throw new Error("Not implemented")`), its
+  failure constructs (Rust `panic!(`, `Err(`, `bail!(`, `anyhow!(`; Python
+  `raise `; TypeScript `throw `) with the stub messages ("not implemented",
+  "not yet implemented", "unimplemented", "todo", as whole words in any case),
+  and the comment openers and string quotes to read a line with, so a marker in a
+  comment or a string is not code. A failure construct in code is a stub when
+  a stub message inside a string follows it in the same statement (before the
+  next `;` in code, or the line's end): `let r = Err(e); let s = "not
+  implemented";` is not one. badciv P5 left
+  `Err(MapError::Parse("Not implemented".to_string()))`, reported as
+  `"Not implemented"`; `Err(… "file not found" …)` is not one. A function that
+  returns the message without failing (P5's `"Not implemented".to_string()`)
+  is not recognised. A language with no stub idiom has `None`
   and the gate says nothing; test files are not judged. The model's
-  finish, a no-op edit and auto-verify all pass the language-server gate and
-  this one before Verifying (`begin_verification`).
+  finish, a no-op edit and auto-verify all pass the language-server gate, the
+  unfinished-plan gate and this one before Verifying (`begin_verification`).
 - Auto-verify (offloading change 1). The harness runs the required checks
   itself, without a model step, when an applied edit's language-server result
   was settled with no errors, warnings or lints, every planned file exists and
   was edited since approval, no stub marker is left and no required check
-  already failed against this source (`auto_verify`). It fires once per source
+  already failed against this source (`auto_verify`). An approval keeps
+  counting from the earlier approval (`symbolic.cycle_edit_start`), so only
+  added files wait for an edit, when the task re-entered Plan through a scope
+  escape (the automatic replan or the human's `replan`, `symbolic.scope_replan`)
+  and its plan only adds files to the plan approved before it, or when its plan
+  is that plan again (same files, same summary); badciv P5's additive
+  scope-escape replan reset the count and auto-verify never fired. An approval
+  withdrawn because source or accepted knowledge changed
+  (`symbolic.coverage_reset`), a plan that drops a file, and any other replan
+  (`/plan`, steering, the model's own), even over the same files, count
+  afresh: the unfinished-plan gate then sends the first finish back once for
+  planned files not edited under the new approval. It fires once per source
   state, at most three times per approval cycle (`auto_verify_exhausted`), never
   without a fresh language-server result, and never right after a human
   message. A failure it finds returns to the model as "The harness ran the
@@ -1195,9 +1303,38 @@ contract 3 and intent contract 2.
   reread, paged and reran `cargo test` for about twenty steps while
   `grid_too_few_rows` kept failing, each action different, so no repeat guard
   fired. `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` switches it off.
-- Scope. An edit outside the plan files is discarded and the task re-enters Plan
-  mode naming the file (`scope_escape_replan`, three per task; the fourth parks
-  for guidance as `scope_escape_exhausted`). A no-op edit (the result equals
+- Misrouted actions. An edit, `replace` or `write` whose `file` has no `/` or
+  `.` and is an action name (`command`, `read`, `write`, …) is invalid output,
+  repaired within the budget and never a scope escape, unless the task knows a
+  file of that name (it exists, the plan names it, or the model read it):
+  badciv P5 sent `write`
+  to file `command` with `mkdir -p …` as content. The correction says to use
+  the action itself and that `write` creates missing parent directories, as
+  the write action's description now says too.
+- Scope. An edit outside the plan files is not applied: the harness asks the
+  human (a harness question, below) whether to add the file, and the model's
+  proposal counts as valid output, so no repair is spent. `add` puts the file
+  in the plan and keeps the approval: the approved revision stands, and what
+  approval derives for plan files (the file's source snapshot, obligations and
+  definition scopes for the whole amended plan, and the file in the latest
+  `approved_plans` entry, which review evidence and auto-verify read) is
+  derived again without a second approval (`scope_added`); the model is told
+  "`<file>` was added to the approved plan. Make your edit." An `add` whose
+  file brings governing rules the approval never had in view and the plan
+  does not address (in its `addresses`, or in its summary as plan coverage
+  reads it) cannot stand on that approval: the amendment is undone and the
+  task replans as for `replan` (`scope_add_needs_replan`), the model told
+  "`<file>` is governed by rules the approved plan does not address
+  (<labels>); replanning so the plan can address them." `replan` is the
+  scope-escape replan: the task re-enters Plan mode naming the file
+  (`scope_escape_replan`, counted in `scope_escapes`, not bounded, since the
+  human chose it). `refuse` tells the model the file is outside the plan and
+  the human declined to add it, and names the plan files to continue within.
+  In badciv P5 each escape cost a full qwen replan (about 5 minutes) and a
+  second plan approval. `MOOSEDEV_HARNESS_SCOPE_CHOICE=off` keeps the
+  automatic replan: the edit is discarded and the task re-enters Plan mode
+  naming the file (`scope_escape_replan`, three per task; the fourth parks for
+  guidance as `scope_escape_exhausted`). A no-op edit (the result equals
   the current source) runs the required checks instead of consuming the repair
   budget (`noop_edit_continuation`), unless the language server has settled
   errors in that source: then the edit is repaired with their count and the
@@ -1205,8 +1342,15 @@ contract 3 and intent contract 2.
   names any planned files that do not exist yet (errors in a file that is fine
   often point at code not written: badciv e3c533b4's `lib.rs` declared modules
   whose files were missing). A `replace` whose old text is gone but whose new
-  text is already in the file exactly once is the same no-op: the edit was made
-  earlier (badciv e3c533b4 re-sent an `#[ignore]` it had added and parked). An
+  text is already in the file exactly once is the same no-op when the file
+  shows the edit was made: the old text is nowhere, old and new share a kept
+  line that anchors them (not bare punctuation, at least four characters, and
+  a whole line of the file exactly once; two `if enabled {` blocks anchor
+  nothing) or the old lines all lie within the new text, and every line the
+  edit removes is gone from the file (badciv e3c533b4
+  re-sent an `#[ignore]` it had added and parked; P5 re-sent a derive that had
+  gained `Hash, PartialOrd`). A new text that merely occurs elsewhere shares no
+  line with the old text and stays a miss. An
   `apply_fix` with an unknown number says whether any fix is offered at all, and
   when the number is a finding's line (a4b sent 131 and 135), says so.
   Neither a no-op edit nor a finish reruns
@@ -1222,6 +1366,15 @@ contract 3 and intent contract 2.
   instead of reopening planning (`replan_continuation`, unbounded); a replan
   while already planning changes nothing (`replan_noop`). A real replan keeps
   the files already read (`model_replan`).
+- Amending an approved plan. While the task plans again after an approval (a
+  replan, human guidance or `/plan`) and the stored plan is still the latest
+  approved one, the prompt labels it "Approved plan (amend it; keep what still
+  holds):" and shows its whole summary up to 6 KB, cut on a character boundary
+  with a line counting what was left out and where the whole plan is, instead
+  of the condensed step view (4 KB, focused on the step's files). A planner
+  shown only part of its own plan paged it from the journal; in badciv P5 one
+  replan parked that way. A proposed plan awaiting approval is shown as
+  "Plan:" as before.
 - Plan-mode actions. The action schema and the allowed-actions line follow the
   task's mode: while planning the model is offered only read, search, inspect,
   question, reply and plan, so replan, edits, commands and finish are not
@@ -1393,8 +1546,8 @@ completed plan.
 Every command other than the conversation (a bare `moosedev code`,
 `resume-session`, and `tui ID`) is headless, for scripts and pipelines: it
 prints JSON, exits non-zero on error, and requires a running daemon. `run` stops at each human gate (plan approval, a policy-gated edit, a
-permission request, knowledge review), so a pipeline drives those with the
-matching command. `tui ID` opens an existing task in the conversational
+permission request, a harness question, knowledge review), so a pipeline drives
+those with the matching command. `tui ID` opens an existing task in the conversational
 interface:
 
 ```sh
@@ -1404,8 +1557,11 @@ moosedev code run TASK_ID
 moosedev code approve TASK_ID
 moosedev code approve-permission TASK_ID
 moosedev code permissions TASK_ID
+moosedev code choose TASK_ID add
 moosedev code review TASK_ID accept
 moosedev code no-knowledge TASK_ID
+moosedev code answer TASK_ID 'The enums are defined in codes.rs.'
+moosedev code rework TASK_ID 'write.rs still has a stub; finish it.'
 moosedev code tui TASK_ID
 ```
 
@@ -1415,8 +1571,12 @@ the typed note proposes nothing. They retain individual proposal reviews;
 opening a task in the TUI enables conversational batching while preserving its
 outstanding obligations.
 `approve-policy`, `deny-permission`, `revoke-permission ID GRANT`,
-`review ID reject`, `plan`, `cancel`, `resume`, and `answer ID TEXT` retain their
-task semantics. `status` includes the pending permission request and active
+`review ID reject`, `plan`, `cancel`, and `resume` retain their task semantics.
+`answer ID TEXT` answers a question or park with the conversation's judgment
+(continue the approved plan, or return to Plan), `rework ID TEXT` sends the
+work back from the final review as `/rework` does, and `choose ID KEY` answers
+a pending harness question with one of its option keys (`status` shows the
+question in `pending_choice`). `status` includes the pending permission request and active
 grants; `permissions` prints only the active grants. Headless `resume ID` resumes
 a task; interactive
 `resume-session ID` resumes a conversation. `--help` lists all commands. Options

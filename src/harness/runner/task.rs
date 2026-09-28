@@ -17,6 +17,9 @@ pub enum Phase {
     AwaitingInput,
     AwaitingPolicy,
     AwaitingPermission,
+    /// A harness question with options (`Task::pending_choice`), answered
+    /// with `/choose`.
+    AwaitingChoice,
     Verifying,
     AwaitingReview,
     Cancelled,
@@ -174,6 +177,49 @@ impl PendingPermission {
     }
 }
 
+/// A question the harness asks the human, with the options it can carry
+/// out. The harness asks only what the symbolic layer cannot default: whether
+/// an approved plan may grow, or whether work may be verified with planned
+/// files missing (Constraint cd9f1a96 keeps such questions away from the
+/// model).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingChoice {
+    pub id: String,
+    pub kind: ChoiceKind,
+    pub prompt: String,
+    pub options: Vec<ChoiceOption>,
+    /// The key of the option taken when the human answers `/choose` alone.
+    pub default: String,
+}
+
+/// What a pending choice is about, with what its options act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChoiceKind {
+    /// The model proposed an edit to `file`, outside the approved plan.
+    ScopeAdd { file: String },
+    /// A finish came back with planned `files` still missing.
+    MissingPlannedFile { files: Vec<String> },
+}
+
+impl ChoiceKind {
+    /// The journal name of the kind.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ChoiceKind::ScopeAdd { .. } => "scope_add",
+            ChoiceKind::MissingPlannedFile { .. } => "missing_planned_file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceOption {
+    pub key: String,
+    pub label: String,
+}
+
 /// A durable capability approved for the remainder of this task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +343,9 @@ pub struct Task {
     pub pending_permission: Option<PendingPermission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_grants: Vec<PermissionGrant>,
+    /// The harness question awaiting the human (`Phase::AwaitingChoice`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_choice: Option<PendingChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spec: Option<PendingSpecApproval>,
     #[serde(default)]
@@ -324,6 +373,14 @@ pub struct Task {
     /// the model, rather than following a harness park.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_back: bool,
+    /// The harness parked approved work while the approved plan still
+    /// stands (a spent or repeated repair, a stalled failure, a repeated
+    /// read, inspect or command). A message then is judged against the plan
+    /// as a handback is, so a one-line hint continues the plan instead of
+    /// costing a replan and its approval. Cleared by the next accepted model
+    /// action, an answer, new guidance, a return to Plan or an approval.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_stands_park: bool,
     /// What the language servers reported after the last applied code edit:
     /// current state every prompt shows and finish is gated on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +479,14 @@ pub struct StandingGuidance {
     /// The `## Implement` section, added to [`Self::text`] in Auto mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implement: Option<String>,
+}
+
+impl Task {
+    /// The review of the task's final capture, after every required check
+    /// passed: where `/rework` can send the work back instead of completing.
+    pub fn at_final_review(&self) -> bool {
+        self.phase == Phase::AwaitingReview && self.final_capture
+    }
 }
 
 impl StandingGuidance {

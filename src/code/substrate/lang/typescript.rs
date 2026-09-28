@@ -5,7 +5,9 @@ use std::path::Path;
 use std::process::Command;
 
 use super::file_name;
-use super::{first_matching_subdir, CheckTool, LanguageSpec, ProducerHooks, StubSyntax};
+use super::{
+    first_matching_subdir, CheckTool, LanguageSpec, ProducerHooks, StubSyntax, STUB_MESSAGES,
+};
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
 use crate::code::substrate::symbols;
@@ -42,12 +44,16 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }],
     stubs: Some(StubSyntax {
         markers: &["throw new Error(\"Not implemented\")"],
+        stub_messages: STUB_MESSAGES,
+        failure_constructs: &["throw "],
         line_comments: &["//"],
         block_comments: &["/*", "*"],
         quotes: &['"', '\'', '`'],
     }),
     // Jest's and Mocha's reports are not read yet.
     test_failures: None,
+    // The harness runs no TypeScript server yet.
+    unresolved_names: None,
 };
 
 /// The `*.test.*` / `*.spec.*` infix every JS test runner recognizes. A JS

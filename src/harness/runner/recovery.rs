@@ -75,7 +75,11 @@ impl Runner {
         let repair = self.task.recovery.as_mut().unwrap();
         if repair.attempts >= MAX_CANDIDATES {
             repair.status = RecoveryStatus::AwaitingGuidance;
+            let action = repair.purpose == "harness_action";
             self.task.phase = Phase::AwaitingInput;
+            if action {
+                self.park_under_approved_plan();
+            }
             self.persist()?;
             anyhow::bail!("model output failed validation after three attempts; provide human guidance before retrying");
         }
@@ -204,6 +208,12 @@ impl Runner {
             self.task.phase = Phase::AwaitingInput;
             self.task.last_response = message.clone();
             let purpose = repair.purpose.clone();
+            // A rejected action leaves the approved plan standing: a hint
+            // answering it continues the plan. A capture-note park is not
+            // about the plan's work and keeps its guidance path.
+            if purpose == "harness_action" {
+                self.park_under_approved_plan();
+            }
             self.intent_event(
                 if repeat_parked {
                     "repair_repeat_parked"

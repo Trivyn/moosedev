@@ -1,5 +1,6 @@
 //! Human capture review: resolving one card or a whole batch against the
 //! daemon, journaling each disposition, and choosing the phase that follows.
+use super::approval::Disposition;
 use super::{bounded, HttpFailure, Phase, Runner};
 use crate::harness::protocol::{
     CaptureRequest, CaptureResponse, CheckpointResponse, ReviewRequest,
@@ -205,8 +206,25 @@ impl Runner {
                 .review_intent_links(position, accept, journal_interaction)
                 .await;
         }
+        self.resolve_capture_card(position, accept, journal_interaction)
+            .await?;
+        if self.task.reviews.is_empty() && self.task.phase == Phase::AwaitingReview {
+            return self.continue_after_review().await;
+        }
+        self.persist()
+    }
+
+    /// Resolve the capture card at `position` with the daemon and journal
+    /// its disposition, leaving the phase to the caller.
+    async fn resolve_capture_card(
+        &mut self,
+        position: usize,
+        accept: bool,
+        journal_interaction: bool,
+    ) -> Result<()> {
         anyhow::ensure!(self.task.batch_capture, "interactive review is not enabled");
         let request = self.task.reviews[position].request.clone();
+        let id = request.operation_id.clone();
         let (accept, rejected) = self.capture_decision(&request, accept);
         let result = self.resolve_capture(&request, accept, &rejected).await?;
         anyhow::ensure!(
@@ -214,21 +232,18 @@ impl Runner {
             "knowledge review is not durably resolved"
         );
         let item = self.task.reviews.remove(position);
-        self.task.review_drops.remove(id);
+        self.task.review_drops.remove(&id);
         if journal_interaction {
-            self.emit_review_interaction(accept, id);
+            self.emit_review_interaction(accept, &id);
         }
-        self.emit_capture_review_events(id, &item.response, accept, &rejected);
+        self.emit_capture_review_events(&id, &item.response, accept, &rejected);
         self.event(format!(
             "Human {} captured knowledge{}.\n{}",
             if accept { "accepted" } else { "rejected" },
             dropped_titles(&item.request, &rejected),
             serde_json::to_string(&item.request)?
         ));
-        if self.task.reviews.is_empty() && self.task.phase == Phase::AwaitingReview {
-            return self.continue_after_review().await;
-        }
-        self.persist()
+        Ok(())
     }
 
     /// The phase after every pending review is resolved: an outstanding
@@ -311,6 +326,14 @@ impl Runner {
             self.task.phase == Phase::AwaitingReview && self.task.pending_capture.is_some(),
             "no captured proposals awaiting review"
         );
+        self.resolve_pending_capture(accept).await?;
+        // Ratification can change governing knowledge; fresh_approval checks it before work.
+        self.continue_after_review().await
+    }
+
+    /// Resolve the one pending capture of a task without batch review and
+    /// journal its disposition, leaving the phase to the caller.
+    async fn resolve_pending_capture(&mut self, accept: bool) -> Result<()> {
         let request = self
             .task
             .capture_request
@@ -339,8 +362,86 @@ impl Runner {
         self.task.pending_capture = None;
         self.task.capture_request = None;
         self.commit_capture_page();
-        // Ratification can change governing knowledge; fresh_approval checks it before work.
-        self.continue_after_review().await
+        Ok(())
+    }
+
+    /// The human sends the work back at the final capture review instead of
+    /// letting a rejection complete the task (badciv P5: step 2 had to be
+    /// restarted as a new task). The pending capture is rejected as `/reject`
+    /// records it. The note is judged against the approved plan as a park
+    /// answer is: one that changes the plan (it opens with a refusal, turns
+    /// the work around, or names a file or rule the plan leaves out) returns
+    /// the task to Plan with the note as guidance, as a steering message
+    /// does. Otherwise the task returns to Working under the approval it had,
+    /// with the note as guidance, and its next finish verifies and asks for
+    /// the final note again. `fresh_approval` still guards the next step.
+    pub async fn rework(&mut self, note: String) -> Result<()> {
+        anyhow::ensure!(
+            self.task.at_final_review(),
+            "nothing to send back: rework applies at the final capture review"
+        );
+        anyhow::ensure!(
+            !note.trim().is_empty() && note.len() <= 16_000,
+            "say what is left to do: the note must contain 1..16000 bytes"
+        );
+        anyhow::ensure!(
+            self.task.reviews.iter().all(|r| r.intent_links.is_none()),
+            "resolve the association review first"
+        );
+        let disposition = self.judge_message(&note, true).await;
+        let ids: Vec<String> = self
+            .task
+            .reviews
+            .iter()
+            .map(|r| r.request.operation_id.clone())
+            .collect();
+        if !ids.is_empty() {
+            self.intent_event(
+                "review_interaction",
+                &format!("rejected batch [{}]", ids.join(",")),
+            );
+            self.persist()?;
+            for _ in &ids {
+                self.resolve_capture_card(0, false, false).await?;
+            }
+        } else if self.task.pending_capture.is_some() {
+            self.resolve_pending_capture(false).await?;
+        }
+        self.event(format!("Human sent the work back at review: {note}"));
+        self.task.review_continuation = None;
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.auto_verification = None;
+            // The next final checkpoint asks for a note about the reworked
+            // change instead of reporting the rejected one as captured.
+            state.capture_note = None;
+            // A human choice to verify with planned files missing answered
+            // the finish before review; the next finish is gated again.
+            state.unfinished_accepted_at = None;
+        }
+        if let Disposition::Replan(reason) = &disposition {
+            self.intent_event("review_rework", &format!("replan: {reason}"));
+            self.event(format!("Returning to Plan: {reason}"));
+            // The review is resolved: the steering path returns to Plan.
+            self.task.phase = Phase::Planning;
+            return self.return_to_plan_with_guidance(None, note).await;
+        }
+        self.intent_event("review_rework", &bounded(&note, 400));
+        self.end_unchanged_window();
+        self.forget_failure();
+        self.task.knowledge_turn_sequence = self.task.knowledge_turn_sequence.saturating_add(1);
+        self.task.final_capture = false;
+        self.task.completion_pending = false;
+        self.task.check_results.clear();
+        self.task.guidance = note.clone();
+        self.task.last_response = format!("The human sent the work back at review: {note}");
+        self.task.recovery = None;
+        self.task.handed_back = false;
+        self.task.plan_stands_park = false;
+        self.task.turn_finished = false;
+        self.task.steps = 0;
+        self.task.after_review = Phase::Working;
+        self.task.phase = Phase::Working;
+        self.persist()
     }
 
     pub async fn confirm_no_knowledge(&mut self) -> Result<()> {

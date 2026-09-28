@@ -220,6 +220,7 @@ impl Runner {
             ));
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
+            self.park_under_approved_plan();
             return Some(format!(
                 "[Harness: the same failure ({what}) has come back {count} times with no edit in between; rerunning, reading and paging have not changed it. Guidance is needed: say what to change, or /plan to change the approach.]\n"
             ));

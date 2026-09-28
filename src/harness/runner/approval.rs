@@ -45,24 +45,51 @@ impl Runner {
             return self.persist();
         }
         self.derive_symbolic_scope(&context).await?;
+        // Whether the edits made under the plan approved before this one
+        // still count: this plan only grows that one after a scope escape
+        // (the task re-entered Plan to add the file an edit needed), or it is
+        // that plan again (same files, same summary). Any other replan, even
+        // one over the same files, re-approves different work.
+        let scope_replan = std::mem::take(&mut self.symbolic_state_mut().scope_replan);
+        let keeps_coverage = match (self.task.approved_plans.last(), self.task.plan.as_ref()) {
+            (Some(previous), Some(plan)) => {
+                let grown = previous.files.iter().all(|file| plan.files.contains(file));
+                (scope_replan && grown)
+                    || (previous.files == plan.files && previous.summary == plan.summary)
+            }
+            _ => false,
+        };
         self.record_approved_plan(&context);
         let edits = self.task.edits.len();
         let state = self.symbolic_state_mut();
         state.unchanged_since_approval = true;
         state.cycle_replan_continuations = 0;
         state.auto_verifications = 0;
-        // A new approval starts a new cycle: only edits made under it count,
-        // and no arm from before it may fire.
+        // A human choice to verify with planned files missing answered the
+        // plan approved then; this approval's finish is gated again.
+        state.unfinished_accepted_at = None;
+        // A new approval starts a new cycle, and no arm from before it may
+        // fire. Only edits made under it count toward auto-verify and the
+        // unfinished-plan gate, unless it keeps the earlier plan's coverage
+        // (above) and nothing outside the harness withdrew that approval:
+        // then the earlier plan's edits still cover its files, and
+        // auto-verify waits only for the added ones (badciv P5: an additive
+        // scope-escape replan reset the count, so every planned file had to
+        // be edited again and it never fired).
         state.auto_verify_armed = None;
         state.auto_fix_armed = None;
         state.auto_fix_chain = 0;
-        state.cycle_edit_start = edits;
+        if !keeps_coverage || std::mem::take(&mut state.coverage_reset) {
+            state.cycle_edit_start = edits;
+        }
+        state.coverage_reset = false;
         state.plan_grounded = false;
         self.task.approved_revision = Some(context.revision);
         self.task.completion_pending = false;
         self.task.mode = Mode::Auto;
         self.task.phase = Phase::Working;
         self.task.turn_finished = false;
+        self.task.plan_stands_park = false;
         self.task.check_results.clear();
         self.intent_event("plan_approved", "approved current source and knowledge");
         self.end_intent_cycle("approved");
@@ -166,21 +193,27 @@ impl Runner {
         // question), the harness judges the message against the approved plan
         // (Disposition). Treating every message as new guidance returned the
         // task to Plan, so "continue with the plan" in badciv 1e6cd3e7 cost a
-        // replan and its approval. A harness park (scope escapes, a check
-        // nothing can grant) still replans, as does /plan; in Plan a message
-        // is guidance as before.
+        // replan and its approval. A harness park where the approved plan
+        // still stands (a spent or repeated repair of an action, a stalled
+        // failure, a repeated read, inspect or command) is judged the same
+        // way: in badciv P5 a one-line hint answering a repeat park cost a
+        // ~5-minute replan and an approval, twice. A park that questions the
+        // plan (scope escapes exhausted, a check nothing can grant, a context
+        // overflow, capture retypes exhausted) still replans, as does /plan;
+        // in Plan a message is guidance as before. `handed_back` can be stale
+        // under a park: a reply sets it before its capture checkpoint, and if
+        // that checkpoint's note repair parked, the message is judged too,
+        // which answers the park with a fresh repair budget in the same place.
         let judged = self.task.phase == Phase::AwaitingInput
             && self.task.mode == Mode::Auto
-            && self.task.handed_back
+            && (self.task.handed_back || self.task.plan_stands_park)
             && !self.task.objective_pending;
-        if judged && self.context.is_none() {
-            // A reloaded task has no delivered rules yet; fetch them as resume
-            // does. Unreachable knowledge leaves the rule check out, and an
-            // unclear message is still announced.
-            let files = self.task.read_files.clone();
-            let _ = self.refresh(&files).await;
-        }
-        let disposition = judged.then(|| self.message_disposition(&text));
+        let disposition = if judged {
+            let park = self.task.plan_stands_park && !self.task.handed_back;
+            Some(self.judge_message(&text, park).await)
+        } else {
+            None
+        };
         let continues = matches!(
             disposition,
             Some(Disposition::Continue | Disposition::Unclear)
@@ -216,6 +249,18 @@ impl Runner {
             self.intent_event("message_disposition", &format!("replan: {reason}"));
             self.event(format!("Returning to Plan: {reason}"));
         }
+        self.return_to_plan_with_guidance(id, text).await
+    }
+
+    /// New human guidance: whatever was pending is abandoned and the task
+    /// returns to Plan with `text` as its guidance (or, when the approved
+    /// objective is done, as its new objective). A message that is not judged
+    /// to continue the plan, and a rework note that changes it, come here.
+    pub(super) async fn return_to_plan_with_guidance(
+        &mut self,
+        id: Option<&str>,
+        text: String,
+    ) -> Result<()> {
         self.abandon_pending_intent("new human guidance").await?;
         if self.task.pending_spec.take().is_some() {
             self.event(
@@ -242,6 +287,7 @@ impl Runner {
         self.task.last_response = text;
         self.task.turn_finished = false;
         self.task.handed_back = false;
+        self.task.plan_stands_park = false;
         self.task.steps = 0;
         // Guidance leads to a new plan, so the old plan's failed check no
         // longer says anything about what a rerun would test.
@@ -250,9 +296,16 @@ impl Runner {
         self.task.approved_revision = None;
         self.discard_pending_edit("new human guidance invalidated the proposed edit")?;
         self.discard_pending_permission("new human guidance invalidated the request")?;
+        self.discard_pending_choice("new human guidance replaced the question")?;
         self.task.completion_pending = false;
         self.task.check_results.clear();
         self.task.final_capture = false;
+        if self.task.mode == Mode::Auto {
+            // Steering takes approved work back to Plan: not a scope escape.
+            if let Some(state) = self.task.symbolic.as_mut() {
+                state.scope_replan = false;
+            }
+        }
         self.task.mode = Mode::Plan;
         self.task.after_review = Phase::Planning;
         // What the model read stays: guidance is about the plan, and source
@@ -269,10 +322,23 @@ impl Runner {
         self.persist()
     }
 
+    /// Judge a message against the approved plan, fetching the delivered
+    /// rules first when a reloaded task has none yet (as resume does).
+    /// Unreachable knowledge leaves the rule check out, and an unclear
+    /// message is still announced.
+    pub(super) async fn judge_message(&mut self, text: &str, park: bool) -> Disposition {
+        if self.context.is_none() {
+            let files = self.task.read_files.clone();
+            let _ = self.refresh(&files).await;
+        }
+        self.message_disposition(text, park)
+    }
+
     /// How a message answering handed-back approved work relates to the
     /// plan, judged from the plan's files, the rules it implements and the
-    /// repository, never by a model.
-    fn message_disposition(&self, text: &str) -> Disposition {
+    /// repository, never by a model. `park`: it answers a harness park (or
+    /// sends work back at review), where negation is how a hint explains.
+    fn message_disposition(&self, text: &str, park: bool) -> Disposition {
         let words: Vec<String> = text
             .split(|c: char| !c.is_alphanumeric() && c != '\'')
             .filter(|word| !word.is_empty())
@@ -283,12 +349,7 @@ impl Runner {
         };
         for token in text.split_whitespace() {
             if let Some(path) = named_path(token) {
-                let covered = plan.files.iter().any(|file| {
-                    file == &path
-                        || file
-                            .strip_prefix(path.as_str())
-                            .is_some_and(|rest| rest.starts_with('/'))
-                });
+                let covered = plan.files.iter().any(|file| covers(file, &path));
                 if !covered {
                     return Disposition::Replan(format!(
                         "your message names {path}, which the approved plan does not cover."
@@ -307,11 +368,21 @@ impl Runner {
                 rule.label
             ));
         }
-        // Stopping or changing course is never read as carrying on.
-        if let Some(word) = words
-            .iter()
-            .find(|word| STOP_WORDS.contains(&word.as_str()))
-        {
+        // Stopping or changing course is never read as carrying on. Answering
+        // a park is explaining: "lib.rs does not re-export them" is a hint,
+        // so there a negation mid-sentence does not count (badciv P5 attempt
+        // 2 replanned on two such hints), but a message that opens with a
+        // refusal ("Do not make this change; …") or holds a word that turns
+        // the work around does.
+        if park {
+            if let Some(refusal) = opening_refusal(&words) {
+                return Disposition::Replan(format!(
+                    "your message says \"{refusal}\", which may change or stop the approved work."
+                ));
+            }
+        }
+        let stops = if park { PARK_STOP_WORDS } else { STOP_WORDS };
+        if let Some(word) = words.iter().find(|word| stops.contains(&word.as_str())) {
             return Disposition::Replan(format!(
                 "your message says \"{word}\", which may change or stop the approved work."
             ));
@@ -367,6 +438,12 @@ impl Runner {
         );
         self.abandon_pending_intent("human returned to Plan")
             .await?;
+        if self.task.mode == Mode::Auto {
+            // The human's replan, not a scope escape's.
+            if let Some(state) = self.task.symbolic.as_mut() {
+                state.scope_replan = false;
+            }
+        }
         self.task.mode = Mode::Plan;
         self.task.phase = Phase::Planning;
         if self.task.pending_spec.take().is_some() {
@@ -375,6 +452,7 @@ impl Runner {
         self.task.approved_revision = None;
         self.discard_pending_edit("human returned the task to Plan")?;
         self.discard_pending_permission("human returned the task to Plan")?;
+        self.discard_pending_choice("human returned the task to Plan")?;
         self.task.completion_pending = false;
         self.task.final_capture = false;
         self.task.check_results.clear();
@@ -383,6 +461,7 @@ impl Runner {
             self.clear_working_set();
         }
         self.task.steps = 0;
+        self.task.plan_stands_park = false;
         // Returning to Plan is human guidance: a fresh repair cycle, as for
         // an answer, or a spent budget would refuse the first plan.
         self.task.recovery = None;
@@ -390,6 +469,14 @@ impl Runner {
         self.end_intent_cycle("human replan");
         self.event("Human returned the task to Plan.");
         self.persist()
+    }
+
+    /// Mark a park of approved work whose plan still stands, so the human's
+    /// answer is judged against the plan (`submit_message_inner`).
+    pub(super) fn park_under_approved_plan(&mut self) {
+        self.task.plan_stands_park = self.task.mode == Mode::Auto
+            && self.task.approved_revision.is_some()
+            && self.task.plan.is_some();
     }
 
     pub async fn answer(&mut self, text: String) -> Result<()> {
@@ -405,6 +492,7 @@ impl Runner {
         self.task.recovery = None;
         self.task.last_response = text;
         self.task.handed_back = false;
+        self.task.plan_stands_park = false;
         self.task.steps = 0;
         // A task stopped because its prompt outgrew the budget would build the
         // same prompt again: the answer returns it to Plan with an empty
@@ -463,7 +551,7 @@ impl Runner {
 }
 
 /// How a message answering handed-back approved work relates to the plan.
-enum Disposition {
+pub(super) enum Disposition {
     /// Only a request to carry on: the approval stands.
     Continue,
     /// It names a file or rule outside the approved plan: replan.
@@ -509,6 +597,20 @@ fn named_path(token: &str) -> Option<String> {
     (segments_ok && (slashed || has_extension)).then(|| path.to_string())
 }
 
+/// Whether a plan file is the path a message names: the file itself, a
+/// directory holding it, or a trailing part of its path ("codes.rs" or
+/// "src/codes.rs" for `crates/x/src/codes.rs`), which is how a one-line hint
+/// names a file.
+fn covers(file: &str, path: &str) -> bool {
+    file == path
+        || file
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || file
+            .strip_suffix(path)
+            .is_some_and(|head| head.ends_with('/'))
+}
+
 /// Whether `text` names `label` as whole words, case-insensitively, so a short
 /// label ("NP-7") counts and does not match inside a longer word.
 fn names_label(text: &str, label: &str) -> bool {
@@ -530,6 +632,28 @@ const STOP_WORDS: &[&str] = &[
     "revert", "rather", "never", "skip",
 ];
 
+/// The stop words that still mean a change of course anywhere in the answer
+/// to a harness park, where negation is how a hint explains what went wrong.
+const PARK_STOP_WORDS: &[&str] = &[
+    "stop", "halt", "hold", "wait", "cancel", "abort", "instead", "undo", "revert", "rather",
+];
+
+/// Words that refuse the approved work when a park answer opens with one.
+const OPENING_REFUSALS: &[&str] = &[
+    "no", "dont", "stop", "wait", "hold", "halt", "cancel", "never", "skip",
+];
+
+/// The refusal a park answer opens with, from its words (punctuation and
+/// quote marks such as `>` or `▎` already stripped): one of
+/// [`OPENING_REFUSALS`] first, or "do not".
+fn opening_refusal(words: &[String]) -> Option<String> {
+    match words {
+        [first, second, ..] if first == "do" && second == "not" => Some("do not".into()),
+        [first, ..] if OPENING_REFUSALS.contains(&first.as_str()) => Some(first.clone()),
+        _ => None,
+    }
+}
+
 /// Words a message made only of means "carry on with the approved plan".
 const CONTINUE_WORDS: &[&str] = &[
     "continue", "go", "on", "ahead", "yes", "yep", "y", "ok", "okay", "sure", "proceed", "carry",
@@ -539,7 +663,7 @@ const CONTINUE_WORDS: &[&str] = &[
 
 #[cfg(test)]
 mod disposition_tests {
-    use super::{named_path, names_label, STOP_WORDS};
+    use super::{covers, named_path, names_label, opening_refusal, PARK_STOP_WORDS, STOP_WORDS};
 
     #[test]
     fn paths_are_named_with_suffixes_and_backslashes_but_not_versions_or_ratios() {
@@ -565,6 +689,17 @@ mod disposition_tests {
     }
 
     #[test]
+    fn a_bare_file_name_names_the_plan_file_it_is_the_name_of() {
+        assert!(covers("crates/sim/src/codes.rs", "codes.rs"));
+        assert!(covers("crates/sim/src/codes.rs", "src/codes.rs"));
+        assert!(covers("crates/sim/src/codes.rs", "crates/sim"));
+        assert!(covers("codes.rs", "codes.rs"));
+        assert!(!covers("crates/sim/src/codes.rs", "other/codes.rs"));
+        assert!(!covers("crates/sim/src/xcodes.rs", "codes.rs"));
+        assert!(!covers("crates/sim/src/codes.rs", "sim/src"));
+    }
+
+    #[test]
     fn rule_labels_match_as_whole_words_short_ones_included() {
         assert!(names_label("Apply NP-7 here.", "NP-7"));
         assert!(!names_label("Apply NP-70 here.", "NP-7"));
@@ -579,5 +714,39 @@ mod disposition_tests {
         for word in ["no", "stop", "dont", "instead", "wait"] {
             assert!(STOP_WORDS.contains(&word), "{word}");
         }
+        // A park answer explains with negations; only turning words count.
+        for word in PARK_STOP_WORDS {
+            assert!(STOP_WORDS.contains(word), "{word}");
+        }
+        for word in ["no", "not", "dont", "never"] {
+            assert!(!PARK_STOP_WORDS.contains(&word), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_park_answer_opening_with_a_refusal_is_one() {
+        let words = |text: &str| -> Vec<String> {
+            text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                .filter(|word| !word.is_empty())
+                .map(|word| word.to_lowercase().replace('\'', ""))
+                .collect()
+        };
+        let refusal = |text: &str| opening_refusal(&words(text));
+        assert_eq!(
+            refusal("Do not make this change; wait.").as_deref(),
+            Some("do not")
+        );
+        assert_eq!(refusal("> Don't touch it.").as_deref(), Some("dont"));
+        assert_eq!(refusal("▎ No, leave it.").as_deref(), Some("no"));
+        assert_eq!(refusal("Skip that file.").as_deref(), Some("skip"));
+        assert_eq!(
+            refusal("▎ The enums are in codes.rs; lib.rs does not re-export them."),
+            None
+        );
+        assert_eq!(
+            refusal("labels.py does not strip the name; don't change anything else."),
+            None
+        );
+        assert_eq!(refusal(""), None);
     }
 }

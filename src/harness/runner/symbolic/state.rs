@@ -4,8 +4,9 @@ use crate::harness::protocol::{AssociatePage, CaptureTypeResponse, CheckOutcome}
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Edits outside the plan files replan autonomously this many times per task;
-/// the next one parks for human guidance.
+/// With `MOOSEDEV_HARNESS_SCOPE_CHOICE=off`, edits outside the plan files
+/// replan autonomously this many times per task; the next one parks for human
+/// guidance. Otherwise each escape asks the human, who is the bound.
 pub const MAX_SCOPE_ESCAPES: usize = 3;
 /// A rejected typed capture is retyped under fresh ids this many times per
 /// task; the next rejection parks for human guidance.
@@ -33,6 +34,14 @@ pub struct SymbolicState {
     /// per source state, like the language-server gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stub_refused_at: Option<usize>,
+    /// The edit count at which a finish was sent back for planned files
+    /// missing or not edited this approval cycle: once per source state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfinished_refused_at: Option<usize>,
+    /// The edit count at which the human chose to verify with planned files
+    /// still missing; a finish at that source state is not asked again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfinished_accepted_at: Option<usize>,
     /// The edit count a clean, freshly checked edit armed auto-verify at; taken
     /// by the next advance whether it fires or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +59,23 @@ pub struct SymbolicState {
     /// same plan.
     #[serde(default)]
     pub cycle_edit_start: usize,
+    /// Set when source or accepted knowledge withdrew the approval: the next
+    /// approval starts counting edits afresh even if it only adds files to
+    /// the plan before it. Consumed by that approval.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub coverage_reset: bool,
+    /// Set when a scope escape returned the task to Plan (the automatic
+    /// replan, or the human's `replan` choice): the next approval keeps the
+    /// earlier plan's edits if its files contain that plan's. Consumed by
+    /// that approval; cleared when the human returns the task to Plan.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scope_replan: bool,
+    /// (edits, required-check results) when a reply last continued the
+    /// turn. Another reply may continue once either has grown since, so a
+    /// model that works between replies keeps its turn and one that only
+    /// replies still hands it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_continued_at: Option<(usize, usize)>,
     /// The edit count a fresh result with a fix the harness may apply armed
     /// auto-fix at; taken by the next advance.
     #[serde(default, skip_serializing_if = "Option::is_none")]

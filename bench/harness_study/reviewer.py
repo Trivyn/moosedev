@@ -48,6 +48,20 @@ def review_input(state, episode):
                     "reason": "native harness parked for human guidance: " + str(task.get("last_response", ""))}
     if task.get("last_error"):
         return {"terminal": "agent_failure", "reason": task["last_error"], "cause": "runner_error"}
+    if phase == "AwaitingChoice":
+        # A harness question. The frozen reviewer answers as it reviews a plan:
+        # an out-of-plan file within the episode's allowance is added, any
+        # other is refused; a missing planned file is left for the model to
+        # write (the question's default).
+        choice = task.get("pending_choice") or {}
+        kind = choice.get("kind") or {}
+        scope = kind.get("scope_add") if isinstance(kind, dict) else None
+        if scope is not None:
+            key = "add" if in_scope(scope.get("file", ""), episode["allowed_paths"]) else "refuse"
+            return {"input": "/choose " + key, "reason": "simulated scope answer by episode allowance",
+                    "kind": "choice"}
+        return {"input": "/choose " + str(choice.get("default", "")), "reason": "simulated default answer",
+                "kind": "choice"}
     if phase == "AwaitingPermission":
         return {"input": "/deny",
                 "reason": "frozen study denies unexpected permission requests",

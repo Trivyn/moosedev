@@ -55,6 +55,49 @@ impl Runner {
 }
 
 impl Runner {
+    /// An edit whose `file` is an action name with no path shape (badciv P5:
+    /// `write` to file `command` whose content was `mkdir -p …`) is a
+    /// misrouted action, refused as invalid output so the repair budget
+    /// corrects it, never read as a scope escape. A file of that name the
+    /// task knows (it exists, the plan names it, or the model read it) is a
+    /// file. An offered fix's file comes from the language server, not the
+    /// model, so it is not checked.
+    fn misrouted_action(&self, action: &Action) -> Result<()> {
+        let (Action::Edit { file, .. } | Action::Replace { file, .. } | Action::Write { file, .. }) =
+            action
+        else {
+            return Ok(());
+        };
+        if file.contains(['/', '.'])
+            || !super::model::is_action_name(file)
+            || self.task.read_files.contains(file)
+            || self
+                .task
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.files.contains(file))
+            || matches!(self.workspace.read(file), Ok(Some(_)))
+        {
+            return Ok(());
+        }
+        Err(misrouted(file))
+    }
+}
+
+/// The repair a misrouted action gets.
+fn misrouted(file: &str) -> anyhow::Error {
+    let hint = if file == "command" {
+        "To run a shell command use the command action".to_owned()
+    } else {
+        format!("Use the {file} action itself")
+    };
+    anyhow::anyhow!(
+        "`{file}` is an action, not a file. {hint}; write creates missing parent directories itself."
+    )
+    .context(super::model::InvalidModelOutput)
+}
+
+impl Runner {
     /// Before permission checks: an edit outside the approved plan files
     /// becomes the ordinary replan transition naming the file, bounded per
     /// task. Returns `None` once parked for guidance.
@@ -62,6 +105,7 @@ impl Runner {
         &mut self,
         action: Action,
     ) -> Result<Option<Action>> {
+        self.misrouted_action(&action)?;
         if self.task.mode != Mode::Auto {
             return Ok(Some(action));
         }
@@ -91,6 +135,15 @@ impl Runner {
         if plan_files.contains(&file) {
             return Ok(Some(action));
         }
+        // The human decides whether the approved plan grows (the replan below
+        // is then only the off switch's): a replan cost a full planning pass
+        // and a second approval per escape (badciv P5). The model's proposal
+        // was valid output, so no repair is spent. `None`: parked.
+        if super::choice::scope_choice_enabled() {
+            self.candidate_accepted();
+            self.ask_scope_add(&file, &plan_files)?;
+            return Ok(None);
+        }
         let state = self.symbolic_state_mut();
         state.scope_escapes += 1;
         let escapes = state.scope_escapes;
@@ -112,6 +165,8 @@ impl Runner {
             }
             return Ok(None);
         }
+        // The next approval may keep this plan's edits if it only grows it.
+        self.symbolic_state_mut().scope_replan = true;
         self.intent_event(
             "scope_escape_replan",
             &format!("{file}: escape {escapes} of {MAX_SCOPE_ESCAPES}"),
@@ -382,8 +437,13 @@ impl Runner {
         self.event(format!(
             "Replan continued the approved plan ({count}): {reason}"
         ));
+        let outside = if super::choice::scope_choice_enabled() {
+            "asks the human whether to add that file to the plan"
+        } else {
+            "returns the task to planning automatically"
+        };
         self.task.last_response = format!(
-            "Replan not needed: nothing has changed since the plan was approved (no edit, command, check result or human answer since approval), so the approved plan still governs. Make the change it describes in {files}, or finish to run the required checks. An edit to a file outside the plan returns the task to planning automatically."
+            "Replan not needed: nothing has changed since the plan was approved (no edit, command, check result or human answer since approval), so the approved plan still governs. Make the change it describes in {files}, or finish to run the required checks. An edit to a file outside the plan {outside}."
         );
     }
 
@@ -535,6 +595,61 @@ mod tests {
             revision: "r1".into(),
         });
         assert!(runner.repeat_search_answer("harness").is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_action_name_as_a_file_is_a_misrouted_action() {
+        let project = Project::new("misrouted-action");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Make the tests dir".into())
+            .await
+            .unwrap();
+        let misrouted_action = |runner: &Runner, action: &Action| runner.misrouted_action(action);
+        let write = |file: &str| Action::Write {
+            file: file.into(),
+            content: Some("mkdir -p tests".into()),
+        };
+        let error = misrouted_action(&runner, &write("command")).unwrap_err();
+        assert!(error.is::<super::super::model::InvalidModelOutput>());
+        assert!(
+            format!("{error:#}").contains("`command` is an action, not a file. To run a shell command use the command action; write creates missing parent directories itself."),
+            "{error:#}"
+        );
+        let replace = Action::Replace {
+            file: "read".into(),
+            old_text: "a".into(),
+            new_text: "b".into(),
+        };
+        assert!(
+            format!("{:#}", misrouted_action(&runner, &replace).unwrap_err())
+                .contains("`read` is an action, not a file. Use the read action itself")
+        );
+        // A path shape, or a name no action has, is a file.
+        for file in ["src/command", "command.rs", "Makefile", "commands"] {
+            assert!(misrouted_action(&runner, &write(file)).is_ok(), "{file}");
+        }
+        assert!(misrouted_action(
+            &runner,
+            &Action::Command {
+                command: "ls".into()
+            }
+        )
+        .is_ok());
+        // An action name the task knows as a file is one: it exists, the
+        // plan names it, or the model read it.
+        std::fs::write(project.0.join("search"), "notes\n").unwrap();
+        assert!(misrouted_action(&runner, &write("search")).is_ok());
+        runner.task.read_files.push("read".into());
+        assert!(misrouted_action(&runner, &replace).is_ok());
+        runner.task.plan = Some(crate::harness::runner::Plan {
+            summary: "Write the command script".into(),
+            files: vec!["command".into()],
+            checks: vec![],
+            addresses: vec![],
+        });
+        assert!(misrouted_action(&runner, &write("command")).is_ok());
+        assert!(misrouted_action(&runner, &write("question")).is_err());
         server.abort();
     }
 

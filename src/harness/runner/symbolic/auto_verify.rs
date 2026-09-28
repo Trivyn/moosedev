@@ -94,24 +94,15 @@ impl Runner {
         if !idle || self.untested_failure().is_some() || !self.diagnostics_clean() {
             return false;
         }
-        let (start, harness_fixes) = task.symbolic.as_ref().map_or((0, None), |state| {
-            (state.cycle_edit_start, Some(&state.auto_fixed_edits))
-        });
-        // The model's own edits only: a fix the harness applied to a file the
-        // model has not worked on yet is not that file done.
-        let edited_by_model = |file: &String| {
-            task.edits
-                .iter()
-                .enumerate()
-                .skip(start)
-                .any(|(index, edit)| {
-                    &edit.file == file && !harness_fixes.is_some_and(|fixes| fixes.contains(&index))
-                })
-        };
+        // Every planned file exists and has an edit of the model's own this
+        // cycle: a fix the harness applied to a file the model has not worked
+        // on yet is not that file done. This is also why auto-verify never
+        // meets the unfinished-plan gate in `begin_verification`.
         let every_file_done = plan
             .files
             .iter()
-            .all(|file| matches!(self.workspace.read(file), Ok(Some(_))) && edited_by_model(file));
+            .all(|file| matches!(self.workspace.read(file), Ok(Some(_))))
+            && self.planned_files_unedited().is_empty();
         if !every_file_done || !self.planned_stubs().is_empty() {
             return false;
         }

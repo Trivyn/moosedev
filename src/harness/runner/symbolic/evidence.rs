@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 
 use super::super::Runner;
+use crate::code::substrate::lang::{file_name, is_language_file};
 use crate::code::substrate::outline;
 
 /// Identifiers from the note listed at most, so the line stays readable.
@@ -102,8 +103,15 @@ impl Runner {
             .and_then(|state| state.capture_note.as_ref())
         {
             let changed = self.changed_code();
+            let files: BTreeSet<&str> = edited
+                .iter()
+                .chain(planned.iter())
+                .copied()
+                .chain(self.task.read_files.iter().map(String::as_str))
+                .collect();
             let absent: Vec<String> = note_names(&note.note)
                 .into_iter()
+                .filter(|name| !names_a_file(name, &files))
                 .filter(|name| !changed.touches(name))
                 .take(NOTE_NAMES)
                 .collect();
@@ -215,6 +223,17 @@ fn note_names(note: &str) -> Vec<String> {
     names
 }
 
+/// Whether a note name is a file rather than code: one of the task's files,
+/// or its base name, or anything with a registered language's extension.
+/// badciv P5's review said "The note names `lib.rs`, which no edit in this
+/// task added or changed" of a file the task had edited.
+fn names_a_file(name: &str, files: &BTreeSet<&str>) -> bool {
+    files
+        .iter()
+        .any(|file| *file == name || file_name(file) == name)
+        || is_language_file(name)
+}
+
 /// Whether `line` holds `name` as a whole word (a path's last segment
 /// counts: `Map::tile` is found by `tile`).
 fn contains_word(line: &str, name: &str) -> bool {
@@ -231,7 +250,24 @@ fn contains_word(line: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_word, note_names, ChangedCode};
+    use super::{contains_word, names_a_file, note_names, ChangedCode};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn a_note_name_that_is_a_file_is_not_code() {
+        let files: BTreeSet<&str> = ["badciv-map/src/lib.rs", "badciv-map/Makefile"].into();
+        // badciv P5: `lib.rs` is the base name of an edited file.
+        assert!(names_a_file("lib.rs", &files));
+        assert!(names_a_file("badciv-map/src/lib.rs", &files));
+        assert!(names_a_file("Makefile", &files));
+        // A registered language's extension is a file whatever the task touched.
+        assert!(names_a_file("codes.rs", &files));
+        assert!(names_a_file("labels.py", &files));
+        // Code stays code, dotted paths included.
+        for name in ["parse_map", "MapError::Parse", "self.grid", "os.path"] {
+            assert!(!names_a_file(name, &files), "{name}");
+        }
+    }
 
     #[test]
     fn a_note_names_code_in_backticks_and_calls() {

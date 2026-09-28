@@ -5,7 +5,7 @@
 //! gap is journaled. A delivery nudge on wording, never a compliance verdict,
 //! and never a halt or a repair.
 use super::super::{ContextResponse, Runner};
-use crate::harness::coverage::{assess, CoverageThresholds};
+use crate::harness::coverage::{assess, CoverageReceipt, CoverageThresholds};
 use crate::harness::protocol::{spec_title_key, GoverningRule};
 
 /// Claim bytes a coverage return may carry for the rules it names.
@@ -35,17 +35,9 @@ impl Runner {
                 CoverageThresholds::default()
             }
         };
-        let background = format!("{} {}", self.task.objective, self.task.guidance);
         let mut unmet = Vec::new();
         for rule in rules {
-            let receipt = assess(
-                summary,
-                &background,
-                &rule.iri,
-                &rule.label,
-                &rule.claim,
-                &thresholds,
-            );
+            let receipt = self.coverage_receipt(summary, rule, &thresholds);
             let detail = serde_json::to_string(&receipt).unwrap_or_default();
             self.intent_event("constraint_coverage", &detail);
             if !receipt.covered {
@@ -121,6 +113,48 @@ impl Runner {
         ));
         self.task.last_response = note;
         true
+    }
+
+    /// Whether `summary` addresses `rule` beyond what the objective and the
+    /// human's guidance already say: the plan coverage check's reading.
+    fn coverage_receipt(
+        &self,
+        summary: &str,
+        rule: &GoverningRule,
+        thresholds: &CoverageThresholds,
+    ) -> CoverageReceipt {
+        let background = format!("{} {}", self.task.objective, self.task.guidance);
+        assess(
+            summary,
+            &background,
+            &rule.iri,
+            &rule.label,
+            &rule.claim,
+            thresholds,
+        )
+    }
+
+    /// The rules among `rules` the current plan does not address: not among
+    /// its `addresses`, and not covered by its summary as the plan coverage
+    /// check reads it (the plan may also say a rule is deferred or does not
+    /// apply). With the claims the model retrieved, as that check reads them.
+    pub(in crate::harness::runner) fn unaddressed_rules(
+        &self,
+        rules: &[GoverningRule],
+    ) -> Vec<GoverningRule> {
+        let Some(plan) = self.task.plan.as_ref() else {
+            return Vec::new();
+        };
+        let thresholds = CoverageThresholds::from_env().unwrap_or_default();
+        self.rules_with_retrieved_claims(rules)
+            .into_iter()
+            .filter(|rule| {
+                !plan.addresses.contains(&rule.iri)
+                    && !self
+                        .coverage_receipt(&plan.summary, rule, &thresholds)
+                        .covered
+            })
+            .collect()
     }
 
     /// Resolve the plan's `addresses` to the IRIs of rules delivered for its

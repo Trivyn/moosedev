@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{file_name, note_failed};
+use super::{backticked, file_name, note_failed, STUB_MESSAGES};
 use super::{
     CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec,
     StubSyntax,
@@ -69,12 +69,40 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     }],
     stubs: Some(StubSyntax {
         markers: &["unimplemented!(", "todo!("],
+        stub_messages: STUB_MESSAGES,
+        failure_constructs: &["panic!(", "Err(", "bail!(", "anyhow!("],
         line_comments: &["//"],
         block_comments: &["/*", "*"],
         quotes: &['"'],
     }),
     test_failures: Some(test_failures),
+    unresolved_names: Some(unresolved_names),
 };
+
+/// The names rustc's and rust-analyzer's resolution errors name, each as its
+/// last path segment: "unresolved import(s) `a::B`, `a::C`" names every one;
+/// "cannot find type `X` in this scope" (value, function, struct, variant or
+/// union type, trait, macro) and "failed to resolve: use of undeclared type
+/// `X`" name the first.
+fn unresolved_names(message: &str) -> Vec<String> {
+    let first = message.lines().next().unwrap_or_default();
+    let names: Vec<&str> = if first.starts_with("unresolved import") {
+        backticked(first).collect()
+    } else if first.starts_with("cannot find ")
+        || first.starts_with("failed to resolve: use of undeclared ")
+    {
+        backticked(first).take(1).collect()
+    } else {
+        Vec::new()
+    };
+    names
+        .into_iter()
+        .filter_map(|path| path.rsplit("::").next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 
 /// libtest's report of failed tests. Each is named by its `test NAME ...
 /// FAILED` line, its `---- NAME stdout ----` header and the closing
@@ -224,7 +252,40 @@ fn declaration_name(node: tree_sitter::Node<'_>, source: &str) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::test_failures;
+    use super::{test_failures, unresolved_names};
+
+    #[test]
+    fn resolution_errors_name_the_last_segment() {
+        assert_eq!(
+            unresolved_names("unresolved import `badciv_map::Terrain`"),
+            ["Terrain"]
+        );
+        // badciv P5, as rust-analyzer published it.
+        assert_eq!(
+            unresolved_names("unresolved imports `badciv_map::Terrain`, `badciv_map::Climate`, `badciv_map::Resource`, `badciv_map::Faction`"),
+            ["Terrain", "Climate", "Resource", "Faction"]
+        );
+        for (message, name) in [
+            ("cannot find type `Grid` in this scope", "Grid"),
+            ("cannot find value `grid` in this scope", "grid"),
+            (
+                "cannot find function `parse_map` in this scope",
+                "parse_map",
+            ),
+            (
+                "cannot find struct, variant or union type `Tile` in this scope",
+                "Tile",
+            ),
+            (
+                "failed to resolve: use of undeclared type `Terrain`",
+                "Terrain",
+            ),
+        ] {
+            assert_eq!(unresolved_names(message), [name], "{message}");
+        }
+        assert!(unresolved_names("mismatched types\nexpected `u8`, found `u32`").is_empty());
+        assert!(unresolved_names("unused import: `Terrain`").is_empty());
+    }
 
     #[test]
     fn libtest_failures_are_named_and_located() {

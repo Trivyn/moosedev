@@ -58,6 +58,12 @@ pub(crate) struct LanguageSpec {
     /// None when this build reads no runner of the language.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub test_failures: Option<fn(&str) -> Vec<FailedTest>>,
+    /// The names a diagnostic says could not be resolved ("unresolved import
+    /// `a::B`" names `B`), so the harness can point at a declaration of that
+    /// name found by name. None when this build reads no such message of the
+    /// language.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub unresolved_names: Option<fn(&str) -> Vec<String>>,
 }
 
 /// A test a runner reported failed: its name as the runner printed it
@@ -120,6 +126,31 @@ pub(crate) fn failed_tests(output: &str) -> Vec<FailedTest> {
     failures
 }
 
+/// The names every registered language's parser reads as unresolved in a
+/// diagnostic `message`, in order, each once. The message does not say which
+/// language's checker wrote it, and the formats do not overlap.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn unresolved_names(message: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for parse in LANGUAGES
+        .iter()
+        .filter_map(|language| language.unresolved_names)
+    {
+        for name in parse(message) {
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// The text between each pair of backticks in `text`, in order.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+fn backticked(text: &str) -> impl Iterator<Item = &str> {
+    text.split('`').skip(1).step_by(2)
+}
+
 /// A language's stub idiom (`unimplemented!(`, `raise NotImplementedError`)
 /// with just enough lexical syntax to read a line: a marker after a comment
 /// opener or inside a string is not code. A finish with a stub left in a
@@ -129,6 +160,13 @@ pub(crate) fn failed_tests(output: &str) -> Vec<FailedTest> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StubSyntax {
     pub markers: &'static [&'static str],
+    /// Messages that say code is not written yet ("not implemented"), matched
+    /// without regard to case inside a string literal on a line that also
+    /// holds one of `failure_constructs` as code: badciv P5 left
+    /// `Err(MapError::Parse("Not implemented".to_string()))`.
+    pub stub_messages: &'static [&'static str],
+    /// How the language fails with a message (`Err(`, `panic!(`, `raise `).
+    pub failure_constructs: &'static [&'static str],
     /// Openers of a comment that runs to the end of the line (`//`, `#`).
     pub line_comments: &'static [&'static str],
     /// Openers of a block comment, and a line that continues one (`/*`, `*`).
@@ -327,6 +365,22 @@ fn language_for_path(path: &str) -> Option<&'static LanguageSpec> {
     })
 }
 
+/// Whether a name reads as a file of a registered language (`lib.rs`,
+/// `labels.py`) by its extension: text in a note that names a file, not code.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn is_language_file(path: &str) -> bool {
+    language_for_path(path).is_some()
+}
+
+/// Messages that say code is not written yet, shared by the languages.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) const STUB_MESSAGES: &[&str] = &[
+    "not implemented",
+    "not yet implemented",
+    "unimplemented",
+    "todo",
+];
+
 /// The stub idiom of the language owning a path; None for an unknown language
 /// or one without stubs.
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
@@ -379,6 +433,18 @@ pub(crate) fn first_matching_subdir(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unresolved_names_union_every_language() {
+        assert_eq!(
+            super::unresolved_names(
+                "unresolved imports `badciv_map::Terrain`, `badciv_map::Climate`"
+            ),
+            ["Terrain", "Climate"]
+        );
+        assert_eq!(super::unresolved_names("Undefined name `grid`"), ["grid"]);
+        assert!(super::unresolved_names("mismatched types\nexpected `u8`").is_empty());
+    }
+
     #[test]
     fn stub_syntax_follows_the_language_of_the_path() {
         let markers = |path| super::stub_syntax_for(path).map(|syntax| syntax.markers);

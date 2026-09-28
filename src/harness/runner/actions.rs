@@ -5,6 +5,7 @@ use super::{
 };
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
+use std::collections::HashSet;
 
 /// A validated action the dispatcher can execute without re-checking its
 /// arguments: bounds hold, the target was read, and `replace`/`write` are
@@ -616,20 +617,40 @@ fn whole_file_rewrite(source: &str, old_text: &str, new_text: &str) -> Option<St
     })
 }
 
-/// Whether a replace whose `old_text` is gone has already been made: its
-/// `new_text` is in the file exactly once, keeps every line of `old_text`
-/// (the edit added or wrapped text, as badciv e3c533b4's `#[ignore]` did), and
-/// anything a junk trim would match of `old_text` lies within that change. A
-/// `new_text` that merely occurs elsewhere is not evidence: that replace stays
-/// a miss.
+/// Whether a replace whose `old_text` is gone has already been made. The
+/// evidence is structural, never a lone `new_text` match: `new_text` is in the
+/// file exactly once, `old_text` is nowhere, the two are related (they share a
+/// kept line that anchors them, or every line of `old_text` lies within
+/// `new_text`), every line the edit removes is gone from the file, and
+/// anything a junk trim would match of `old_text` lies within that change.
+/// That covers an added line (badciv e3c533b4's `#[ignore]`), an extended one
+/// (`return name` → `return name.strip()`) and a changed one (badciv P5's
+/// derive gaining `Hash, PartialOrd`). A `new_text` that merely occurs
+/// elsewhere is unrelated to `old_text`, and a removed line still in the file
+/// means the change was not made: both stay a miss. A kept line anchors only
+/// when it says something (not bare brackets or punctuation, at least four
+/// characters) and is a whole line of the file exactly once: codex found two
+/// `if enabled {` blocks, where the untouched one made the other's needed
+/// replace look made.
 fn already_applied(source: &str, old_text: &str, new_text: &str) -> bool {
+    fn lines(text: &str) -> impl Iterator<Item = &str> {
+        text.lines().map(str::trim).filter(|line| !line.is_empty())
+    }
+    let new_lines: HashSet<&str> = lines(new_text).collect();
+    let source_lines: HashSet<&str> = lines(source).collect();
+    let (kept, removed): (Vec<&str>, Vec<&str>) =
+        lines(old_text).partition(|line| new_lines.contains(line));
+    let anchors = |line: &&str| {
+        line.len() >= 4
+            && line.chars().any(char::is_alphanumeric)
+            && lines(source).filter(|known| known == line).count() == 1
+    };
+    let related = kept.iter().any(anchors) || removed.iter().all(|line| new_text.contains(line));
     !new_text.trim().is_empty()
         && occurrences(source, new_text) == 1
-        && old_text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .all(|line| new_text.contains(line))
+        && occurrences(source, old_text) == 0
+        && related
+        && removed.iter().all(|line| !source_lines.contains(line))
         && repair_literal_span(source, old_text)
             .is_none_or(|repair| new_text.contains(&repair.span))
 }
@@ -905,6 +926,41 @@ mod tests {
             source,
             "#[test]\nfn gone() {",
             "#[test]\nfn other() {"
+        ));
+
+        // badciv P5: a changed line, not an added one. The derive gained
+        // `Hash, PartialOrd`; the enum body is the kept context.
+        let old = "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Faction {\n    Terrans,\n    Saurids,\n    Greys,\n}";
+        let new = "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]\npub enum Faction {\n    Terrans,\n    Saurids,\n    Greys,\n}";
+        let applied = format!("use std::fmt;\n\n{new}\n\nimpl Faction {{}}\n");
+        assert!(already_applied(&applied, old, new));
+        // The removed derive line is still in the file (another type keeps
+        // it): the change is not evidently made, so it stays a miss.
+        let still = format!(
+            "{applied}\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Climate {{}}\n"
+        );
+        assert!(!already_applied(&still, old, new));
+        // An extended line: the old line lies within the new one.
+        assert!(already_applied(
+            "def label(name):\n    return name.strip()\n",
+            "    return name\n",
+            "    return name.strip()\n"
+        ));
+        // codex: two `if enabled {` blocks. The replace meant for `stop`
+        // (whose body the model misremembered) has a new_text that is the
+        // untouched block in `start`; the shared lines are a line the file
+        // holds twice and a bare brace, so nothing anchors it: a miss.
+        let blocks = "fn start() {\n    if enabled {\n        flush();\n    }\n}\n\nfn stop() {\n    if enabled {\n        close();\n    }\n}\n";
+        assert!(!already_applied(
+            blocks,
+            "    if enabled {\n        drain();\n    }",
+            "    if enabled {\n        flush();\n    }"
+        ));
+        // The same edit with the block written once is recognised.
+        assert!(already_applied(
+            "fn start() {\n    if enabled {\n        flush();\n    }\n}\n",
+            "    if enabled {\n        drain();\n    }",
+            "    if enabled {\n        flush();\n    }"
         ));
     }
 
