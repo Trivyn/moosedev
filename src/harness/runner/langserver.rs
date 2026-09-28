@@ -12,7 +12,9 @@
 //! What the server can do beyond reporting is offered as choices, not tools:
 //! its quick fixes are numbered under their findings, and `apply_fix` turns
 //! one into an ordinary edit.
-use crate::code::substrate::lang::{language_servers, unresolved_names, LinterSpec, ServerSpec};
+use crate::code::substrate::lang::{
+    language_servers, unresolved_names, Deferral, LinterSpec, Publishes, ServerSpec,
+};
 use crate::harness::digest::sha256_hex;
 use crate::harness::executor::{resolve_program, ServerDirectory};
 use anyhow::{Context, Result};
@@ -51,6 +53,28 @@ impl ServerSpec {
         name.is_some_and(|name| self.project_files.contains(&name))
     }
 
+    /// Its deferral, when the server it defers to is among `started`, the
+    /// servers already started for the task.
+    fn deferral(&self, started: &[&str]) -> Option<Deferral> {
+        self.defers_to
+            .filter(|deferral| started.contains(&deferral.to))
+    }
+
+    /// The `initializationOptions` it starts with: its linter's when one
+    /// runs through it, else those of its deferral when it defers, else its
+    /// own.
+    fn initialization_options(
+        &self,
+        linter: Option<LinterSpec>,
+        deferral: Option<Deferral>,
+    ) -> Value {
+        let options = linter
+            .map(|linter| linter.options)
+            .or(deferral.map(|deferral| deferral.options))
+            .unwrap_or(self.options);
+        options()
+    }
+
     /// The first candidate command whose program is installed.
     fn argv(&self) -> Option<Vec<String>> {
         self.commands.iter().find_map(|command| {
@@ -75,7 +99,8 @@ pub struct Finding {
     pub message: String,
     /// The compiler's full text when the server passes it on (rust-analyzer's
     /// `data.rendered`: the source excerpt, `note:` and `help:` lines with a
-    /// suggested fix), else the related spans as `note:` lines; bounded.
+    /// suggested fix), else the finding's line followed by the rest of a
+    /// multi-line message and the related spans as `note:` lines; bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// Where the symbol at the error is defined, when that is in the
@@ -515,10 +540,12 @@ pub(super) struct LanguageServer {
 }
 
 impl LanguageServer {
-    /// Spawn `command`, run `initialize` and open nothing yet.
+    /// Spawn `command`, run `initialize` with `options` and open nothing
+    /// yet.
     pub(super) async fn start(
         spec: ServerSpec,
         linter: Option<LinterSpec>,
+        options: Value,
         mut command: std::process::Command,
         mirror: &Path,
     ) -> Result<Self> {
@@ -562,7 +589,7 @@ impl LanguageServer {
                 "processId": Value::Null,
                 "rootUri": root,
                 "workspaceFolders": [{"uri": root, "name": "project"}],
-                "initializationOptions": linter.map_or(spec.options, |linter| linter.options)(),
+                "initializationOptions": options,
                 "capabilities": {
                     "textDocument": {
                         "synchronization": {"didSave": true},
@@ -701,9 +728,10 @@ impl LanguageServer {
         }
         if text.is_none() {
             // A deleted file has no diagnostics, whatever the server last
-            // said about it.
+            // said about it, and a re-created one is a new document.
             if let Ok(mut seen) = self.seen.lock() {
                 seen.diagnostics.remove(file);
+                seen.published_at.remove(file);
             }
         }
         // 1 created, 2 changed, 3 deleted: from what the edit did, not from
@@ -728,9 +756,9 @@ impl LanguageServer {
     /// also have shown work on this edit after `since` (a status report, or
     /// announced work ending): a quiescent flag left over from the previous
     /// edit says nothing about this one. A server that publishes for every
-    /// version (pyright) must have published diagnostics about the text just
-    /// sent of `file` when it has it open: it may say nothing while it
-    /// analyzes, and its silence is not a clean result.
+    /// version must have published diagnostics about the text just sent of
+    /// `file` when it has it open (see [`reported`]): it may say nothing
+    /// while it analyzes, and its silence is not a clean result.
     pub(super) async fn settle(&mut self, file: &str, since: Instant, timeout: Duration) -> bool {
         const QUIET: Duration = Duration::from_millis(800);
         const FIRST_WORD: Duration = Duration::from_millis(1500);
@@ -741,7 +769,7 @@ impl LanguageServer {
         };
         let deadline = since + timeout;
         let needs_status = self.concerns(file);
-        let awaits_report = self.spec.publishes_every_version && self.open.contains(file);
+        let open = self.open.contains(file);
         loop {
             let now = Instant::now();
             let settled = match self.seen.lock() {
@@ -760,8 +788,12 @@ impl LanguageServer {
                     } else {
                         seen.quiescent != Some(false)
                     };
-                    let reported =
-                        !awaits_report || seen.published_at.get(file).is_some_and(|at| *at > since);
+                    let reported = reported(
+                        self.spec.publishes,
+                        open,
+                        seen.published_at.get(file).copied(),
+                        since,
+                    );
                     !seen.exited
                         && reported
                         && (heard || now.duration_since(since) >= FIRST_WORD)
@@ -961,7 +993,8 @@ impl LanguageServer {
     }
 
     /// A resolved WorkspaceEdit as a fix, when it is one text edit to a
-    /// planned file of the current version that changes something.
+    /// planned file of the current version that changes something and does
+    /// not silence a diagnostic (see [`adds_suppression`]).
     fn fix_from_edit(
         &self,
         edit: &Value,
@@ -978,7 +1011,8 @@ impl LanguageServer {
         }
         let text = read_in_mirror(&self.mirror, &file)?;
         let edits = fix_edits(&text, &edits)?;
-        if splice(&text, &edits)? == text {
+        let fixed = splice(&text, &edits)?;
+        if fixed == text || adds_suppression(&title, &text, &fixed) {
             return None;
         }
         Some(OfferedFix {
@@ -1017,6 +1051,49 @@ impl LanguageServer {
         };
         let source = self.lint().map(|(_, source)| source);
         findings(&seen.diagnostics, source, &self.mirror)
+    }
+}
+
+/// Comments and attributes that silence a diagnostic instead of fixing it.
+const SUPPRESSIONS: &[&str] = &[
+    "# pyright: ignore",
+    "# type: ignore",
+    "# noqa",
+    "// @ts-ignore",
+    "#[allow(",
+];
+
+/// Whether a quick fix silences a diagnostic rather than fixing it: its title
+/// names a suppression (basedpyright's "Add `# pyright: ignore[…]`" under
+/// every error), or its edit adds one to the text. A small model offered one
+/// takes it and the error is gone unfixed; it is never offered or applied.
+fn adds_suppression(title: &str, before: &str, after: &str) -> bool {
+    SUPPRESSIONS.iter().any(|marker| {
+        title.contains(marker) || after.matches(marker).count() > before.matches(marker).count()
+    })
+}
+
+/// Whether a server that publishes as `publishes` has reported on the text of
+/// `file` sent at `since`, given when it last published about `file`
+/// (`published_at`) and whether it has the file open. One that publishes for
+/// every version must have published since. One that publishes for every
+/// version of the files it checks (ruff) must have too, once it has published
+/// about the file at all: silence then is not a clean result, while a file
+/// it never published about may be one its configuration excludes. The
+/// settle deadline bounds the wait either way.
+fn reported(
+    publishes: Publishes,
+    open: bool,
+    published_at: Option<Instant>,
+    since: Instant,
+) -> bool {
+    if !open {
+        return true;
+    }
+    match publishes {
+        Publishes::EveryVersion => published_at.is_some_and(|at| at > since),
+        Publishes::CheckedFiles => published_at.is_none_or(|at| at > since),
+        Publishes::OnChange => true,
     }
 }
 
@@ -1083,24 +1160,26 @@ fn findings(
     let files: BTreeMap<&String, &Vec<lsp_types::Diagnostic>> = diagnostics.iter().collect();
     for (file, diagnostics) in files {
         for diagnostic in diagnostics {
-            let finding = || Finding {
+            let lint = lint_source.is_some() && diagnostic.source.as_deref() == lint_source;
+            let (list, kind) = match diagnostic.severity {
+                Some(lsp_types::DiagnosticSeverity::ERROR) | None => (&mut found.errors, "error"),
+                Some(lsp_types::DiagnosticSeverity::WARNING) if lint => (&mut found.lints, "lint"),
+                Some(lsp_types::DiagnosticSeverity::WARNING) => (&mut found.warnings, "warning"),
+                _ => continue,
+            };
+            let mut finding = Finding {
                 file: file.clone(),
                 line: diagnostic.range.start.line + 1,
                 column: diagnostic.range.start.character + 1,
                 message: diagnostic.message.clone(),
-                detail: detail(diagnostic, mirror),
+                detail: None,
                 definition: None,
                 declared: Vec::new(),
                 fixes: Vec::new(),
                 fixes_complete: false,
             };
-            let lint = lint_source.is_some() && diagnostic.source.as_deref() == lint_source;
-            match diagnostic.severity {
-                Some(lsp_types::DiagnosticSeverity::ERROR) | None => found.errors.push(finding()),
-                Some(lsp_types::DiagnosticSeverity::WARNING) if lint => found.lints.push(finding()),
-                Some(lsp_types::DiagnosticSeverity::WARNING) => found.warnings.push(finding()),
-                _ => {}
-            }
+            finding.detail = detail(diagnostic, &finding.line(kind), mirror);
+            list.push(finding);
         }
     }
     for list in [&mut found.errors, &mut found.warnings, &mut found.lints] {
@@ -1153,8 +1232,11 @@ fn single_file_edits(edit: &Value) -> Option<(String, Option<i32>, Vec<Value>)> 
     }
 }
 
-/// The compiler's full text of a diagnostic, bounded; else its related spans.
-fn detail(diagnostic: &lsp_types::Diagnostic, mirror: &Path) -> Option<String> {
+/// The compiler's full text of a diagnostic, bounded; else, under `heading`
+/// (the finding's one line), the rest of a multi-line message (pyright's
+/// second line says which types do not match) and its related spans. None
+/// when there is nothing beyond the one line.
+fn detail(diagnostic: &lsp_types::Diagnostic, heading: &str, mirror: &Path) -> Option<String> {
     if let Some(rendered) = diagnostic
         .data
         .as_ref()
@@ -1178,13 +1260,48 @@ fn detail(diagnostic: &lsp_types::Diagnostic, mirror: &Path) -> Option<String> {
             )
         })
         .collect();
-    (!notes.is_empty()).then(|| {
-        bounded_detail(&format!(
-            "{}\n{}",
-            diagnostic.message.lines().next().unwrap_or_default(),
-            notes.join("\n")
-        ))
-    })
+    let lines: Vec<String> = message_continuation(&diagnostic.message)
+        .into_iter()
+        .chain(notes)
+        .collect();
+    (!lines.is_empty())
+        .then(|| bounded_detail(&format!("{}\n{}", heading.trim_end(), lines.join("\n"))))
+}
+
+/// Lines of a message after its first kept at most, and their bytes.
+const CONTINUATION_LINES: usize = 3;
+const CONTINUATION_BYTES: usize = 300;
+
+/// The lines of a multi-line message after its first, indented under it:
+/// at most [`CONTINUATION_LINES`] within [`CONTINUATION_BYTES`], a longer
+/// line cut at a character with a marker.
+fn message_continuation(message: &str) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for line in message
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(CONTINUATION_LINES)
+    {
+        let left = CONTINUATION_BYTES.saturating_sub(bytes);
+        if left == 0 {
+            break;
+        }
+        let line = if line.len() <= left {
+            line.to_owned()
+        } else {
+            let mut end = left;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{} […]", &line[..end])
+        };
+        bytes += line.len();
+        kept.push(format!("  {line}"));
+    }
+    kept
 }
 
 /// Bytes of compiler text one finding keeps.
@@ -1431,10 +1548,21 @@ impl LanguageServers {
         read_paths: &[PathBuf],
         files: &[String],
     ) -> Result<(Self, Vec<(&'static str, String)>)> {
+        Self::start_servers(project, directory, read_paths, files, language_servers()).await
+    }
+
+    /// [`Self::start`] over `specs`, in their order.
+    async fn start_servers(
+        project: &Path,
+        directory: &Path,
+        read_paths: &[PathBuf],
+        files: &[String],
+        specs: impl Iterator<Item = &'static ServerSpec>,
+    ) -> Result<(Self, Vec<(&'static str, String)>)> {
         let directory = ServerDirectory::prepare(project, directory)?;
         let mut servers = Vec::new();
         let mut notes = Vec::new();
-        for spec in language_servers() {
+        for spec in specs {
             if !files
                 .iter()
                 .any(|file| spec.language_of(file).is_some() || spec.is_project_file(file))
@@ -1474,10 +1602,17 @@ impl LanguageServers {
                 None => None,
             };
             let command = directory.command(&argv, read_paths)?;
-            match LanguageServer::start(*spec, linter, command, &directory.mirror()).await {
+            // A server deferring to another is listed after it, so this is
+            // whether that one actually started.
+            let started: Vec<&str> = servers.iter().map(LanguageServer::name).collect();
+            let deferral = spec.deferral(&started);
+            let options = spec.initialization_options(linter, deferral);
+            match LanguageServer::start(*spec, linter, options, command, &directory.mirror()).await
+            {
                 Ok(server) => {
                     let with = linter
                         .map(|l| format!(" with {}", l.name))
+                        .or(deferral.map(|deferral| format!(", deferring to {}", deferral.to)))
                         .unwrap_or_default();
                     notes.push((
                         "language_server",
@@ -2182,6 +2317,11 @@ mod tests {
         eprintln!("{notes:?}");
         let names: Vec<&str> = servers.servers.iter().map(|s| s.name()).collect();
         assert_eq!(names, ["pyright", "ruff"], "{notes:?}");
+        assert!(
+            notes.iter().any(|(_, note)| note
+                .starts_with("Language server ruff: started, deferring to pyright (")),
+            "{notes:?}"
+        );
 
         let editable = ["pkg/mod.py".to_owned()];
         async fn edit(
@@ -2227,6 +2367,22 @@ mod tests {
             "{snapshot:?}"
         );
         assert!(snapshot.lints.is_empty(), "{snapshot:?}");
+        // The message's second line, which names the mismatch, is shown.
+        assert!(
+            snapshot
+                .render(4_000)
+                .contains("\n  \"Literal['a']\" is not assignable to \"int\"\n"),
+            "{snapshot:?}"
+        );
+        // basedpyright's "Add `# pyright: ignore[…]`" silences the error; it
+        // is not offered.
+        assert!(
+            snapshot
+                .findings()
+                .flat_map(|f| &f.fixes)
+                .all(|fix| !fix.title.contains("ignore")),
+            "{snapshot:?}"
+        );
 
         // An unused import: ruff's lint (F401) alone, its removal offered as
         // the fix ruff prefers. The harness does not apply it itself: a fix
@@ -2331,6 +2487,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// Real ruff with no type checker started: it defers to nothing, so an
+    /// undefined name and a syntax error are its to report and neither edit
+    /// settles clean.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ruff and a functional OS sandbox; run explicitly"]
+    async fn ruff_alone_reports_undefined_names_and_syntax_errors() {
+        let project = std::env::temp_dir().join(format!("moosedev-ruff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(project.join("pkg")).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"ruff-probe\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("pkg/__init__.py"), "").unwrap();
+        std::fs::write(
+            project.join("pkg/mod.py"),
+            "def one() -> int:\n    return 1\n",
+        )
+        .unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("moosedev-ruff-lsp-{}", uuid::Uuid::new_v4()));
+        let files = ["pyproject.toml", "pkg/__init__.py", "pkg/mod.py"].map(str::to_owned);
+        // As when no type checker is installed.
+        let (mut servers, notes) = LanguageServers::start_servers(
+            &project,
+            &directory,
+            &[],
+            &files,
+            language_servers().filter(|spec| spec.name != "pyright"),
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = servers.servers.iter().map(|s| s.name()).collect();
+        assert_eq!(names, ["ruff"], "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|(_, note)| note.starts_with("Language server ruff: started (")),
+            "not deferring: {notes:?}"
+        );
+        let editable = ["pkg/mod.py".to_owned()];
+        for (text, expected) in [
+            ("def one() -> int:\n    return missing\n", "`missing`"),
+            ("def one(:\n    return 1\n", ""),
+        ] {
+            std::fs::write(project.join("pkg/mod.py"), text).unwrap();
+            let snapshot = servers
+                .after_edit(
+                    "pkg/mod.py",
+                    true,
+                    Some(text),
+                    Duration::from_secs(60),
+                    &editable,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            eprintln!("{}", snapshot.render(4_000));
+            assert!(snapshot.settled, "{snapshot:?}");
+            assert!(
+                snapshot
+                    .findings()
+                    .any(|f| f.line <= 2 && f.message.contains(expected)),
+                "{text:?} is reported: {snapshot:?}"
+            );
+        }
+        drop(servers);
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     fn diagnostic(line: u32, column: u32, message: &str) -> lsp_types::Diagnostic {
         let at = lsp_types::Position::new(line - 1, column - 1);
         lsp_types::Diagnostic {
@@ -2393,6 +2620,77 @@ mod tests {
         let mut gone = found.errors[1].clone();
         gone.message = "changed".into();
         assert!(fix_targets(&diagnostics, &gone, mirror).0.is_empty());
+    }
+
+    /// pyright's second line says which types do not match: it is part of
+    /// the finding's detail, under the finding's located line, bounded. The
+    /// full message stays the finding's identity: two errors on one line
+    /// that differ only past the first line are two findings.
+    #[test]
+    fn a_multi_line_message_keeps_its_further_lines_in_the_detail() {
+        let first = "Type \"Literal['a']\" is not assignable to declared type \"int\"";
+        let two = format!("{first}\n  \"Literal['a']\" is not assignable to \"int\"");
+        let other = format!("{first}\n  \"Literal['b']\" is not assignable to \"int\"");
+        let long = format!("{first}\n{}\nsecond\nthird\nfourth", "x".repeat(400));
+        let mirror = Path::new("/tmp/mirror");
+        let diagnostics = HashMap::from([
+            (
+                "pkg/mod.py".to_string(),
+                vec![
+                    diagnostic(1, 10, &two),
+                    diagnostic(1, 15, &other),
+                    diagnostic(2, 1, "one line only"),
+                ],
+            ),
+            ("pkg/long.py".to_string(), vec![diagnostic(1, 1, &long)]),
+        ]);
+        let found = findings(&diagnostics, None, mirror);
+        let in_mod: Vec<&Finding> = found
+            .errors
+            .iter()
+            .filter(|f| f.file == "pkg/mod.py")
+            .collect();
+        assert_eq!(in_mod.len(), 3, "{in_mod:?}");
+        assert_eq!(
+            in_mod[0].detail.as_deref(),
+            Some(
+                "pkg/mod.py:1:10 error: Type \"Literal['a']\" is not assignable to declared type \"int\"\n  \"Literal['a']\" is not assignable to \"int\""
+            )
+        );
+        assert!(in_mod[1]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("Literal['b']"));
+        assert_eq!(in_mod[2].detail, None, "nothing beyond the one line");
+        let snapshot = DiagnosticsSnapshot {
+            servers: vec!["pyright".into()],
+            settled: true,
+            errors: found.errors.clone(),
+            ..Default::default()
+        };
+        let block = snapshot.render(4_000);
+        assert!(
+            block.contains("pkg/mod.py:1:10 error: Type \"Literal['a']\" is not assignable to declared type \"int\"\n  \"Literal['a']\" is not assignable to \"int\"\n"),
+            "{block}"
+        );
+        // At most three further lines within 300 bytes, a longer one cut.
+        let long = found
+            .errors
+            .iter()
+            .find(|f| f.file == "pkg/long.py")
+            .unwrap();
+        let detail = long.detail.as_deref().unwrap();
+        assert_eq!(detail.lines().count(), 2, "{detail}");
+        assert!(detail.ends_with(" […]"), "{detail}");
+        assert!(
+            detail.len() <= long.line("error").len() + CONTINUATION_BYTES + 10,
+            "{detail}"
+        );
+        assert_eq!(
+            message_continuation("a\n  b\n\n c \nd\ne"),
+            ["  b", "  c", "  d"]
+        );
     }
 
     /// An unresolved name the server located nowhere is pointed at its
@@ -2504,6 +2802,97 @@ mod tests {
         let found = findings(&diagnostics, None, Path::new("/m"));
         assert!(found.lints.is_empty());
         assert_eq!(lines(&found.warnings), [1, 3]);
+    }
+
+    /// ruff leaves undefined names and syntax errors to the type checker only
+    /// when the type checker started for the task, which is listed before it;
+    /// alone it reports them. A server with a linter starts with the linter's
+    /// options.
+    #[test]
+    fn a_server_defers_only_to_a_server_that_started() {
+        let python: Vec<&ServerSpec> = language_servers()
+            .filter(|spec| spec.language == "Python")
+            .collect();
+        let [types, ruff] = python.as_slice() else {
+            panic!("two Python servers");
+        };
+        // Every deferral names a server of its language listed before it.
+        for (at, spec) in language_servers().enumerate() {
+            if let Some(deferral) = spec.defers_to {
+                assert!(
+                    language_servers()
+                        .take(at)
+                        .any(|earlier| earlier.name == deferral.to
+                            && earlier.language == spec.language),
+                    "{} defers to {}, which must be listed before it",
+                    spec.name,
+                    deferral.to
+                );
+            }
+        }
+        let ignores_f821 = |options: &Value| {
+            options["settings"]["lint"]["ignore"]
+                .as_array()
+                .is_some_and(|rules| rules.contains(&json!("F821")))
+        };
+        assert!(ruff.deferral(&[]).is_none());
+        assert!(ruff.deferral(&["rust-analyzer"]).is_none());
+        let alone = ruff.initialization_options(None, ruff.deferral(&[]));
+        assert!(!ignores_f821(&alone), "{alone}");
+        assert!(alone["settings"].get("showSyntaxErrors").is_none());
+        let deferral = ruff.deferral(&[types.name]);
+        assert_eq!(deferral.map(|deferral| deferral.to), Some("pyright"));
+        let deferring = ruff.initialization_options(None, deferral);
+        assert!(ignores_f821(&deferring), "{deferring}");
+        assert_eq!(deferring["settings"]["showSyntaxErrors"], false);
+        assert!(types.deferral(&["ruff"]).is_none());
+
+        let rust = language_servers()
+            .find(|spec| spec.name == "rust-analyzer")
+            .unwrap();
+        let clippy = rust.linter.unwrap();
+        assert_eq!(
+            rust.initialization_options(Some(clippy), None)["check"]["command"],
+            "clippy"
+        );
+        assert_eq!(
+            rust.initialization_options(None, None)["check"]["command"],
+            "check"
+        );
+    }
+
+    /// Settling waits for a report on the text just sent: always from a
+    /// server that publishes every version, and from ruff once it has
+    /// published about the file; a file it never published about (one its
+    /// configuration may exclude) and a closed file need none.
+    #[test]
+    fn a_report_is_awaited_once_the_server_has_published_for_the_file() {
+        let since = Instant::now();
+        let before = since - Duration::from_secs(1);
+        let after = since + Duration::from_millis(10);
+        for (publishes, never, earlier, since_edit) in [
+            (Publishes::EveryVersion, false, false, true),
+            (Publishes::CheckedFiles, true, false, true),
+            (Publishes::OnChange, true, true, true),
+        ] {
+            assert_eq!(
+                reported(publishes, true, None, since),
+                never,
+                "{publishes:?}"
+            );
+            assert_eq!(
+                reported(publishes, true, Some(before), since),
+                earlier,
+                "{publishes:?}"
+            );
+            assert_eq!(
+                reported(publishes, true, Some(after), since),
+                since_edit,
+                "{publishes:?}"
+            );
+            assert!(reported(publishes, false, Some(before), since));
+            assert!(reported(publishes, false, None, since));
+        }
     }
 
     /// Each `workspace/configuration` item is answered from the language's
@@ -2740,6 +3129,36 @@ mod tests {
         assert_eq!(byte_offset(text, 1, 6), Some(13));
         assert_eq!(byte_offset(text, 2, 0), Some(text.len()));
         assert_eq!(byte_offset(text, 3, 0), None);
+    }
+
+    /// A fix that adds a suppression comment or attribute, or is titled as
+    /// one, is not a fix; one that keeps an existing comment is.
+    #[test]
+    fn a_fix_that_only_silences_the_diagnostic_is_filtered() {
+        let before = "x: int = \"a\"\n";
+        for (title, after) in [
+            (
+                "Add `# pyright: ignore[reportAssignmentType]`",
+                "x: int = \"a\"  # pyright: ignore[reportAssignmentType]\n",
+            ),
+            ("Ignore this error", "x: int = \"a\"  # type: ignore\n"),
+            ("Disable for this line", "x: int = \"a\"  # noqa: F401\n"),
+            ("Suppress", "// @ts-ignore\nx: int = \"a\"\n"),
+            (
+                "Allow this lint",
+                "#[allow(clippy::needless_return)]\nx: int = \"a\"\n",
+            ),
+            ("Add `# noqa`", "x: int = 1\n"),
+        ] {
+            assert!(adds_suppression(title, before, after), "{title}: {after}");
+        }
+        assert!(!adds_suppression("Change to `1`", before, "x: int = 1\n"));
+        // A comment the text already had, kept by the fix, is not added.
+        assert!(!adds_suppression(
+            "Remove unused import",
+            "import os  # noqa: F401\nimport sys\n",
+            "import os  # noqa: F401\n",
+        ));
     }
 
     #[test]

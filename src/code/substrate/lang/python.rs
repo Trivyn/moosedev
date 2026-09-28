@@ -10,8 +10,8 @@ use super::{
     backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
 };
 use super::{
-    first_matching_subdir, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks, ServerSpec,
-    StubSyntax,
+    first_matching_subdir, Deferral, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks,
+    Publishes, ServerSpec, StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -64,8 +64,9 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
                 "pyrightconfig.json",
             ],
             server_status: false,
-            publishes_every_version: true,
+            publishes: Publishes::EveryVersion,
             options: || Value::Null,
+            defers_to: None,
             linter: None,
             lint_source: None,
             settings: pyright_settings,
@@ -77,20 +78,17 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
             languages: SOURCE_FILES,
             project_files: &["pyproject.toml", "ruff.toml", ".ruff.toml"],
             server_status: false,
-            publishes_every_version: false,
+            // Nothing for a file its configuration excludes.
+            publishes: Publishes::CheckedFiles,
+            options: || ruff_options(false),
             // An undefined name (F821) and a syntax error are the type
-            // checker's to report; reported by both, each would be listed
-            // twice. The project's own ruff configuration still applies:
-            // this ignore is added to its rule selection. No `# noqa`
-            // comment is offered as a fix: it silences the lint, it does not
-            // fix it.
-            options: || {
-                json!({"settings": {
-                    "lint": {"ignore": ["F821"]},
-                    "showSyntaxErrors": false,
-                    "codeAction": {"disableRuleComment": {"enable": false}},
-                }})
-            },
+            // checker's to report while it runs; reported by both, each
+            // would be listed twice. Without a type checker ruff reports
+            // them: `return missing` must not settle clean.
+            defers_to: Some(Deferral {
+                to: "pyright",
+                options: || ruff_options(true),
+            }),
             linter: None,
             lint_source: Some("Ruff"),
             settings: no_settings,
@@ -109,7 +107,21 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
     missing_modules: Some(missing_modules),
+    module_dir: None,
 };
+
+/// ruff's `initializationOptions`. The project's own ruff configuration
+/// still applies: `deferring` adds F821 to its ignored rules and turns syntax
+/// errors off, which the type checker reports. No `# noqa` comment is offered
+/// as a fix: it silences the lint, it does not fix it.
+fn ruff_options(deferring: bool) -> Value {
+    let mut settings = json!({"codeAction": {"disableRuleComment": {"enable": false}}});
+    if deferring {
+        settings["lint"] = json!({"ignore": ["F821"]});
+        settings["showSyntaxErrors"] = json!(false);
+    }
+    json!({ "settings": settings })
+}
 
 /// Python sources and the language id each is opened with.
 const SOURCE_FILES: &[(&str, &str)] = &[("py", "python"), ("pyi", "python")];
@@ -136,8 +148,10 @@ fn pyright_settings(section: &str) -> Value {
 }
 
 /// The files an import could not find, relative to the project root: a
-/// module `pkg.mod` is `pkg/mod.py` or the package `pkg/mod/__init__.py`, at
-/// the project root or under `src/`. pyright says `Import "pkg.mod" could not
+/// module `pkg.mod` is `pkg/mod.py` or the package `pkg/mod/__init__.py`,
+/// under the source root the declaring file lies in (the directory above its
+/// path's `pkg/`: `services/api/src/` for `services/api/src/pkg/x.py`), then
+/// at the project root or under `src/`. pyright says `Import "pkg.mod" could not
 /// be resolved` of the declaring file, where a relative `.mod` resolves in
 /// the declaring file's package (`..mod` one package up); a failed run prints
 /// `ModuleNotFoundError: No module named 'pkg.mod'`, declaring file unknown.
@@ -190,7 +204,13 @@ fn module_files(module: &str, declaring_file: &str) -> Vec<String> {
         }
         vec![dir.to_string()]
     } else if path.contains('/') {
-        vec![String::new(), "src".to_string()]
+        let mut roots = source_roots(&path, declaring_file);
+        for root in ["", "src"] {
+            if !roots.iter().any(|known| known == root) {
+                roots.push(root.to_string());
+            }
+        }
+        roots
     } else {
         return Vec::new();
     };
@@ -203,6 +223,25 @@ fn module_files(module: &str, declaring_file: &str) -> Vec<String> {
             ]
         })
         .collect()
+}
+
+/// The source roots `declaring_file`'s own path shows for an absolute import
+/// of `path` (`pkg/mod`): each directory of the declaring file named as the
+/// import's first package, its prefix being a root, outermost first.
+fn source_roots(path: &str, declaring_file: &str) -> Vec<String> {
+    let package = path.split('/').next().unwrap_or_default();
+    let dirs: Vec<&str> = parent_dir(declaring_file)
+        .split('/')
+        .filter(|dir| !dir.is_empty())
+        .collect();
+    let mut roots: Vec<String> = Vec::new();
+    for (at, dir) in dirs.iter().enumerate() {
+        let root = dirs[..at].join("/");
+        if *dir == package && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 /// The name ruff's F821 ("Undefined name `X`") or pyright ("\"X\" is not
@@ -380,7 +419,8 @@ mod tests {
     }
 
     /// A type checker (basedpyright before pyright) and ruff as the linter,
-    /// which leaves undefined names and syntax errors to the type checker.
+    /// which leaves undefined names and syntax errors to the type checker
+    /// while one runs, and reports them itself otherwise.
     #[test]
     fn python_runs_a_type_checker_and_ruff_as_its_linter() {
         let [types, lints] = super::LANGUAGE.servers else {
@@ -392,22 +432,35 @@ mod tests {
         assert_eq!((types.lint_source, lints.lint_source), (None, Some("Ruff")));
         // pyright reports on every version, even of an excluded file; ruff
         // says nothing about a file its configuration excludes.
-        assert!(types.publishes_every_version && !lints.publishes_every_version);
+        assert_eq!(types.publishes, super::Publishes::EveryVersion);
+        assert_eq!(lints.publishes, super::Publishes::CheckedFiles);
         for server in [types, lints] {
             assert_eq!(server.languages, [("py", "python"), ("pyi", "python")]);
             assert!(server.project_files.contains(&"pyproject.toml"));
             assert!(server.linter.is_none() && !server.server_status);
         }
-        let options = (lints.options)();
+        assert!(types.defers_to.is_none());
+        let deferral = lints.defers_to.expect("ruff defers to the type checker");
+        assert_eq!(deferral.to, types.name);
+        let deferring = (deferral.options)();
         assert_eq!(
-            options["settings"]["lint"]["ignore"],
+            deferring["settings"]["lint"]["ignore"],
             serde_json::json!(["F821"])
         );
-        assert_eq!(options["settings"]["showSyntaxErrors"], false);
-        assert_eq!(
-            options["settings"]["codeAction"]["disableRuleComment"]["enable"],
-            false
+        assert_eq!(deferring["settings"]["showSyntaxErrors"], false);
+        // Alone, ruff reports undefined names and syntax errors itself.
+        let alone = (lints.options)();
+        assert!(alone["settings"].get("lint").is_none(), "{alone}");
+        assert!(
+            alone["settings"].get("showSyntaxErrors").is_none(),
+            "{alone}"
         );
+        for options in [deferring, alone] {
+            assert_eq!(
+                options["settings"]["codeAction"]["disableRuleComment"]["enable"],
+                false
+            );
+        }
 
         // Each section pyright or basedpyright asks for, shaped as asked.
         let settings = types.settings;
@@ -439,6 +492,50 @@ mod tests {
                 "badciv/grid/__init__.py",
                 "src/badciv/grid.py",
                 "src/badciv/grid/__init__.py"
+            ]
+        );
+        // A nested source root, read from the declaring file's path, comes
+        // first.
+        assert_eq!(
+            missing(
+                "Import \"pkg.mod\" could not be resolved",
+                None,
+                "services/api/src/pkg/sub/x.py"
+            ),
+            [
+                "services/api/src/pkg/mod.py",
+                "services/api/src/pkg/mod/__init__.py",
+                "pkg/mod.py",
+                "pkg/mod/__init__.py",
+                "src/pkg/mod.py",
+                "src/pkg/mod/__init__.py"
+            ]
+        );
+        assert_eq!(
+            missing(
+                "Import \"badciv.grid\" could not be resolved",
+                None,
+                "src/badciv/map.py"
+            ),
+            [
+                "src/badciv/grid.py",
+                "src/badciv/grid/__init__.py",
+                "badciv/grid.py",
+                "badciv/grid/__init__.py"
+            ]
+        );
+        // A declaring file outside any `pkg/` shows no root of its own.
+        assert_eq!(
+            missing(
+                "Import \"pkg.mod\" could not be resolved",
+                None,
+                "tools/run.py"
+            ),
+            [
+                "pkg/mod.py",
+                "pkg/mod/__init__.py",
+                "src/pkg/mod.py",
+                "src/pkg/mod/__init__.py"
             ]
         );
         // Relative imports resolve in the declaring package.

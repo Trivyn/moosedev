@@ -37,8 +37,8 @@ pub struct Plan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
     /// The governing rules delivered for the plan files that the plan leaves
-    /// open: not in `addresses` and not covered by the summary. The approval
-    /// gate names them; `/approve` records them as deferred.
+    /// open: not in `addresses`, whatever its summary says of them. The
+    /// approval gate names them; `/approve` records them as deferred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_rules: Vec<OpenRule>,
     /// Questions the planner left for the human to decide before building,
@@ -54,6 +54,11 @@ pub struct OpenRule {
     pub iri: String,
     pub label: String,
     pub kind: String,
+    /// The plan's summary speaks to it (as plan coverage reads it): it may
+    /// say the rule is deferred or does not apply, but the plan does not
+    /// list it as implemented.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mentioned: bool,
 }
 
 /// A question a proposed plan leaves for the human, with its options.

@@ -356,8 +356,12 @@ line and column.
   which publishes diagnostics for every version of an open document (even of
   a file its configuration excludes), has also settled only once it has
   published them for the text just sent of the edited file: it may say
-  nothing while it analyzes, and silence is not a clean result. Not ruff: it
-  publishes nothing for a file its configuration excludes. A result that
+  nothing while it analyzes, and silence is not a clean result. ruff
+  publishes for every version of a file it checks but nothing for a file its
+  configuration excludes, so it is held to the same once it has published
+  about the file at all; a file it never published about may be excluded,
+  and its quiet there is taken as settled. The settle deadline bounds either
+  wait. A result that
   did not settle is shown as unknown, never as clean. (OpenCode on the same
   badciv objective appended rust-analyzer errors to edit results without
   settling; qwen called them stale and ran `cargo build` after about one edit
@@ -365,7 +369,10 @@ line and column.
 - **Current state, not history.** Every prompt shows the latest result in the
   harness state (4 KB): the errors, each with the compiler's full text while it
   fits (rust-analyzer's `data.rendered`: the source excerpt and the `note:` and
-  `help:` lines, up to 800 bytes each, else its related spans) and the
+  `help:` lines, up to 800 bytes each; else the error's line followed by the
+  rest of a multi-line message, at most three lines within 300 bytes —
+  pyright's second line names the mismatch, `"Literal['a']" is not assignable
+  to "int"` — and its related spans) and the
   definition behind it ("defined at file:line: …", at most two targets, for the
   first five errors: a field's `&'static str` next to the `&str` binding that
   fails it). An error among those five that the server located nowhere and
@@ -380,6 +387,8 @@ line and column.
   (Constraint 6bf5ef13); badciv P5's tests imported four names `lib.rs` did not
   re-export. One finding stands for each file, line and message (at the lowest
   column): rust-analyzer published that unresolved-imports error once per name.
+  The whole message is that key, as it is what quick fixes are asked for by:
+  two errors on one line that differ past their first line stay two.
   Then the compiler's warnings and the linter's findings, each with its
   suggestion (warnings were once only counted, and qwen ran `cargo build` to
   read them). Files with
@@ -393,7 +402,13 @@ line and column.
   hint on the `let`, not on the failed borrow. It keeps at most three per
   diagnostic the finding stands for, and at most eight per finding (four
   unresolved names each bring their own fix), and only those it can apply as
-  one ordinary edit: text edits to a single plan file that change it. Each is listed under its finding
+  one ordinary edit: text edits to a single plan file that change it. A fix
+  that silences the diagnostic instead of fixing it is never offered or
+  applied: one titled with, or whose edit adds, `# pyright: ignore`,
+  `# type: ignore`, `# noqa`, `// @ts-ignore` or `#[allow(` (basedpyright
+  offers "Add `# pyright: ignore[…]`" under every error); dropping one the
+  server prefers leaves the list incomplete, so no auto-fix is chosen from
+  it. Each is listed under its finding
   (`fix 3: consider changing this to be mutable`). The Auto schema offers
   `apply_fix(fix)` from the first Auto step whenever a language server could
   check the plan (servers on, none failed, a planned file one a server checks),
@@ -415,13 +430,16 @@ line and column.
   add clippy); rust-analyzer checks without it.", `language_linter_missing`)
   and the checker runs `cargo check`. Nothing stops. For Python the linter is
   ruff, a server of its own (`ruff server`) beside the type checker: its
-  warnings (source `Ruff`) are the lints, its errors stay errors. It leaves an
-  undefined name (F821) and syntax errors to the type checker, so each is
-  listed once, and offers no `# noqa` comment as a fix (it silences a lint,
+  warnings (source `Ruff`) are the lints, its errors stay errors. While a
+  type checker runs for the task it leaves an undefined name (F821) and
+  syntax errors to it, so each is listed once ("Language server ruff:
+  started, deferring to pyright"); with no type checker installed, or one
+  that failed to start, ruff reports them itself, so `return missing` never
+  settles clean. It offers no `# noqa` comment as a fix (it silences a lint,
   it does not fix it); the project's own ruff configuration still applies,
-  with F821 ignored on top. A missing ruff is "No linter for Python: ruff is
-  not installed." With several linters the block names them all
-  (`clippy, ruff`).
+  with F821 ignored on top while deferring. A missing ruff is "No linter for
+  Python: ruff is not installed." With several linters the block names them
+  all (`clippy, ruff`).
 - **What the human sees.** The header shows the last result beside the model
   and phase (`rust-analyzer ✓` only with no errors, warnings or lints;
   `rust-analyzer: 2 error(s), 1 warning(s)` in red with errors, yellow
@@ -453,7 +471,9 @@ line and column.
 - **Languages.** Each language's servers and linter are rows in the language
   registry (`src/code/substrate/lang/`), beside its SCIP producer and
   tree-sitter grammar: commands, file extensions with their language ids,
-  project files, initialization options, the answers to
+  project files, initialization options (and, for a server that defers to
+  another of its language, those used while that one runs; it is listed
+  after it, so whether it started is known), the answers to
   `workspace/configuration` by section, the `source` of a server that is
   itself a linter, and an attached linter's probe and install hint. Every
   installed server of a language runs, and every one hears every edit. Rust
@@ -1103,11 +1123,15 @@ contract 3 and intent contract 2.
   and where its edits begin; a replan replaces the current plan but not this
   history, and a new objective clears it.
 - Open rules at plan approval. When a plan is stored, the delivered rules it
-  neither lists in `addresses` nor covers in its summary (as plan coverage
-  reads it; normally the rules a plan kept after its coverage returns still
-  skips) are kept on the plan as `open_rules` (IRI, label, kind). The plan
-  gate names them: "Leaves open N rule(s): <labels, at most 8, then '… and K
-  more'> — /approve defers them; a message revises the plan." `/approve`
+  does not list in `addresses` are kept on the plan as `open_rules` (IRI,
+  label, kind), whatever its summary says of them: `addresses` is the
+  structural record of what the plan implements, and a summary that says a
+  rule "is deferred outside this objective" or "does not apply" leaves it
+  open as surely as one that skips it. Those the summary speaks to (as plan
+  coverage reads it) are marked `mentioned`. The plan gate names them:
+  "Leaves open N rule(s): <labels, at most 8, a mentioned one followed by
+  '(mentioned in the summary)', then '… and K more'> — /approve defers them;
+  a message revises the plan." `/approve`
   records their IRIs as the approved plan's `deferred` and journals
   `rules_deferred` with the count and labels. Deferring changes no knowledge:
   spec progress still counts only recorded `isMotivatedBy` edges, so a
@@ -1302,15 +1326,21 @@ contract 3 and intent contract 2.
   absolute paths keep what follows the directory's last occurrence);
   rust-analyzer's "unresolved module, can't find module file: …" lists them
   relative to the declaring file's directory; pyright's `Import "pkg.mod" could
-  not be resolved` names `pkg/mod.py` or `pkg/mod/__init__.py` at the project
-  root or under `src/` (a relative `.mod` in the declaring package). A failed
+  not be resolved` names `pkg/mod.py` or `pkg/mod/__init__.py` under the
+  source root the declaring file's path shows (the directory above its
+  `pkg/`: `services/api/src/` for `services/api/src/pkg/x.py`), then at the
+  project root or under `src/` (a relative `.mod` in the declaring package). A failed
   command or required check whose output says `ModuleNotFoundError: No module
   named 'pkg.mod'` asks the same, the declaring file unknown. It asks only
   during approved work (Auto, Working, nothing else pending) and never about a
   file that exists or is planned (a planned file not written yet is the
   unfinished-plan gate's), a file already asked about this approval cycle, a
   file in a directory the project neither has nor plans, or a top-level
-  Python name alone (an uninstalled package looks the same). The harness arms
+  Python name alone (an uninstalled package looks the same). A directory not
+  created yet is no reason to skip a file its declaration places there:
+  Rust's `mod inner;` in `src/foo.rs` wants `src/foo/inner.rs` whether or not
+  `src/foo/` exists (the declaring file's module directory, its own for
+  `lib.rs`, `main.rs` and `mod.rs`: each language's `module_dir`). The harness arms
   no auto-fix or auto-verify while it asks. `add` amends the approved plan as
   a scope `add` does (with the same fallback to a replan when the file brings
   rules the plan does not address), the model told "`<file>` was added to the

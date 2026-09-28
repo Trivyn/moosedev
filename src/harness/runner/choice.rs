@@ -4,7 +4,7 @@
 //! missing, it asks the human with the options it can carry out, instead of
 //! answering it by replanning or by verifying a false completion.
 use super::*;
-use crate::code::substrate::lang::missing_modules;
+use crate::code::substrate::lang::{declared_module_dir, missing_modules};
 
 /// Whether a scope escape asks the human. `MOOSEDEV_HARNESS_SCOPE_CHOICE=off`
 /// keeps the automatic replan for study variants.
@@ -145,7 +145,7 @@ impl Runner {
             .find_map(|error| {
                 let candidates =
                     missing_modules(&error.message, error.detail.as_deref(), &error.file);
-                self.unplanned_missing_module(&candidates)
+                self.unplanned_missing_module(&candidates, &error.file)
                     .map(|file| (file, error.file.clone()))
             });
         match found {
@@ -159,7 +159,7 @@ impl Runner {
     /// output does not say which file imports it.
     pub(super) fn ask_missing_module_in_output(&mut self, output: &str) -> bool {
         let candidates = missing_modules(output, None, "");
-        match self.unplanned_missing_module(&candidates) {
+        match self.unplanned_missing_module(&candidates, "") {
             Some(file) => self.ask_missing_module(file, String::new()),
             None => false,
         }
@@ -172,8 +172,16 @@ impl Runner {
     /// the narrowed repair handle a planned file not written yet), exists, or
     /// was asked about in this approval cycle. A candidate in a directory the
     /// project neither has nor plans names no module of the project (an
-    /// import of a package not installed), so it is not asked about.
-    fn unplanned_missing_module(&self, candidates: &[String]) -> Option<String> {
+    /// import of a package not installed), so it is not asked about, unless
+    /// the directory is the one the declaring file's language puts its
+    /// modules in (Rust's `src/foo/` for `mod inner;` in `src/foo.rs`, which
+    /// the first module there creates): derived from the declaration, not
+    /// guessed. `declaring_file` is empty when unknown.
+    fn unplanned_missing_module(
+        &self,
+        candidates: &[String],
+        declaring_file: &str,
+    ) -> Option<String> {
         let task = &self.task;
         if candidates.is_empty()
             || !structural_ask_enabled()
@@ -199,8 +207,10 @@ impl Runner {
         }) {
             return None;
         }
+        let module_dir = declared_module_dir(declaring_file);
         let known_dir = |dir: &str| {
             dir.is_empty()
+                || module_dir.as_deref() == Some(dir)
                 || self.workspace.root().join(dir).is_dir()
                 || plan
                     .files

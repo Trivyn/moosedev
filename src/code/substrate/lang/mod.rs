@@ -75,6 +75,14 @@ pub(crate) struct LanguageSpec {
     /// this build reads no such message of the language.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub missing_modules: Option<MissingModules>,
+    /// The directory a module declared in a file lives in, by the
+    /// language's own rule (Rust: `src/foo/` for `mod inner;` in
+    /// `src/foo.rs`, the file's own directory for `lib.rs`, `main.rs` and
+    /// `mod.rs`). A missing module file there is the project's even while
+    /// that directory does not exist yet. None when the language has no
+    /// such rule (Python's absolute imports name no directory by it).
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub module_dir: Option<fn(&str) -> String>,
 }
 
 /// A language's reader of missing module files: (message, the compiler's full
@@ -183,6 +191,14 @@ pub(crate) fn missing_modules(
     files
 }
 
+/// The directory a module declared in `declaring_file` lives in, when its
+/// language says (see [`LanguageSpec::module_dir`]).
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn declared_module_dir(declaring_file: &str) -> Option<String> {
+    let module_dir = language_for_path(declaring_file)?.module_dir?;
+    Some(module_dir(declaring_file))
+}
+
 /// `path`'s directory, `/`-separated, without a trailing `/`; empty at the
 /// project root.
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
@@ -266,14 +282,16 @@ pub(crate) struct ServerSpec {
     /// The server reports `experimental/serverStatus` (rust-analyzer), whose
     /// `quiescent` flag says when indexing and checking are done.
     pub server_status: bool,
-    /// The server publishes diagnostics for every version of an open
-    /// document, even unchanged ones (pyright), so settling waits for its
-    /// report on the version just sent: it may say nothing while it
-    /// analyzes. Not ruff, which publishes nothing for a file its
-    /// configuration excludes.
-    pub publishes_every_version: bool,
+    /// When the server publishes diagnostics for an open document, which is
+    /// what settling may wait for.
+    pub publishes: Publishes,
     /// Sent as `initializationOptions` when the language has no linter.
     pub options: fn() -> Value,
+    /// What this server leaves to another server of its language while that
+    /// one runs for the task (ruff: undefined names and syntax errors, to the
+    /// type checker). The other is listed before it in `servers`, so it has
+    /// started, or not, by the time this one starts.
+    pub defers_to: Option<Deferral>,
     /// The language's linter, run through the server when installed.
     pub linter: Option<LinterSpec>,
     /// The server is itself a linter (ruff): its warnings whose `source` is
@@ -282,6 +300,35 @@ pub(crate) struct ServerSpec {
     /// The answer to a `workspace/configuration` item, by its `section`
     /// (pyright asks for `python`); [`no_settings`] answers null to all.
     pub settings: fn(&str) -> Value,
+}
+
+/// When a language server publishes diagnostics for an open document.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Publishes {
+    /// For every version, even an unchanged result and even of a file its
+    /// configuration excludes (pyright): settling waits for its report on
+    /// the version just sent, since it may say nothing while it analyzes.
+    EveryVersion,
+    /// For every version of a file it checks, and nothing for a file its
+    /// configuration excludes (ruff): once it has published for a file,
+    /// settling waits for its report on the version just sent; a file it has
+    /// never published for may be one it excludes.
+    CheckedFiles,
+    /// Only when its result changes (rust-analyzer); other evidence
+    /// (`server_status`) says when it is done.
+    OnChange,
+}
+
+/// See [`ServerSpec::defers_to`].
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deferral {
+    /// The [`ServerSpec::name`] of the server deferred to.
+    pub to: &'static str,
+    /// Sent as `initializationOptions` instead of [`ServerSpec::options`]
+    /// while that server runs.
+    pub options: fn() -> Value,
 }
 
 /// No settings for any section: the server keeps its defaults and its
@@ -534,6 +581,20 @@ mod tests {
             ["pkg/grid.py", "pkg/grid/__init__.py"]
         );
         assert!(super::missing_modules("mismatched types", None, "src/lib.rs").is_empty());
+    }
+
+    /// Rust puts the modules a file declares in its stem's directory, or in
+    /// its own for `lib.rs`, `main.rs` and `mod.rs`; Python names none.
+    #[test]
+    fn a_declared_module_lives_in_the_declaring_files_module_directory() {
+        let dir = super::declared_module_dir;
+        assert_eq!(dir("src/foo.rs").as_deref(), Some("src/foo"));
+        assert_eq!(dir("crates/a/src/lib.rs").as_deref(), Some("crates/a/src"));
+        assert_eq!(dir("src/main.rs").as_deref(), Some("src"));
+        assert_eq!(dir("src/foo/mod.rs").as_deref(), Some("src/foo"));
+        assert_eq!(dir("lib.rs").as_deref(), Some(""));
+        assert_eq!(dir("pkg/a.py"), None);
+        assert_eq!(dir(""), None);
     }
 
     #[test]

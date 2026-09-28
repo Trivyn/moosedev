@@ -5,6 +5,7 @@
 //! defaults, and the builder is shown each decision.
 use super::task::{OpenChoice, OpenRule, Phase};
 use super::{ContextResponse, Runner};
+use crate::harness::protocol::GoverningRule;
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -128,11 +129,28 @@ pub(super) fn decided(choices: &[OpenChoice]) -> String {
 
 impl Runner {
     /// The rules the just-stored plan leaves open among those delivered for
-    /// its files, as the plan keeps them.
+    /// its files, as the plan keeps them: every one not in its `addresses`,
+    /// the structural record of what it implements. A summary that says a
+    /// rule is deferred or does not apply leaves it open too; such a rule is
+    /// marked as mentioned.
     pub(super) fn open_rules(&self, context: &ContextResponse) -> Vec<OpenRule> {
-        self.unaddressed_rules(&context.governing_rules)
+        let Some(plan) = self.task.plan.as_ref() else {
+            return Vec::new();
+        };
+        let open: Vec<GoverningRule> = context
+            .governing_rules
+            .iter()
+            .filter(|rule| !plan.addresses.contains(&rule.iri))
+            .cloned()
+            .collect();
+        let unmentioned: Vec<String> = self
+            .unaddressed_rules(&open)
             .into_iter()
+            .map(|rule| rule.iri)
+            .collect();
+        open.into_iter()
             .map(|rule| OpenRule {
+                mentioned: !unmentioned.contains(&rule.iri),
                 iri: rule.iri,
                 label: rule.label,
                 kind: rule.kind,

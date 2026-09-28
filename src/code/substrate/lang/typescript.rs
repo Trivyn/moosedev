@@ -55,6 +55,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     // The harness runs no TypeScript server yet.
     unresolved_names: None,
     missing_modules: None,
+    module_dir: None,
 };
 
 /// The `*.test.*` / `*.spec.*` infix every JS test runner recognizes. A JS

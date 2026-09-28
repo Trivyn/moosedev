@@ -7,8 +7,8 @@ use super::{
     backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
 };
 use super::{
-    CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, ServerSpec,
-    StubSyntax,
+    CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, Publishes,
+    ServerSpec, StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -47,10 +47,11 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         languages: &[("rs", "rust")],
         project_files: &["Cargo.toml"],
         server_status: true,
-        publishes_every_version: false,
+        publishes: Publishes::OnChange,
         // Check with `cargo check` on save, so borrow and lifetime errors
         // arrive too, not only rust-analyzer's own analysis.
         options: || json!({"checkOnSave": true, "check": {"command": "check"}}),
+        defers_to: None,
         // Clippy as the on-save check: its lints arrive through the same
         // settled path as the compiler's errors, which it reports too.
         linter: Some(LinterSpec {
@@ -83,6 +84,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
     missing_modules: Some(missing_modules),
+    module_dir: Some(module_dir),
 };
 
 /// The files a module declaration could not find, relative to the project
@@ -126,15 +128,23 @@ fn missing_modules(message: &str, detail: Option<&str>, declaring_file: &str) ->
     let Some(name) = backticked(first).next().filter(|name| !name.is_empty()) else {
         return Vec::new();
     };
-    let dir = parent_dir(&declaring_file);
-    let module_dir = match file_name(&declaring_file) {
-        "lib.rs" | "main.rs" | "mod.rs" => dir.to_string(),
-        other => join_path(dir, other.strip_suffix(".rs").unwrap_or(other)),
-    };
+    let module_dir = module_dir(&declaring_file);
     vec![
         join_path(&module_dir, &format!("{name}.rs")),
         join_path(&module_dir, &format!("{name}/mod.rs")),
     ]
+}
+
+/// The directory the modules `declaring_file` declares live in: its own for
+/// a `lib.rs`, `main.rs` or `mod.rs`, else its stem's subdirectory
+/// (`src/foo/` for `src/foo.rs`).
+fn module_dir(declaring_file: &str) -> String {
+    let declaring_file = declaring_file.replace('\\', "/");
+    let dir = parent_dir(&declaring_file);
+    match file_name(&declaring_file) {
+        "lib.rs" | "main.rs" | "mod.rs" => dir.to_string(),
+        other => join_path(dir, other.strip_suffix(".rs").unwrap_or(other)),
+    }
 }
 
 /// `help` (a path rustc printed) relative to the project root, given that the

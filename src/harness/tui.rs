@@ -436,15 +436,22 @@ fn gate(task: &Task, standing: &[String]) -> String {
 const OPEN_RULES_SHOWN: usize = 8;
 
 /// What a plan leaves to the human, for its approval gate: the rules it
-/// leaves open, which approval defers, and its open choices.
+/// leaves open, which approval defers (marked when its summary speaks to
+/// them), and its open choices.
 fn plan_leaves(plan: &super::runner::Plan) -> String {
     let mut text = String::new();
     if !plan.open_rules.is_empty() {
-        let labels: Vec<&str> = plan
+        let labels: Vec<String> = plan
             .open_rules
             .iter()
             .take(OPEN_RULES_SHOWN)
-            .map(|rule| rule.label.as_str())
+            .map(|rule| {
+                if rule.mentioned {
+                    format!("{} (mentioned in the summary)", rule.label)
+                } else {
+                    rule.label.clone()
+                }
+            })
             .collect();
         let more = plan.open_rules.len().saturating_sub(OPEN_RULES_SHOWN);
         let more = if more > 0 {
@@ -2412,6 +2419,7 @@ mod tests {
             iri: format!("urn:rule:{n}"),
             label: format!("Rule {n}"),
             kind: "Constraint".into(),
+            mentioned: n == 2,
         };
         task.plan = Some(super::super::runner::Plan {
             summary: "Trim label whitespace".into(),
@@ -2428,7 +2436,7 @@ mod tests {
         });
         let text = gate(&task, &[]);
         assert!(
-            text.contains("\nLeaves open 2 rule(s): Rule 1; Rule 2 — /approve defers them; a message revises the plan."),
+            text.contains("\nLeaves open 2 rule(s): Rule 1; Rule 2 (mentioned in the summary) — /approve defers them; a message revises the plan."),
             "{text}"
         );
         assert!(
@@ -2442,7 +2450,7 @@ mod tests {
         plan.open_choices[0].answer = Some("dash".into());
         let text = gate(&task, &[]);
         assert!(
-            text.contains("Leaves open 10 rule(s): Rule 1; Rule 2; Rule 3; Rule 4; Rule 5; Rule 6; Rule 7; Rule 8 … and 2 more — "),
+            text.contains("Leaves open 10 rule(s): Rule 1; Rule 2 (mentioned in the summary); Rule 3; Rule 4; Rule 5; Rule 6; Rule 7; Rule 8 … and 2 more — "),
             "{text}"
         );
         assert!(text.contains("(default: space; chosen: dash)"), "{text}");

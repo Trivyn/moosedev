@@ -3928,6 +3928,16 @@ async fn a_choice_relying_on_a_withdrawn_approval_is_refused_and_the_question_di
     assert!(intent_details(&runner, "choice_made").is_empty());
 }
 
+fn preserve_rule() -> GoverningRule {
+    GoverningRule {
+        iri: PRESERVE.into(),
+        label: "Preserve display label behavior".into(),
+        kind: "Requirement".into(),
+        claim: "hasDescription: Display labels render exactly as before.\n".into(),
+        via: "via: linked to labels.py".into(),
+    }
+}
+
 /// A plan kept although it neither addresses nor mentions a delivered rule
 /// leaves that rule open: the plan stores it for the approval gate, and
 /// approval records it as deferred.
@@ -3935,13 +3945,7 @@ async fn a_choice_relying_on_a_withdrawn_approval_is_refused_and_the_question_di
 async fn a_plan_leaving_a_rule_open_stores_it_and_approval_defers_it() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = symbolic_fixture().await;
-    fixture.shared.lock().unwrap().governing_rules = vec![GoverningRule {
-        iri: PRESERVE.into(),
-        label: "Preserve display label behavior".into(),
-        kind: "Requirement".into(),
-        claim: "hasDescription: Display labels render exactly as before.\n".into(),
-        via: "via: linked to labels.py".into(),
-    }];
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
     let mut runner = fixture.interactive().await;
     let plan = json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[]});
     fixture.conversational(plan.clone());
@@ -3955,6 +3959,7 @@ async fn a_plan_leaving_a_rule_open_stores_it_and_approval_defers_it() {
     assert_eq!(open[0].iri, PRESERVE);
     assert_eq!(open[0].label, "Preserve display label behavior");
     assert_eq!(open[0].kind, "Requirement");
+    assert!(!open[0].mentioned);
 
     runner.approve_plan().await.unwrap();
     assert_eq!(runner.task.approved_plans[0].deferred, vec![PRESERVE]);
@@ -3968,6 +3973,42 @@ async fn a_plan_leaving_a_rule_open_stores_it_and_approval_defers_it() {
     assert!(!fixture
         .last_model_prompt("harness_action")
         .contains("open_rules"));
+}
+
+/// A summary that defers a rule satisfies plan coverage, but the plan does
+/// not list the rule as implemented: it stays open, marked as mentioned, and
+/// approval records its deferral. Only `addresses` closes a rule.
+#[tokio::test]
+async fn a_rule_the_summary_defers_is_still_open_and_approval_defers_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a helper. Preserve display label behavior is deferred outside this objective.","files":["labels.py"],"checks":["true"],"addresses":[]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan, "coverage is met");
+    let open = &runner.task.plan.as_ref().unwrap().open_rules;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].iri, PRESERVE);
+    assert!(open[0].mentioned);
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.approved_plans[0].deferred, vec![PRESERVE]);
+    assert_eq!(
+        intent_details(&runner, "rules_deferred"),
+        vec!["1 rule(s): Preserve display label behavior"]
+    );
+
+    // A plan that lists the rule in `addresses` leaves nothing open.
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a helper that preserves display label behavior.","files":["labels.py"],"checks":["true"],"addresses":[PRESERVE]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert!(runner.task.plan.as_ref().unwrap().open_rules.is_empty());
+    runner.approve_plan().await.unwrap();
+    assert!(runner.task.approved_plans[0].deferred.is_empty());
+    assert!(intent_details(&runner, "rules_deferred").is_empty());
 }
 
 /// A plan's open choices: an invalid one goes back for repair, the human
@@ -4289,6 +4330,42 @@ async fn a_planned_module_file_not_written_yet_or_the_switch_off_asks_nothing() 
     assert_eq!(runner.task.edits.len(), 1);
     assert_ne!(runner.task.phase, Phase::AwaitingChoice);
     assert!(intent_details(&runner, "missing_module_asked").is_empty());
+}
+
+/// `mod inner;` in `src/foo.rs` wants `src/foo/inner.rs`, whose directory
+/// the first module there creates: the declaration derives it, so the human
+/// is asked although `src/foo/` does not exist.
+#[tokio::test]
+async fn a_rust_module_in_a_directory_not_created_yet_is_asked_about() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    assert!(!fixture.root.join("src/foo").exists());
+    let mut snapshot = diagnostics(1);
+    snapshot.errors[0].file = "src/foo.rs".into();
+    snapshot.errors[0].message =
+        "unresolved module, can't find module file: foo/inner.rs, or foo/inner/mod.rs".into();
+    runner.task.diagnostics = Some(snapshot);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().kind,
+        moosedev::harness::runner::ChoiceKind::MissingModule {
+            file: "src/foo/inner.rs".into(),
+            declared_in: "src/foo.rs".into()
+        }
+    );
+    assert_eq!(
+        intent_details(&runner, "missing_module_asked"),
+        vec!["src/foo/inner.rs in `src/foo.rs`"]
+    );
 }
 
 #[tokio::test]
