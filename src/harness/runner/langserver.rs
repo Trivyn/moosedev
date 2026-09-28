@@ -13,7 +13,8 @@
 //! its quick fixes are numbered under their findings, and `apply_fix` turns
 //! one into an ordinary edit.
 use crate::code::substrate::lang::{
-    language_servers, unresolved_names, Deferral, LinterSpec, Publishes, ServerSpec,
+    is_syntax_error, language_servers, unresolved_names, Deferral, LinterSpec, Publishes,
+    ServerSpec,
 };
 use crate::harness::digest::sha256_hex;
 use crate::harness::executor::{resolve_program, ServerDirectory};
@@ -348,19 +349,30 @@ impl DiagnosticsSnapshot {
     /// first error, then lint, whose complete list holds exactly one fix the
     /// server prefers, and that fix does not only delete. Warnings never:
     /// rustc's fixes for unused items delete scaffolding the model is about
-    /// to use, or hide an omission (badciv edc914f6's `_key`).
+    /// to use, or hide an omission (badciv edc914f6's `_key`). Nothing in a
+    /// file that does not parse: a fix there guesses at text the model meant
+    /// to write (badciv P5 attempt 3: rustc's "a keyword `fn` with a similar
+    /// name" turned literal `\n\n` into `\fn\fn()`). Each stays offered to
+    /// the model. A fix that adds a panicking call is held where it is
+    /// applied, against the file's text (`Runner::auto_apply_fix`).
     pub(super) fn auto_fix(&self) -> Option<(&Finding, &OfferedFix)> {
         if !self.settled {
             return None;
         }
+        let unparsed: HashSet<&str> = self
+            .findings()
+            .filter(|finding| is_syntax_error(&finding.message))
+            .map(|finding| finding.file.as_str())
+            .collect();
         self.errors.iter().chain(&self.lints).find_map(|finding| {
-            if !finding.fixes_complete {
+            if !finding.fixes_complete || unparsed.contains(finding.file.as_str()) {
                 return None;
             }
             let mut preferred = finding.fixes.iter().filter(|fix| fix.preferred);
             let fix = preferred.next()?;
             let deletes_only = fix.edits.iter().all(|edit| edit.text.is_empty());
-            (preferred.next().is_none() && !deletes_only).then_some((finding, fix))
+            (preferred.next().is_none() && !deletes_only && !unparsed.contains(fix.file.as_str()))
+                .then_some((finding, fix))
         })
     }
 
@@ -2221,6 +2233,32 @@ mod tests {
             )
         });
         assert!(chosen.apply(immutable).unwrap().contains("let mut v"));
+        // Literal `\n` escapes written into code (badciv P5 attempt 3): the
+        // file does not parse, and whatever rustc suggests there is left to
+        // the model.
+        let escaped = "pub fn made() -> u32 {\n    let a = 1;\\n\\n    let b = 2;\n    a + b\n}\n";
+        std::fs::write(project.join("src/lib.rs"), escaped).unwrap();
+        let snapshot = servers
+            .after_edit(
+                "src/lib.rs",
+                true,
+                Some(escaped),
+                Duration::from_secs(60),
+                &editable,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.settled, "{snapshot:?}");
+        eprintln!("escaped: {:?}", flags(&snapshot));
+        assert!(
+            snapshot
+                .errors
+                .iter()
+                .any(|error| is_syntax_error(&error.message)),
+            "{snapshot:?}"
+        );
+        assert!(snapshot.auto_fix().is_none(), "{:?}", flags(&snapshot));
         // Outside the editable files, nothing is offered.
         let snapshot = servers
             .after_edit(
@@ -2445,6 +2483,20 @@ mod tests {
         assert_eq!(named.len(), 1, "{snapshot:?}");
         assert_eq!(named[0].message, "\"missing\" is not defined");
         assert_eq!(snapshot.errors.len(), 1, "{snapshot:?}");
+        assert!(!is_syntax_error(&named[0].message));
+
+        // A file that does not parse: the type checker's parser errors read
+        // as syntax errors (ruff's are off while it defers).
+        let unparsed = "def one(:\n    return 1\n";
+        let snapshot = edit(&mut servers, &project, unparsed, &editable).await;
+        assert!(
+            snapshot
+                .errors
+                .iter()
+                .any(|error| is_syntax_error(&error.message)),
+            "{snapshot:?}"
+        );
+        assert!(snapshot.auto_fix().is_none(), "{snapshot:?}");
 
         // A clean edit settles clean.
         let snapshot = edit(&mut servers, &project, clean, &editable).await;
@@ -2551,6 +2603,12 @@ mod tests {
                     .findings()
                     .any(|f| f.line <= 2 && f.message.contains(expected)),
                 "{text:?} is reported: {snapshot:?}"
+            );
+            // ruff's syntax error reads as one; its undefined name does not.
+            assert_eq!(
+                snapshot.findings().any(|f| is_syntax_error(&f.message)),
+                expected.is_empty(),
+                "{snapshot:?}"
             );
         }
         drop(servers);
@@ -3327,6 +3385,108 @@ mod tests {
         .unwrap();
         assert!(!old.fixes_complete && !old.fixes[0].preferred);
         assert_eq!(chosen(&snapshot(vec![old], vec![], vec![])), None);
+    }
+
+    /// badciv P5 attempt 3, from the archived journal: literal `\n` escapes
+    /// written into parse.rs drew rust-analyzer's "Syntax Error: …" and
+    /// rustc's "unknown start of token", and rustc's preferred fixes for the
+    /// same file ("there is a keyword `fn` with a similar name", "add a
+    /// parameter list") were applied.
+    #[test]
+    fn auto_fix_takes_nothing_in_a_file_that_does_not_parse() {
+        let fix = |id, file: &str, texts: &[&str]| OfferedFix {
+            id,
+            title: format!("fix {id}"),
+            file: file.into(),
+            base: String::new(),
+            edits: texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| FixEdit {
+                    start: index * 4,
+                    end: index * 4,
+                    text: (*text).into(),
+                })
+                .collect(),
+            preferred: true,
+        };
+        let finding = |file: &str, message: &str, fixes: Vec<OfferedFix>| Finding {
+            file: file.into(),
+            line: 114,
+            column: 17,
+            message: message.into(),
+            detail: None,
+            definition: None,
+            declared: Vec::new(),
+            fixes,
+            fixes_complete: true,
+        };
+        let parse = "badciv-map/src/parse.rs";
+        let snapshot = |errors: Vec<Finding>| DiagnosticsSnapshot {
+            settled: true,
+            errors,
+            ..Default::default()
+        };
+        let chosen = |s: &DiagnosticsSnapshot| s.auto_fix().map(|(_, fix)| fix.id);
+        let keyword = || fix(1, parse, &["fn"]);
+        // The syntax error's own fix, and a fix for another finding in the
+        // same file: neither.
+        assert_eq!(
+            chosen(&snapshot(vec![finding(
+                parse,
+                "unknown start of token: \\",
+                vec![keyword()]
+            )])),
+            None
+        );
+        assert_eq!(
+            chosen(&snapshot(vec![
+                finding(
+                    parse,
+                    "Syntax Error: expected expression, item or let statement",
+                    vec![]
+                ),
+                finding(parse, "mismatched types", vec![fix(2, parse, &["x"])]),
+            ])),
+            None
+        );
+        // Another file's fix is still taken, and the same fix is taken once
+        // the file parses.
+        assert_eq!(
+            chosen(&snapshot(vec![
+                finding(
+                    parse,
+                    "Syntax Error: expected expression, item or let statement",
+                    vec![]
+                ),
+                finding(
+                    "badciv-map/src/lib.rs",
+                    "mismatched types",
+                    vec![fix(3, "badciv-map/src/lib.rs", &["x"])]
+                ),
+            ])),
+            Some(3)
+        );
+        assert_eq!(
+            chosen(&snapshot(vec![finding(
+                parse,
+                "mismatched types",
+                vec![fix(2, parse, &["x"])]
+            )])),
+            Some(2)
+        );
+        // A fix whose text holds a panicking call is selected here: whether
+        // it adds one is decided against the file's text where it is
+        // applied (`panicking_calls` in auto_fix.rs), so a corrected line
+        // keeping its `.unwrap()` is not held.
+        assert_eq!(
+            chosen(&snapshot(vec![finding(
+                parse,
+                "mismatched types",
+                vec![fix(4, parse, &["(", ").try_into().unwrap()"])]
+            )])),
+            Some(4)
+        );
     }
 
     #[test]

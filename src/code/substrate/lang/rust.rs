@@ -79,13 +79,34 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         failure_constructs: &["panic!(", "Err(", "bail!(", "anyhow!("],
         line_comments: &["//"],
         block_comments: &["/*", "*"],
+        multiline: &[("/*", "*/")],
         quotes: &['"'],
     }),
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
     missing_modules: Some(missing_modules),
+    is_syntax_error: Some(is_syntax_error),
     module_dir: Some(module_dir),
 };
+
+/// rust-analyzer's parser errors ("Syntax Error: expected a name") and
+/// rustc's lexer and parser errors, by the first line of the message. Only
+/// forms no type or borrow error takes: rust-analyzer's type mismatch reads
+/// "expected u32, found usize", so a bare "expected …, found …" is not one.
+fn is_syntax_error(message: &str) -> bool {
+    const PARSE_ERRORS: &[&str] = &[
+        "Syntax Error:",
+        "unknown start of token",
+        "expected one of",
+        "expected identifier, found",
+        "expected item, found",
+        "this file contains an unclosed delimiter",
+        "unexpected closing delimiter",
+        "mismatched closing delimiter",
+    ];
+    let first = message.lines().next().unwrap_or_default().trim_start();
+    PARSE_ERRORS.iter().any(|form| first.starts_with(form))
+}
 
 /// The files a module declaration could not find, relative to the project
 /// root. rustc's E0583 ("file not found for module `parse`") names them in
@@ -363,7 +384,33 @@ fn declaration_name(node: tree_sitter::Node<'_>, source: &str) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{missing_modules, test_failures, unresolved_names};
+    use super::{is_syntax_error, missing_modules, test_failures, unresolved_names};
+
+    /// badciv P5 attempt 3, verbatim: the findings on parse.rs after a
+    /// replace wrote literal `\n` escapes into code.
+    #[test]
+    fn parser_errors_are_syntax_errors_and_type_errors_are_not() {
+        for message in [
+            "Syntax Error: expected expression, item or let statement",
+            "Syntax Error: expected a name",
+            "Syntax Error: expected a block",
+            "unknown start of token: \\",
+            "expected identifier, found keyword `fn`\nexpected identifier, found keyword",
+            "expected one of `.`, `;`, `?`, `}`, or an operator, found `let`",
+            "this file contains an unclosed delimiter",
+            "unexpected closing delimiter: `}`",
+        ] {
+            assert!(is_syntax_error(message), "{message}");
+        }
+        for message in [
+            "mismatched types\nexpected `usize`, found `u32`",
+            "expected u32, found usize",
+            "cannot find value `x` in this scope",
+            "unused variable: `line`",
+        ] {
+            assert!(!is_syntax_error(message), "{message}");
+        }
+    }
 
     const E0583: &str = "error[E0583]: file not found for module `parse`\n --> src/lib.rs:1:1\n  |\n1 | mod parse;\n  | ^^^^^^^^^^\n  |\n  = help: to create the module `parse`, create file \"src/parse.rs\" or \"src/parse/mod.rs\"\n  = note: if there is a `mod parse` elsewhere in the crate already, import it with `use crate::...` instead";
 

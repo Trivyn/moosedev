@@ -1,7 +1,7 @@
 //! Harness questions to the human (`PendingChoice`). The symbolic layer
 //! defaults what it can (Constraint cd9f1a96); what it cannot, whether the
 //! approved plan may grow or whether work may be verified with planned files
-//! missing, it asks the human with the options it can carry out, instead of
+//! missing or unedited, it asks the human with the options it can carry out, instead of
 //! answering it by replanning or by verifying a false completion.
 use super::*;
 use crate::code::substrate::lang::{declared_module_dir, missing_modules};
@@ -70,7 +70,8 @@ impl Runner {
             .collect();
         let subject = match &choice.kind {
             ChoiceKind::ScopeAdd { file } => file.clone(),
-            ChoiceKind::MissingPlannedFile { files } => files.join(", "),
+            ChoiceKind::MissingPlannedFile { files }
+            | ChoiceKind::UneditedPlannedFiles { files } => files.join(", "),
             ChoiceKind::MissingModule { file, .. } => file.clone(),
         };
         self.intent_event(
@@ -126,6 +127,26 @@ impl Runner {
             ],
             default: "write".into(),
             kind: ChoiceKind::MissingPlannedFile { files },
+        })
+    }
+
+    /// A repeat finish with planned `files` that exist but still have no edit
+    /// of the model's. A plan may list a file that needs no change (AD
+    /// 9f5063d2); the human says so, not the model's repeated finish (badciv
+    /// P5 attempt 3: a4b finished again and again with planned files untouched).
+    pub(super) fn ask_unedited_planned_files(&mut self, files: Vec<String>) -> Result<()> {
+        let listed = files.join(", ");
+        self.park_on_choice(PendingChoice {
+            id: uuid::Uuid::new_v4().to_string(),
+            prompt: format!(
+                "The model finished twice with planned file(s) {listed} not edited since the plan was approved. The required checks cannot show whether they needed a change."
+            ),
+            options: vec![
+                option("work", format!("The model edits {listed}")),
+                option("finish", format!("Verify anyway: {listed} need no change")),
+            ],
+            default: "work".into(),
+            kind: ChoiceKind::UneditedPlannedFiles { files },
         })
     }
 
@@ -417,6 +438,26 @@ impl Runner {
                 self.intent_event("finish_forced_missing", &files.join(", "));
                 self.verify_after_choice(format!(
                     "Verifying with planned file(s) {} missing, as the human chose.",
+                    files.join(", ")
+                ))
+                .await?;
+            }
+            (ChoiceKind::UneditedPlannedFiles { files }, "work") => {
+                self.settle_choice(&pending, key);
+                self.task.phase = Phase::Working;
+                self.task.last_response = format!(
+                    "The human says the plan still needs these files edited: {}. Make those edits, then finish.",
+                    files.join(", ")
+                );
+            }
+            (ChoiceKind::UneditedPlannedFiles { files }, "finish") => {
+                self.require_approval().await?;
+                let at = self.task.edits.len();
+                self.symbolic_state_mut().unfinished_accepted_at = Some(at);
+                self.settle_choice(&pending, key);
+                self.intent_event("finish_forced_unedited", &files.join(", "));
+                self.verify_after_choice(format!(
+                    "Verifying with planned file(s) {} unedited, which the human says need no change.",
                     files.join(", ")
                 ))
                 .await?;

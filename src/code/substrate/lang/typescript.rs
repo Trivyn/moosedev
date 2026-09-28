@@ -48,6 +48,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         failure_constructs: &["throw "],
         line_comments: &["//"],
         block_comments: &["/*", "*"],
+        multiline: &[("/*", "*/")],
         quotes: &['"', '\'', '`'],
     }),
     // Jest's and Mocha's reports are not read yet.
@@ -55,6 +56,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     // The harness runs no TypeScript server yet.
     unresolved_names: None,
     missing_modules: None,
+    is_syntax_error: None,
     module_dir: None,
 };
 

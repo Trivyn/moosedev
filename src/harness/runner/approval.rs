@@ -67,8 +67,11 @@ impl Runner {
         state.cycle_replan_continuations = 0;
         state.auto_verifications = 0;
         // A human choice to verify with planned files missing answered the
-        // plan approved then; this approval's finish is gated again.
+        // plan approved then; this approval's finish is gated again, first
+        // with a send-back: a refusal under an earlier plan at the same edit
+        // count does not make this plan's first finish a repeat.
         state.unfinished_accepted_at = None;
+        state.unfinished_refused_at = None;
         // Missing modules are asked about once per approved plan.
         state.asked_missing.clear();
         // A new approval starts a new cycle, and no arm from before it may

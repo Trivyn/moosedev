@@ -53,7 +53,8 @@ def review_input(state, episode):
         # an out-of-plan file within the episode's allowance is added, any
         # other is refused (an edit outside the plan, or a module file a
         # declaration or import names); a missing planned file is left for the
-        # model to write (the question's default).
+        # model to write, and an unedited one for the model to edit (each
+        # question's default).
         choice = task.get("pending_choice") or {}
         kind = choice.get("kind") or {}
         scope = None

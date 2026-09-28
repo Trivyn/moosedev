@@ -8,9 +8,9 @@ use crate::code::substrate::lang::{is_test_path, stub_syntax_for, StubSyntax};
 
 /// Whether `marker` occurs in `line` as code, read with the language's own
 /// syntax: not after one of its comment openers and not inside one of its
-/// strings. Line-level and approximate (a string opened on an earlier line is
-/// not seen); a false match only costs the one send-back the gate allows per
-/// source.
+/// strings. Line-level and approximate (a whole file is read through
+/// [`code_lines`] first, which blanks comments and strings that span lines);
+/// a false match only costs the one send-back the gate allows per source.
 fn is_code(line: &str, marker: &str, syntax: &StubSyntax) -> bool {
     line.match_indices(marker)
         .any(|(at, _)| code_at(line, at, syntax))
@@ -18,7 +18,7 @@ fn is_code(line: &str, marker: &str, syntax: &StubSyntax) -> bool {
 
 /// Whether byte `at` of `line` is code: not after a comment opener and not
 /// inside a string.
-fn code_at(line: &str, at: usize, syntax: &StubSyntax) -> bool {
+pub(in crate::harness::runner) fn code_at(line: &str, at: usize, syntax: &StubSyntax) -> bool {
     let before = &line[..at];
     let opener = before.trim_start();
     let commented = syntax
@@ -29,11 +29,124 @@ fn code_at(line: &str, at: usize, syntax: &StubSyntax) -> bool {
             .block_comments
             .iter()
             .any(|comment| opener.starts_with(comment));
-    let quoted = syntax
-        .quotes
-        .iter()
-        .any(|quote| before.matches(*quote).count() % 2 == 1);
+    let quoted = syntax.quotes.iter().any(|quote| quote_open(before, *quote));
     !commented && !quoted
+}
+
+/// Whether `before` leaves a `quote` string open: an odd count of `quote`s
+/// not escaped by a backslash (`"a\"b` is still open).
+pub(in crate::harness::runner) fn quote_open(before: &str, quote: char) -> bool {
+    let mut open = false;
+    let mut escaped = false;
+    for c in before.chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            open = !open;
+        }
+    }
+    open
+}
+
+/// `text`'s lines with every comment or string that spans lines (the
+/// language's `multiline` delimiters: a Rust `/* */` block, a Python
+/// triple-quoted string) blanked out, delimiters included, byte offsets
+/// kept: a `todo!()` in a block comment or `raise NotImplementedError` in a
+/// docstring is not code, and a line read alone cannot see where the span
+/// opened. A span closed on the line it opens on is left to the line-level
+/// reading, which judges a stub message inside a string. Approximate: an
+/// ordinary string ends with its line, and block comments do not nest.
+fn code_lines(text: &str, syntax: &StubSyntax) -> Vec<String> {
+    // The open span: its closer, whether escapes apply in it (a string), and
+    // the line and byte it opened at.
+    let mut open: Option<(&str, bool, usize, usize)> = None;
+    let mut lines = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let mut blank: Vec<(usize, usize)> = Vec::new();
+        let mut quote: Option<char> = None;
+        let mut at = 0;
+        while at < line.len() {
+            let rest = &line[at..];
+            if let Some((closer, string, opened_line, opened_at)) = open {
+                let from = if opened_line == index { opened_at } else { 0 };
+                match span_end(rest, closer, string) {
+                    Some(end) => {
+                        at += end;
+                        if opened_line != index {
+                            blank.push((from, at));
+                        }
+                        open = None;
+                    }
+                    None => {
+                        blank.push((from, line.len()));
+                        at = line.len();
+                    }
+                }
+                continue;
+            }
+            let c = rest.chars().next().unwrap_or_default();
+            if let Some(open_quote) = quote {
+                if c == '\\' {
+                    at += 1;
+                    at += line[at..].chars().next().map_or(0, char::len_utf8);
+                    continue;
+                }
+                if c == open_quote {
+                    quote = None;
+                }
+            } else if syntax
+                .line_comments
+                .iter()
+                .any(|comment| rest.starts_with(comment))
+            {
+                break;
+            } else if let Some((opener, closer)) = syntax
+                .multiline
+                .iter()
+                .find(|(opener, _)| rest.starts_with(opener))
+            {
+                let string = syntax.quotes.iter().any(|quote| opener.starts_with(*quote));
+                open = Some((closer, string, index, at));
+                at += opener.len();
+                continue;
+            } else if syntax.quotes.contains(&c) {
+                quote = Some(c);
+            }
+            at += c.len_utf8();
+        }
+        let mut code = line.to_owned();
+        for (from, to) in blank {
+            code.replace_range(from..to, &" ".repeat(to - from));
+        }
+        lines.push(code);
+    }
+    lines
+}
+
+/// The byte just past `closer` in `rest`, skipping a backslash-escaped
+/// character inside a string.
+fn span_end(rest: &str, closer: &str, string: bool) -> Option<usize> {
+    let mut chars = rest.char_indices();
+    while let Some((at, c)) = chars.next() {
+        if rest[at..].starts_with(closer) {
+            return Some(at + closer.len());
+        }
+        if string && c == '\\' {
+            chars.next();
+        }
+    }
+    None
+}
+
+/// The stubs of a file's `text`, as `(line, stub)` with 1-based lines.
+fn text_stubs(text: &str, syntax: &StubSyntax) -> Vec<(usize, String)> {
+    code_lines(text, syntax)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line_stub(line, syntax).map(|stub| (index + 1, stub)))
+        .collect()
 }
 
 /// The stub `line` holds, as the report names it: a marker (`todo!(`), or a
@@ -99,11 +212,7 @@ fn in_string(line: &str, at: usize, syntax: &StubSyntax) -> bool {
         .line_comments
         .iter()
         .any(|comment| before.contains(comment));
-    !commented
-        && syntax
-            .quotes
-            .iter()
-            .any(|quote| before.matches(*quote).count() % 2 == 1)
+    !commented && syntax.quotes.iter().any(|quote| quote_open(before, *quote))
 }
 
 use super::super::Runner;
@@ -116,23 +225,28 @@ impl Runner {
         let Some(plan) = self.task.plan.as_ref() else {
             return Vec::new();
         };
-        let mut stubs = Vec::new();
-        for file in &plan.files {
-            // A language without a stub idiom is not judged, and a test may
-            // name a marker on purpose (asserting a message, a fixture).
-            let Some(syntax) = stub_syntax_for(file).filter(|_| !is_test_path(file)) else {
-                continue;
-            };
-            let Ok(Some(text)) = self.workspace.read(file) else {
-                continue;
-            };
-            for (index, line) in text.lines().enumerate() {
-                if let Some(stub) = line_stub(line, syntax) {
-                    stubs.push((file.clone(), index + 1, stub));
-                }
-            }
+        plan.files
+            .iter()
+            .flat_map(|file| {
+                self.file_stubs(file)
+                    .into_iter()
+                    .map(move |(line, stub)| (file.clone(), line, stub))
+            })
+            .collect()
+    }
+
+    /// Stubs left in `file`, as `(line, stub)`, read from disk. A file that
+    /// does not exist holds none, a language without a stub idiom is not
+    /// judged, and a test may name a marker on purpose (asserting a message,
+    /// a fixture).
+    pub(in crate::harness::runner) fn file_stubs(&self, file: &str) -> Vec<(usize, String)> {
+        let Some(syntax) = stub_syntax_for(file).filter(|_| !is_test_path(file)) else {
+            return Vec::new();
+        };
+        match self.workspace.read(file) {
+            Ok(Some(text)) => text_stubs(&text, syntax),
+            _ => Vec::new(),
         }
-        stubs
     }
 
     /// The plan's files that do not exist on disk yet, in plan order.
@@ -211,11 +325,12 @@ impl Runner {
 
     /// Send a finish back while planned files are missing or have no model
     /// edit this approval cycle: once per source state, naming each group.
-    /// A repeat finish with only unedited files goes on to the checks (a
-    /// planned file may need no change); one with files still missing asks
-    /// the human, since only they can say whether the plan still wants them
-    /// (badciv P5: step 2 finished with 4 planned test files never written).
-    /// True when the finish was refused or parked.
+    /// A repeat finish at the same source state asks the human, since only
+    /// they can say whether the plan still wants the files: about the missing
+    /// ones first (badciv P5: step 2 finished with 4 planned test files never
+    /// written), else about the unedited ones, which a plan may list needing
+    /// no change (badciv P5 attempt 3 spent finish after finish with planned
+    /// files untouched). True when the finish was refused or parked.
     pub(in crate::harness::runner) fn refuse_unfinished_plan(&mut self) -> Result<bool> {
         let missing = self.unwritten_planned_files();
         let unedited = self.planned_files_unedited();
@@ -258,16 +373,17 @@ impl Runner {
             return Ok(true);
         }
         if missing.is_empty() {
-            return Ok(false);
+            self.ask_unedited_planned_files(unedited)?;
+        } else {
+            self.ask_missing_planned_files(missing)?;
         }
-        self.ask_missing_planned_files(missing)?;
         Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_code, line_stub};
+    use super::{is_code, line_stub, text_stubs};
     use crate::code::substrate::lang::stub_syntax_for;
 
     #[test]
@@ -392,5 +508,59 @@ mod tests {
             throw,
             typescript
         ));
+        // A quote escaped inside a string does not close it.
+        assert!(!is_code(r#"    let m = "a \" todo!()";"#, "todo!(", rust));
+    }
+
+    /// A marker inside a comment or string that spans lines is not code: a
+    /// line read alone cannot see the `/*` or `"""` that opened it.
+    #[test]
+    fn a_marker_in_a_multiline_comment_or_docstring_is_not_a_stub() {
+        let rust = stub_syntax_for("a.rs").unwrap();
+        let python = stub_syntax_for("a.py").unwrap();
+        let typescript = stub_syntax_for("a.ts").unwrap();
+        let stubs = |text: &str, syntax| text_stubs(text, syntax);
+        let found = |pairs: &[(usize, &str)]| {
+            pairs
+                .iter()
+                .map(|(line, stub)| (*line, (*stub).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        let block = "fn f() -> u32 {\n    /* Before this lands:\n    todo!()\n    */\n    1\n}\n";
+        assert!(stubs(block, rust).is_empty());
+        // Code after the closer on its line, and after the block: stubs.
+        let after = "/* a\n b */ todo!();\nfn g() {\n    unimplemented!()\n}\n";
+        assert_eq!(
+            stubs(after, rust),
+            found(&[(2, "todo!("), (4, "unimplemented!(")])
+        );
+        // Code before an opener on its line is still read.
+        assert_eq!(
+            stubs("fn f() { todo!() } /* note\n todo!()\n*/\n", rust),
+            found(&[(1, "todo!(")])
+        );
+        // An opener inside a string or after a line comment opens nothing.
+        assert_eq!(
+            stubs("let s = \"/*\";\ntodo!()\n// /*\nunimplemented!()\n", rust),
+            found(&[(2, "todo!("), (4, "unimplemented!(")])
+        );
+        let docstring = "def parse(text):\n    \"\"\"Parse the map.\n\n    raise NotImplementedError for unknown sections.\n    \"\"\"\n    return text\n";
+        assert!(stubs(docstring, python).is_empty());
+        let single =
+            "HELP = '''\nraise NotImplementedError\n'''\ndef f():\n    raise NotImplementedError\n";
+        assert_eq!(
+            stubs(single, python),
+            found(&[(5, "raise NotImplementedError")])
+        );
+        // A one-line docstring stays with the line-level reading.
+        assert_eq!(
+            stubs(
+                "def f():\n    \"\"\"Doc.\"\"\"\n    raise NotImplementedError\n",
+                python
+            ),
+            found(&[(3, "raise NotImplementedError")])
+        );
+        let ts = "/*\n throw new Error(\"Not implemented\");\n*/\nexport const x = 1;\n";
+        assert!(stubs(ts, typescript).is_empty());
     }
 }
