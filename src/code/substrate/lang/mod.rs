@@ -75,6 +75,16 @@ pub(crate) struct LanguageSpec {
     /// this build reads no such message of the language.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub missing_modules: Option<MissingModules>,
+    /// Whether a diagnostic's message says the file does not parse (rustc's
+    /// "unknown start of token", rust-analyzer's "Syntax Error: …",
+    /// pyright's "Expected expression", ruff's "Expected `)`, found newline").
+    /// Read from the message alone: a finding keeps no rule code. A quick fix
+    /// offered for such a file guesses at text the model meant to write, so
+    /// the harness never applies one itself (badciv P5: rustc's "a keyword
+    /// `fn` with a similar name" turned literal `\n\n` into `\fn\fn()`).
+    /// None when this build reads no such message of the language.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub is_syntax_error: Option<fn(&str) -> bool>,
     /// The directory a module declared in a file lives in, by the
     /// language's own rule (Rust: `src/foo/` for `mod inner;` in
     /// `src/foo.rs`, the file's own directory for `lib.rs`, `main.rs` and
@@ -189,6 +199,18 @@ pub(crate) fn missing_modules(
         }
     }
     files
+}
+
+/// Whether any registered language reads a diagnostic `message` as a syntax
+/// error (see [`LanguageSpec::is_syntax_error`]). As for
+/// [`unresolved_names`], the message does not say which checker wrote it,
+/// and the formats do not overlap.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn is_syntax_error(message: &str) -> bool {
+    LANGUAGES
+        .iter()
+        .filter_map(|language| language.is_syntax_error)
+        .any(|reads| reads(message))
 }
 
 /// The directory a module declared in `declaring_file` lives in, when its
@@ -564,6 +586,23 @@ mod tests {
         );
         assert_eq!(super::unresolved_names("Undefined name `grid`"), ["grid"]);
         assert!(super::unresolved_names("mismatched types\nexpected `u8`").is_empty());
+    }
+
+    #[test]
+    fn syntax_errors_union_every_language() {
+        // badciv P5 attempt 3, verbatim: rust-analyzer's and rustc's.
+        assert!(super::is_syntax_error(
+            "Syntax Error: expected expression, item or let statement"
+        ));
+        assert!(super::is_syntax_error("unknown start of token: \\"));
+        assert!(super::is_syntax_error("Expected expression"));
+        assert!(super::is_syntax_error(
+            "SyntaxError: Expected an expression"
+        ));
+        assert!(!super::is_syntax_error(
+            "mismatched types\nexpected `u32`, found `usize`"
+        ));
+        assert!(!super::is_syntax_error("\"Grid\" is not defined"));
     }
 
     #[test]

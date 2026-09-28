@@ -14,6 +14,7 @@ mod scope;
 mod stall;
 mod state;
 mod stubs;
+pub(super) use stubs::code_at;
 
 use super::actions::Step;
 use super::model::{Action, NoopEdit};

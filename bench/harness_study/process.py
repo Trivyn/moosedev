@@ -109,7 +109,15 @@ SYMBOLIC_EVENT_KINDS = (
     # A module declaration or import naming a file neither planned nor on disk, asked of the human (a harness
     # question); and an outlined file's re-read served as the Last result without rotating the source tiers.
     # Neither is an autonomous recovery.
-    "missing_module_asked", "outlined_read_served")
+    "missing_module_asked", "outlined_read_served",
+    # Edits refused before they apply: a write deleting most of an existing file's top-level declarations, and a
+    # replace whose new_text holds literal `\n` escapes in code. Repairs of the model's output, not autonomous
+    # recoveries.
+    "destructive_write_refused", "replace_escapes_refused",
+    # The human's word that planned files left unedited need no change (a harness question), and the addressed
+    # rules the capture withholds from motivating the decision while planned files hold stubs. Neither is an
+    # autonomous recovery.
+    "finish_forced_unedited", "addressed_withheld")
 # The runner journals one `capture_anchored` event per capture operation with this detail.
 CAPTURE_ANCHOR_COUNTS = re.compile(r"^(\d+) definition anchors, (\d+) module anchors, (\d+) unanchored files, "
                                    r"(\d+) anchor notes, (\d+) restated links$")

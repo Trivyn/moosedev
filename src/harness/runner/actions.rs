@@ -1,8 +1,11 @@
 //! Validate sensor arguments and materialize edits before permission or execution.
+use super::symbolic::code_at;
 use super::{
     model::{Action, ReplyThen},
     plan_choices, Mode, OpenChoice, Runner, MAX_FILES, MAX_PLAN_SUMMARY,
 };
+use crate::code::substrate::lang::stub_syntax_for;
+use crate::code::substrate::outline;
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -397,6 +400,18 @@ impl Runner {
                         Some(decoded) => (decoded, ", new_text"),
                         None => (new_text, ""),
                     };
+                    // new_text left as sent is written as sent: literal `\n`
+                    // escapes in it land in code (badciv P5 attempts 2 and 3
+                    // mixed real line breaks with `\n` in one new_text).
+                    if decoded_new.is_empty() {
+                        if let Some(line) = escaped_newline_in_code(&file, &new_text) {
+                            self.intent_event(
+                                "replace_escapes_refused",
+                                &format!("{file}: new_text line {line}"),
+                            );
+                            anyhow::bail!("new_text contains literal \\n escapes outside string literals on line {line}; send the replacement with real line breaks");
+                        }
+                    }
                     let detail =
                         format!("{file}: decoded JSON string escapes in old_text{decoded_new}");
                     self.intent_event("replace_text_repair", &detail);
@@ -420,7 +435,21 @@ impl Runner {
                 }
                 (file, Some(source.replacen(&old_text, &new_text, 1)))
             }
-            Action::Write { file, content } => (file, content),
+            Action::Write { file, content } => {
+                if let (Some(before), Some(after), true) =
+                    (before.as_deref(), content.as_deref(), write_guard_enabled())
+                {
+                    if let Some(deleted) = deleted_declarations(&file, before, after) {
+                        let names = listed_names(&deleted, DELETED_NAMES_SHOWN);
+                        self.intent_event(
+                            "destructive_write_refused",
+                            &format!("{file}: {}", deleted.join(", ")),
+                        );
+                        anyhow::bail!("This write deletes {names} from {file}. To add to a file use replace on a span, or write the whole file including what it already declares.");
+                    }
+                }
+                (file, content)
+            }
             Action::Edit {
                 file,
                 before: supplied,
@@ -440,6 +469,86 @@ impl Runner {
             after,
         })
     }
+}
+
+/// Whether a `write` to an existing file that deletes most of what it
+/// declares is refused. `MOOSEDEV_HARNESS_WRITE_GUARD=off` applies it, as
+/// before.
+fn write_guard_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_WRITE_GUARD").map_or(true, |value| value.trim() != "off")
+}
+
+/// Declarations a refused write's message names at most.
+const DELETED_NAMES_SHOWN: usize = 8;
+
+/// The top-level named declarations of `text` as `(kind, name)`, in source
+/// order; None for a language with no grammar.
+fn top_level_declarations(file: &str, text: &str) -> Option<Vec<(&'static str, String)>> {
+    Some(
+        outline(file, text)?
+            .into_iter()
+            .filter(|entry| entry.depth == 0)
+            .filter_map(|entry| Some((entry.kind, entry.name?)))
+            .collect(),
+    )
+}
+
+/// The top-level declarations of `before` a whole-file write of `after`
+/// deletes, when that is at least half of them and at least two: a4b
+/// answered "add a test" with a `write` of `lib.rs` holding only the test
+/// module, deleting every type and `mod` declaration (badciv P5 attempt 3).
+/// None for a language with no grammar, or a write that keeps most of them.
+fn deleted_declarations(file: &str, before: &str, after: &str) -> Option<Vec<String>> {
+    let declared = top_level_declarations(file, before)?;
+    let kept = top_level_declarations(file, after)?;
+    let deleted: Vec<&(&str, String)> = declared
+        .iter()
+        .filter(|declaration| !kept.contains(declaration))
+        .collect();
+    if deleted.len() < 2 || deleted.len() * 2 < declared.len() {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (_, name) in deleted {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    Some(names)
+}
+
+/// `names` in backticks, comma-separated, at most `shown` then an ellipsis.
+fn listed_names(names: &[String], shown: usize) -> String {
+    let mut listed: Vec<String> = names
+        .iter()
+        .take(shown)
+        .map(|name| format!("`{name}`"))
+        .collect();
+    if names.len() > shown {
+        listed.push("…".into());
+    }
+    listed.join(", ")
+}
+
+/// The 1-based line of `text` holding a literal `\n` escape (a backslash
+/// then `n`, not after another backslash) in code: outside the string
+/// literals and line comments of `file`'s language (a `"` quote parity when
+/// the language is unknown), and not a `'\n'` character literal.
+fn escaped_newline_in_code(file: &str, text: &str) -> Option<usize> {
+    let syntax = stub_syntax_for(file);
+    let in_code = |line: &str, at: usize| match syntax {
+        Some(syntax) => code_at(line, at, syntax),
+        None => line[..at].matches('"').count().is_multiple_of(2),
+    };
+    text.lines().enumerate().find_map(|(index, line)| {
+        line.match_indices("\\n")
+            .any(|(at, _)| {
+                let backslashes = line[..at].chars().rev().take_while(|c| *c == '\\').count();
+                let char_literal = line[..at].ends_with('\'') && line[at + 2..].starts_with('\'');
+                backslashes.is_multiple_of(2) && !char_literal && in_code(line, at)
+            })
+            .then_some(index + 1)
+    })
 }
 
 /// Whether an outlined file's re-read is served as the Last result.
@@ -1177,5 +1286,74 @@ mod tests {
         let repair = repair_literal_span("fn x() {}\n", "\"$ fn x() {}").unwrap();
         assert_eq!(strip_same_junk("\"$ fn y() {}", &repair), "fn y() {}");
         assert_eq!(strip_same_junk("fn y() {}", &repair), "fn y() {}");
+    }
+
+    /// badciv P5 attempt 3, from the archived journal (variants trimmed):
+    /// a4b answered "add a test" by writing lib.rs as the test module alone.
+    #[test]
+    fn a_write_that_deletes_most_top_level_declarations_is_named() {
+        let before = "#[derive(Debug, Clone, PartialEq, Eq)]\npub enum Terrain {\n    Ocean,\n    Plains,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Climate {\n    Arctic,\n}\n\n#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Tile {\n    pub terrain: Terrain,\n}\n\n#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Map {\n    pub width: u32,\n    pub tiles: Vec<Tile>,\n}\n\nimpl Map {\n    pub fn tile(&self, x: u32) -> Option<&Tile> {\n        self.tiles.get(x as usize)\n    }\n}\n\npub mod codes;\npub mod error;\npub mod parse;\n";
+        let after = "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_map_tile_access() {\n        let map = Map { width: 1, tiles: vec![] };\n        assert!(map.tile(0).is_none());\n    }\n}\n";
+        let deleted = deleted_declarations("badciv-map/src/lib.rs", before, after).unwrap();
+        assert_eq!(
+            deleted,
+            ["Terrain", "Climate", "Tile", "Map", "codes", "error", "parse"]
+        );
+        assert_eq!(listed_names(&deleted, 3), "`Terrain`, `Climate`, `Tile`, …");
+        // The whole file written again with a test added keeps everything.
+        let whole = format!("{before}\n{after}");
+        assert_eq!(
+            deleted_declarations("badciv-map/src/lib.rs", before, &whole),
+            None
+        );
+        // Removing one of seven, or the one of two that is left: not most.
+        let fewer = before.replace("pub mod parse;\n", "");
+        assert_eq!(
+            deleted_declarations("badciv-map/src/lib.rs", before, &fewer),
+            None
+        );
+        assert_eq!(
+            deleted_declarations("a.rs", "fn a() {}\nfn b() {}\n", "fn a() {}\n"),
+            None
+        );
+        // Half, and at least two: named. A language with no grammar: never.
+        assert_eq!(
+            deleted_declarations(
+                "a.py",
+                "def a():\n    pass\n\ndef b():\n    pass\n\nclass C:\n    pass\n\ndef d():\n    pass\n",
+                "def a():\n    pass\n\ndef d():\n    pass\n"
+            ),
+            Some(vec!["b".to_string(), "C".to_string()])
+        );
+        assert_eq!(deleted_declarations("notes.txt", before, after), None);
+    }
+
+    /// badciv P5 attempt 3, from the archived journal: the replace's new_text
+    /// (decoded from the model's JSON) broke its first lines with real line
+    /// breaks and the rest with literal `\n`.
+    #[test]
+    fn literal_newline_escapes_in_code_are_found_by_line() {
+        let new_text = r#"            let terrain = codes::char_to_terrain(*terrain_char).ok_or_else(|| MapError::UnknownChar {
+                section: "terrain".to_string(), x, y, c: *terrain_char, terrain: crate::Terrain::Ocean 
+            })?;\n\n            let climate_char = climate_grid.get(idx).ok_or_else(|| MapError::UnknownSection("climate grid incomplete".to_string()))?;\n            let climate = codes::char_to_climate(*climate_char).ok_or_else(|| MapError::UnknownChar {\n                section: "climate".to_string(), x, y, c: *climate_char, terrain: crate::Terrain::Ocean \n            })?;"#;
+        assert_eq!(
+            escaped_newline_in_code("badciv-map/src/parse.rs", new_text),
+            Some(3)
+        );
+        // Inside a string, a character literal, a comment, or an escaped
+        // backslash: not a line break written as an escape.
+        for text in [
+            "let s = \"a\\nb\";\nlet t = 1;",
+            "if c == '\\n' {\n}",
+            "let x = 1; // split on \\n\n",
+            "let s = r\"C:\\\\new\";",
+        ] {
+            assert_eq!(escaped_newline_in_code("src/a.rs", text), None, "{text}");
+        }
+        assert_eq!(escaped_newline_in_code("a.py", "x = 1\\ny = 2"), Some(1));
+        assert_eq!(escaped_newline_in_code("a.py", "print('a\\nb')"), None);
+        // An unknown language: a `"` string is still read.
+        assert_eq!(escaped_newline_in_code("notes.txt", "a\\nb"), Some(1));
+        assert_eq!(escaped_newline_in_code("notes.txt", "say \"a\\nb\""), None);
     }
 }

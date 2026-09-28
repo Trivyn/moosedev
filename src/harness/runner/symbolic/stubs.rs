@@ -18,7 +18,7 @@ fn is_code(line: &str, marker: &str, syntax: &StubSyntax) -> bool {
 
 /// Whether byte `at` of `line` is code: not after a comment opener and not
 /// inside a string.
-fn code_at(line: &str, at: usize, syntax: &StubSyntax) -> bool {
+pub(in crate::harness::runner) fn code_at(line: &str, at: usize, syntax: &StubSyntax) -> bool {
     let before = &line[..at];
     let opener = before.trim_start();
     let commented = syntax
@@ -211,11 +211,12 @@ impl Runner {
 
     /// Send a finish back while planned files are missing or have no model
     /// edit this approval cycle: once per source state, naming each group.
-    /// A repeat finish with only unedited files goes on to the checks (a
-    /// planned file may need no change); one with files still missing asks
-    /// the human, since only they can say whether the plan still wants them
-    /// (badciv P5: step 2 finished with 4 planned test files never written).
-    /// True when the finish was refused or parked.
+    /// A repeat finish at the same source state asks the human, since only
+    /// they can say whether the plan still wants the files: about the missing
+    /// ones first (badciv P5: step 2 finished with 4 planned test files never
+    /// written), else about the unedited ones, which a plan may list needing
+    /// no change (badciv P5 attempt 3 spent finish after finish with planned
+    /// files untouched). True when the finish was refused or parked.
     pub(in crate::harness::runner) fn refuse_unfinished_plan(&mut self) -> Result<bool> {
         let missing = self.unwritten_planned_files();
         let unedited = self.planned_files_unedited();
@@ -258,9 +259,10 @@ impl Runner {
             return Ok(true);
         }
         if missing.is_empty() {
-            return Ok(false);
+            self.ask_unedited_planned_files(unedited)?;
+        } else {
+            self.ask_missing_planned_files(missing)?;
         }
-        self.ask_missing_planned_files(missing)?;
         Ok(true)
     }
 }

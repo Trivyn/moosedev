@@ -39,7 +39,8 @@ pub struct SymbolicState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unfinished_refused_at: Option<usize>,
     /// The edit count at which the human chose to verify with planned files
-    /// still missing; a finish at that source state is not asked again.
+    /// still missing or unedited; a finish at that source state is not asked
+    /// again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unfinished_accepted_at: Option<usize>,
     /// The edit count a clean, freshly checked edit armed auto-verify at; taken

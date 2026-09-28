@@ -55,6 +55,7 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     // The harness runs no TypeScript server yet.
     unresolved_names: None,
     missing_modules: None,
+    is_syntax_error: None,
     module_dir: None,
 };
 

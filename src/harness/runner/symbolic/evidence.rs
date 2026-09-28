@@ -75,6 +75,14 @@ impl Runner {
                     .join(", ")
             ));
         }
+        let (kept, withheld) = self.addressed_split();
+        if !withheld.is_empty() {
+            facts.push(format!(
+                "Motivated-by edges withheld: stubs left in planned files ({} of {} addressed rules).",
+                withheld.len(),
+                withheld.len() + kept.len()
+            ));
+        }
         let edited: BTreeSet<&str> = self
             .task
             .edits

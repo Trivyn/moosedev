@@ -523,6 +523,8 @@ sys.exit(2)''',
                     "finish_refused_unfinished": 0, "finish_forced_missing": 0,
                     "rules_deferred": 0, "plan_choice": 0,
                     "missing_module_asked": 0, "outlined_read_served": 0,
+                    "destructive_write_refused": 0, "replace_escapes_refused": 0,
+                    "finish_forced_unedited": 0, "addressed_withheld": 0,
                     # Coverage returns, grounding conversions and tool-call decoding are nudges, not recoveries.
                     "structured_model_decisions": 0, "autonomous_recoveries": 2}
         self.assertEqual(symbolic_metrics(final_task["intent_events"], final_task["model_requests"]), expected,

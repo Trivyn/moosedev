@@ -107,8 +107,38 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     test_failures: Some(test_failures),
     unresolved_names: Some(unresolved_names),
     missing_modules: Some(missing_modules),
+    is_syntax_error: Some(is_syntax_error),
     module_dir: None,
 };
+
+/// pyright's parser errors and ruff's (`invalid-syntax`: "Expected a
+/// parameter or the end of the parameter list", "Expected `)`, found
+/// newline"; older ruff wrote "SyntaxError: …"), by the first line of the
+/// message. The finding keeps no rule code, so the form decides: a parser
+/// error opens with "Expected" and names what the grammar wanted, while
+/// pyright's type errors that open the same way name a count ("Expected 2
+/// positional arguments"), "no" ("Expected no type arguments") or what was
+/// received ("Expected class but received …"). A false match only keeps the
+/// harness from applying a fix in that file itself.
+fn is_syntax_error(message: &str) -> bool {
+    const PARSE_ERRORS: &[&str] = &[
+        "SyntaxError",
+        "Unexpected indentation",
+        "Unindent not expected",
+        "Statements must be separated by newlines or semicolons",
+        "String literal is unterminated",
+    ];
+    let first = message.lines().next().unwrap_or_default().trim();
+    if PARSE_ERRORS.iter().any(|form| first.starts_with(form)) || first.ends_with("was not closed")
+    {
+        return true;
+    }
+    first.strip_prefix("Expected ").is_some_and(|wanted| {
+        !wanted.starts_with(|c: char| c.is_ascii_digit())
+            && !wanted.starts_with("no ")
+            && !wanted.contains(" but received")
+    })
+}
 
 /// ruff's `initializationOptions`. The project's own ruff configuration
 /// still applies: `deferring` adds F821 to its ignored rules and turns syntax
@@ -410,6 +440,40 @@ fn declaration_kind(node_kind: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parser_errors_of_pyright_and_ruff_are_syntax_errors() {
+        for message in [
+            // Verbatim from ruff 0.16 and pyright on `def one(:`.
+            "Expected a parameter or the end of the parameter list",
+            "Expected `)`, found newline",
+            "Expected parameter name",
+            "Expected expression",
+            "Expected indented block",
+            "Expected \")\"",
+            "Unexpected indentation",
+            "Unindent not expected",
+            "Statements must be separated by newlines or semicolons",
+            "String literal is unterminated",
+            "\"(\" was not closed",
+            "SyntaxError: Expected an expression",
+            "SyntaxError: Unexpected indentation",
+        ] {
+            assert!(super::is_syntax_error(message), "{message}");
+        }
+        for message in [
+            "Expected 2 positional arguments",
+            "Expected 1 positional argument",
+            "Expected no type arguments for class \"Grid\"",
+            "Expected class but received \"int\"",
+            "Expected type expression but received \"str\"",
+            "\"Grid\" is not defined",
+            "Undefined name `grid`",
+            "Import \"os\" could not be resolved",
+        ] {
+            assert!(!super::is_syntax_error(message), "{message}");
+        }
+    }
+
     #[test]
     fn undefined_names_are_read_from_ruff_and_pyright() {
         assert_eq!(super::unresolved_names("Undefined name `Grid`"), ["Grid"]);

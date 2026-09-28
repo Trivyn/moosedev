@@ -12,6 +12,7 @@ use crate::harness::protocol::{
     SupportEvent, TypedDisposition,
 };
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 
 /// Where the whole of a plan shown in part can be read, for a reader that
 /// cannot page the journal.
@@ -136,7 +137,7 @@ impl Runner {
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    addressed_rules: self.addressed_rules(),
+                    addressed_rules: self.motivating_addressed_rules(),
                     support_events: self.support_events(),
                 };
                 let response: CaptureTypeResponse = self.post("capture/type", &request).await?;
@@ -520,6 +521,58 @@ impl Runner {
             }
         }
         rules
+    }
+
+    /// The addressed rules as `(kept, withheld)`. While stubs are left in
+    /// planned files, a rule the plan said it implements is withheld from
+    /// motivating the decision unless every planned file the approval derived
+    /// it for (`obligations`) is free of stubs; a rule derived for no planned
+    /// file cannot be told apart and is withheld too. badciv P5 attempt 3:
+    /// a scaffolding step of `unimplemented!()` bodies drew 40 `isMotivatedBy`
+    /// edges and spec progress read "36 of 53 addressed".
+    pub(super) fn addressed_split(&self) -> (Vec<String>, Vec<String>) {
+        let rules = self.addressed_rules();
+        let stubbed: BTreeSet<String> = self
+            .planned_stubs()
+            .into_iter()
+            .map(|(file, _, _)| file)
+            .collect();
+        if stubbed.is_empty() {
+            return (rules, Vec::new());
+        }
+        let obligations = self.task.symbolic.as_ref().map(|state| &state.obligations);
+        rules.into_iter().partition(|rule| {
+            let mut files = obligations
+                .into_iter()
+                .flatten()
+                .filter(|(_, iris)| iris.contains(rule))
+                .map(|(file, _)| file)
+                .peekable();
+            files.peek().is_some() && files.all(|file| !stubbed.contains(file))
+        })
+    }
+
+    /// The addressed rules the capture request carries: those
+    /// [`Self::addressed_split`] keeps, journaling any withheld.
+    fn motivating_addressed_rules(&mut self) -> Vec<String> {
+        let (kept, withheld) = self.addressed_split();
+        if !withheld.is_empty() {
+            let files: BTreeSet<String> = self
+                .planned_stubs()
+                .into_iter()
+                .map(|(file, _, _)| file)
+                .collect();
+            self.intent_event(
+                "addressed_withheld",
+                &format!(
+                    "{} of {} addressed rules; stubs left in {}",
+                    withheld.len(),
+                    withheld.len() + kept.len(),
+                    files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            );
+        }
+        kept
     }
 
     /// Journal events where the project or the human pushed back: what a

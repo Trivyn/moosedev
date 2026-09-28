@@ -240,6 +240,9 @@ pub enum ChoiceKind {
     ScopeAdd { file: String },
     /// A finish came back with planned `files` still missing.
     MissingPlannedFile { files: Vec<String> },
+    /// A finish came back with planned `files` that exist but have no edit
+    /// of the model's since the plan was approved.
+    UneditedPlannedFiles { files: Vec<String> },
     /// A module declaration or import in `declared_in` names `file`, which
     /// neither exists nor is planned.
     MissingModule { file: String, declared_in: String },
@@ -251,6 +254,7 @@ impl ChoiceKind {
         match self {
             ChoiceKind::ScopeAdd { .. } => "scope_add",
             ChoiceKind::MissingPlannedFile { .. } => "missing_planned_file",
+            ChoiceKind::UneditedPlannedFiles { .. } => "unedited_planned_files",
             ChoiceKind::MissingModule { .. } => "missing_module",
         }
     }

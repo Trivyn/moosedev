@@ -654,11 +654,13 @@ async fn symbolic_noop_edit_is_repaired_while_the_language_server_reports_errors
     unsettled.settled = false;
     runner.task.diagnostics = Some(unsettled);
     // Nothing is edited: the first no-op is sent back once for the unedited
-    // planned file, and the repeat goes on.
+    // planned file, and the repeat asks the human,
+    // who says it needs no change.
     for _ in 0..2 {
         fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
         runner.advance().await.unwrap();
     }
+    verify_unedited(&mut runner).await;
     assert_eq!(runner.task.phase, Phase::Verifying);
 }
 
@@ -754,12 +756,14 @@ async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
     // Nothing is edited: the first no-op is sent back once for the unedited
-    // planned file, without spending a repair, and the repeat goes on.
+    // planned file, without spending a repair, and the repeat asks the human,
+    // who says it needs no change.
     for _ in 0..2 {
         fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"return name","new_text":"return name"}));
         runner.advance().await.unwrap();
         assert!(runner.task.recovery.is_none());
     }
+    verify_unedited(&mut runner).await;
     assert_eq!(runner.task.phase, Phase::Verifying);
     assert!(runner.task.recovery.is_none());
     assert!(runner.task.last_error.is_none());
@@ -1039,11 +1043,13 @@ async fn a_failed_free_command_does_not_refuse_the_finish() {
         .last_failure
         .is_none());
     // Nothing is edited: the first finish is sent back once for the unedited
-    // planned file, and the repeat goes on.
+    // planned file, and the repeat asks the human,
+    // who says it needs no change.
     for _ in 0..2 {
         fixture.conversational(json!({"action":"finish","summary":"Nothing to change."}));
         runner.advance().await.unwrap();
     }
+    verify_unedited(&mut runner).await;
     assert_eq!(runner.task.phase, Phase::Verifying);
     assert!(intent_details(&runner, "finish_retest_refused").is_empty());
 }
@@ -3215,9 +3221,17 @@ async fn a_required_check_failing_the_same_way_is_focused() {
     runner.approve_plan().await.unwrap();
     act(&fixture, &mut runner, failing_test_command("a")).await;
     // Nothing is edited: the first finish is sent back once for the unedited
-    // planned file, and the repeat goes on.
-    fixture.conversational(json!({"action":"finish","summary":"Done."}));
-    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    // planned file, and the repeat asks the human, who says it needs no
+    // change.
+    for _ in 0..2 {
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"finish","summary":"Done."}),
+        )
+        .await;
+    }
+    verify_unedited(&mut runner).await;
     for _ in 0..6 {
         if runner
             .task
@@ -3856,14 +3870,13 @@ async fn verifying_anyway_does_not_outlive_a_new_approval_or_a_rework() {
     assert_eq!(runner.task.phase, Phase::AwaitingChoice, "asked again");
 }
 
-#[tokio::test]
-async fn a_planned_file_left_unedited_is_sent_back_once_then_verified() {
-    let _env_lock = ENVIRONMENT.lock().await;
-    let fixture = Fixture::new().await;
+/// Finish twice with notes.txt on disk but never edited: sent back once,
+/// then the human is asked whether it needs a change.
+async fn finished_with_notes_unedited(fixture: &Fixture) -> Runner {
     std::fs::write(fixture.root.join("notes.txt"), "Earlier notes.\n").unwrap();
-    let mut runner = edited_with_notes_missing(&fixture).await;
+    let mut runner = edited_with_notes_missing(fixture).await;
     act(
-        &fixture,
+        fixture,
         &mut runner,
         json!({"action":"finish","summary":"Done."}),
     )
@@ -3878,13 +3891,69 @@ async fn a_planned_file_left_unedited_is_sent_back_once_then_verified() {
         vec!["missing: []; unedited: [notes.txt]"]
     );
     act(
+        fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().kind,
+        moosedev::harness::runner::ChoiceKind::UneditedPlannedFiles {
+            files: vec!["notes.txt".into()]
+        }
+    );
+    assert_eq!(choice_keys(&runner), ["work", "finish"]);
+    assert_eq!(runner.task.pending_choice.as_ref().unwrap().default, "work");
+    assert_eq!(
+        intent_details(&runner, "choice_asked"),
+        vec!["unedited_planned_files notes.txt: work, finish (default work)"]
+    );
+    assert!(runner.task.check_results.is_empty(), "nothing verified");
+    runner
+}
+
+/// badciv P5 attempt 3: a4b finished again and again with planned files
+/// untouched. The second finish at the same source asks the human; a plan
+/// listing a file that needs no change still finishes, on their word.
+#[tokio::test]
+async fn a_planned_file_left_unedited_is_sent_back_once_then_asked() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_unedited(&fixture).await;
+    runner.choose("finish").await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert_eq!(
+        intent_details(&runner, "finish_forced_unedited"),
+        vec!["notes.txt"]
+    );
+    assert_eq!(
+        intent_details(&runner, "choice_made"),
+        vec!["unedited_planned_files:finish"]
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.check_results.len(), 1);
+
+    // `work` returns to the model; a further finish at the same source asks
+    // again.
+    let fixture = Fixture::new().await;
+    let mut runner = finished_with_notes_unedited(&fixture).await;
+    runner.choose("work").await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(runner.task.pending_choice.is_none());
+    assert_eq!(
+        runner.task.last_response,
+        "The human says the plan still needs these files edited: notes.txt. Make those edits, then finish."
+    );
+    assert!(intent_details(&runner, "finish_forced_unedited").is_empty());
+    act(
         &fixture,
         &mut runner,
         json!({"action":"finish","summary":"Done."}),
     )
     .await;
-    assert_eq!(runner.task.phase, Phase::Verifying);
-    assert!(intent_details(&runner, "choice_asked").is_empty());
+    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
+    assert_eq!(intent_details(&runner, "choice_asked").len(), 2);
 }
 
 #[tokio::test]
@@ -4439,5 +4508,191 @@ async fn a_failed_run_that_cannot_import_a_module_of_the_project_asks() {
     assert_eq!(
         intent_details(&runner, "missing_module_asked"),
         vec!["pkg/helpers.py (named by a failed run)"]
+    );
+}
+
+const LIB_RS: &str = "pub enum Terrain {\n    Ocean,\n}\n\npub struct Tile {\n    pub terrain: Terrain,\n}\n\npub struct Map {\n    pub tiles: Vec<Tile>,\n}\n\npub mod codes;\npub mod parse;\n";
+const TEST_ONLY_WRITE: &str = "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn empty_map() {\n        assert!(Map { tiles: vec![] }.tiles.is_empty());\n    }\n}\n";
+
+/// lib.rs, read and planned, approved.
+async fn approved_on_lib_rs(fixture: &Fixture) -> Runner {
+    std::fs::write(fixture.root.join("lib.rs"), LIB_RS).unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"lib.rs"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Add a test of the map","files":["lib.rs"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    runner
+}
+
+/// badciv P5 attempt 3: a4b answered "add a test" with a `write` of lib.rs
+/// holding only the test module. The write is a repair naming what it would
+/// delete; a replace adds the test.
+#[tokio::test]
+async fn a_write_that_deletes_most_of_a_files_declarations_is_repaired() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = approved_on_lib_rs(&fixture).await;
+    fixture.conversational(json!({"action":"write","file":"lib.rs","content":TEST_ONLY_WRITE}));
+    fixture.conversational(json!({"action":"replace","file":"lib.rs","old_text":"pub mod parse;\n","new_text":format!("pub mod parse;\n\n{TEST_ONLY_WRITE}")}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert!(
+        std::fs::read_to_string(fixture.root.join("lib.rs"))
+            .unwrap()
+            .starts_with(LIB_RS),
+        "the declarations are kept"
+    );
+    assert!(runner.task.events.iter().any(|event| {
+        event.message.starts_with("Correcting action, attempt 2 of 3")
+            && event.message.contains("This write deletes `Terrain`, `Tile`, `Map`, `codes`, `parse` from lib.rs. To add to a file use replace on a span, or write the whole file including what it already declares.")
+    }), "{:?}", runner.task.events.iter().map(|e| &e.message).collect::<Vec<_>>());
+    assert_eq!(
+        intent_details(&runner, "destructive_write_refused"),
+        vec!["lib.rs: Terrain, Tile, Map, codes, parse"]
+    );
+
+    // Switched off, the write applies as before.
+    let fixture = Fixture::new().await;
+    let mut runner = approved_on_lib_rs(&fixture).await;
+    std::env::set_var("MOOSEDEV_HARNESS_WRITE_GUARD", "off");
+    fixture.conversational(json!({"action":"write","file":"lib.rs","content":TEST_ONLY_WRITE}));
+    let advanced = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_WRITE_GUARD");
+    advanced.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("lib.rs")).unwrap(),
+        TEST_ONLY_WRITE
+    );
+    assert!(intent_details(&runner, "destructive_write_refused").is_empty());
+}
+
+/// badciv P5 attempts 2 and 3: old_text matched only after decoding JSON
+/// escapes, and new_text mixed real line breaks with literal `\n`, which
+/// was written into code. The replace is a repair naming the line.
+#[tokio::test]
+async fn a_decoded_replace_whose_new_text_holds_newline_escapes_in_code_is_repaired() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(
+        fixture.root.join("code.txt"),
+        "let a = \"x\";\nlet b = 2;\n",
+    )
+    .unwrap();
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"let a = \\\"x\\\";\\nlet b = 2;\\n","new_text":"let a = \"y\";\nlet b = 2;\\n\\nlet c = 3;\n"}));
+    fixture.conversational(json!({"action":"replace","file":"code.txt","old_text":"let b = 2;\n","new_text":"let b = 2;\n\nlet c = 3;\n"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "let a = \"x\";\nlet b = 2;\n\nlet c = 3;\n"
+    );
+    assert!(runner.task.events.iter().any(|event| {
+        event.message.starts_with("Correcting action, attempt 2 of 3")
+            && event.message.contains("new_text contains literal \\n escapes outside string literals on line 2; send the replacement with real line breaks")
+    }), "{:?}", runner.task.events.iter().map(|e| &e.message).collect::<Vec<_>>());
+    assert_eq!(
+        intent_details(&runner, "replace_escapes_refused"),
+        vec!["code.txt: new_text line 2"]
+    );
+}
+
+/// badciv P5 attempt 3: a scaffolding step of `unimplemented!()` bodies drew
+/// an `isMotivatedBy` edge to every rule its plan addressed. While a planned
+/// file holds a stub, a rule is withheld unless every planned file it was
+/// derived for is free of stubs; one derived for none is withheld too.
+#[tokio::test]
+async fn addressed_rules_are_withheld_while_planned_files_hold_stubs() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![
+        GoverningRule {
+            iri: PRESERVE.into(),
+            label: "Preserve display label behavior".into(),
+            kind: "Requirement".into(),
+            claim: "hasDescription: Display labels render as before.\n".into(),
+            via: "via: linked to labels.py".into(),
+        },
+        GoverningRule {
+            iri: UNLINKED.into(),
+            label: "Labels never exceed one line".into(),
+            kind: "Constraint".into(),
+            claim: "hasDescription: A label is a single line.\n".into(),
+            via: "via: linked to labels.py".into(),
+        },
+    ];
+    std::fs::write(
+        fixture.root.join("other.py"),
+        "def other():\n    return 1\n",
+    )
+    .unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"read","file":"other.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display label behavior while adding a normalize helper; labels never exceed one line, in other.py","files":["labels.py","other.py"],"checks":["true"],"addresses":["Preserve display label behavior","[Constraint] Labels never exceed one line"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    let state = runner.task.symbolic.as_ref().unwrap();
+    assert_eq!(state.obligations.get("labels.py").unwrap(), &[PRESERVE]);
+    assert!(!state
+        .obligations
+        .values()
+        .flatten()
+        .any(|iri| iri == UNLINKED));
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"replace","file":"other.py","old_text":"    return 1\n","new_text":"    raise NotImplementedError\n"}),
+    )
+    .await;
+    assert_eq!(runner.task.edits.len(), 2);
+
+    // The stub gate sends the first finish back; the second goes on.
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"finish","summary":"Scaffolded."}));
+    }
+    for _ in 0..6 {
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.review(true).await.unwrap(),
+            Phase::Verifying => break,
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    assert_eq!(intent_details(&runner, "finish_refused_stubs").len(), 1);
+    runner.task.check_results = vec![passed_check()];
+    fixture.note("Normalization lives in one helper.");
+    runner.advance().await.unwrap();
+
+    let request = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .capture_type_requests
+        .last()
+        .cloned()
+        .expect("the note was typed");
+    assert_eq!(request.addressed_rules, vec![PRESERVE.to_string()]);
+    assert_eq!(
+        intent_details(&runner, "addressed_withheld"),
+        vec!["1 of 2 addressed rules; stubs left in other.py"]
+    );
+    assert!(
+        intent_details(&runner, "review_evidence").contains(
+            &"Motivated-by edges withheld: stubs left in planned files (1 of 2 addressed rules)."
+                .to_string()
+        ),
+        "{:?}",
+        intent_details(&runner, "review_evidence")
     );
 }

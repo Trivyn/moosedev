@@ -341,6 +341,10 @@ class ReviewerControls(unittest.TestCase):
                                                self.episode)["input"], "/choose refuse")
         self.assertEqual(reviewer.review_input(asked({"missing_planned_file": {"files": ["a.py"]}}, "write"),
                                                self.episode)["input"], "/choose write")
+        # Planned files left unedited: the model edits them, the question's default.
+        answer = reviewer.review_input(asked({"unedited_planned_files": {"files": ["a.py"]}}, "work"), self.episode)
+        self.assertEqual(answer["input"], "/choose work")
+        self.assertEqual(answer["kind"], "choice")
 
     def test_a_missing_module_is_answered_by_allowance(self):
         def asked(file):

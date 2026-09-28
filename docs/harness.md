@@ -244,7 +244,17 @@ progress is visible, and the attempt count survives restart, interruption, and
 it journals as `replace_text_repair` — trimming stray envelope junk from the
 ends, or decoding JSON string escapes a model copied from the JSON-encoded
 source in its prompt (`\"` for `"`) — and otherwise names the first line of
-`old_text` that the file does not contain.
+`old_text` that the file does not contain. When `old_text` matched only after
+decoding and `new_text` is not escaped the same way throughout, `new_text` is
+written as sent; if it holds a literal `\n` escape (a backslash then `n`, not
+after another backslash, not a `'\n'` character literal) in code — outside
+the string literals and line comments of the file's language, read with its
+registry `StubSyntax`, or by `"` parity for a language without one — the
+candidate is a repair: "new_text contains literal \n escapes outside string
+literals on line K; send the replacement with real line breaks"
+(`replace_escapes_refused`). badciv P5 attempts 2 and 3 sent new_text that
+broke its first lines with real line breaks and the rest with `\n`, and the
+harness wrote the escapes into parse.rs.
 A candidate whose decoded action is identical to the previous rejected
 candidate of the same decision does not spend the remaining attempt on the same
 prompt, which a model at temperature 0 answers the same way (badciv c83c10f8
@@ -792,7 +802,15 @@ request carries every rule those plans addressed (`addressed_rules`); for the
 decision proposal each one that is a current Requirement or Constraint becomes
 an `isMotivatedBy` edge (derivation reason `addressed`), shown at review as
 `Motivated by:`. Only when no plan addressed any rule does the single-candidate
-obligation rule apply.
+obligation rule apply. While a planned file still holds a stub, an addressed
+rule is withheld from the request unless every planned file the approval
+derived it for (`symbolic.obligations`) is free of stubs; a rule derived for
+no planned file cannot be attributed and is withheld too
+(`addressed_withheld`, with the counts and the stubbed files), and the review
+evidence says "Motivated-by edges withheld: stubs left in planned files (N of
+M addressed rules)." badciv P5 attempt 3's first step, scaffolding whose
+bodies were mostly `unimplemented!()`, drew edges to 40 rules and spec
+progress read "36 of 53 addressed".
 
 Beside the capture note, the review shows **Evidence (checked by the
 harness)**: facts read from the task and the disk, never from the model, each
@@ -1281,6 +1299,17 @@ contract 3 and intent contract 2.
   model not to reproduce the whole source as a precondition; this is what
   notices when it does, since resending a file is what spends the context
   window (Lesson af16b95e) and what an edit loop looks like from outside.
+- Destructive whole-file writes. A `write` to a file that exists, whose new
+  content drops at least half of the file's top-level named declarations (and
+  at least two) as its language's outline reads them (the registry grammar:
+  `depth` 0 entries with a name, compared by kind and name), is a repair naming
+  them: "This write deletes `Map`, `Tile`, … from lib.rs. To add to a file use
+  replace on a span, or write the whole file including what it already
+  declares." (`destructive_write_refused`). badciv P5 attempt 3 answered "add a
+  test" with a `write` of `lib.rs` holding only the `#[cfg(test)]` module,
+  deleting every type and `mod` declaration. A genuine deletion is made with
+  `replace`. A file of a language with no grammar is not judged.
+  `MOOSEDEV_HARNESS_WRITE_GUARD=off` applies such writes as before.
 - Vacuous checks. A required check is passed on its exit status, so a test
   command that runs no test passes it while proving only that the code builds.
   When a check succeeds and its output carries a runner's own "ran nothing"
@@ -1302,8 +1331,9 @@ contract 3 and intent contract 2.
 - Harness questions. When the symbolic layer cannot default a decision (Constraint
   cd9f1a96 keeps such decisions from the model), the task parks in
   `AwaitingChoice` with a `pending_choice`: an id, its kind (`scope_add` with
-  the file, `missing_planned_file` with the files, or `missing_module` with the
-  file and the file declaring it), a prompt, options by key
+  the file, `missing_planned_file` or `unedited_planned_files` with the files,
+  or `missing_module` with the file and the file declaring it), a prompt,
+  options by key
   and label, and a default (`choice_asked` journals the kind, the keys and the
   default). The TUI shows it under "HARNESS QUESTION" with each option as
   `/choose <key>`, the default marked; `/choose` alone takes the default, and
@@ -1354,13 +1384,20 @@ contract 3 and intent contract 2.
   not the model's), is sent back once for that source state, naming the
   missing files and the unedited files separately and saying that a planned
   file needing no change can stay as it is (`finish_refused_unfinished`); no
-  repair is spent. A repeat finish at the same source state with only unedited
-  files goes on to the checks, and review evidence lists them. One with a
+  repair is spent. A repeat finish at the same source state asks the human.
+  With only unedited files it asks `unedited_planned_files`: `work` returns to
+  the model ("The human says the plan still needs these files edited: …"),
+  and `finish` verifies on the human's word that they need no change
+  (`finish_forced_unedited`), the default being `work`; a plan listing a file
+  that needs no change still finishes (AD 9f5063d2), and badciv P5 attempt 3's
+  a4b, which spent finish after finish with planned files untouched, no longer
+  reaches the checks by repeating itself. One with a
   planned file still missing asks the human (`missing_planned_file`): `write`
   returns to the model ("Write the missing planned file(s): …"), `drop` takes
   the files out of the plan and the latest approved plan and verifies, and
   `finish` verifies anyway (`finish_forced_missing`) for that finish only: a
-  new approval or `/rework` gates the next finish again. badciv P5 finished step 2
+  new approval or `/rework` gates the next finish again, as it does after an
+  `unedited_planned_files` answer. badciv P5 finished step 2
   through a no-op edit with 2 of 11 planned files edited and 4 planned test
   files never written; the checks passed on older tests and it reached final
   review as a false completion. Auto-verify never meets this gate: it fires
@@ -1406,14 +1443,32 @@ contract 3 and intent contract 2.
   without a fresh language-server result, and never right after a human
   message. A failure it finds returns to the model as "The harness ran the
   plan's required checks after your last edit …". A plan that lists a file
-  needing no change never fires it: the model finishes as before.
+  needing no change never fires it: the model finishes, and the unfinished-plan
+  gate asks the human about that file.
   `MOOSEDEV_HARNESS_AUTO_VERIFY=off` switches it off for study variants.
 - Auto-applied fixes (offloading change 2). After an applied edit, the harness
   applies a language server's quick fix itself, without a model step, when the
   result is settled and a finding that is an error or a lint (never a warning:
   rustc's unused-item fixes delete unfinished code or hide an omission) has a
   complete list of offered fixes with exactly one marked `isPreferred` by the
-  server, and that fix does not only delete. A preferred fix the harness cannot
+  server, and that fix does not only delete. Nothing in a file with a syntax
+  error among its findings: each language's registry hook `is_syntax_error`
+  reads the message (rust-analyzer's "Syntax Error: …"; rustc's "unknown start
+  of token", "expected one of", "expected identifier, found", "expected item,
+  found", unclosed, unexpected and mismatched delimiters; pyright's and ruff's
+  parser messages: "Expected …" naming what the grammar wanted ("Expected
+  expression", "Expected `)`, found newline") but not a count, "no" or
+  "… but received" as pyright's type errors do, "Unexpected indentation",
+  "… was not closed", older ruff's "SyntaxError: …"; a finding keeps no rule
+  code, so the message decides, and a false match only withholds auto-fix), and
+  the harness applies no fix for a finding in, or a fix editing, such a file:
+  a fix there guesses at text the model meant to write (badciv P5 attempt 3:
+  literal `\n\n` written into parse.rs drew rustc's "there is a keyword `fn`
+  with a similar name" and "add a parameter list `()`", which turned it into
+  `\fn\fn()`). Nor a fix whose inserted text holds `.unwrap()` or `.expect(`:
+  rustc's preferred `u32`/`usize` conversion `(…).try_into().unwrap()` was
+  applied twice in the same run, adding panics. Both stay offered to the
+  model. A preferred fix the harness cannot
   apply in full (an edit outside the plan, a follow-up command it does not run)
   means the server's choice is not in the list, so nothing is applied. There
   is no heuristic fallback: a server that marks nothing preferred gets no

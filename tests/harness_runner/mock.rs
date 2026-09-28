@@ -688,6 +688,22 @@ pub(super) fn distinct_proposal(kind: &str, title: &str) -> TypedProposal {
     }
 }
 
+/// The repeat finish with a planned file still unedited asks the human; they
+/// answer that it needs no change, and verification begins.
+pub(super) async fn verify_unedited(runner: &mut Runner) {
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingChoice,
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(
+        runner.task.pending_choice.as_ref().unwrap().kind.name(),
+        "unedited_planned_files"
+    );
+    runner.choose("finish").await.unwrap();
+}
+
 pub(super) fn passed_check() -> CheckResult {
     CheckResult {
         command: "true".into(),
