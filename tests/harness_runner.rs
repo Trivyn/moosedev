@@ -3191,12 +3191,13 @@ async fn an_outlined_file_read_again_is_served_without_rotating_the_tiers() {
         runner.task.last_response
     );
 
-    // A repeat with nothing but looking since is refused, then parks.
+    // A repeat while the Last result is a page of the served text is
+    // refused, then parks.
     fixture.conversational(json!({"action":"read","file":"a.rs"}));
     runner.advance().await.unwrap();
     assert_eq!(
         runner.task.last_response,
-        format!("Not read again: `a.rs` is unchanged and already served as the Last result at event {event}. Propose the plan from it, or inspect event {event}.")
+        format!("Not read again: `a.rs` is unchanged and its current text is the Last result (served at event {event}). Propose the plan from it, or inspect event {event}.")
     );
     assert_eq!(runner.task.phase, Phase::Planning);
     assert_eq!(intent_details(&runner, "outlined_read_served").len(), 1);
@@ -3260,21 +3261,27 @@ async fn alternating_served_reads_of_two_outlined_files_park() {
         runner.advance().await.unwrap();
     }
     let read = |file: &str| json!({"action":"read","file":file});
+    // Each serve moves the other file's text out of the Last result, so
+    // each is served once more, and then refused, and the loop parks.
+    for file in ["a.rs", "b.rs", "a.rs", "b.rs"] {
+        fixture.conversational(read(file));
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 4);
     fixture.conversational(read("a.rs"));
     runner.advance().await.unwrap();
-    fixture.conversational(read("b.rs"));
-    runner.advance().await.unwrap();
-    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 2);
-    fixture.conversational(read("a.rs"));
-    runner.advance().await.unwrap();
-    assert!(runner
-        .task
-        .last_response
-        .starts_with("Not read again: `a.rs`"));
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("Not read again: `a.rs` is unchanged and was already served 2 time(s)"),
+        "{}",
+        runner.task.last_response
+    );
     fixture.conversational(read("b.rs"));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
-    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 2);
+    assert_eq!(intent_details(&runner, "outlined_read_served").len(), 4);
 }
 
 #[tokio::test]

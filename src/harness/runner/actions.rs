@@ -1,4 +1,5 @@
 //! Validate sensor arguments and materialize edits before permission or execution.
+use super::dispatch::READ_REFUSED;
 use super::symbolic::{code_at, quote_open};
 use super::{
     model::{Action, ReplyThen},
@@ -627,27 +628,19 @@ impl Runner {
     /// file outlined only for space whose earlier read is still current, its
     /// current text served as the Last result without rotating the source
     /// tiers: an outlined file read again was refused, and small models
-    /// re-read it anyway or edited blind. A serve is not repeated for the same
-    /// file until the model makes progress: the repeat is refused, and a
-    /// further one parks as any repeated refusal does.
+    /// re-read it anyway or edited blind. A serve is repeated only once the
+    /// Last result has moved on from it ([`Self::served_repeat`]).
     fn read_step(&self, file: String) -> Step {
-        // Outside the step's scope a read shows the file once, as the Last
-        // result, and the working set stays the scope's.
+        // Outside the step's scope a read shows the file as the Last result,
+        // and the working set stays the scope's.
         if self.outside_scope(&file) {
-            return match self.served_since_progress(&file) {
-                Some(event) => {
-                    let next = if self.task.mode == Mode::Plan {
-                        "Propose the plan with what it showed"
-                    } else {
-                        "Take the plan's next step with what it showed"
-                    };
-                    Step::ReadRefused {
-                        reason: format!(
-                            "`{file}` is unchanged and already served as the Last result at event {event}. {next}, or inspect event {event}."
-                        ),
-                        file,
-                    }
-                }
+            let next = if self.task.mode == Mode::Plan {
+                "Propose the plan with what it showed"
+            } else {
+                "Take the plan's next step with what it showed"
+            };
+            return match self.served_repeat(&file, next) {
+                Some(reason) => Step::ReadRefused { file, reason },
                 None => Step::ReadOutsideScope { file },
             };
         }
@@ -661,38 +654,70 @@ impl Runner {
         {
             return Step::ReadRefused { file, reason };
         }
-        match self.served_since_progress(&file) {
-            Some(event) => {
-                let next = if self.task.mode == Mode::Plan {
-                    "Propose the plan from it"
-                } else {
-                    "Edit it"
-                };
-                Step::ReadRefused {
-                    reason: format!(
-                        "`{file}` is unchanged and already served as the Last result at event {event}. {next}, or inspect event {event}."
-                    ),
-                    file,
-                }
-            }
+        let next = if self.task.mode == Mode::Plan {
+            "Propose the plan from it"
+        } else {
+            "Edit it"
+        };
+        match self.served_repeat(&file, next) {
+            Some(reason) => Step::ReadRefused { file, reason },
             None => Step::ReadOutlined { file },
         }
     }
 
-    /// The event of an outlined read, or a read outside the scope, of `file`
-    /// served since the model last did anything but look (reads, inspects
-    /// and searches), while the file on disk is still the text it served (the
-    /// read snapshot the serve recorded). A file changed since is served
-    /// again: its repeat is not "unchanged".
-    fn served_since_progress(&self, file: &str) -> Option<usize> {
+    /// Why a re-read of `file`, served (outlined, or outside the scope) since
+    /// the model last did anything but look (reads, inspects and searches),
+    /// is refused, `next` naming the step to take instead; `None` when it is
+    /// served. Never refused once the file on disk changed since the serve
+    /// (its read snapshot): that is not a repeat. Refused while the Last
+    /// result, which the prompt shows, is still the served text or a page of
+    /// its journal event. Once the Last result has moved on, the text is no
+    /// longer in the prompt and is served again (badciv run 14 re-read the
+    /// spec it was building and was sent to page the journal instead), but
+    /// only once per looking run and never after a refusal of it in that
+    /// run: a model re-reading in a loop meets a refusal, then parks as any
+    /// repeated refusal does.
+    fn served_repeat(&self, file: &str, next: &str) -> Option<String> {
         let served = [
             format!("{OUTLINED_SERVED} {file} "),
             format!("{OUTSIDE_SCOPE_SERVED} {file} "),
         ];
-        self.looking_run(self.task.events.len())
-            .find(|(_, event)| served.iter().any(|at| event.message.starts_with(at)))
-            .map(|(index, _)| index)
-            .filter(|_| self.read_is_current(file))
+        let refused = format!("{READ_REFUSED} `{file}` ");
+        let mut serves = Vec::new();
+        let mut refused_before = false;
+        for (index, event) in self.looking_run(self.task.events.len()) {
+            if served.iter().any(|at| event.message.starts_with(at)) {
+                serves.push(index);
+            }
+            refused_before |= event.message.starts_with(&refused);
+        }
+        let latest = *serves.first()?;
+        if !self.read_is_current(file) {
+            return None;
+        }
+        // The served text, or a page of a serve's journal event.
+        let last = &self.task.last_response;
+        let shown = [
+            outlined_text_response(file, ""),
+            outside_scope_text_response(file, ""),
+        ]
+        .iter()
+        .any(|header| last.starts_with(header))
+            || serves
+                .iter()
+                .any(|event| last.starts_with(&format!("Journal event {event}, bytes ")));
+        if shown {
+            return Some(format!(
+                "`{file}` is unchanged and its current text is the Last result (served at event {latest}). {next}, or inspect event {latest}."
+            ));
+        }
+        if refused_before || serves.len() > 1 {
+            return Some(format!(
+                "`{file}` is unchanged and was already served {} time(s), with only reads, inspects and searches since, most recently at event {latest}. {next}, or inspect event {latest}.",
+                serves.len()
+            ));
+        }
+        None
     }
 
     /// Whether the Last result is the whole current text of `file`, served

@@ -1223,7 +1223,7 @@ pub(super) const DIAGNOSTICS_BYTES: usize = 4_000;
 
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";
-const READ_REFUSED: &str = "Not read again:";
+pub(super) const READ_REFUSED: &str = "Not read again:";
 /// Room for the "Journal event N, bytes a..b of c:" line above a page.
 const INSPECT_HEADER_RESERVE: usize = 96;
 /// Bytes kept for the note that says where a served outlined read that did

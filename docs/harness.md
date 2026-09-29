@@ -1347,10 +1347,15 @@ contract 3 and intent contract 2.
   from what the model happened to read: the plan's files, then the files
   earlier approved plans of the task listed, then in Auto the files the
   current errors are in (settled language-server errors and the files the
-  latest failed command names), or in Plan the approved spec in play and the
-  files it covers. That spec's approval is current, rules are still open, and
-  its components cover a place (whole-project coverage `.` names none); the
-  objective, the guidance or a read names it, or it is the only such spec.
+  latest failed command names) and the approved spec in play (the spec file
+  alone: the plan chose the files to build), or in Plan the approved spec in
+  play and the files it covers. That spec's approval is current, rules are
+  still open, and its components cover a place (whole-project coverage `.`
+  names none); the objective, the guidance or a read names it, or it is the
+  only such spec, or else it is the spec covering the most of the plans'
+  files. In Auto the spec was once outside the scope, so the builder was
+  served the spec it implements once and lost it from the next prompt
+  (badciv run 14 read it 9 times); preloaded, it stays in view.
   Scope files on disk that are not in the working set join it as preloaded
   source: no recency, read snapshot or read file, and in Plan mode their
   governing rules arrive as `rule_files` without dossiers. At most 24 are
@@ -1374,7 +1379,7 @@ contract 3 and intent contract 2.
   "Current text of `<file>` (outside this step's scope; not added to the
   working set):", journaled as `Served read outside scope:` with
   `read_served_outside_scope`, paged and refused on repeat as a served
-  outlined read is. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches scope,
+  outlined read is: only while its text is still in the prompt. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches scope,
   preloading and these serves off.
 - Redundant reads. A model `read` of a file the producing prompt already
   shows in full is refused without touching the tiers (the refusal gives the
@@ -1397,11 +1402,16 @@ contract 3 and intent contract 2.
   records the bytes shown. A text larger than the Last result can show
   unclipped (the budget an `inspect` page gets) is served from its start with
   a note naming that event and the offset to `inspect` for the rest. A repeat
-  read of the same file while the model has only looked since the serve is
-  refused ("Not read again: `<file>` is unchanged and already served as the
-  Last result at event N", with a mode-aware next step), so a further repeat
-  parks as above; reads alternating between outlined files are each served
-  once and then park the same way. `MOOSEDEV_HARNESS_SERVE_OUTLINED=off`
+  read of the same unchanged file while the model has only looked since the
+  serve is refused while the Last result is still the served text or a page
+  of its event ("Not read again: `<file>` is unchanged and its current text is
+  the Last result (served at event N)", with a mode-aware next step). Once
+  the Last result has moved on, the text is no longer in the prompt and the
+  read is served again, once per looking run and not after a refusal of it
+  ("... was already served N time(s), with only reads, inspects and searches
+  since"): a further repeat parks as above, and reads alternating between
+  outlined files are each served twice and then park the same way. A file
+  changed on disk since its serve is always served again. `MOOSEDEV_HARNESS_SERVE_OUTLINED=off`
   restores the refusal (its `Read` event is named, and the next step is
   mode-aware: plan from the outline, inspect that event, or propose the edit
   so the edit guard shows it in full).
