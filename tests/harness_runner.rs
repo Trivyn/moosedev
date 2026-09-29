@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 mod links;
 #[path = "harness_runner/mock.rs"]
 mod mock;
+#[path = "harness_runner/scope.rs"]
+mod scope;
 #[path = "harness_runner/symbolic.rs"]
 mod symbolic;
 #[path = "harness_runner/tools.rs"]
@@ -760,6 +762,10 @@ async fn a_new_file_is_written_at_once_when_its_rules_were_in_view() {
 #[tokio::test]
 async fn first_edit_guard_and_deny_gate_precede_any_write() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // The plan's unread file stays out of the working set, so the first edit
+    // meets the guard. With source by scope it is preloaded and shown in
+    // full, and the edit proceeds (scope::an_edit_to_a_preloaded_file_...).
+    let _scope_off = SourceScopeOff::new();
     let fixture = Fixture::new().await;
     let mut runner = Runner::create(
         fixture.root.clone(),
@@ -1965,8 +1971,7 @@ async fn headless_pending_review_imports_into_interactive_with_checkpoint_bookke
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     runner.confirm_no_knowledge().await.unwrap();
     runner.approve_plan().await.unwrap();
-    fixture.edit();
-    runner.advance().await.unwrap();
+    // The plan's file is preloaded and shown in full: the first edit applies.
     fixture.edit();
     runner.advance().await.unwrap();
     assert_eq!(runner.task.edits.len(), 1);

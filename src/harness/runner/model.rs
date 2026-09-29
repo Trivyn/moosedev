@@ -247,6 +247,8 @@ struct Mandatory {
     /// Bytes left after it and the output schema.
     remaining: usize,
     source: SourceView,
+    /// Bytes of everything but the source text and outlines.
+    fixed: usize,
 }
 
 /// One physical generation: action JSON text (json_schema contract, capture note)
@@ -937,7 +939,7 @@ impl Runner {
         let limit = self.prompt_budget()?;
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
-        let outlines = protected_source(&blocks);
+        let outlines = protected_source(&blocks) + self.scope_note().len();
         let fixed = prompt.len()
             + SOURCE_HEADER.len()
             + "{}\n".len()
@@ -980,7 +982,22 @@ impl Runner {
             state,
             remaining: limit.saturating_sub(required),
             source,
+            fixed,
         })
+    }
+
+    /// Bytes of source outlines (with the scope note) a prompt on `context`
+    /// has room for while full source keeps its whole share and the
+    /// observation floor stays free: what preloading scope files may use, so
+    /// a preload neither shrinks what a step shows in full nor overflows a
+    /// prompt that fitted. `None` when there is no such room.
+    pub(super) fn outline_allowance(&self, context: &ContextResponse) -> Option<usize> {
+        let limit = self.prompt_budget().ok()?;
+        let fixed = self
+            .mandatory_prompt(context, OBSERVATION_FLOOR)
+            .ok()?
+            .fixed;
+        limit.checked_sub(fixed + OBSERVATION_FLOOR + source_budget(limit, 0, 0))
     }
 
     /// What the next prompt will show of the working-set source, built as
@@ -1105,6 +1122,7 @@ impl Runner {
             state,
             mut remaining,
             source,
+            ..
         } = self.mandatory_prompt(context, self.observation_reserve()?)?;
         let last = self.last_result();
         let header = self.observations_prefix()?;

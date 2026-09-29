@@ -196,7 +196,7 @@ pub(super) fn failed_command_output(message: &str) -> Option<&str> {
 /// Working-set files the output names, in the order it first names them. A
 /// longer path is matched first and masks the shorter paths inside it, so
 /// `src/lib.rs` is not found inside `crates/map/src/lib.rs`.
-fn files_named_in(output: &str, files: &[&String]) -> Vec<String> {
+pub(super) fn files_named_in(output: &str, files: &[&String]) -> Vec<String> {
     let mut longest_first = files.to_vec();
     longest_first.sort_by_key(|file| std::cmp::Reverse(file.len()));
     let mut taken: Vec<std::ops::Range<usize>> = Vec::new();
@@ -223,6 +223,25 @@ fn files_named_in(output: &str, files: &[&String]) -> Vec<String> {
     }
     found.sort();
     found.into_iter().map(|(_, file)| file).collect()
+}
+
+/// One file as the prompt could show it. A file that does not exist is always
+/// shown (`null`), so its cost belongs to the protected part
+/// ([`protected_source`]).
+pub(super) fn source_block(file: &str, text: &Option<String>) -> SourceBlock {
+    let key = serde_json::to_string(file).unwrap_or_default().len();
+    let value = serde_json::to_string(text).unwrap_or_default().len();
+    let (outline, short_tier) = match text {
+        Some(text) => outline_block(file, text),
+        // An absent file costs `null`; it is always shown.
+        None => (String::new(), Tier::Full),
+    };
+    SourceBlock {
+        file: file.to_string(),
+        full_cost: key + 1 + value + 1,
+        outline,
+        short_tier,
+    }
 }
 
 fn outline_block(file: &str, text: &str) -> (String, Tier) {
@@ -272,6 +291,7 @@ impl Runner {
         self.task.source_outlined.clear();
         self.task.source_outlined_seen.clear();
         self.task.source_full.clear();
+        self.task.source_preloaded.clear();
     }
 
     /// The model acted on the last prompt, so it has seen that prompt's
@@ -281,33 +301,29 @@ impl Runner {
     }
 
     /// Every working-set file, each with the cost of showing it in full and
-    /// its outline. A file that does not exist is always shown (`null`), so
-    /// its cost belongs to the protected part ([`protected_source`]).
+    /// its outline ([`source_block`]).
     pub(super) fn source_blocks(&self) -> Vec<SourceBlock> {
         self.task
             .source
             .iter()
-            .map(|(file, text)| {
-                let key = serde_json::to_string(file).unwrap_or_default().len();
-                let value = serde_json::to_string(text).unwrap_or_default().len();
-                let (outline, short_tier) = match text {
-                    Some(text) => outline_block(file, text),
-                    // An absent file costs `null`; it is always shown.
-                    None => (String::new(), Tier::Full),
-                };
-                SourceBlock {
-                    file: file.clone(),
-                    full_cost: key + 1 + value + 1,
-                    outline,
-                    short_tier,
-                }
-            })
+            .map(|(file, text)| source_block(file, text))
             .collect()
+    }
+
+    /// The output of the latest failed command, even when a later command (a
+    /// listing, a search) succeeded: those do not fix what the failure names.
+    pub(super) fn latest_failure_output(&self) -> Option<&str> {
+        self.task
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| failed_command_output(&event.message))
     }
 
     /// The order in which files are shown in full, each with why: the file
     /// the model read or edited last, the files the latest failed command
-    /// names, then the rest, most recently read or edited first.
+    /// names, the files with errors, this step's scope files, then the rest,
+    /// most recently read or edited first.
     pub(super) fn source_ranking(&self) -> Vec<(String, &'static str)> {
         fn push(ranked: &mut Vec<(String, &'static str)>, file: &str, reason: &'static str) {
             if !ranked.iter().any(|(seen, _)| seen == file) {
@@ -320,15 +336,7 @@ impl Runner {
         if let Some(file) = self.task.source_recency.iter().rev().find(present) {
             push(&mut ranked, file, "latest");
         }
-        // The latest failed command, even when a later command (a listing, a
-        // search) succeeded: those do not fix what the failure names.
-        let last_failure = self
-            .task
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| failed_command_output(&event.message));
-        if let Some(output) = last_failure {
+        if let Some(output) = self.latest_failure_output() {
             let files: Vec<&String> = source.keys().collect();
             for file in files_named_in(output, &files) {
                 push(&mut ranked, &file, "failed_output");
@@ -341,6 +349,11 @@ impl Runner {
                     push(&mut ranked, &finding.file, "diagnostics");
                 }
             }
+        }
+        // The step's scope, read or preloaded: ahead of recency, but not
+        // needed, so it never pushes a kept file out.
+        for file in self.scope.files.iter().filter(present) {
+            push(&mut ranked, file, "scope");
         }
         for file in self.task.source_recency.iter().rev().filter(present) {
             push(&mut ranked, file, "recency");
@@ -487,7 +500,11 @@ impl Runner {
         let swapped: Vec<String> = placed
             .iter()
             .filter(|placed| {
-                placed.tier != Tier::Full && !self.task.source_outlined_seen.contains(&placed.file)
+                placed.tier != Tier::Full
+                    && !self.task.source_outlined_seen.contains(&placed.file)
+                    // A preloaded file never shown in full was not swapped out.
+                    && !(self.task.source_preloaded.contains(&placed.file)
+                        && !self.task.read_files.contains(&placed.file))
             })
             .map(|placed| placed.file.clone())
             .collect();
@@ -509,6 +526,8 @@ impl Runner {
             }
             outlines.insert_str(0, OUTLINES_HEADER);
         }
+        // Counted in the protected part at its largest, as the swap notice is.
+        outlines.push_str(&self.scope_note());
         let entries: Vec<String> = full
             .iter()
             .map(|(file, text)| {
@@ -932,6 +951,48 @@ mod tests {
         assert_eq!(runner.task.phase, Phase::Planning);
         assert!(runner.task.read_files.is_empty() && runner.task.source.is_empty());
         assert!(runner.task.source_recency.is_empty());
+        server.abort();
+    }
+
+    /// The step's scope ranks after the files a step needs and before
+    /// recency, and is not itself needed.
+    #[tokio::test]
+    async fn scope_files_rank_after_errors_and_before_recency() {
+        let project = Project::new("source-scope-rank");
+        let (mut runner, server) = runner_with(
+            &project,
+            &[
+                ("a.rs", module(2)),
+                ("b.rs", module(2)),
+                ("c.rs", module(2)),
+                ("d.rs", module(2)),
+            ],
+        )
+        .await;
+        for file in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            runner.touch_source(file);
+        }
+        runner.event(
+            "Command: cargo build\nPermission grants: none\nSuccess: false\nerror: --> c.rs:1:1"
+                .to_string(),
+        );
+        runner.scope.files = vec!["a.rs".into(), "missing.rs".into()];
+        assert_eq!(
+            runner.source_ranking(),
+            [
+                ("d.rs".to_string(), "latest"),
+                ("c.rs".to_string(), "failed_output"),
+                ("a.rs".to_string(), "scope"),
+                ("b.rs".to_string(), "recency"),
+            ]
+        );
+        // Over budget, a scope file gives way before a needed one.
+        let blocks = runner.source_blocks();
+        let cost = |file: &str| blocks.iter().find(|b| b.file == file).unwrap().full_cost;
+        let view = runner
+            .source_view(&blocks, cost("d.rs") + cost("c.rs"))
+            .unwrap();
+        assert_eq!(view.full(), BTreeSet::from(["c.rs".into(), "d.rs".into()]));
         server.abort();
     }
 

@@ -26,6 +26,24 @@ use serde_json::{json, Value};
 /// never from the environment.
 pub(super) static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` for the life of the guard: the working
+/// set is what the model read, as before source by scope. Hold
+/// [`ENVIRONMENT`] with it.
+pub(super) struct SourceScopeOff;
+
+impl SourceScopeOff {
+    pub(super) fn new() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_SOURCE_SCOPE", "off");
+        Self
+    }
+}
+
+impl Drop for SourceScopeOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_SOURCE_SCOPE");
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Script {
     pub(super) root: PathBuf,
