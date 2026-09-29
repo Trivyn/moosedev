@@ -234,6 +234,26 @@ impl Runner {
                 self.intent_event("rules_delivered", &detail);
             }
         }
+        // Rules the daemon's scoped walk kept out of these files, journaled on
+        // change like the delivery above.
+        if !response.excluded_components.is_empty() {
+            let detail = response
+                .excluded_components
+                .iter()
+                .map(|entry| format!("{}: {} via \"{}\"", entry.component, entry.rules, entry.via))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let unchanged = self
+                .task
+                .intent_events
+                .iter()
+                .rev()
+                .find(|event| event.kind == "rules_scope_excluded")
+                .is_some_and(|last| last.detail == detail);
+            if !unchanged {
+                self.intent_event("rules_scope_excluded", &detail);
+            }
+        }
         let turn = self.ensure_knowledge_turn(&topic, &response.revision);
         turn.retrieval_topic = topic;
         turn.revision = response.revision.clone();

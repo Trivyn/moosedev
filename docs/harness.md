@@ -1063,6 +1063,19 @@ contract 3 and intent contract 2.
   inventory (up to 100 record names) is listed only while the walk supplies no
   linked evidence and no Project rules, as on the first request with no files;
   otherwise the recall preamble omits it.
+  A component reached only because a linked record concerns or constrains it
+  joins the walk only if its declared paths cover one of the files, or if it
+  declares no paths (containment cannot judge it). A decision linked to one
+  crate that also concerns its neighbours no longer carries their rules into
+  that crate's files (badciv run 14: 31 badciv-sim and badciv-tui rules in
+  every badciv-map prompt). The context says what was left out in one counted
+  line ("31 rules of badciv-sim and badciv-tui (Constraint: …; Requirement: …),
+  reached through decision "…", are not shown for these files; search project
+  knowledge to see them."), `ContextResponse.excluded_components` carries it,
+  and the runner journals `rules_scope_excluded` when it changes. Components
+  from `realizes`, declared paths and approved specs are unaffected, as are the
+  linked records themselves. `MOOSEDEV_HARNESS_RULE_WALK_SCOPED=off` (a daemon
+  setting) restores the unscoped walk.
 - Guidance. `Runner::create` snapshots `.moosedev/GUIDANCE.md` into the task
   (`standing_guidance`: source, sha256, the shared text and each mode's
   section) and journals `guidance_loaded` with the size of what each mode

@@ -1200,6 +1200,100 @@ async fn linked_evidence_walks_unindexed_file_by_component_path() {
     );
 }
 
+/// Rules stay within the walked files' components (3A): a decision linked to a
+/// file in Harness that also concerns Billing does not carry Billing's rules
+/// into the file, and the context says so with a counted line. A path-less
+/// component the decision concerns still delivers, a Billing rule another hop
+/// reaches is delivered (and not counted), and the unscoped walk restores
+/// today's behaviour.
+#[tokio::test]
+async fn a_linked_decision_does_not_carry_other_components_rules() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let harness = record(&state, "SystemComponent", "Harness");
+    graph::declare_component_paths(&state, &harness, &["src/".into()]).unwrap();
+    let billing = record(&state, "SystemComponent", "Billing");
+    graph::declare_component_paths(&state, &billing, &["billing/".into()]).unwrap();
+    let docs = record(&state, "SystemComponent", "Docs");
+    let decision = direct_decision(&state, symbol, "Harness scope decision");
+    for component in [&harness, &billing, &docs] {
+        graph::relate(&state, &decision, "concerns", component).unwrap();
+    }
+    let rule = |kind: &str, title: &str, component: &str| {
+        let iri = record_with(&state, kind, title, &format!("{title} claim."), "accepted");
+        graph::relate(&state, &iri, "concerns", component).unwrap();
+        iri
+    };
+    let own = rule("Constraint", "Harness own rule", &harness);
+    let pathless = rule("Constraint", "Docs path-less rule", &docs);
+    let foreign = rule("Constraint", "Billing foreign rule", &billing);
+    let motivating = rule("Requirement", "Billing motivating need", &billing);
+    graph::relate(&state, &decision, "isMotivatedBy", &motivating).unwrap();
+
+    let response = linked_context(&state, "harness scope", &["src/harness.rs"]);
+    let governing: Vec<(&str, &str)> = response
+        .governing_rules
+        .iter()
+        .map(|rule| (rule.iri.as_str(), rule.via.as_str()))
+        .collect();
+    assert!(
+        governing.contains(&(own.as_str(), "via: component Harness")),
+        "{governing:?}"
+    );
+    assert!(
+        governing.contains(&(pathless.as_str(), "via: component Docs")),
+        "{governing:?}"
+    );
+    assert!(
+        governing.contains(&(motivating.as_str(), "via: motivates Harness scope decision")),
+        "{governing:?}"
+    );
+    assert!(
+        !governing.iter().any(|(iri, _)| *iri == foreign),
+        "{governing:?}"
+    );
+    assert!(
+        response.context.contains(
+            "\n1 rule of Billing (Constraint: 1), reached through decision \"Harness scope decision\", is not shown for these files; search project knowledge to see them.\n"
+        ),
+        "{}",
+        response.context
+    );
+    assert_eq!(
+        response.excluded_components,
+        [RuleScopeExclusion {
+            component: "Billing".into(),
+            via: "Harness scope decision".into(),
+            rules: 1,
+        }]
+    );
+
+    // The off switch: the unscoped walk delivers Billing's rule again, reports
+    // nothing left out, and otherwise governs exactly as the scoped walk.
+    let files = ["src/harness.rs".to_string()];
+    let rule_iris = |scoped: bool| {
+        let evidence = graph::linked_evidence(&state, &files, &[], scoped).unwrap();
+        let iris: Vec<String> = graph::governing_rules(&evidence, None)
+            .into_iter()
+            .map(|rule| rule.iri)
+            .collect();
+        (iris, evidence.excluded_components.len())
+    };
+    let (unscoped, unscoped_excluded) = rule_iris(false);
+    let (scoped, scoped_excluded) = rule_iris(true);
+    assert_eq!((unscoped_excluded, scoped_excluded), (0, 1));
+    assert!(unscoped.contains(&foreign), "{unscoped:?}");
+    assert_eq!(
+        unscoped
+            .iter()
+            .filter(|iri| **iri != foreign)
+            .collect::<Vec<_>>(),
+        scoped.iter().collect::<Vec<_>>(),
+        "only the out-of-scope rule differs"
+    );
+}
+
 /// A file inside a nested component is governed by its own component's rules
 /// and by every enclosing component's (a whole-project spec's), each named
 /// with its via line; a file outside the nested component gets only the

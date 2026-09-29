@@ -2,7 +2,7 @@
 //! journals what each prompt section took, whole on its `model_requests`
 //! entry and compact as one `context_plan` intent event.
 use super::mock::*;
-use moosedev::harness::protocol::GoverningRule;
+use moosedev::harness::protocol::{GoverningRule, RuleScopeExclusion};
 use moosedev::harness::response::ActionContract;
 use moosedev::harness::runner::Runner;
 use serde_json::{json, Value};
@@ -226,4 +226,35 @@ async fn the_receipt_counts_the_earlier_tasks_the_history_shows() {
     assert!(usize_at(&plans[0]["history"], "bytes") > 0);
     let compact = intent_details(&runner, "context_plan").pop().unwrap();
     assert!(compact.contains("(2 earlier)"), "{compact}");
+}
+
+/// What the daemon's scoped rule walk left out is journaled once, as one
+/// `rules_scope_excluded` event, not on every refresh.
+#[tokio::test]
+async fn the_scoped_rule_walk_exclusion_is_journaled_on_change() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().excluded_components = vec![RuleScopeExclusion {
+        component: "badciv-sim".into(),
+        via: "Unidirectional dependency graph".into(),
+        rules: 29,
+    }];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"reply","message":"Read it.","then":"wait"}));
+    runner.advance().await.unwrap();
+    let refreshes = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|request| request["kind"] == "context")
+        .count();
+    assert!(refreshes >= 2, "{refreshes} context refreshes");
+    assert_eq!(
+        intent_details(&runner, "rules_scope_excluded"),
+        ["badciv-sim: 29 via \"Unidirectional dependency graph\""]
+    );
 }

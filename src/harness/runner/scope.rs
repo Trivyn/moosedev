@@ -354,6 +354,7 @@ mod tests {
             intent_contracts: vec![2],
             context_contracts: vec![1],
             governing_rules: vec![],
+            excluded_components: vec![],
             approved_specs: vec![],
         };
         let error = Runner::validate_daemon_contracts(&context(vec![2]))
