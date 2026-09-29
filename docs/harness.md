@@ -964,6 +964,15 @@ pending obligations across interruption or restart. Do not edit journals to
 bypass gates. Context is bounded; governing knowledge is never silently dropped
 to fit the model window.
 
+Conversation history (at most 12 KB) replays only the current task's turns.
+Each earlier task in the conversation is one line, its first request (200
+bytes) and its last answer (300 bytes), under a heading that says the current
+source wins where they disagree; the block holds at most 4 KB, the oldest tasks
+dropping first behind a counted line, and the current turns keep the rest. In
+badciv run 13, step 1's turns replayed whole led step 2 to plan a fix the
+source already had. `MOOSEDEV_HARNESS_EARLIER_TASKS=full` replays every task's
+turns as before.
+
 Repository navigation previews are byte-bounded (up to 8 KB), and optional
 conversation history uses only space remaining after current evidence and the
 action schema. Omitted paths are disclosed; `search` first returns the accepted
