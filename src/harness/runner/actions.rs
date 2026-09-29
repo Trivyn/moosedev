@@ -461,13 +461,15 @@ impl Runner {
                 if let (Some(before), Some(after), true) =
                     (before.as_deref(), content.as_deref(), write_guard_enabled())
                 {
-                    if let Some(deleted) = deleted_declarations(&file, before, after) {
+                    let moved = self.declared_elsewhere(&file);
+                    if let Some(deleted) = deleted_declarations_except(&file, before, after, &moved)
+                    {
                         let names = listed_names(&deleted, DELETED_NAMES_SHOWN);
                         self.intent_event(
                             "destructive_write_refused",
                             &format!("{file}: {}", deleted.join(", ")),
                         );
-                        anyhow::bail!("This write deletes {names} from {file}. To add to a file use replace on a span, or write the whole file including what it already declares.");
+                        anyhow::bail!("This write deletes {names} from {file}. To add to a file use replace on a span, or write the whole file including what it already declares. To move declarations to another file, write that file first: a declaration another file of the working set or the plan defines is not counted as deleted.");
                     }
                 }
                 (file, content)
@@ -503,6 +505,32 @@ fn write_guard_enabled() -> bool {
 /// Declarations a refused write's message names at most.
 const DELETED_NAMES_SHOWN: usize = 8;
 
+impl Runner {
+    /// The top-level declarations, as `(kind, name)`, that the working set
+    /// and the plan's files other than `file` define as they stand on disk:
+    /// where the declarations a write removes from `file` may have moved.
+    fn declared_elsewhere(&self, file: &str) -> BTreeSet<(String, String)> {
+        let mut files: BTreeSet<&str> = self.task.source.keys().map(String::as_str).collect();
+        if let Some(plan) = &self.task.plan {
+            files.extend(plan.files.iter().map(String::as_str));
+        }
+        let mut declared = BTreeSet::new();
+        for other in files.into_iter().filter(|other| *other != file) {
+            let text = match self.workspace.read(other) {
+                Ok(Some(text)) => text,
+                _ => match self.task.source.get(other) {
+                    Some(Some(text)) => text.clone(),
+                    _ => continue,
+                },
+            };
+            for (kind, name) in top_level_declarations(other, &text).unwrap_or_default() {
+                declared.insert((kind.to_owned(), name));
+            }
+        }
+        declared
+    }
+}
+
 /// The top-level named declarations of `text` as `(kind, name)`, in source
 /// order; None for a language with no grammar.
 fn top_level_declarations(file: &str, text: &str) -> Option<Vec<(&'static str, String)>> {
@@ -524,12 +552,28 @@ fn top_level_declarations(file: &str, text: &str) -> Option<Vec<(&'static str, S
 /// functions deletes none. The names listed are the gone names of each kind
 /// with a net deletion. None for a language with no grammar, or a write that
 /// keeps most of them.
+#[cfg(test)]
 fn deleted_declarations(file: &str, before: &str, after: &str) -> Option<Vec<String>> {
+    deleted_declarations_except(file, before, after, &BTreeSet::new())
+}
+
+/// [`deleted_declarations`], not counting a gone declaration that `moved`
+/// holds as `(kind, name)`: one another file of the working set or the plan
+/// now defines. A plan that splits a file into modules writes the modules
+/// first, then the file without what moved (badciv run 15: `lib.rs` split
+/// into `error.rs`, `codes.rs`, … was refused three times and parked).
+fn deleted_declarations_except(
+    file: &str,
+    before: &str,
+    after: &str,
+    moved: &BTreeSet<(String, String)>,
+) -> Option<Vec<String>> {
     let declared = top_level_declarations(file, before)?;
     let written = top_level_declarations(file, after)?;
     let gone: Vec<&(&str, String)> = declared
         .iter()
         .filter(|declaration| !written.contains(declaration))
+        .filter(|(kind, name)| !moved.contains(&((*kind).to_owned(), name.clone())))
         .collect();
     let added: Vec<&(&str, String)> = written
         .iter()
@@ -1465,6 +1509,40 @@ mod tests {
             Some(vec!["b".to_string(), "C".to_string()])
         );
         assert_eq!(deleted_declarations("notes.txt", before, after), None);
+    }
+
+    /// badciv run 15: declarations another file now defines have moved,
+    /// not been deleted; what is defined nowhere else still counts.
+    #[test]
+    fn declarations_defined_elsewhere_are_not_deleted() {
+        let before =
+            "pub enum Terrain {}\npub struct Tile {}\npub struct Map {}\npub fn tile() {}\n";
+        let after = "pub mod types;\n";
+        let defined = |text: &str| -> BTreeSet<(String, String)> {
+            top_level_declarations("types.rs", text)
+                .unwrap()
+                .into_iter()
+                .map(|(kind, name)| (kind.to_owned(), name))
+                .collect()
+        };
+        let moved = defined("pub enum Terrain {}\npub struct Tile {}\npub struct Map {}\n");
+        assert_eq!(
+            deleted_declarations_except("a.rs", before, after, &moved),
+            None
+        );
+        assert_eq!(
+            deleted_declarations_except("a.rs", before, after, &defined("pub enum Terrain {}\n")),
+            Some(vec![
+                "Tile".to_string(),
+                "Map".to_string(),
+                "tile".to_string()
+            ])
+        );
+        // A same-named declaration of another kind has not moved.
+        assert!(
+            deleted_declarations_except("a.rs", before, after, &defined("pub fn Map() {}\n"))
+                .is_some()
+        );
     }
 
     /// A rewrite that renames declarations deletes none of them: deletions
