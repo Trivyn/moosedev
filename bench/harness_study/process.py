@@ -97,6 +97,8 @@ SYMBOLIC_EVENT_KINDS = (
     # a call written as text, and the provider's refusal of a required tool choice. None is an autonomous
     # recovery.
     "tool_arguments_repaired", "extra_tool_calls_ignored", "tool_call_from_content", "tool_choice_fallback",
+    # A json_schema answer whose nested object the model flattened, folded back by the schema-driven repair.
+    "json_unflattened",
     # Harness questions to the human (a scope escape, a finish with planned files missing), the scope amendment
     # the human chose (or the replan it became when the added file brought rules the plan does not address), and
     # the unfinished-plan gate's send-back and forced verification. None is an autonomous recovery: the human

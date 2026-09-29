@@ -36,15 +36,35 @@ pub struct Plan {
     /// summary's prose, become the capture's `isMotivatedBy` edges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
+    /// IRIs of the governing rules the model says the existing code already
+    /// satisfies unchanged, resolved like `addresses` (which wins when both
+    /// name a rule). A claim only: it settles the rule for coverage and the
+    /// approval gate, and never becomes a knowledge edge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub satisfied: Vec<String>,
     /// The governing rules delivered for the plan files that the plan leaves
-    /// open: not in `addresses`, whatever its summary says of them. The
-    /// approval gate names them; `/approve` records them as deferred.
+    /// open: not in `addresses` or `satisfied`, whatever its summary says of
+    /// them. The approval gate names them; `/approve` records them as
+    /// deferred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_rules: Vec<OpenRule>,
     /// Questions the planner left for the human to decide before building,
     /// answered with `/choose <n> <option>` or by their default on approval.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_choices: Vec<OpenChoice>,
+}
+
+impl Plan {
+    /// The `satisfied` claims every consumer reads: none while
+    /// `MOOSEDEV_HARNESS_PLAN_SATISFIED=off`, even when a resumed task's
+    /// journal holds some from when the field was on.
+    pub fn satisfied_claims(&self) -> &[String] {
+        if super::rule_state::plan_satisfied_enabled() {
+            &self.satisfied
+        } else {
+            &[]
+        }
+    }
 }
 
 /// A governing rule a proposed plan leaves open.
@@ -83,6 +103,9 @@ pub struct ApprovedPlan {
     pub files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
+    /// The plan's `satisfied` claims at approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub satisfied: Vec<String>,
     /// IRIs of every governing rule delivered for the plan files at approval.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules_in_view: Vec<String>,
@@ -502,6 +525,12 @@ pub struct Task {
     /// they fit: a file that changes tier resends the prompt after it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub(super) source_full: std::collections::BTreeSet<String>,
+    /// Working-set files the harness loaded because they are in the step's
+    /// scope, not because the model read them: no recency, read snapshot or
+    /// read file. A model read makes one an ordinary working-set file; one
+    /// that leaves the scope unread leaves the working set.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(super) source_preloaded: std::collections::BTreeSet<String>,
     /// The standing guidance this task was created with, replayed verbatim on
     /// resume. `None` only in journals written before the guidance file.
     #[serde(default, skip_serializing_if = "Option::is_none")]

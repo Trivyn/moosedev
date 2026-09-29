@@ -7,6 +7,10 @@
 //! step) and never learns a family's syntax. What normalization did is
 //! returned as [`Note`]s for the journal.
 //!
+//! The json_schema contract's answers, whose schema travelled in the prompt,
+//! get schema-driven shape repairs in [`json_schema`] (a flattened nested
+//! object folded back into place).
+//!
 //! Candidates for later migration here, left in place because they depend on
 //! harness state: the `old_text` junk trimming in
 //! `harness::runner::actions::repair_literal_span` (needs the file's source)
@@ -15,6 +19,7 @@
 
 pub mod gemma;
 pub mod json;
+pub mod json_schema;
 
 use super::{ToolCall, ToolCompletion};
 use serde_json::{Map, Value};

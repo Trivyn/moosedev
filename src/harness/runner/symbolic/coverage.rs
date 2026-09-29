@@ -12,15 +12,22 @@ use crate::harness::protocol::{spec_title_key, GoverningRule};
 const COVERAGE_NOTE_CLAIM_BYTES: usize = 8_000;
 
 impl Runner {
-    /// True when the plan was returned; the caller stores nothing.
+    /// True when the plan was returned; the caller stores nothing. A rule
+    /// already settled needs no answer: decided, or settled by an approved
+    /// plan of this task, or among the proposal's `satisfied` claims (see
+    /// [`Self::settlement`]).
     pub(in crate::harness::runner) fn plan_coverage_return(
         &mut self,
         summary: &str,
         context: &ContextResponse,
+        satisfied: &[String],
     ) -> bool {
         // The rules as the prompt showed them, with any claim the model
         // retrieved, so the check reads the same wording the plan answered.
-        let rules = &self.rules_with_retrieved_claims(&context.governing_rules);
+        let rules = &self.unsettled_rules(
+            self.rules_with_retrieved_claims(&context.governing_rules),
+            satisfied,
+        );
         if rules.is_empty() {
             self.symbolic_state_mut().coverage_returns = 0;
             return false;
@@ -135,9 +142,10 @@ impl Runner {
     }
 
     /// The rules among `rules` the current plan does not address: not among
-    /// its `addresses`, and not covered by its summary as the plan coverage
-    /// check reads it (the plan may also say a rule is deferred or does not
-    /// apply). With the claims the model retrieved, as that check reads them.
+    /// its `addresses`, not settled (by its `satisfied` claims or otherwise),
+    /// and not covered by its summary as the plan coverage check reads it
+    /// (the plan may also say a rule is deferred or does not apply). With the
+    /// claims the model retrieved, as that check reads them.
     pub(in crate::harness::runner) fn unaddressed_rules(
         &self,
         rules: &[GoverningRule],
@@ -146,15 +154,18 @@ impl Runner {
             return Vec::new();
         };
         let thresholds = CoverageThresholds::from_env().unwrap_or_default();
-        self.rules_with_retrieved_claims(rules)
-            .into_iter()
-            .filter(|rule| {
-                !plan.addresses.contains(&rule.iri)
-                    && !self
-                        .coverage_receipt(&plan.summary, rule, &thresholds)
-                        .covered
-            })
-            .collect()
+        self.unsettled_rules(
+            self.rules_with_retrieved_claims(rules),
+            plan.satisfied_claims(),
+        )
+        .into_iter()
+        .filter(|rule| {
+            !plan.addresses.contains(&rule.iri)
+                && !self
+                    .coverage_receipt(&plan.summary, rule, &thresholds)
+                    .covered
+        })
+        .collect()
     }
 
     /// Resolve the plan's `addresses` to the IRIs of rules delivered for its
@@ -165,16 +176,7 @@ impl Runner {
         addresses: &[String],
         context: &ContextResponse,
     ) -> Vec<String> {
-        let mut resolved: Vec<String> = Vec::new();
-        let mut unknown: Vec<&str> = Vec::new();
-        for entry in addresses {
-            match resolve_address(entry, &context.governing_rules) {
-                Some(rule) if !resolved.contains(&rule.iri) => resolved.push(rule.iri.clone()),
-                Some(_) => {}
-                None if entry.trim().is_empty() => {}
-                None => unknown.push(entry.trim()),
-            }
-        }
+        let (resolved, unknown) = resolve_entries(addresses, &context.governing_rules);
         if !unknown.is_empty() {
             self.intent_event("plan_addresses_unresolved", &unknown.join("; "));
             self.event(format!(
@@ -195,6 +197,70 @@ impl Runner {
         }
         resolved
     }
+
+    /// Resolve the plan's `satisfied` claims as [`Self::resolve_plan_addresses`]
+    /// resolves `addresses`, which win on overlap: a rule the plan implements
+    /// is not also already satisfied. Journals `plan_satisfied` and
+    /// `plan_satisfied_unresolved` when the plan sent any.
+    pub(in crate::harness::runner) fn resolve_plan_satisfied(
+        &mut self,
+        satisfied: &[String],
+        addresses: &[String],
+        context: &ContextResponse,
+    ) -> Vec<String> {
+        let (resolved, unknown) = satisfied_entries(satisfied, addresses, context);
+        if !unknown.is_empty() {
+            self.intent_event("plan_satisfied_unresolved", &unknown.join("; "));
+            self.event(format!(
+                "Plan satisfied entries ignored: {} named no project rule of the plan files.",
+                unknown.join("; ")
+            ));
+        }
+        if satisfied.iter().any(|entry| !entry.trim().is_empty()) {
+            self.intent_event(
+                "plan_satisfied",
+                &format!(
+                    "{} of {} rule(s): {}",
+                    resolved.len(),
+                    context.governing_rules.len(),
+                    resolved.join(" ")
+                ),
+            );
+        }
+        resolved
+    }
+}
+
+/// `entries` resolved to the IRIs of `rules`, once each in the order first
+/// named, and the entries naming no rule. Blank entries are neither.
+fn resolve_entries<'e>(
+    entries: &'e [String],
+    rules: &[GoverningRule],
+) -> (Vec<String>, Vec<&'e str>) {
+    let mut resolved: Vec<String> = Vec::new();
+    let mut unknown: Vec<&str> = Vec::new();
+    for entry in entries {
+        match resolve_address(entry, rules) {
+            Some(rule) if !resolved.contains(&rule.iri) => resolved.push(rule.iri.clone()),
+            Some(_) => {}
+            None if entry.trim().is_empty() => {}
+            None => unknown.push(entry.trim()),
+        }
+    }
+    (resolved, unknown)
+}
+
+/// A plan's `satisfied` entries resolved against the delivered rules, less
+/// the rules its `addresses` entries name, and the entries naming no rule.
+pub(in crate::harness::runner) fn satisfied_entries<'e>(
+    satisfied: &'e [String],
+    addresses: &[String],
+    context: &ContextResponse,
+) -> (Vec<String>, Vec<&'e str>) {
+    let (addressed, _) = resolve_entries(addresses, &context.governing_rules);
+    let (mut resolved, unknown) = resolve_entries(satisfied, &context.governing_rules);
+    resolved.retain(|iri| !addressed.contains(iri));
+    (resolved, unknown)
 }
 
 /// One `addresses` entry to a delivered rule: its IRI (exactly, else the one
@@ -271,6 +337,7 @@ mod tests {
             kind: "Requirement".into(),
             claim: String::new(),
             via: String::new(),
+            decided_by: Vec::new(),
         }
     }
 

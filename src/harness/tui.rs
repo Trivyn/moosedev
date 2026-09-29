@@ -797,6 +797,20 @@ fn plan_gate(task: &Task, plan: &super::runner::Plan, standing: &[String]) -> Ga
             labels.join("\n"),
         );
     }
+    let satisfied = plan.satisfied_claims();
+    if !satisfied.is_empty() {
+        // A claim for the human to weigh: the plan says the existing code
+        // already holds these rules, so it neither implements nor defers them.
+        let mut iris: Vec<String> = satisfied.iter().take(OPEN_RULES_SHOWN).cloned().collect();
+        let more = satisfied.len().saturating_sub(OPEN_RULES_SHOWN);
+        if more > 0 {
+            iris.push(format!("… and {more} more"));
+        }
+        gate.block(
+            format!("Says {} rule(s) already hold", satisfied.len()),
+            iris.join("\n"),
+        );
+    }
     for (index, choice) in plan.open_choices.iter().enumerate() {
         let chosen = choice
             .answer
@@ -2837,6 +2851,7 @@ mod tests {
             files: vec!["labels.py".into()],
             checks: vec!["pytest -q".into()],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![rule(1), rule(2)],
             open_choices: vec![super::super::runner::OpenChoice {
                 question: "Which separator?".into(),
@@ -2872,10 +2887,20 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("(default: space; chosen: dash)"), "{text}");
+        assert!(!text.contains("already hold"), "{text}");
+
+        let plan = task.plan.as_mut().unwrap();
+        plan.satisfied = vec!["urn:rule:held".into()];
+        let text = gate(&task, &[]).to_plain();
+        assert!(
+            text.contains("\nSays 1 rule(s) already hold:\n  urn:rule:held\n"),
+            "{text}"
+        );
 
         let plan = task.plan.as_mut().unwrap();
         plan.open_rules.clear();
         plan.open_choices.clear();
+        plan.satisfied.clear();
         let text = gate(&task, &[]).to_plain();
         assert!(!text.contains("Leaves open") && !text.contains("Open choice"));
         assert!(!text.contains("/choose") && text.contains("/approve  execute the plan\n"));
@@ -2890,6 +2915,7 @@ mod tests {
             files: vec!["labels.py".into()],
             checks: vec!["pytest -q".into()],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });
@@ -2975,6 +3001,7 @@ mod tests {
             files: vec!["labels.py".into()],
             checks: vec!["pytest -q".into()],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });
@@ -3320,6 +3347,7 @@ mod tests {
                 kind: "Constraint".into(),
                 claim: "Parsing must not depend on iteration order.".into(),
                 via: "src/parser.rs".into(),
+                decided_by: Vec::new(),
             }],
             records: vec![],
             delivery_receipt: None,

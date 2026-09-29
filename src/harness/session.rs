@@ -289,48 +289,52 @@ impl Conversation {
     /// start of the conversation, not one turn per new turn, so the window
     /// only grows by appending between trims and a model server's prefix
     /// cache keeps reusing it.
+    ///
+    /// Earlier tasks in the conversation render one line each
+    /// ([`earlier_tasks_block`]), ahead of the active task's turns, which
+    /// keep the budget the block leaves: replayed in full, step 1's turns
+    /// told the model to make a fix the current source already had (Lesson
+    /// f67c840f). `MOOSEDEV_HARNESS_EARLIER_TASKS=full` replays them as
+    /// before.
     pub fn context(&self) -> String {
+        let earlier_full = std::env::var("MOOSEDEV_HARNESS_EARLIER_TASKS")
+            .is_ok_and(|value| value.trim() == "full");
+        self.context_with(earlier_full)
+    }
+    fn context_with(&self, earlier_full: bool) -> String {
         // Conversation is expendable prompt context; accepted knowledge is not.
         const CONTEXT_BUDGET: usize = 12_000;
-        const CONTEXT_TRIM: usize = 4_800;
-        const SEPARATOR: &str = "\n\n";
         let current = self
             .messages
             .iter()
             .rposition(|message| message.role == "user" && message.task == self.active_task);
-        let turns: Vec<String> = self
-            .messages
+        let shown = self.messages.iter().enumerate().filter(|(index, message)| {
+            (message.role == "user" || message.role == "assistant")
+                && Some(*index) != current
+                && !self
+                    .queued
+                    .iter()
+                    .any(|queued| message.id.as_ref() == Some(&queued.id))
+        });
+        // With no active task there is no earlier task to tell apart.
+        let summarize = !earlier_full && self.active_task.is_some();
+        let (earlier, active): (Vec<&Message>, Vec<&Message>) = shown
+            .map(|(_, message)| message)
+            .partition(|message| summarize && message.task != self.active_task);
+        let turns: Vec<String> = active
             .iter()
-            .enumerate()
-            .filter(|(index, message)| {
-                (message.role == "user" || message.role == "assistant")
-                    && Some(*index) != current
-                    && !self
-                        .queued
-                        .iter()
-                        .any(|queued| message.id.as_ref() == Some(&queued.id))
-            })
-            .map(|(_, message)| format!("{}: {}", message.role, message.text))
+            .map(|message| format!("{}: {}", message.role, message.text))
             .collect();
-        let size = |turns: &[String]| {
-            turns.iter().map(String::len).sum::<usize>()
-                + SEPARATOR.len() * turns.len().saturating_sub(1)
-        };
-        let mut start = 0;
-        let total = size(&turns);
-        if total > CONTEXT_BUDGET {
-            let drop = (total - CONTEXT_BUDGET).div_ceil(CONTEXT_TRIM) * CONTEXT_TRIM;
-            let mut dropped = 0;
-            while start < turns.len() && dropped < drop {
-                dropped += turns[start].len() + SEPARATOR.len();
-                start += 1;
-            }
+        let block = earlier_tasks_block(&earlier);
+        if block.is_empty() {
+            return recent_turns(&turns, CONTEXT_BUDGET);
         }
-        // A turn larger than the whole budget is never shown in part.
-        while size(&turns[start..]) > CONTEXT_BUDGET {
-            start += 1;
+        let recent = recent_turns(&turns, CONTEXT_BUDGET - block.len() - TURN_SEPARATOR.len());
+        if recent.is_empty() {
+            block
+        } else {
+            format!("{block}{TURN_SEPARATOR}{recent}")
         }
-        turns[start..].join(SEPARATOR)
     }
     fn sync_task(&mut self, task: &Task) {
         let seen = *self.seen_events.get(&task.id).unwrap_or(&0);
@@ -341,6 +345,109 @@ impl Conversation {
         }
         self.seen_events.insert(task.id.clone(), task.events.len());
     }
+}
+
+const TURN_SEPARATOR: &str = "\n\n";
+
+/// The last whole `turns` within `budget` bytes, joined by `TURN_SEPARATOR`.
+/// Older turns drop in `CONTEXT_TRIM` chunks counted from the first turn.
+fn recent_turns(turns: &[String], budget: usize) -> String {
+    const CONTEXT_TRIM: usize = 4_800;
+    let size = |turns: &[String]| {
+        turns.iter().map(String::len).sum::<usize>()
+            + TURN_SEPARATOR.len() * turns.len().saturating_sub(1)
+    };
+    let mut start = 0;
+    let total = size(turns);
+    if total > budget {
+        let drop = (total - budget).div_ceil(CONTEXT_TRIM) * CONTEXT_TRIM;
+        let mut dropped = 0;
+        while start < turns.len() && dropped < drop {
+            dropped += turns[start].len() + TURN_SEPARATOR.len();
+            start += 1;
+        }
+    }
+    // A turn larger than the whole budget is never shown in part.
+    while size(&turns[start..]) > budget {
+        start += 1;
+    }
+    turns[start..].join(TURN_SEPARATOR)
+}
+
+pub(crate) const EARLIER_TASKS_HEADER: &str = "Earlier tasks in this conversation (history; where it disagrees with the current source above, the source is right):";
+const EARLIER_TASKS_BYTES: usize = 4_096;
+const EARLIER_REQUEST_BYTES: usize = 200;
+const EARLIER_ANSWER_BYTES: usize = 300;
+
+/// One line per earlier task, in first-seen order: its first user text and
+/// its last assistant text. The block stays within `EARLIER_TASKS_BYTES`,
+/// dropping the oldest tasks first and counting them; empty when there are
+/// no earlier turns.
+fn earlier_tasks_block(messages: &[&Message]) -> String {
+    let mut tasks: Vec<(Option<&str>, Option<&str>, Option<&str>)> = Vec::new();
+    for message in messages {
+        let task = message.task.as_deref();
+        let index = match tasks.iter().position(|(id, ..)| *id == task) {
+            Some(index) => index,
+            None => {
+                tasks.push((task, None, None));
+                tasks.len() - 1
+            }
+        };
+        let (_, request, answer) = &mut tasks[index];
+        match message.role.as_str() {
+            "user" if request.is_none() => *request = Some(&message.text),
+            "assistant" => *answer = Some(&message.text),
+            _ => {}
+        }
+    }
+    let lines: Vec<String> = tasks
+        .iter()
+        .map(|(_, request, answer)| {
+            format!(
+                "- {} → {}",
+                request.map_or("(no request recorded)".into(), |text| {
+                    one_line(text, EARLIER_REQUEST_BYTES)
+                }),
+                answer.map_or("(no answer recorded)".into(), |text| {
+                    one_line(text, EARLIER_ANSWER_BYTES)
+                }),
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let render = |omitted: usize| {
+        let mut block = vec![EARLIER_TASKS_HEADER.to_string()];
+        if omitted > 0 {
+            block.push(format!("{omitted} earlier task(s) omitted."));
+        }
+        block.extend(lines[omitted..].iter().cloned());
+        block.join("\n")
+    };
+    let mut omitted = 0;
+    let mut block = render(omitted);
+    while block.len() > EARLIER_TASKS_BYTES && omitted < lines.len() {
+        omitted += 1;
+        block = render(omitted);
+    }
+    block
+}
+
+/// `text` with its whitespace collapsed to single spaces, cut on a character
+/// boundary to at most `max` bytes, an ellipsis included.
+fn one_line(text: &str, max: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.len() <= max {
+        return line;
+    }
+    const ELLIPSIS: &str = "…";
+    let mut end = max - ELLIPSIS.len();
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ELLIPSIS}", line[..end].trim_end())
 }
 
 fn transcript_role(index: usize, knowledge_events: &[usize]) -> Option<&'static str> {
@@ -1696,6 +1803,121 @@ mod tests {
         assert!(!context.contains("Latest guidance"));
         assert!(context.contains("Earlier question"));
         assert!(context.contains("Earlier answer"));
+    }
+    fn three_task_conversation() -> Conversation {
+        let mut conversation = Conversation::new(PathBuf::from("/unused"));
+        conversation.active_task = Some("one".into());
+        conversation.push("user", "Fix the  map\n  loader");
+        conversation.push("assistant", "Reading map.rs");
+        conversation.push("assistant", "Fixed the loader\nin map.rs");
+        conversation.active_task = Some("two".into());
+        conversation.push("user", "Add tests");
+        conversation.push("activity", "cargo test passed");
+        conversation.push("assistant", "Added three tests");
+        conversation.active_task = Some("three".into());
+        conversation.push("user", "Now render the map");
+        conversation.push("assistant", "Reading render.rs");
+        conversation.push("user", "Use the tui crate");
+        conversation.push("assistant", "Planned");
+        conversation
+    }
+    #[test]
+    fn earlier_tasks_render_one_line_each_ahead_of_the_current_turns() {
+        // badciv run 13: step 1's turns, replayed whole into step 2, told the
+        // planner to make a fix the current source already had.
+        let conversation = three_task_conversation();
+        assert_eq!(
+            conversation.context_with(false),
+            format!(
+                "{EARLIER_TASKS_HEADER}\n\
+                 - Fix the map loader → Fixed the loader in map.rs\n\
+                 - Add tests → Added three tests\n\n\
+                 user: Now render the map\n\n\
+                 assistant: Reading render.rs\n\n\
+                 assistant: Planned"
+            )
+        );
+    }
+    #[test]
+    fn earlier_tasks_full_restores_the_whole_history() {
+        let conversation = three_task_conversation();
+        let today = "user: Fix the  map\n  loader\n\n\
+                     assistant: Reading map.rs\n\n\
+                     assistant: Fixed the loader\nin map.rs\n\n\
+                     user: Add tests\n\n\
+                     assistant: Added three tests\n\n\
+                     user: Now render the map\n\n\
+                     assistant: Reading render.rs\n\n\
+                     assistant: Planned";
+        assert_eq!(conversation.context_with(true), today);
+        let previous = std::env::var("MOOSEDEV_HARNESS_EARLIER_TASKS").ok();
+        std::env::set_var("MOOSEDEV_HARNESS_EARLIER_TASKS", " full ");
+        let switched = conversation.context();
+        match previous {
+            Some(value) => std::env::set_var("MOOSEDEV_HARNESS_EARLIER_TASKS", value),
+            None => std::env::remove_var("MOOSEDEV_HARNESS_EARLIER_TASKS"),
+        }
+        assert_eq!(switched, today);
+    }
+    #[test]
+    fn a_single_task_conversation_is_unchanged() {
+        let mut conversation = Conversation::new(PathBuf::from("/unused"));
+        conversation.push("user", "Explain the layout");
+        conversation.push("assistant", "It has two crates");
+        conversation.push("user", "And the tests?");
+        // No active task: today's output, whatever tasks the messages name.
+        assert_eq!(
+            conversation.context_with(false),
+            "user: Explain the layout\n\nassistant: It has two crates"
+        );
+        conversation.active_task = Some("only".into());
+        for message in &mut conversation.messages {
+            message.task = Some("only".into());
+        }
+        // Enough turns to exercise the chunked trim.
+        for n in 0..80 {
+            conversation.push("assistant", format!("{n} {}", "y".repeat(250)));
+        }
+        let context = conversation.context_with(false);
+        assert_eq!(context, conversation.context_with(true));
+        assert!(context.len() <= 12_000 && context.ends_with(&"y".repeat(250)));
+        assert!(!context.contains(EARLIER_TASKS_HEADER));
+    }
+    #[test]
+    fn earlier_tasks_block_is_bounded_and_counts_what_it_omits() {
+        let mut conversation = Conversation::new(PathBuf::from("/unused"));
+        for n in 0..20 {
+            conversation.active_task = Some(format!("task-{n}"));
+            conversation.push("user", format!("request {n} {}", "ask ".repeat(100)));
+            conversation.push("assistant", format!("answer {n} {}", "é".repeat(400)));
+        }
+        conversation.active_task = Some("current".into());
+        conversation.push("user", "The current objective");
+        for n in 0..60 {
+            conversation.push("assistant", format!("turn {n} {}", "z".repeat(250)));
+        }
+        let context = conversation.context_with(false);
+        assert!(context.len() <= 12_000, "{}", context.len());
+        let block = context.split("\n\n").next().unwrap();
+        assert!(block.len() <= 4_096, "{}", block.len());
+        assert!(block.starts_with(EARLIER_TASKS_HEADER));
+        let kept: Vec<&str> = block
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        assert!((1..20).contains(&kept.len()), "{} kept", kept.len());
+        assert!(block.contains(&format!("\n{} earlier task(s) omitted.\n", 20 - kept.len())));
+        // Oldest first out: the newest earlier task is kept, the first is not.
+        assert!(kept.last().unwrap().starts_with("- request 19 "));
+        assert!(!block.contains("request 0 "));
+        for line in kept {
+            let (request, answer) = line[2..].split_once(" → ").unwrap();
+            assert!(request.len() <= 200 && request.ends_with('…'));
+            assert!(answer.len() <= 300 && answer.ends_with('…'));
+        }
+        // The current turns keep the rest of the budget, trimmed as today.
+        assert!(context.ends_with(&format!("turn 59 {}", "z".repeat(250))));
+        assert!(!context.contains("The current objective"));
     }
     #[test]
     fn acquire_preserves_configuration_notice_after_reloading_the_journal() {

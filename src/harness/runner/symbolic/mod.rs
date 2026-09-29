@@ -8,6 +8,7 @@ mod auto_verify;
 pub(super) use auto_verify::AUTO_VERIFY_FAILED;
 mod capture_note;
 mod coverage;
+pub(super) use coverage::satisfied_entries;
 mod evidence;
 mod grounding;
 mod scope;
@@ -26,6 +27,13 @@ pub use state::{
     MAX_RETYPES, MAX_SCOPE_ESCAPES,
 };
 use state::{NoteAnswer, CAPTURE_NOTE_QUESTION};
+
+/// Whether a model replan is held once while every current error is in the
+/// approved files. `MOOSEDEV_HARNESS_REPLAN_HOLD=off` lets every replan
+/// through, as before.
+fn replan_hold_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_REPLAN_HOLD").map_or(true, |value| value.trim() != "off")
+}
 
 impl Runner {
     pub(super) fn symbolic_state_mut(&mut self) -> &mut SymbolicState {
@@ -99,6 +107,24 @@ fn misrouted(file: &str) -> anyhow::Error {
 }
 
 impl Runner {
+    /// The file an edit, `replace`, `write` or offered fix would change. An
+    /// offered fix edits the file it was offered for; an unknown number is
+    /// `None` here and refused later, as it materializes.
+    pub(in crate::harness::runner) fn edit_target(&self, action: &Action) -> Option<String> {
+        match action {
+            Action::Edit { file, .. }
+            | Action::Replace { file, .. }
+            | Action::Write { file, .. } => Some(file.clone()),
+            Action::ApplyFix { fix } => self
+                .task
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.fix(*fix))
+                .map(|offered| offered.file.clone()),
+            _ => None,
+        }
+    }
+
     /// Before permission checks: an edit outside the approved plan files
     /// becomes the ordinary replan transition naming the file, bounded per
     /// task. Returns `None` once parked for guidance.
@@ -110,22 +136,8 @@ impl Runner {
         if self.task.mode != Mode::Auto {
             return Ok(Some(action));
         }
-        let file = match &action {
-            Action::Edit { file, .. }
-            | Action::Replace { file, .. }
-            | Action::Write { file, .. } => file.clone(),
-            // An offered fix edits the file it was offered for; an unknown
-            // number is refused later, as it materializes.
-            Action::ApplyFix { fix } => match self
-                .task
-                .diagnostics
-                .as_ref()
-                .and_then(|diagnostics| diagnostics.fix(*fix))
-            {
-                Some(offered) => offered.file.clone(),
-                None => return Ok(Some(action)),
-            },
-            _ => return Ok(Some(action)),
+        let Some(file) = self.edit_target(&action) else {
+            return Ok(Some(action));
         };
         let plan_files = self
             .task
@@ -448,6 +460,74 @@ impl Runner {
         );
     }
 
+    /// A model replan in approved work while every current error (settled
+    /// language-server errors, files the latest failure names) is in the
+    /// approved plan's files is held once per edit count: the errors are
+    /// shown and the model told to fix them within the plan, as a replan
+    /// cannot move errors the plan already covers. A second replan at the
+    /// same edit count goes through. True when held.
+    /// `MOOSEDEV_HARNESS_REPLAN_HOLD=off` never holds.
+    pub(in crate::harness::runner) fn hold_replan(
+        &mut self,
+        repo: &[String],
+        reason: &str,
+    ) -> bool {
+        let task = &self.task;
+        if !replan_hold_enabled()
+            || task.mode != Mode::Auto
+            || task.phase != Phase::Working
+            || task.approved_revision.is_none()
+        {
+            return false;
+        }
+        let Some(plan) = task.plan.as_ref() else {
+            return false;
+        };
+        let edits = task.edits.len();
+        if task
+            .symbolic
+            .as_ref()
+            .is_some_and(|state| state.replan_held_at == Some(edits))
+        {
+            return false;
+        }
+        let errors = self.current_error_files(repo);
+        if errors.is_empty() || !errors.iter().all(|file| plan.files.contains(file)) {
+            return false;
+        }
+        let files = errors.join(", ");
+        self.symbolic_state_mut().replan_held_at = Some(edits);
+        self.intent_event("replan_held", &format!("{files}: {reason}"));
+        self.event(format!(
+            "Replan held once: every current error is in the approved files ({files}): {reason}"
+        ));
+        let mut message = format!(
+            "Replan held once: every current error is in the approved files ({files}). Errors:\n"
+        );
+        if let Some(diagnostics) = self
+            .task
+            .diagnostics
+            .as_ref()
+            .filter(|diagnostics| diagnostics.settled && !diagnostics.errors.is_empty())
+        {
+            message.push_str(&diagnostics.render(super::dispatch::DIAGNOSTICS_BYTES));
+        }
+        if let Some(output) = self.latest_failure_output() {
+            let grouped = super::step_scope::errors_by_file(
+                output,
+                repo,
+                super::step_scope::FAILURE_ERRORS_BYTES,
+            );
+            if !grouped.is_empty() {
+                message.push_str("Latest failed run:\n");
+                message.push_str(&grouped);
+            }
+        }
+        message.push_str("\nFix them within the plan; replan again if the plan itself is wrong.");
+        self.task.last_response = message;
+        true
+    }
+
     /// A replan while already planning changes nothing.
     pub(in crate::harness::runner) fn symbolic_replan_noop(&mut self, reason: &str) {
         self.intent_event("replan_noop", reason);
@@ -648,6 +728,7 @@ mod tests {
             files: vec!["command".into()],
             checks: vec![],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

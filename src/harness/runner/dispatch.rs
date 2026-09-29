@@ -132,6 +132,9 @@ impl Runner {
     /// read and the model proposes again with it in view (`Some(false)`).
     /// `None`: not the first edit of a new file. badciv 14ad550e spent one
     /// turn per new file on a read that answered "[file does not exist]".
+    /// A preloaded scope file the prompt showed in full is handled the same
+    /// way: its author saw its current source, so reading it in only has to
+    /// bring nothing new.
     async fn read_new_edit_target(
         &mut self,
         action: &model::Action,
@@ -143,7 +146,10 @@ impl Runner {
             | model::Action::Edit { file, .. } => file.clone(),
             _ => return Ok(None),
         };
-        if self.task.read_files.contains(&file) || self.workspace.read(&file)?.is_some() {
+        let preloaded = self.preloaded_in_full(&file);
+        if self.task.read_files.contains(&file)
+            || (!preloaded && self.workspace.read(&file)?.is_some())
+        {
             return Ok(None);
         }
         let read = self.read_into_working_set(&file).await?;
@@ -168,15 +174,28 @@ impl Runner {
             .chain(read.evidence_iris.iter().map(String::as_str))
             .filter(|iri| !seen.contains(iri))
             .collect();
+        let (kind, shown) = if preloaded {
+            (
+                "first_edit_satisfied_preloaded",
+                format!("{file} was shown in full as a scope file"),
+            )
+        } else {
+            (
+                "first_edit_satisfied_absent",
+                format!("{file} does not exist yet"),
+            )
+        };
         if unseen.is_empty() {
-            self.intent_event("first_edit_satisfied_absent", &file);
-            self.event(format!(
-                "First edit of new file {file}: reading it brought no governing knowledge the proposal had not seen, so the edit proceeds."
-            ));
+            self.intent_event(kind, &file);
+            self.event(if preloaded {
+                format!("First edit of {file}: it was shown in full as a scope file and reading it brought no governing knowledge the proposal had not seen, so the edit proceeds.")
+            } else {
+                format!("First edit of new file {file}: reading it brought no governing knowledge the proposal had not seen, so the edit proceeds.")
+            });
             return Ok(Some(true));
         }
         self.event(format!(
-            "First-edit guard: {file} does not exist yet, but it is governed by {} record(s) the proposal had not seen; the edit will not execute. Propose it again with them in view.",
+            "First-edit guard: {shown}, but it is governed by {} record(s) the proposal had not seen; the edit will not execute. Propose it again with them in view.",
             unseen.len()
         ));
         self.task.last_response = format!(
@@ -266,7 +285,22 @@ impl Runner {
             self.task.steps < MAX_STEPS,
             "task reached {MAX_STEPS} model steps; inspect and provide new guidance"
         );
+        let files = self.workspace.files()?;
         let targets = self.task.read_files.clone();
+        // The step's scope, before its refresh: in Plan mode the scope files
+        // that may be preloaded bring their governing rules, not dossiers
+        // (Auto already sends the approved plan's unread files).
+        let preload = self.scope_candidates(&files);
+        let rule_files = if self.task.mode == Mode::Plan
+            && self
+                .context
+                .as_ref()
+                .is_none_or(|context| context.context_contracts.contains(&1))
+        {
+            preload.rule_files()
+        } else {
+            Vec::new()
+        };
         // An approved step's context was refreshed by `fresh_approval` above
         // for exactly the files read.
         let reuse = self.context.as_ref().filter(|context| {
@@ -278,16 +312,19 @@ impl Runner {
         });
         let context = match reuse {
             Some(context) => context.clone(),
-            None => self.refresh(&targets).await?,
+            None => self.refresh_with_rules(&targets, &rule_files).await?,
         };
-        // A previously read file may have changed through another client.
-        for file in &targets {
-            self.task
-                .source
-                .insert(file.clone(), self.workspace.read(file)?);
+        self.preload_scope(&context, preload);
+        // A previously read or preloaded file may have changed through
+        // another client.
+        let mut reload: std::collections::BTreeSet<String> =
+            self.task.source.keys().cloned().collect();
+        reload.extend(targets.iter().cloned());
+        for file in reload {
+            let text = self.workspace.read(&file)?;
+            self.task.source.insert(file, text);
         }
-        let files = self.workspace.files()?;
-        let (context, (prompt, source)) = match self.prompt(&context, &files) {
+        let built = match self.prompt_with_plan(&context, &files) {
             // Rule claims past the daemon's fixed floor are the first thing a
             // crowded prompt gives up: ask again for the floor alone, so the
             // budget share never stops a step that fitted before it.
@@ -302,16 +339,27 @@ impl Runner {
                 let floor = if self.task.mode == Mode::Auto {
                     self.refresh_approved_scope().await?
                 } else {
-                    self.refresh(&targets).await?
+                    self.refresh_with_rules(&targets, &rule_files).await?
                 };
                 self.intent_event(
                     "rule_claims_floor",
                     "prompt overflowed with the rule-claim budget; rebuilt with the fixed floor",
                 );
-                let built = self.prompt(&floor, &files)?;
-                (floor, built)
+                self.prompt_with_plan(&floor, &files)
+                    .map(|built| (floor, built))
             }
-            built => (context, built?),
+            built => built.map(|built| (context, built)),
+        };
+        let (context, (prompt, source, plan)) = match built {
+            // The scope's own rules must never stop a step: without them and
+            // the preloads, the prompt is the one the step had before.
+            Err(error) if error.is::<model::PromptOverflow>() && !rule_files.is_empty() => {
+                self.withdraw_scope_preload();
+                let context = self.refresh(&targets).await?;
+                let built = self.prompt_with_plan(&context, &files)?;
+                (context, built)
+            }
+            built => built?,
         };
         if !source.swapped.is_empty() {
             let total: usize = self.task.source.values().flatten().map(String::len).sum();
@@ -331,6 +379,10 @@ impl Runner {
         if let Some(receipt) = source.receipt() {
             self.intent_event("source_delivery", &receipt);
         }
+        // What each section of this prompt took, on every request: compact
+        // in the intent journal, whole on the request's journal entry, both
+        // written when the request is sent ([`Self::model_json`]).
+        self.context_plan = Some(plan);
         let output: ModelOutput = self
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;
@@ -338,6 +390,9 @@ impl Runner {
         // A scope escape arrives here as a replan too; only the model's own
         // replan can be continued.
         let proposed_replan = matches!(action, model::Action::Replan { .. });
+        // A file an earlier approved plan listed joins the plan without
+        // asking, so the scope check below lets its edit through.
+        self.auto_scope_add(&action).await;
         let Some(action) = self.symbolic_intercept(action)? else {
             self.source_outlines_seen();
             return self.persist();
@@ -378,6 +433,7 @@ impl Runner {
                 | Step::Read { .. }
                 | Step::ReadRefused { .. }
                 | Step::ReadOutlined { .. }
+                | Step::ReadOutsideScope { .. }
                 | Step::Search { .. }
         );
         match step {
@@ -423,7 +479,10 @@ impl Runner {
                 self.refuse_read(&file, &reason);
             }
             Step::ReadOutlined { file } => {
-                self.serve_outlined_read(&file, &context)?;
+                self.serve_outlined_read(&file, &context, false)?;
+            }
+            Step::ReadOutsideScope { file } => {
+                self.serve_outlined_read(&file, &context, true)?;
             }
             Step::Search { query } => {
                 // A query already asked in this task returns the same records;
@@ -491,15 +550,21 @@ impl Runner {
                 files,
                 checks,
                 addresses,
+                satisfied,
                 open_choices,
             } => {
                 let context = self.refresh(&files).await?;
                 // Before anything is stored: a plan whose summary skips a
-                // governing rule goes back once with a note naming it.
-                if self.plan_coverage_return(&summary, &context) {
+                // governing rule goes back once with a note naming it. A
+                // rule already settled, or one the plan says the existing
+                // code satisfies, needs no answer.
+                let (claimed, _) = symbolic::satisfied_entries(&satisfied, &addresses, &context);
+                if self.plan_coverage_return(&summary, &context, &claimed) {
                     return self.persist();
                 }
                 let addresses = self.resolve_plan_addresses(&addresses, &context);
+                let satisfied = self.resolve_plan_satisfied(&satisfied, &addresses, &context);
+                self.journal_rules_settled(&context.governing_rules, &satisfied);
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));
@@ -508,6 +573,7 @@ impl Runner {
                     files,
                     checks,
                     addresses,
+                    satisfied,
                     open_rules: Vec::new(),
                     open_choices,
                 });
@@ -667,6 +733,9 @@ impl Runner {
             }
             Step::Replan { reason } => {
                 if proposed_replan {
+                    if self.hold_replan(&files, &reason) {
+                        return Ok(());
+                    }
                     self.intent_event("model_replan", &reason);
                 }
                 self.enter_replan(reason);
@@ -1533,19 +1602,39 @@ impl Runner {
     /// A text larger than the Last result can show is served from its start,
     /// with where to page the rest from. The read snapshot is refreshed to
     /// the served text, and a Last result that holds all of it lets an edit
-    /// of the file through the outline guard.
-    fn serve_outlined_read(&mut self, file: &str, context: &ContextResponse) -> Result<()> {
+    /// of the file through the outline guard. A file outside the step's
+    /// scope (`outside_scope`) is served the same way, never having been in
+    /// the working set, and says so.
+    fn serve_outlined_read(
+        &mut self,
+        file: &str,
+        context: &ContextResponse,
+        outside_scope: bool,
+    ) -> Result<()> {
         let text = self
             .workspace
             .read(file)?
-            .context("an outlined file no longer exists")?;
+            .context("a served file no longer exists")?;
         self.symbolic_state_mut()
             .read_snapshots
             .insert(file.to_string(), fingerprint(&Some(text.clone())));
-        let whole = actions::outlined_text_response(file, &text);
+        let (respond, prefix, kind): (fn(&str, &str) -> String, _, _) = if outside_scope {
+            (
+                actions::outside_scope_text_response,
+                actions::OUTSIDE_SCOPE_SERVED,
+                "read_served_outside_scope",
+            )
+        } else {
+            (
+                actions::outlined_text_response,
+                actions::OUTLINED_SERVED,
+                "outlined_read_served",
+            )
+        };
+        let whole = respond(file, &text);
         let budget = self.next_inspect_budget(context)?;
         let size = text.len();
-        let header = format!("{} {file} ({size} bytes):\n", actions::OUTLINED_SERVED);
+        let header = format!("{prefix} {file} ({size} bytes):\n");
         let event = self.task.events.len();
         let shown = if whole.len() <= budget {
             size
@@ -1559,17 +1648,14 @@ impl Runner {
             end
         };
         self.event(format!("{header}{text}"));
-        self.intent_event(
-            "outlined_read_served",
-            &format!("{file}: bytes 0..{shown} of {size}"),
-        );
+        self.intent_event(kind, &format!("{file}: bytes 0..{shown} of {size}"));
         self.task.last_response = if shown == size {
             whole
         } else {
             let offset = header.len() + shown;
             format!(
                 "{}\n[Bytes 0..{shown} of {size} shown; the rest is in journal event {event}: inspect({event}, {offset}).]",
-                actions::outlined_text_response(file, &text[..shown])
+                respond(file, &text[..shown])
             )
         };
         Ok(())

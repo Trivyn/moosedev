@@ -180,6 +180,17 @@ naming `tool_choice`), the harness resends with `tool_choice: "auto"` and no
 `tool_choice_fallback` intent event per task. Streamed `delta.tool_calls` are
 accumulated by index; assistant text beside the call becomes the message, and
 reasoning text is ignored.
+Under `json_schema` the schema travels in the prompt, so nothing enforces its
+nesting: a model may flatten a nested object into its parent. When an answer
+fails as given, `llm::normalize::json_schema::unflatten` folds such a variant
+back into place from the schema alone (a string that is exactly one variant's
+tag, with keys only that variant allows), or rebuilds a variant keyed by its
+tag (`{"replace":{…fields}}`, or `{"apply_fix":1}` when the variant has one
+other field), and the repair is journaled as `json_unflattened`; Qwen3.5-9B answered `{"message":…,"action":"write",
+"file":…}` three times running. A builder whose native tool calls drop large
+arguments (the same model left `write` without `content` under the harness's
+long prompt) runs better on `json_schema`: set it per role with
+`[harness.model.implement] action_contract = "json_schema"`.
 
 Only the first call runs. Later calls are journaled as `extra_tool_calls_ignored`,
 and the session notes that one action runs per step. The exception is a `reply`
@@ -953,6 +964,15 @@ pending obligations across interruption or restart. Do not edit journals to
 bypass gates. Context is bounded; governing knowledge is never silently dropped
 to fit the model window.
 
+Conversation history (at most 12 KB) replays only the current task's turns.
+Each earlier task in the conversation is one line, its first request (200
+bytes) and its last answer (300 bytes), under a heading that says the current
+source wins where they disagree; the block holds at most 4 KB, the oldest tasks
+dropping first behind a counted line, and the current turns keep the rest. In
+badciv run 13, step 1's turns replayed whole led step 2 to plan a fix the
+source already had. `MOOSEDEV_HARNESS_EARLIER_TASKS=full` replays every task's
+turns as before.
+
 Repository navigation previews are byte-bounded (up to 8 KB), and optional
 conversation history uses only space remaining after current evidence and the
 action schema. Omitted paths are disclosed; `search` first returns the accepted
@@ -1111,6 +1131,32 @@ contract 3 and intent contract 2.
   rules. (It used to repeat each as a header, `via:` line and "claim under
   Project rules" pointer, about 180 bytes per rule: 15.6 KB for 86 rules in
   badciv 7e0c50eb.)
+- Rules by state. Each governing rule has a state for the step, by
+  precedence: decided (the daemon's `decided_by`, context contract 3, names
+  an accepted decision `isMotivatedBy` it), addressed by approved plan N of
+  this task (its `addresses`, and the edits made under it, from its first
+  edit to the next plan's, touched every file it lists: a plan replaced
+  before any edit, or part-way through its files, implemented nothing),
+  claimed satisfied (the current plan's `satisfied`: the proposed plan's,
+  or in Auto the approved plan's), else open. An earlier approved plan
+  settles only through what it fully implemented: its `satisfied` claims
+  and the rules its approval deferred settle nothing for a later plan. In
+  Auto the rules the approved plan addresses stay open, so the builder keeps
+  the claims it implements; a proposed plan settles nothing but through its
+  own `satisfied`. A settled Requirement renders as one line, `[Requirement]
+  label (iri) — decided by <AD> | addressed by approved plan N | plan says
+  already satisfied; <via>`, in delivered
+  order, and a closing line counts them with the search route. Constraints
+  always render in full whatever their state: a decision addressing a
+  Constraint does not retire it (Lesson f07aacbb). A settled rule of either
+  kind needs no answer: plan coverage does not send a plan back for it, the
+  plan does not leave it open, add-to-plan does not ask about it, and the
+  Plan-mode echo names only the open rules and counts the rest ("(n settled
+  rule(s) need no answer)"). `Step::Plan` journals `rules_settled` ("decided
+  a, addressed b, satisfied c of n rule(s)") when any is settled.
+  Against an older daemon (no `decided_by`) settlement falls back to plans.
+  `MOOSEDEV_HARNESS_RULES_BY_STATE=off` treats every rule as open except the
+  proposed plan's own `satisfied` claims.
 
   Requirements are governing rules because they are what an approved spec
   mostly records: `/approve-spec` links both kinds to the covering component,
@@ -1150,8 +1196,24 @@ contract 3 and intent contract 2.
   in `approved_plans` with its addresses, the rules delivered at its approval
   and where its edits begin; a replan replaces the current plan but not this
   history, and a new objective clears it.
+- Plan satisfied. A plan may also list, in `satisfied`, the rules the
+  existing code already satisfies unchanged; in the strict schema it is
+  required and may be empty, like `addresses`. Entries resolve as `addresses`
+  do (`plan_satisfied`, `plan_satisfied_unresolved`), and `addresses` wins
+  when both name a rule. It is a claim only: the claimed rules settle for
+  coverage and are not left open, the plan gate shows "Says N rule(s) already
+  hold", `/approve` journals `rules_claimed_satisfied` and keeps the claims on
+  the approved plan, and capture never turns them into `isMotivatedBy` edges.
+  With the field on, the rules header asks the plan to say that the existing
+  code already satisfies a rule as a fourth answer.
+  `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` removes `satisfied` from the schema,
+  the action meanings and the rules header, and drops any a model sends; the
+  claims a resumed task's journal already holds settle nothing, are not
+  journaled or kept at approval, and are neither shown at the gate nor sent
+  in the plan.
 - Open rules at plan approval. When a plan is stored, the delivered rules it
-  does not list in `addresses` are kept on the plan as `open_rules` (IRI,
+  does not list in `addresses`, and that nothing settles (see Rules by
+  state), are kept on the plan as `open_rules` (IRI,
   label, kind), whatever its summary says of them: `addresses` is the
   structural record of what the plan implements, and a summary that says a
   rule "is deferred outside this objective" or "does not apply" leaves it
@@ -1246,6 +1308,31 @@ contract 3 and intent contract 2.
   file's tier, size and reason (`kept` for a file held from the last prompt),
   and the model request records `source_outlined`, `source_full` and
   `source_budget`.
+- Context plan receipt. Every step-action request records what each prompt
+  section took. Its `model_requests` entry carries `context_plan`: `scope`,
+  `preloaded` and `preload_skipped` (the step's scope files, the ones
+  preloaded, and the ones left out for space); `rules` (the rules section's
+  `bytes`, the rules shown `full`, `one_line` and `title_only` by kind, the
+  `settled` rules by state, and `decided_by_supported`, whether the daemon
+  reports the decisions that settle a rule, context contract 3); `source`
+  (the section's `bytes`, entity dossiers included, the files shown `full`,
+  as an `outline` or `listed`, the full-source `budget`, and the files shown
+  in full in and out of the scope, `scope_full` and `nonscope_full`);
+  `history` (`bytes` and the `earlier_tasks` lines it shows);
+  `navigation_bytes`, `observations_bytes`, `head_bytes` and `state_bytes`;
+  `schema_bytes`, the output schema appended under the json_schema contract
+  (0 under tools, whose definitions travel beside the prompt), and
+  `repair_bytes`, the rejection note a repair attempt appends; `total`, the
+  prompt text sent, which all of those add up to; and `budget`, the prompt
+  budget. Each request also
+  journals one `context_plan` intent event with the counts on one line, for
+  example `rules 26.8KB full 45 line 12 title 0 settled d12 p0 s0; source
+  30.1KB budget 40.0KB full 4 outline 6 listed 0 (in scope 4, out 0); scope 9
+  pre 5 skip 0; hist 2.1KB (2 earlier); nav 1.2KB; obs 8.0KB; head 40.1KB;
+  state 1.2KB; schema 12.0KB; repair 0.0KB; total 70.3/99.0KB` (settled: `d` decided, `p` addressed by an
+  approved plan, `s` said satisfied). A repair request gets its
+  own receipt. The receipt only journals, as `source_delivery` does, so it
+  has no switch.
 - Source swap notice. When a prompt shows as an outline a file the previous
   prompt showed in full, the outlines section opens by naming it, with the
   working set's size and the source budget, and `source_swap` is journaled.
@@ -1256,6 +1343,39 @@ contract 3 and intent contract 2.
   model reading its files in
   a cycle through a budget one file short (badciv 7e0c50eb) is told it is
   swapping, rather than finding out one read at a time.
+- Source by scope. Each step has a scope, chosen from its state rather than
+  from what the model happened to read: the plan's files, then the files
+  earlier approved plans of the task listed, then in Auto the files the
+  current errors are in (settled language-server errors and the files the
+  latest failed command names), or in Plan the approved spec in play and the
+  files it covers. That spec's approval is current, rules are still open, and
+  its components cover a place (whole-project coverage `.` names none); the
+  objective, the guidance or a read names it, or it is the only such spec.
+  Scope files on disk that are not in the working set join it as preloaded
+  source: no recency, read snapshot or read file, and in Plan mode their
+  governing rules arrive as `rule_files` without dossiers. At most 24 are
+  preloaded, their outlines within a tenth of the prompt budget, and only
+  while the prompt keeps full source's whole share and the observation floor
+  with their outlines added, so a preload never shrinks what a step shows in
+  full or overflows a prompt that fitted. The rest are named in the source
+  section ("Scope files not loaded for space: …; read one to load it."). A
+  preloaded file that leaves the scope unread leaves the working set;
+  `scope_preload` is journaled when the set changes. Should the rules the
+  scope brought still overflow the prompt after the rule-claim floor, the
+  step withdraws its preloads and is built without them (`scope_preload`
+  "withdrawn"), so the scope never stops a step. Scope files rank after
+  the files a step needs and before recency (reason `scope`). A preloaded
+  file shown in full counts as read for the redundant-read refusal and for
+  edit grounding, and an edit to it reads it in and proceeds in the same step
+  when the read brings no governing knowledge the proposal had not seen; an
+  outlined one still meets the edit guards. An empty scope changes nothing.
+- Reads outside the scope. With a non-empty scope, a `read` of an existing
+  file outside it that the model has not read is served as the Last result,
+  "Current text of `<file>` (outside this step's scope; not added to the
+  working set):", journaled as `Served read outside scope:` with
+  `read_served_outside_scope`, paged and refused on repeat as a served
+  outlined read is. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches scope,
+  preloading and these serves off.
 - Redundant reads. A model `read` of a file the producing prompt already
   shows in full is refused without touching the tiers (the refusal gives the
   next action: plan in Plan mode; edit, check or finish while working). A
@@ -1564,7 +1684,17 @@ contract 3 and intent contract 2.
   second plan approval. `MOOSEDEV_HARNESS_SCOPE_CHOICE=off` keeps the
   automatic replan: the edit is discarded and the task re-enters Plan mode
   naming the file (`scope_escape_replan`, three per task; the fourth parks for
-  guidance as `scope_escape_exhausted`). A no-op edit (the result equals
+  guidance as `scope_escape_exhausted`). An edit outside the plan to a file
+  an earlier approved plan of the task listed (a replan narrowed the plan and
+  dropped it) is not asked about: the human approved that file once, so it
+  joins the plan as `add` would, and the edit goes on (`scope_auto_added`).
+  Not a file the human declined (`refuse` at a scope or missing-module
+  question) or removed (`drop` at a missing planned file) in this task
+  (`scope_declined` in the journal's symbolic state); and a file bringing rules
+  the approval does not address, or an amendment that fails, is undone and
+  asked about as before (`scope_auto_add_refused`, with the rule labels or the
+  error). `MOOSEDEV_HARNESS_SCOPE_AUTO_ADD=off` asks about every file outside
+  the plan. A no-op edit (the result equals
   the current source) runs the required checks instead of consuming the repair
   budget (`noop_edit_continuation`), unless the language server has settled
   errors in that source: then the edit is repaired with their count and the
@@ -1595,7 +1725,17 @@ contract 3 and intent contract 2.
   check result or human answer since approval continues the approved plan
   instead of reopening planning (`replan_continuation`, unbounded); a replan
   while already planning changes nothing (`replan_noop`). A real replan keeps
-  the files already read (`model_replan`).
+  the files already read (`model_replan`). A model replan while every current
+  error is in the approved plan's files (the settled language-server errors
+  and the files the latest failed command names, as source by scope finds
+  them) is held once per edit count (`replan_held`, "files: reason";
+  `replan_held_at` in the symbolic state): the task stays in approved work and
+  the model is told "Replan held once: every current error is in the approved
+  files (…)", then the language-server block, the latest failure's error lines
+  grouped by file (2,000 bytes at most), and "Fix them within the plan; replan
+  again if the plan itself is wrong." A second replan at the same edit count
+  goes through; no hold when an error is outside the plan or there is none.
+  `MOOSEDEV_HARNESS_REPLAN_HOLD=off` lets every replan through.
 - Amending an approved plan. While the task plans again after an approval (a
   replan, human guidance or `/plan`) and the stored plan is still the latest
   approved one, the prompt labels it "Approved plan (amend it; keep what still

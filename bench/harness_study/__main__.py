@@ -144,6 +144,13 @@ def main(argv=None):
                          help="reorder every prompt first, e.g. --move 'entity dossiers' source")
     command.add_argument("--details", action="store_true",
                          help="add per-section churn and the prefill/generation latency fit")
+    command = sub.add_parser("rules-by-state", help="offline estimate of the project-rules section with settled rules on one line; no model calls")
+    command.add_argument("journals", type=Path, nargs="+", help="task journals of one conversation, in conversation order")
+    command.add_argument("--decided", type=Path, default=None,
+                         help="file of rule IRIs an accepted decision already settles, one per line")
+    command.add_argument("--no-proxy", action="store_true",
+                         help="do not treat rules an earlier journal's approved plan addressed as settled")
+    command.add_argument("--json", action="store_true", help="machine-readable output")
     command = sub.add_parser("prefill-probe", help="time a live model server's prefill on two consecutive journaled prompts, sent as the harness sends them")
     command.add_argument("journal", type=Path, help="a .moosedev/harness/tasks/<id>.json task journal")
     command.add_argument("--tools", type=Path, required=True, help="the action tool definitions as the harness sends them (JSON)")
@@ -268,6 +275,11 @@ def main(argv=None):
         from .prefix_reuse import report_file
         move = tuple(args.move) if args.move else None
         print(json.dumps(report_file(args.journal, move, args.details), indent=2))
+        return 0
+    elif args.command == "rules-by-state":
+        from .rules_by_state import report_files, table
+        result = report_files(args.journals, args.decided, proxy=not args.no_proxy)
+        print(json.dumps(result, indent=2) if args.json else table(result))
         return 0
     elif args.command == "prefill-probe":
         from .prefill_probe import probe_file

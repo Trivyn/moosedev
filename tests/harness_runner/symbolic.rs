@@ -1199,6 +1199,7 @@ async fn only_action_and_capture_note_schemas_are_ever_requested() {
         kind: "Requirement".into(),
         claim: "hasDescription: A rendered name never changes between views.\n".into(),
         via: "via: component Labels".into(),
+        decided_by: Vec::new(),
     }];
     fixture.note(
         "The helper strips whitespace so labels compare equal; keep normalization in one place.",
@@ -1733,6 +1734,7 @@ async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
             kind: "Requirement".into(),
             claim: "hasDescription: Display labels render as before.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
         GoverningRule {
             iri: UNLINKED.into(),
@@ -1740,6 +1742,7 @@ async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
             kind: "Constraint".into(),
             claim: "hasDescription: A label is a single line.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
     ];
     let mut runner = fixture.interactive().await;
@@ -1828,6 +1831,7 @@ async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
         stale: false,
         record_count: 3,
         open_rules: Some(vec!["Labels are localized".into()]),
+        covers: Vec::new(),
     }];
     for _ in 0..4 {
         match runner.task.phase {
@@ -1855,6 +1859,7 @@ async fn a_returned_plan_names_each_rule_by_its_kind() {
         kind: "Requirement".into(),
         claim: "hasDescription: Display labels render exactly as before.\n".into(),
         via: "via: linked to labels.py".into(),
+        decided_by: Vec::new(),
     }];
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[]}));
@@ -3603,6 +3608,7 @@ async fn adding_a_file_governed_by_rules_the_plan_does_not_address_replans() {
             kind: "Constraint".into(),
             claim: "hasDescription: A module-level constant is never reassigned.\n".into(),
             via: "via: linked to other.py".into(),
+            decided_by: Vec::new(),
         },
     )];
     let mut runner = escaped_to_other(&fixture).await;
@@ -4111,6 +4117,7 @@ fn preserve_rule() -> GoverningRule {
         kind: "Requirement".into(),
         claim: "hasDescription: Display labels render exactly as before.\n".into(),
         via: "via: linked to labels.py".into(),
+        decided_by: Vec::new(),
     }
 }
 
@@ -4298,7 +4305,7 @@ async fn the_plan_choices_switch_removes_open_choices() {
         .contains(&json!("open_choices")));
     assert!(fixture
         .last_model_prompt("harness_action")
-        .contains("plan(summary,files,checks,addresses,open_choices)"));
+        .contains("plan(summary,files,checks,addresses,satisfied,open_choices)"));
     assert_eq!(runner.task.plan.as_ref().unwrap().open_choices.len(), 1);
 
     std::env::set_var("MOOSEDEV_HARNESS_PLAN_CHOICES", "off");
@@ -4317,6 +4324,11 @@ async fn the_plan_choices_switch_removes_open_choices() {
     assert!(!fixture
         .last_model_prompt("harness_action")
         .contains("open_choices"));
+    // The satisfied field has its own switch and stays.
+    assert!(off["properties"].get("satisfied").is_some());
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("plan(summary,files,checks,addresses,satisfied)"));
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert!(runner.task.plan.as_ref().unwrap().open_choices.is_empty());
 }
@@ -4723,6 +4735,7 @@ async fn addressed_rules_are_withheld_while_planned_files_hold_stubs() {
             kind: "Requirement".into(),
             claim: "hasDescription: Display labels render as before.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
         GoverningRule {
             iri: UNLINKED.into(),
@@ -4730,6 +4743,7 @@ async fn addressed_rules_are_withheld_while_planned_files_hold_stubs() {
             kind: "Constraint".into(),
             claim: "hasDescription: A label is a single line.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
     ];
     std::fs::write(
@@ -4836,11 +4850,13 @@ async fn addressed_rules_across_two_plans(
             summary: "Keep labels on one line".into(),
             files: vec![earlier.into()],
             addresses: vec![UNLINKED.into()],
+            satisfied: vec![],
             edit_start: 0,
             ..current.clone()
         },
         moosedev::harness::runner::ApprovedPlan {
             addresses: vec![PRESERVE.into()],
+            satisfied: vec![],
             edit_start: 1,
             ..current
         },
@@ -4955,4 +4971,352 @@ async fn a_write_without_content_is_repaired_not_a_finish() {
         "the repair names the absent file"
     );
     assert!(runner.task.edits.iter().any(|edit| edit.file == "codes.py"));
+}
+
+fn unlinked_rule() -> GoverningRule {
+    GoverningRule {
+        iri: UNLINKED.into(),
+        label: "Labels never exceed one line".into(),
+        kind: "Constraint".into(),
+        claim: "hasDescription: A label is a single line.\n".into(),
+        via: "via: linked to labels.py".into(),
+        decided_by: Vec::new(),
+    }
+}
+
+fn decided(rule: GoverningRule, decision: &str) -> GoverningRule {
+    GoverningRule {
+        decided_by: vec![decision.into()],
+        ..rule
+    }
+}
+
+/// The Project rules block of a step prompt, up to the action meanings.
+fn rules_section(prompt: &str) -> String {
+    let rules = prompt
+        .split("\nProject rules (")
+        .nth(1)
+        .expect("a rules block");
+    rules.split("\nAction meanings").next().unwrap().to_owned()
+}
+
+/// A rule an accepted decision is motivated by needs no answer: the plan is
+/// not sent back for it and does not leave it open. A decided Requirement is
+/// one line naming the decision; a decided Constraint is still shown whole.
+#[tokio::test]
+async fn rules_a_decision_settles_are_not_sent_back_or_left_open() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![
+        decided(preserve_rule(), "urn:ad:preserve"),
+        decided(unlinked_rule(), "urn:ad:unlinked"),
+    ];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[],"satisfied":[]}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingPlan,
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner.task.plan.as_ref().unwrap().open_rules.is_empty());
+    assert!(intent_details(&runner, "constraint_coverage").is_empty());
+    assert_eq!(
+        intent_details(&runner, "rules_settled"),
+        vec!["decided 2, addressed 0, satisfied 0 of 2 rule(s)"]
+    );
+    let prompt = fixture.last_model_prompt("harness_action");
+    let rules = rules_section(&prompt);
+    assert!(
+        rules.contains(&format!("\n[Requirement] Preserve display label behavior ({PRESERVE}) — decided by urn:ad:preserve; via: linked to labels.py\n")),
+        "{rules}"
+    );
+    assert!(!rules.contains("Display labels render exactly as before."));
+    assert!(
+        rules.contains(&format!("\n[Constraint] Labels never exceed one line ({UNLINKED})\nvia: linked to labels.py\nhasDescription: A label is a single line.\n")),
+        "a decided Constraint stays whole: {rules}"
+    );
+    assert!(rules.contains("\n1 settled Requirement(s) are shown as one line without their claim and need no answer; search project knowledge for their claims\n"));
+    assert!(
+        prompt.contains(
+            "\nEvery project rule is already settled (2 settled rule(s) need no answer)."
+        ),
+        "{prompt}"
+    );
+}
+
+/// A rule an earlier approved plan of the task addressed, with an edit made
+/// under it, is settled when planning again: one line, not sent back, not
+/// left open. While that plan is being built its rules stay whole.
+#[tokio::test]
+async fn a_rule_an_earlier_approved_plan_addressed_is_settled_when_replanning() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Preserve display label behavior while adding a helper","files":["labels.py"],"checks":["true"],"addresses":[PRESERVE]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    // In Auto the builder keeps the claims its plan implements.
+    let building = fixture.last_model_prompt("harness_action");
+    assert!(
+        rules_section(&building).contains(&format!("({PRESERVE})\nvia: linked to labels.py\nhasDescription: Display labels render exactly as before.\n")),
+        "{building}"
+    );
+
+    fixture.conversational(
+        json!({"action":"replan","reason":"Normalize must also collapse whitespace"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    fixture.conversational(json!({"action":"plan","summary":"Collapse whitespace in normalize","files":["labels.py"],"checks":["true"],"addresses":[]}));
+    for _ in 0..3 {
+        if runner.task.phase == Phase::AwaitingPlan {
+            break;
+        }
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.confirm_no_knowledge().await.unwrap(),
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan, "not sent back");
+    assert!(runner.task.plan.as_ref().unwrap().open_rules.is_empty());
+    assert_eq!(
+        intent_details(&runner, "rules_settled"),
+        vec!["decided 0, addressed 1, satisfied 0 of 1 rule(s)"]
+    );
+    let planning = fixture.last_model_prompt("harness_action");
+    let rules = rules_section(&planning);
+    assert!(
+        rules.contains(&format!("\n[Requirement] Preserve display label behavior ({PRESERVE}) — addressed by approved plan 1; via: linked to labels.py\n")),
+        "{rules}"
+    );
+    assert!(!rules.contains("Display labels render exactly as before."));
+}
+
+/// A plan's `satisfied` claims resolve like its addresses (which win on
+/// overlap); an entry naming no rule is journaled and dropped. A claimed rule
+/// is not sent back or left open, approval journals the claim and keeps it,
+/// and it never becomes a knowledge edge.
+#[tokio::test]
+async fn a_plan_says_a_rule_already_holds_and_that_claim_mints_no_edge() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule(), unlinked_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    let planning = fixture.last_model_prompt("harness_action");
+    assert!(planning.contains("plan(summary,files,checks,addresses,satisfied,open_choices)"));
+    assert!(planning.contains("that the existing code already satisfies it unchanged"));
+    fixture.conversational(json!({"action":"plan","summary":"Add a normalize helper so labels never exceed one line","files":["labels.py"],"checks":["true"],"addresses":["[Constraint] Labels never exceed one line"],"satisfied":["Preserve display label behavior","No such rule",UNLINKED]}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingPlan,
+        "{}",
+        runner.task.last_response
+    );
+    let plan = runner.task.plan.as_ref().unwrap();
+    assert_eq!(plan.addresses, vec![UNLINKED.to_string()]);
+    assert_eq!(plan.satisfied, vec![PRESERVE.to_string()]);
+    assert!(plan.open_rules.is_empty());
+    assert_eq!(
+        intent_details(&runner, "plan_satisfied"),
+        vec![format!("1 of 2 rule(s): {PRESERVE}")]
+    );
+    assert_eq!(
+        intent_details(&runner, "plan_satisfied_unresolved"),
+        vec!["No such rule"]
+    );
+    assert_eq!(
+        intent_details(&runner, "rules_settled"),
+        vec!["decided 0, addressed 0, satisfied 1 of 2 rule(s)"]
+    );
+
+    runner.approve_plan().await.unwrap();
+    assert_eq!(runner.task.approved_plans[0].satisfied, vec![PRESERVE]);
+    assert_eq!(
+        intent_details(&runner, "rules_claimed_satisfied"),
+        vec!["1 rule(s): Preserve display label behavior"]
+    );
+    assert!(intent_details(&runner, "rules_deferred").is_empty());
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.edits.len(), 1);
+    let building = rules_section(&fixture.last_model_prompt("harness_action"));
+    assert!(
+        building.contains(&format!("\n[Requirement] Preserve display label behavior ({PRESERVE}) — plan says already satisfied; via: linked to labels.py\n")),
+        "{building}"
+    );
+    assert!(building.contains("hasDescription: A label is a single line.\n"));
+
+    fixture.conversational(json!({"action":"finish","summary":"Normalized."}));
+    for _ in 0..6 {
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.review(true).await.unwrap(),
+            Phase::Verifying => break,
+            _ => runner.advance().await.unwrap(),
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::Verifying);
+    runner.task.check_results = vec![passed_check()];
+    fixture.note("Normalization lives in one helper.");
+    runner.advance().await.unwrap();
+    let request = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .capture_type_requests
+        .last()
+        .cloned()
+        .expect("the note was typed");
+    assert_eq!(request.addressed_rules, vec![UNLINKED.to_string()]);
+}
+
+/// `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` while alive.
+struct SatisfiedOff;
+
+impl SatisfiedOff {
+    fn new() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_PLAN_SATISFIED", "off");
+        Self
+    }
+}
+
+impl Drop for SatisfiedOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_PLAN_SATISFIED");
+    }
+}
+
+/// A task resumed with `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` whose journal
+/// already holds `satisfied` claims behaves as before the field existed: the
+/// claims settle no rule, leave none closed at approval, are not journaled or
+/// kept on the approved plan, and are neither shown nor sent to the model.
+#[tokio::test]
+async fn switched_off_satisfied_ignores_the_claims_a_resumed_journal_holds() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule(), unlinked_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a normalize helper so labels never exceed one line","files":["labels.py"],"checks":["true"],"addresses":["[Constraint] Labels never exceed one line"],"satisfied":["Preserve display label behavior"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().satisfied,
+        vec![PRESERVE.to_string()]
+    );
+
+    let _off = SatisfiedOff::new();
+    // The gate's "Says N rule(s) already hold" line reads these.
+    assert!(runner
+        .task
+        .plan
+        .as_ref()
+        .unwrap()
+        .satisfied_claims()
+        .is_empty());
+    runner.approve_plan().await.unwrap();
+    let claimed = intent_details(&runner, "rules_claimed_satisfied");
+    let kept = runner.task.approved_plans[0].satisfied.clone();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    let building = fixture.last_model_prompt("harness_action");
+    assert!(claimed.is_empty(), "{claimed:?}");
+    assert!(kept.is_empty(), "{kept:?}");
+    let rules = rules_section(&building);
+    assert!(
+        rules.contains(&format!("({PRESERVE})\nvia: linked to labels.py\nhasDescription: Display labels render exactly as before.\n")),
+        "{rules}"
+    );
+    assert!(!rules.contains("plan says already satisfied"), "{rules}");
+    assert!(!building.contains("\"satisfied\""), "{building}");
+}
+
+/// Both switches off, the rules settle by nothing and plans carry no
+/// `satisfied`: the planning prompt is byte-identical whether or not the
+/// daemon says a decision settles a rule, and it reads as before.
+struct RulesByStateOff;
+
+impl RulesByStateOff {
+    fn new() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_RULES_BY_STATE", "off");
+        std::env::set_var("MOOSEDEV_HARNESS_PLAN_SATISFIED", "off");
+        Self
+    }
+}
+
+impl Drop for RulesByStateOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_RULES_BY_STATE");
+        std::env::remove_var("MOOSEDEV_HARNESS_PLAN_SATISFIED");
+    }
+}
+
+#[tokio::test]
+async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _off = RulesByStateOff::new();
+    let plan = json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[],"satisfied":["Preserve display label behavior"]});
+    let mut prompts = Vec::new();
+    for decision in [None, Some("urn:ad:preserve")] {
+        let fixture = symbolic_fixture().await;
+        let rules = vec![preserve_rule(), unlinked_rule()];
+        fixture.shared.lock().unwrap().governing_rules = match decision {
+            Some(decision) => rules
+                .into_iter()
+                .map(|rule| decided(rule, decision))
+                .collect(),
+            None => rules,
+        };
+        let mut runner = fixture.interactive().await;
+        fixture.conversational(plan.clone());
+        runner.advance().await.unwrap();
+        // The satisfied claim is dropped, so coverage sends the plan back.
+        assert!(runner.task.plan.is_none(), "returned for the rules");
+        assert!(intent_details(&runner, "rules_settled").is_empty());
+        let request = requests_of_kind(&fixture, "model")
+            .into_iter()
+            .rfind(|request| request["schema"] == "harness_action")
+            .unwrap();
+        let tools = request["body"]["tools"].as_array().unwrap();
+        let plan_tool = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "plan")
+            .unwrap();
+        assert!(plan_tool["function"]["parameters"]["properties"]
+            .get("satisfied")
+            .is_none());
+        assert_eq!(
+            plan_tool["function"]["description"],
+            "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses)."
+        );
+        prompts.push(fixture.last_model_prompt("harness_action"));
+    }
+    assert_eq!(prompts[0], prompts[1]);
+    let prompt = &prompts[0];
+    assert!(!prompt.contains("satisfied"), "{prompt}");
+    assert!(!prompt.contains("settled"), "{prompt}");
+    assert!(prompt.contains("plan(summary,files,checks,addresses,open_choices)"));
+    let rules = rules_section(prompt);
+    let before = format!("hard requirements for any change that touches them; for each, your plan says it implements the rule, that the rule does not apply to this change, or that it is deferred because it lies outside this objective; list only the ones it implements in addresses):\n\n[Requirement] Preserve display label behavior ({PRESERVE})\nvia: linked to labels.py\nhasDescription: Display labels render exactly as before.\n\n[Constraint] Labels never exceed one line ({UNLINKED})\nvia: linked to labels.py\nhasDescription: A label is a single line.\n");
+    let output_rule = rules
+        .strip_prefix(&before)
+        .unwrap_or_else(|| panic!("{rules}"));
+    assert!(
+        output_rule.starts_with("Call exactly one tool") || output_rule.starts_with("Return"),
+        "nothing follows the rules but the output rule: {output_rule}"
+    );
+    assert!(prompt.contains("\nYour plan summary must say, for each project rule, whether this change implements it, it does not apply, or it is deferred as outside this objective: Preserve display label behavior; Labels never exceed one line. List only the ones it implements in addresses."));
 }

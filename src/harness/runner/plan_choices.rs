@@ -130,19 +130,23 @@ pub(super) fn decided(choices: &[OpenChoice]) -> String {
 impl Runner {
     /// The rules the just-stored plan leaves open among those delivered for
     /// its files, as the plan keeps them: every one not in its `addresses`,
-    /// the structural record of what it implements. A summary that says a
-    /// rule is deferred or does not apply leaves it open too; such a rule is
-    /// marked as mentioned.
+    /// the structural record of what it implements, and not settled: not
+    /// among its `satisfied` claims, decided, or settled by an earlier
+    /// approved plan of this task. A summary that says a rule is deferred or
+    /// does not apply leaves it open too; such a rule is marked as mentioned.
     pub(super) fn open_rules(&self, context: &ContextResponse) -> Vec<OpenRule> {
         let Some(plan) = self.task.plan.as_ref() else {
             return Vec::new();
         };
-        let open: Vec<GoverningRule> = context
-            .governing_rules
-            .iter()
-            .filter(|rule| !plan.addresses.contains(&rule.iri))
-            .cloned()
-            .collect();
+        let open: Vec<GoverningRule> = self.unsettled_rules(
+            context
+                .governing_rules
+                .iter()
+                .filter(|rule| !plan.addresses.contains(&rule.iri))
+                .cloned()
+                .collect(),
+            plan.satisfied_claims(),
+        );
         let unmentioned: Vec<String> = self
             .unaddressed_rules(&open)
             .into_iter()
@@ -202,9 +206,23 @@ impl Runner {
         self.persist()
     }
 
-    /// On approval: every unanswered open choice takes its default, and the
-    /// rules the plan leaves open are journaled as deferred.
+    /// On approval: every unanswered open choice takes its default, the
+    /// rules the plan leaves open are journaled as deferred, and those it
+    /// says already hold as claimed satisfied.
     pub(super) fn settle_plan_approval(&mut self) {
+        let claimed: Vec<String> = self.task.plan.as_ref().map_or_else(Vec::new, |plan| {
+            plan.satisfied_claims()
+                .iter()
+                .map(|iri| {
+                    self.context
+                        .as_ref()
+                        .and_then(|context| {
+                            context.governing_rules.iter().find(|rule| &rule.iri == iri)
+                        })
+                        .map_or_else(|| iri.clone(), |rule| rule.label.clone())
+                })
+                .collect()
+        });
         let Some(plan) = self.task.plan.as_mut() else {
             return;
         };
@@ -227,6 +245,12 @@ impl Runner {
             self.intent_event(
                 "rules_deferred",
                 &format!("{} rule(s): {}", deferred.len(), deferred.join("; ")),
+            );
+        }
+        if !claimed.is_empty() {
+            self.intent_event(
+                "rules_claimed_satisfied",
+                &format!("{} rule(s): {}", claimed.len(), claimed.join("; ")),
             );
         }
     }
@@ -271,11 +295,17 @@ mod tests {
         let old = json!({"summary":"s","files":["a.rs"],"checks":["true"]});
         let plan: Plan = serde_json::from_value(old.clone()).unwrap();
         assert!(plan.open_rules.is_empty() && plan.open_choices.is_empty());
+        assert!(plan.satisfied.is_empty());
         assert_eq!(serde_json::to_value(&plan).unwrap(), old);
         let old = json!({"summary":"s","files":["a.rs"],"edit_start":0});
         let approved: ApprovedPlan = serde_json::from_value(old.clone()).unwrap();
-        assert!(approved.deferred.is_empty());
+        assert!(approved.deferred.is_empty() && approved.satisfied.is_empty());
         assert_eq!(serde_json::to_value(&approved).unwrap(), old);
+        // A plan that claims a rule already holds keeps the claim.
+        let new = json!({"summary":"s","files":["a.rs"],"checks":["true"],"satisfied":["urn:r"]});
+        let plan: Plan = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(plan.satisfied, ["urn:r"]);
+        assert_eq!(serde_json::to_value(&plan).unwrap(), new);
     }
 
     #[test]

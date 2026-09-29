@@ -314,6 +314,7 @@ mod tests {
             files: vec![],
             checks: vec!["true".into()],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

@@ -545,6 +545,7 @@ impl Runner {
         match self.task.approved_plans.last_mut() {
             Some(last) if last.summary == plan.summary && last.files == plan.files => {
                 last.addresses = plan.addresses.clone();
+                last.satisfied = plan.satisfied_claims().to_vec();
                 last.rules_in_view = rules_in_view;
                 last.deferred = deferred;
             }
@@ -553,6 +554,7 @@ impl Runner {
                     summary: plan.summary.clone(),
                     files: plan.files.clone(),
                     addresses: plan.addresses.clone(),
+                    satisfied: plan.satisfied_claims().to_vec(),
                     rules_in_view,
                     deferred,
                     edit_start,
