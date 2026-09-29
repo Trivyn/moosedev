@@ -1134,15 +1134,18 @@ contract 3 and intent contract 2.
 - Rules by state. Each governing rule has a state for the step, by
   precedence: decided (the daemon's `decided_by`, context contract 3, names
   an accepted decision `isMotivatedBy` it), addressed by approved plan N of
-  this task (its `addresses`, and an edit was made under it: a plan replaced
-  before any edit implemented nothing), claimed satisfied (the proposed
-  plan's `satisfied`, or an approved plan's), deferred by approved plan N
-  (the open rules its approval deferred), else open. In Auto the rules the
-  approved plan addresses stay open, so the builder keeps the claims it
-  implements; a proposed plan settles nothing but through its own
-  `satisfied`. A settled Requirement renders as one line, `[Requirement]
+  this task (its `addresses`, and the edits made under it, from its first
+  edit to the next plan's, touched every file it lists: a plan replaced
+  before any edit, or part-way through its files, implemented nothing),
+  claimed satisfied (the current plan's `satisfied`: the proposed plan's,
+  or in Auto the approved plan's), else open. An earlier approved plan
+  settles only through what it fully implemented: its `satisfied` claims
+  and the rules its approval deferred settle nothing for a later plan. In
+  Auto the rules the approved plan addresses stay open, so the builder keeps
+  the claims it implements; a proposed plan settles nothing but through its
+  own `satisfied`. A settled Requirement renders as one line, `[Requirement]
   label (iri) — decided by <AD> | addressed by approved plan N | plan says
-  already satisfied | deferred by approved plan N; <via>`, in delivered
+  already satisfied; <via>`, in delivered
   order, and a closing line counts them with the search route. Constraints
   always render in full whatever their state: a decision addressing a
   Constraint does not retire it (Lesson f07aacbb). A settled rule of either
@@ -1150,7 +1153,7 @@ contract 3 and intent contract 2.
   plan does not leave it open, add-to-plan does not ask about it, and the
   Plan-mode echo names only the open rules and counts the rest ("(n settled
   rule(s) need no answer)"). `Step::Plan` journals `rules_settled` ("decided
-  a, addressed b, satisfied c, deferred d of n rule(s)") when any is settled.
+  a, addressed b, satisfied c of n rule(s)") when any is settled.
   Against an older daemon (no `decided_by`) settlement falls back to plans.
   `MOOSEDEV_HARNESS_RULES_BY_STATE=off` treats every rule as open except the
   proposed plan's own `satisfied` claims.
@@ -1204,7 +1207,10 @@ contract 3 and intent contract 2.
   With the field on, the rules header asks the plan to say that the existing
   code already satisfies a rule as a fourth answer.
   `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` removes `satisfied` from the schema,
-  the action meanings and the rules header, and drops any a model sends.
+  the action meanings and the rules header, and drops any a model sends; the
+  claims a resumed task's journal already holds settle nothing, are not
+  journaled or kept at approval, and are neither shown at the gate nor sent
+  in the plan.
 - Open rules at plan approval. When a plan is stored, the delivered rules it
   does not list in `addresses`, and that nothing settles (see Rules by
   state), are kept on the plan as `open_rules` (IRI,
@@ -1314,14 +1320,17 @@ contract 3 and intent contract 2.
   in full in and out of the scope, `scope_full` and `nonscope_full`);
   `history` (`bytes` and the `earlier_tasks` lines it shows);
   `navigation_bytes`, `observations_bytes`, `head_bytes` and `state_bytes`;
-  `total`, the prompt's length before the output schema, which those
-  sections add up to; and `budget`, the prompt budget. Each request also
+  `schema_bytes`, the output schema appended under the json_schema contract
+  (0 under tools, whose definitions travel beside the prompt), and
+  `repair_bytes`, the rejection note a repair attempt appends; `total`, the
+  prompt text sent, which all of those add up to; and `budget`, the prompt
+  budget. Each request also
   journals one `context_plan` intent event with the counts on one line, for
-  example `rules 26.8KB full 45 line 12 title 0 settled d12 p0 s0 f0; source
+  example `rules 26.8KB full 45 line 12 title 0 settled d12 p0 s0; source
   30.1KB budget 40.0KB full 4 outline 6 listed 0 (in scope 4, out 0); scope 9
   pre 5 skip 0; hist 2.1KB (2 earlier); nav 1.2KB; obs 8.0KB; head 40.1KB;
-  state 1.2KB; total 58.3/99.0KB` (settled: `d` decided, `p` addressed by an
-  approved plan, `s` said satisfied, `f` deferred). A repair request gets its
+  state 1.2KB; schema 12.0KB; repair 0.0KB; total 70.3/99.0KB` (settled: `d` decided, `p` addressed by an
+  approved plan, `s` said satisfied). A repair request gets its
   own receipt. The receipt only journals, as `source_delivery` does, so it
   has no switch.
 - Source swap notice. When a prompt shows as an outline a file the previous

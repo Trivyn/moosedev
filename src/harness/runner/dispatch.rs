@@ -380,9 +380,9 @@ impl Runner {
             self.intent_event("source_delivery", &receipt);
         }
         // What each section of this prompt took, on every request: compact
-        // in the intent journal, whole on the request's journal entry.
-        self.intent_event("context_plan", &plan.compact());
-        self.context_plan = Some(serde_json::to_value(&plan)?);
+        // in the intent journal, whole on the request's journal entry, both
+        // written when the request is sent ([`Self::model_json`]).
+        self.context_plan = Some(plan);
         let output: ModelOutput = self
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;

@@ -122,6 +122,52 @@ async fn plan_mode_preloads_the_spec_in_play_with_rules_not_dossiers() {
     assert_eq!(intent_details(&runner, "scope_preload").len(), 1);
 }
 
+/// A read outside the scope of a file that changed on disk since it was
+/// served is served again, with the new text: it is not a repeat of an
+/// unchanged file.
+#[tokio::test]
+async fn a_read_outside_the_scope_of_a_file_changed_since_it_was_served_is_served_again() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    spec_project(&fixture, true);
+    let mut runner = planner(&fixture).await;
+    fixture.conversational(json!({"action":"read","file":"other/notes.rs"}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        intent_details(&runner, "read_served_outside_scope").len(),
+        1
+    );
+
+    let changed = "fn other() {}\nfn another() {}\n";
+    std::fs::write(fixture.root.join("other/notes.rs"), changed).unwrap();
+    fixture.conversational(json!({"action":"read","file":"other/notes.rs"}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.last_response,
+        format!("Current text of `other/notes.rs` (outside this step's scope; not added to the working set):\n{changed}")
+    );
+    assert_eq!(
+        intent_details(&runner, "read_served_outside_scope"),
+        [
+            format!("other/notes.rs: bytes 0..{0} of {0}", NOTES.len()),
+            format!("other/notes.rs: bytes 0..{0} of {0}", changed.len()),
+        ]
+    );
+    assert!(runner.task.read_files.is_empty());
+
+    // Unchanged since that second serve, the next read is a repeat.
+    fixture.conversational(json!({"action":"read","file":"other/notes.rs"}));
+    runner.advance().await.unwrap();
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("Not read again: `other/notes.rs` is unchanged"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
 #[tokio::test]
 async fn a_read_of_a_preloaded_file_shown_in_full_is_not_repeated() {
     let _env_lock = ENVIRONMENT.lock().await;

@@ -25,8 +25,12 @@ A rule is settled for a request when
 Auto-mode exception: in an Auto request the rules the approved plan addresses
 stay open, so the builder keeps the claims it implements.
 
-Plans' `deferred` lists are not counted as settling (Group B also settles a
-deferred rule), so Auto-mode figures here are conservative.
+Plans' `deferred` and `satisfied` lists are not counted as settling. The
+harness counts neither from an earlier plan either, but it does count the
+current plan's `satisfied` claims, so figures here are conservative there.
+The harness also settles an earlier plan's addresses only once every file of
+it was edited under it; this estimate does not check edits, so it can
+overstate settlement for a plan replaced part-way.
 """
 import json
 import re

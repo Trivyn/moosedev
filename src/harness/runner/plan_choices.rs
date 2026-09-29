@@ -145,7 +145,7 @@ impl Runner {
                 .filter(|rule| !plan.addresses.contains(&rule.iri))
                 .cloned()
                 .collect(),
-            &plan.satisfied,
+            plan.satisfied_claims(),
         );
         let unmentioned: Vec<String> = self
             .unaddressed_rules(&open)
@@ -211,7 +211,7 @@ impl Runner {
     /// says already hold as claimed satisfied.
     pub(super) fn settle_plan_approval(&mut self) {
         let claimed: Vec<String> = self.task.plan.as_ref().map_or_else(Vec::new, |plan| {
-            plan.satisfied
+            plan.satisfied_claims()
                 .iter()
                 .map(|iri| {
                     self.context

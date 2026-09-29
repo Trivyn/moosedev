@@ -154,15 +154,18 @@ impl Runner {
             return Vec::new();
         };
         let thresholds = CoverageThresholds::from_env().unwrap_or_default();
-        self.unsettled_rules(self.rules_with_retrieved_claims(rules), &plan.satisfied)
-            .into_iter()
-            .filter(|rule| {
-                !plan.addresses.contains(&rule.iri)
-                    && !self
-                        .coverage_receipt(&plan.summary, rule, &thresholds)
-                        .covered
-            })
-            .collect()
+        self.unsettled_rules(
+            self.rules_with_retrieved_claims(rules),
+            plan.satisfied_claims(),
+        )
+        .into_iter()
+        .filter(|rule| {
+            !plan.addresses.contains(&rule.iri)
+                && !self
+                    .coverage_receipt(&plan.summary, rule, &thresholds)
+                    .covered
+        })
+        .collect()
     }
 
     /// Resolve the plan's `addresses` to the IRIs of rules delivered for its

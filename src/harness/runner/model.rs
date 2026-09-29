@@ -549,6 +549,13 @@ impl Runner {
         name: &str,
         schema: Value,
     ) -> Result<T> {
+        // The step prompt's receipt, completed below with what the request
+        // appends to the prompt; a request that is never sent journals none.
+        let mut context_plan = if name == "harness_action" {
+            self.context_plan.take()
+        } else {
+            None
+        };
         let config = self.active_config()?;
         anyhow::ensure!(
             config.configured,
@@ -608,6 +615,7 @@ impl Runner {
                     .map(|repair| repair.attempts as u8),
             },
         );
+        let base_request_len = base_request.len();
         let mut request = base_request;
         if let Some(repair) = &self.task.recovery {
             if !repair.diagnostic.is_empty() {
@@ -622,6 +630,16 @@ impl Runner {
                 ));
             }
         }
+        // What was appended to the step prompt: the output schema (under
+        // the json_schema contract; tool definitions travel beside the
+        // prompt) and a repair note, so `total` is the prompt sent.
+        if let Some(plan) = context_plan.as_mut() {
+            plan.schema_bytes = base_request_len.saturating_sub(prompt.len());
+            plan.repair_bytes = request.len().saturating_sub(base_request_len);
+            plan.total = request.len();
+            self.intent_event("context_plan", &plan.compact());
+        }
+        let context_plan = context_plan.map(serde_json::to_value).transpose()?;
         {
             // Bind audit metadata to the source actually delivered, rather than
             // rereading files that may have changed while preparing the request.
@@ -631,11 +649,6 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            let context_plan = if name == "harness_action" {
-                self.context_plan.take()
-            } else {
-                None
-            };
             self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"context_plan":context_plan,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
@@ -963,6 +976,10 @@ impl Runner {
             }
             plan.open_rules.clear();
             plan.open_choices.clear();
+            // Claims a resumed journal holds from when the field was on.
+            if !rule_state::plan_satisfied_enabled() {
+                plan.satisfied.clear();
+            }
             plan
         });
         prompt.push_str(&format!(
@@ -1301,6 +1318,9 @@ impl Runner {
             observations_bytes: observations.len(),
             head_bytes,
             state_bytes: state.len(),
+            // What the request appends is added when it is sent.
+            schema_bytes: 0,
+            repair_bytes: 0,
             total: prompt.len(),
             budget: self.prompt_budget()?,
         };
@@ -2058,8 +2078,8 @@ mod tests {
             RuleState::Decided("urn:ad:1".into()),
             RuleState::Decided("urn:ad:2".into()),
             RuleState::AddressedByPlan(1),
-            RuleState::Deferred(2),
-            RuleState::ClaimedSatisfied(None),
+            RuleState::AddressedByPlan(2),
+            RuleState::ClaimedSatisfied,
             RuleState::Open,
         ];
         let (rendered, receipt) = project_rules(&rules, &states);
@@ -2080,20 +2100,15 @@ mod tests {
         assert!(receipt.title_only.is_empty());
         assert_eq!(
             receipt.settled,
-            BTreeMap::from([
-                ("addressed", 1),
-                ("decided", 2),
-                ("deferred", 1),
-                ("satisfied", 1)
-            ])
+            BTreeMap::from([("addressed", 2), ("decided", 2), ("satisfied", 1)])
         );
         // A rule with no via line keeps its one line whole.
         let mut bare = rule("urn:r5", "Requirement", "");
         bare.via.clear();
-        let (rendered, _) = project_rules(&[bare], &[RuleState::Deferred(1)]);
+        let (rendered, _) = project_rules(&[bare], &[RuleState::AddressedByPlan(1)]);
         assert!(
             rendered
-                .contains("\n[Requirement] Rule urn:r5 (urn:r5) — deferred by approved plan 1\n"),
+                .contains("\n[Requirement] Rule urn:r5 (urn:r5) — addressed by approved plan 1\n"),
             "{rendered}"
         );
 
@@ -2104,7 +2119,7 @@ mod tests {
             echo.ends_with(": Rule urn:r4 (5 settled rule(s) need no answer). List only the ones it implements in addresses."),
             "{echo}"
         );
-        let settled = [RuleState::Deferred(1), RuleState::AddressedByPlan(1)];
+        let settled = [RuleState::ClaimedSatisfied, RuleState::AddressedByPlan(1)];
         assert_eq!(
             plan_rule_echo(&rules[..2], &settled),
             "\nEvery project rule is already settled (2 settled rule(s) need no answer)."

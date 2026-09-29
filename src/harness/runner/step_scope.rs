@@ -96,7 +96,39 @@ fn named_candidates<'a>(output: &str, repo: &'a [String]) -> Vec<&'a String> {
         .collect()
 }
 
-/// The error lines of a failed run's `output` ([`error_lines`]), grouped
+/// A failed run's error lines ([`error_lines`]) in output order, each
+/// `-->` location only when it is printed right under an error line: the
+/// location of a warning or a note is no error's.
+fn failure_error_lines(output: &str) -> Vec<&str> {
+    let errors = error_lines(output);
+    let mut kept = Vec::new();
+    let mut under_error = false;
+    for line in output.lines().map(str::trim) {
+        let location = line.starts_with("--> ");
+        let keep = errors.contains(line) && (!location || under_error);
+        if keep {
+            kept.push(line);
+        }
+        under_error = keep && !location;
+    }
+    kept
+}
+
+/// The part of a failed run's `output` its error files are read from: its
+/// error lines and their locations ([`failure_error_lines`]), so a path the
+/// output names only in passing (a compiling crate, a warning, a test name)
+/// is not taken for an error's file. The whole output when it has no error
+/// line.
+fn failure_error_text(output: &str) -> std::borrow::Cow<'_, str> {
+    let lines = failure_error_lines(output);
+    if lines.is_empty() {
+        output.into()
+    } else {
+        lines.join("\n").into()
+    }
+}
+
+/// The error lines of a failed run's `output` ([`failure_error_lines`]), grouped
 /// under the repository file each names, or that the `--> file:line` under
 /// it points at, in the order the output first names each file; lines naming
 /// no project file come last. Within `limit` bytes, with a counted line for
@@ -110,7 +142,7 @@ pub(super) fn errors_by_file(output: &str, repo: &[String], limit: usize) -> Str
             None => groups.push((file, vec![line])),
         }
     }
-    let errors = error_lines(output);
+    let errors: BTreeSet<&str> = failure_error_lines(output).into_iter().collect();
     let candidates = named_candidates(output, repo);
     let named = |line: &str| files_named_in(line, &candidates).into_iter().next();
     let mut groups: Groups = Vec::new();
@@ -170,7 +202,8 @@ pub(super) fn errors_by_file(output: &str, repo: &[String], limit: usize) -> Str
 
 impl Runner {
     /// Files the current errors are in: the settled language-server errors,
-    /// then the files the latest failed command names, once each.
+    /// then the files the latest failed command's errors name, once each
+    /// ([`failure_error_text`]).
     pub(super) fn current_error_files(&self, repo: &[String]) -> Vec<String> {
         let mut files = Vec::new();
         if let Some(diagnostics) = self.task.diagnostics.as_ref().filter(|d| d.settled) {
@@ -179,7 +212,8 @@ impl Runner {
             }
         }
         if let Some(output) = self.latest_failure_output() {
-            for file in files_named_in(output, &named_candidates(output, repo)) {
+            let text = failure_error_text(output);
+            for file in files_named_in(&text, &named_candidates(&text, repo)) {
                 push_unique(&mut files, &file);
             }
         }
@@ -492,6 +526,12 @@ a/src/lib.rs:\n  error[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n\
             "{bounded}"
         );
         assert_eq!(errors_by_file("all good\n", &repo, 100), "");
+        // A warning's location is not an error line.
+        let output = "warning: unused import\n --> a/src/grid.rs:1:1\nerror[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n";
+        assert_eq!(
+            errors_by_file(output, &repo, FAILURE_ERRORS_BYTES),
+            "a/src/lib.rs:\n  error[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n"
+        );
     }
 
     #[test]
@@ -640,6 +680,19 @@ a/src/lib.rs:\n  error[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n\
             ["c/src/lib.rs", "a/src/lib.rs"]
         );
         assert_eq!(runner.step_scope(&repo), ["a/src/lib.rs", "c/src/lib.rs"]);
+
+        // A path the output names outside its error lines is no error file.
+        runner.event(
+            "Command: cargo test\nPermission grants: none\nSuccess: false\n   Compiling c v0.1.0 (c/src/lib.rs)\nwarning: unused import\n --> b/src/lib.rs:3:5\nerror[E0308]: mismatched types\n --> a/src/lib.rs:2:1\nerror: could not compile `a`"
+                .to_string(),
+        );
+        assert_eq!(runner.current_error_files(&repo), ["a/src/lib.rs"]);
+        // With no error line at all, the whole output is read.
+        runner.event(
+            "Command: cargo test\nPermission grants: none\nSuccess: false\nthread 'main' panicked at b/src/lib.rs:4:9"
+                .to_string(),
+        );
+        assert_eq!(runner.current_error_files(&repo), ["b/src/lib.rs"]);
         server.abort();
     }
 

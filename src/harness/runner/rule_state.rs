@@ -1,12 +1,13 @@
 //! Where each governing rule stands for this step. A rule an accepted decision
-//! already settles, or an approved plan of this task addressed, deferred or
-//! said the existing code satisfies, needs no answer from the planner, and a
-//! settled Requirement is shown as one line instead of its claim (Constraint
-//! 979354f7, rule 4 as amended). Constraints are never shortened by state: a
-//! decision that addresses a Constraint does not retire it, since it binds
-//! every later change to what it governs (Lesson f07aacbb). Their state still
-//! counts for plan coverage and the rules a plan leaves open.
-use super::task::{ApprovedPlan, Plan};
+//! already settles, an approved plan of this task fully implemented, or the
+//! current plan says the existing code satisfies, needs no answer from the
+//! planner, and a settled Requirement is shown as one line instead of its
+//! claim (Constraint 979354f7, rule 4 as amended). Constraints are never
+//! shortened by state: a decision that addresses a Constraint does not retire
+//! it, since it binds every later change to what it governs (Lesson
+//! f07aacbb). Their state still counts for plan coverage and the rules a plan
+//! leaves open.
+use super::task::{ApprovedPlan, PendingEdit, Plan};
 use super::{Mode, Runner};
 use crate::harness::protocol::GoverningRule;
 use serde::Serialize;
@@ -14,16 +15,18 @@ use std::collections::BTreeMap;
 
 /// Whether rules settle by state. `MOOSEDEV_HARNESS_RULES_BY_STATE=off` treats
 /// every rule as open, as before: nothing is shortened, and coverage and the
-/// open rules read every delivered rule. The satisfied claims of the plan
-/// being proposed are its own answer and still count
-/// ([`plan_satisfied_enabled`] governs them).
+/// open rules read every delivered rule. The satisfied claims of the current
+/// plan are its own answer and still count ([`plan_satisfied_enabled`]
+/// governs them).
 pub(super) fn by_state_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_RULES_BY_STATE").map_or(true, |value| value.trim() != "off")
 }
 
 /// Whether plans may say which rules the existing code already satisfies.
 /// `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` removes `satisfied` from the schema,
-/// the prompt and the rules header, and drops any a model sends anyway.
+/// the prompt and the rules header, drops any a model sends anyway, and
+/// ignores any a resumed task's journal already holds: no claim settles a
+/// rule, is journaled at approval or is shown at the gate.
 pub(super) fn plan_satisfied_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_PLAN_SATISFIED").map_or(true, |value| value.trim() != "off")
 }
@@ -36,14 +39,13 @@ pub(super) enum RuleState {
     /// An accepted decision `isMotivatedBy` the rule: the first of its
     /// `decided_by`.
     Decided(String),
-    /// Approved plan n lists the rule in `addresses`, and an edit was made
-    /// under it.
+    /// Approved plan n lists the rule in `addresses`, and every file of that
+    /// plan was edited under it.
     AddressedByPlan(usize),
-    /// A plan says the existing code already satisfies the rule: approved
-    /// plan n, or (`None`) the plan being proposed.
-    ClaimedSatisfied(Option<usize>),
-    /// Approved plan n left the rule open, and its approval deferred it.
-    Deferred(usize),
+    /// The current plan says the existing code already satisfies the rule:
+    /// the plan being proposed, or in Auto the approved plan being built.
+    /// An earlier approved plan's claims settle nothing.
+    ClaimedSatisfied,
 }
 
 impl RuleState {
@@ -57,8 +59,7 @@ impl RuleState {
             RuleState::Open => return None,
             RuleState::Decided(decision) => format!("decided by {decision}"),
             RuleState::AddressedByPlan(n) => format!("addressed by approved plan {n}"),
-            RuleState::ClaimedSatisfied(_) => "plan says already satisfied".to_owned(),
-            RuleState::Deferred(n) => format!("deferred by approved plan {n}"),
+            RuleState::ClaimedSatisfied => "plan says already satisfied".to_owned(),
         })
     }
 
@@ -68,11 +69,13 @@ impl RuleState {
             RuleState::Open => "open",
             RuleState::Decided(_) => "decided",
             RuleState::AddressedByPlan(_) => "addressed",
-            RuleState::ClaimedSatisfied(_) => "satisfied",
-            RuleState::Deferred(_) => "deferred",
+            RuleState::ClaimedSatisfied => "satisfied",
         }
     }
 }
+
+/// The settled states' names, in precedence order, for counted lines.
+pub(super) const SETTLED_NAMES: [&str; 3] = ["decided", "addressed", "satisfied"];
 
 /// What settles rules for one step.
 pub(super) struct Settlement<'a> {
@@ -81,25 +84,41 @@ pub(super) struct Settlement<'a> {
     /// claims it implements, so these stay open whatever else settles them.
     implementing: &'a [String],
     approved: &'a [ApprovedPlan],
-    /// `Task::edits` so far: a plan replaced before any edit implemented
-    /// nothing, so its `addresses` settle nothing (as capture reads them).
-    edits: usize,
-    /// The satisfied claims of the plan being proposed.
-    claimed: &'a [String],
+    /// `Task::edits` so far: an approved plan's `addresses` settle only once
+    /// every file of the plan was edited under it. A plan replaced before any
+    /// edit, or part-way through its files, did not implement what it
+    /// addressed.
+    edits: &'a [PendingEdit],
+    /// The current plan's satisfied claims: the proposal's in Plan mode, and
+    /// in Auto the approved plan's as well.
+    claimed: Vec<&'a str>,
 }
 
 impl<'a> Settlement<'a> {
+    /// `claimed` is the proposed plan's satisfied claims; in Auto the current
+    /// plan's are added. With `satisfied` off no claim settles anything.
     pub(super) fn new(
         mode: Mode,
         current: Option<&'a Plan>,
         approved: &'a [ApprovedPlan],
-        edits: usize,
+        edits: &'a [PendingEdit],
         claimed: &'a [String],
         by_state: bool,
+        satisfied: bool,
     ) -> Self {
-        let implementing = match (mode, current) {
-            (Mode::Auto, Some(plan)) => plan.addresses.as_slice(),
-            _ => &[],
+        let current = match mode {
+            Mode::Auto => current,
+            Mode::Plan => None,
+        };
+        let implementing = current.map_or(&[][..], |plan| plan.addresses.as_slice());
+        let claimed = if satisfied {
+            claimed
+                .iter()
+                .chain(current.into_iter().flat_map(|plan| &plan.satisfied))
+                .map(String::as_str)
+                .collect()
+        } else {
+            Vec::new()
         };
         Self {
             by_state,
@@ -110,39 +129,25 @@ impl<'a> Settlement<'a> {
         }
     }
 
-    /// Precedence: Decided, AddressedByPlan, ClaimedSatisfied, Deferred,
-    /// Open; a proposed plan settles only through `claimed`.
+    /// Precedence: Decided, AddressedByPlan, ClaimedSatisfied, Open; a
+    /// proposed plan settles only through `claimed`, and an earlier approved
+    /// plan only through what it fully implemented.
     pub(super) fn state(&self, rule: &GoverningRule) -> RuleState {
         if self.implementing.contains(&rule.iri) {
             return RuleState::Open;
         }
-        let in_plan = |field: fn(&ApprovedPlan) -> &[String], edited: bool| {
-            self.approved
-                .iter()
-                .enumerate()
-                .rfind(|(index, plan)| {
-                    field(plan).contains(&rule.iri) && (!edited || self.edited_under(*index))
-                })
-                .map(|(index, _)| index + 1)
-        };
         if self.by_state {
             if let Some(decision) = rule.decided_by.first() {
                 return RuleState::Decided(decision.clone());
             }
-            if let Some(n) = in_plan(|plan| &plan.addresses, true) {
-                return RuleState::AddressedByPlan(n);
+            if let Some((index, _)) = self.approved.iter().enumerate().rfind(|(index, plan)| {
+                plan.addresses.contains(&rule.iri) && self.implemented(*index)
+            }) {
+                return RuleState::AddressedByPlan(index + 1);
             }
         }
-        if self.claimed.contains(&rule.iri) {
-            return RuleState::ClaimedSatisfied(None);
-        }
-        if self.by_state {
-            if let Some(n) = in_plan(|plan| &plan.satisfied, false) {
-                return RuleState::ClaimedSatisfied(Some(n));
-            }
-            if let Some(n) = in_plan(|plan| &plan.deferred, false) {
-                return RuleState::Deferred(n);
-            }
+        if self.claimed.contains(&rule.iri.as_str()) {
+            return RuleState::ClaimedSatisfied;
         }
         RuleState::Open
     }
@@ -151,14 +156,22 @@ impl<'a> Settlement<'a> {
         rules.iter().map(|rule| self.state(rule)).collect()
     }
 
-    /// Whether an edit was made under approved plan `index`.
-    fn edited_under(&self, index: usize) -> bool {
+    /// Whether approved plan `index` was carried out: at least one edit was
+    /// made under it (from its `edit_start` to the next plan's, or to now),
+    /// and those edits touched every file it lists.
+    fn implemented(&self, index: usize) -> bool {
+        let plan = &self.approved[index];
         let end = self
             .approved
             .get(index + 1)
-            .map_or(self.edits, |next| next.edit_start)
-            .min(self.edits);
-        self.approved[index].edit_start < end
+            .map_or(self.edits.len(), |next| next.edit_start)
+            .min(self.edits.len());
+        let edits = &self.edits[plan.edit_start.min(end)..end];
+        !edits.is_empty()
+            && plan
+                .files
+                .iter()
+                .all(|file| edits.iter().any(|edit| &edit.file == file))
     }
 }
 
@@ -175,15 +188,17 @@ pub(super) struct RulesReceipt {
 
 impl Runner {
     /// What settles rules now; `claimed` is the satisfied claims of the plan
-    /// being proposed, empty when none is.
+    /// being proposed, empty when none is (in Auto the approved plan's own
+    /// claims are added).
     pub(super) fn settlement<'a>(&'a self, claimed: &'a [String]) -> Settlement<'a> {
         Settlement::new(
             self.task.mode,
             self.task.plan.as_ref(),
             &self.task.approved_plans,
-            self.task.edits.len(),
+            &self.task.edits,
             claimed,
             by_state_enabled(),
+            plan_satisfied_enabled(),
         )
     }
 
@@ -212,7 +227,7 @@ impl Runner {
         if counts.is_empty() {
             return;
         }
-        let detail = ["decided", "addressed", "satisfied", "deferred"]
+        let detail = SETTLED_NAMES
             .iter()
             .map(|name| format!("{name} {}", counts.get(name).copied().unwrap_or(0)))
             .collect::<Vec<_>>()
@@ -239,74 +254,104 @@ mod tests {
         }
     }
 
+    fn approved_on(
+        files: &[&str],
+        addresses: &[&str],
+        satisfied: &[&str],
+        deferred: &[&str],
+        edit_start: usize,
+    ) -> ApprovedPlan {
+        let strings = |list: &[&str]| list.iter().map(|item| item.to_string()).collect();
+        ApprovedPlan {
+            summary: "s".into(),
+            files: strings(files),
+            addresses: strings(addresses),
+            satisfied: strings(satisfied),
+            rules_in_view: Vec::new(),
+            deferred: strings(deferred),
+            edit_start,
+        }
+    }
+
     fn approved(
         addresses: &[&str],
         satisfied: &[&str],
         deferred: &[&str],
         edit_start: usize,
     ) -> ApprovedPlan {
-        let iris = |list: &[&str]| list.iter().map(|iri| iri.to_string()).collect();
-        ApprovedPlan {
-            summary: "s".into(),
-            files: vec!["a.rs".into()],
-            addresses: iris(addresses),
-            satisfied: iris(satisfied),
-            rules_in_view: Vec::new(),
-            deferred: iris(deferred),
-            edit_start,
-        }
+        approved_on(&["a.rs"], addresses, satisfied, deferred, edit_start)
     }
 
-    fn plan(addresses: &[&str]) -> Plan {
+    fn edits(files: &[&str]) -> Vec<PendingEdit> {
+        files
+            .iter()
+            .map(|file| PendingEdit {
+                file: file.to_string(),
+                before: None,
+                after: Some(String::new()),
+                reason: String::new(),
+                revision: String::new(),
+            })
+            .collect()
+    }
+
+    fn plan(addresses: &[&str], satisfied: &[&str]) -> Plan {
+        let strings = |list: &[&str]| list.iter().map(|item| item.to_string()).collect();
         Plan {
             summary: "s".into(),
             files: vec!["a.rs".into()],
             checks: vec![],
-            addresses: addresses.iter().map(|iri| iri.to_string()).collect(),
-            satisfied: vec![],
+            addresses: strings(addresses),
+            satisfied: strings(satisfied),
             open_rules: vec![],
             open_choices: vec![],
         }
     }
 
+    fn settle<'a>(
+        mode: Mode,
+        current: Option<&'a Plan>,
+        plans: &'a [ApprovedPlan],
+        edits: &'a [PendingEdit],
+        claimed: &'a [String],
+    ) -> Settlement<'a> {
+        Settlement::new(mode, current, plans, edits, claimed, true, true)
+    }
+
     #[test]
-    fn precedence_is_decided_addressed_satisfied_deferred_open() {
-        // Plan 1 addressed, said satisfied and deferred everything; an edit
-        // was made under it.
-        let everything = ["urn:a", "urn:b", "urn:c", "urn:d"];
-        let plans = [approved(&everything, &everything, &everything, 0)];
-        let claimed = vec!["urn:c".to_string()];
-        let settle = Settlement::new(Mode::Plan, None, &plans, 1, &claimed, true);
+    fn precedence_is_decided_addressed_satisfied_open() {
+        // Plan 1 addressed everything; its one file was edited under it.
+        let everything = ["urn:a", "urn:b", "urn:c"];
+        let plans = [approved(&everything, &[], &[], 0)];
+        let edited = edits(&["a.rs"]);
+        let claimed = vec!["urn:b".to_string(), "urn:c".to_string()];
+        let state = settle(Mode::Plan, None, &plans, &edited, &claimed);
         assert_eq!(
-            settle.state(&rule("urn:a", &["urn:ad:1", "urn:ad:2"])),
+            state.state(&rule("urn:a", &["urn:ad:1", "urn:ad:2"])),
             RuleState::Decided("urn:ad:1".into())
         );
         assert_eq!(
-            settle.state(&rule("urn:b", &[])),
+            state.state(&rule("urn:b", &[])),
             RuleState::AddressedByPlan(1)
         );
-
-        let plans = [approved(&[], &["urn:c"], &["urn:c", "urn:d"], 0)];
-        let settle = Settlement::new(Mode::Plan, None, &plans, 1, &claimed, true);
+        let plans = [approved(&[], &[], &[], 0)];
+        let state = settle(Mode::Plan, None, &plans, &edited, &claimed);
         assert_eq!(
-            settle.state(&rule("urn:c", &[])),
-            RuleState::ClaimedSatisfied(None),
-            "the proposal's claim outranks an approved plan's"
+            state.state(&rule("urn:c", &[])),
+            RuleState::ClaimedSatisfied
         );
-        let settle = Settlement::new(Mode::Plan, None, &plans, 1, &[], true);
-        assert_eq!(
-            settle.state(&rule("urn:c", &[])),
-            RuleState::ClaimedSatisfied(Some(1))
-        );
-        assert_eq!(settle.state(&rule("urn:d", &[])), RuleState::Deferred(1));
-        assert_eq!(settle.state(&rule("urn:e", &[])), RuleState::Open);
-        // The latest approved plan names the rule.
+        assert_eq!(state.state(&rule("urn:e", &[])), RuleState::Open);
+        // The latest approved plan that implemented the rule names it.
         let plans = [
-            approved(&[], &[], &["urn:d"], 0),
-            approved(&[], &[], &["urn:d"], 0),
+            approved(&["urn:d"], &[], &[], 0),
+            approved(&["urn:d"], &[], &[], 1),
         ];
-        let settle = Settlement::new(Mode::Plan, None, &plans, 0, &[], true);
-        assert_eq!(settle.state(&rule("urn:d", &[])), RuleState::Deferred(2));
+        let edited = edits(&["a.rs", "a.rs"]);
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(
+            state.state(&rule("urn:d", &[])),
+            RuleState::AddressedByPlan(2)
+        );
     }
 
     #[test]
@@ -315,11 +360,12 @@ mod tests {
             approved(&["urn:a"], &[], &[], 0),
             approved(&["urn:a"], &[], &[], 1),
         ];
-        let current = plan(&["urn:a"]);
+        let edited = edits(&["a.rs", "a.rs"]);
+        let current = plan(&["urn:a"], &[]);
         let decided = rule("urn:a", &["urn:ad"]);
-        let auto = Settlement::new(Mode::Auto, Some(&current), &plans, 2, &[], true);
+        let auto = settle(Mode::Auto, Some(&current), &plans, &edited, &[]);
         assert_eq!(auto.state(&decided), RuleState::Open);
-        let planning = Settlement::new(Mode::Plan, Some(&current), &plans, 2, &[], true);
+        let planning = settle(Mode::Plan, Some(&current), &plans, &edited, &[]);
         assert_eq!(
             planning.state(&decided),
             RuleState::Decided("urn:ad".into())
@@ -334,37 +380,108 @@ mod tests {
     fn a_proposed_plan_or_one_replaced_before_any_edit_settles_nothing() {
         // A proposed plan is `Task::plan`, never an approved plan: in Plan
         // mode its addresses settle nothing.
-        let proposed = plan(&["urn:a"]);
-        let settle = Settlement::new(Mode::Plan, Some(&proposed), &[], 0, &[], true);
-        assert_eq!(settle.state(&rule("urn:a", &[])), RuleState::Open);
+        let proposed = plan(&["urn:a"], &[]);
+        let state = settle(Mode::Plan, Some(&proposed), &[], &[], &[]);
+        assert_eq!(state.state(&rule("urn:a", &[])), RuleState::Open);
         // Plan 1 was replaced by plan 2 before any edit: it implemented
-        // nothing, though what it deferred stays deferred.
+        // nothing, and what it deferred is open.
         let plans = [
             approved(&["urn:a"], &[], &["urn:b"], 0),
             approved(&[], &[], &[], 0),
         ];
-        let settle = Settlement::new(Mode::Plan, None, &plans, 3, &[], true);
-        assert_eq!(settle.state(&rule("urn:a", &[])), RuleState::Open);
-        assert_eq!(settle.state(&rule("urn:b", &[])), RuleState::Deferred(1));
+        let edited = edits(&["a.rs", "a.rs", "a.rs"]);
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(state.state(&rule("urn:a", &[])), RuleState::Open);
+        assert_eq!(state.state(&rule("urn:b", &[])), RuleState::Open);
         // The latest plan, with no edit yet, has implemented nothing either.
         let plans = [approved(&["urn:a"], &[], &[], 3)];
-        let settle = Settlement::new(Mode::Plan, None, &plans, 3, &[], true);
-        assert_eq!(settle.state(&rule("urn:a", &[])), RuleState::Open);
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(state.state(&rule("urn:a", &[])), RuleState::Open);
+        // A plan with no files still needs an edit made under it.
+        let plans = [approved_on(&[], &["urn:a"], &[], &[], 3)];
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(state.state(&rule("urn:a", &[])), RuleState::Open);
+    }
+
+    #[test]
+    fn a_plan_replaced_part_way_through_its_files_settles_nothing() {
+        // Plan 1 covers a.rs and b.rs; only a.rs was edited before plan 2
+        // replaced it (b.rs was edited under plan 2, which does not count
+        // for plan 1). Its addresses (the rule for b.rs among them) stay
+        // open: nothing says the part it did implemented them.
+        let plans = [
+            approved_on(&["a.rs", "b.rs"], &["urn:a", "urn:b"], &[], &[], 0),
+            approved_on(&["c.rs"], &[], &[], &[], 1),
+        ];
+        let edited = edits(&["a.rs", "b.rs", "c.rs"]);
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(state.state(&rule("urn:b", &[])), RuleState::Open);
+        assert_eq!(state.state(&rule("urn:a", &[])), RuleState::Open);
+        // Every file edited under plan 1 settles what it addressed.
+        let plans = [
+            approved_on(&["a.rs", "b.rs"], &["urn:a", "urn:b"], &[], &[], 0),
+            approved_on(&["c.rs"], &[], &[], &[], 2),
+        ];
+        let edited = edits(&["b.rs", "a.rs", "c.rs"]);
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(
+            state.state(&rule("urn:b", &[])),
+            RuleState::AddressedByPlan(1)
+        );
+    }
+
+    #[test]
+    fn only_the_current_plans_claims_settle() {
+        // Plan 1 said urn:s already holds and deferred urn:f; a replan is
+        // proposed. Neither settles anything for the new plan.
+        let plans = [approved(&[], &["urn:s"], &["urn:f"], 0)];
+        let edited = edits(&["a.rs"]);
+        let state = settle(Mode::Plan, None, &plans, &edited, &[]);
+        assert_eq!(state.state(&rule("urn:s", &[])), RuleState::Open);
+        assert_eq!(state.state(&rule("urn:f", &[])), RuleState::Open);
+        // The proposal's own claim does.
+        let claimed = vec!["urn:s".to_string()];
+        let state = settle(Mode::Plan, None, &plans, &edited, &claimed);
+        assert_eq!(
+            state.state(&rule("urn:s", &[])),
+            RuleState::ClaimedSatisfied
+        );
+        // In Auto, the approved plan being built claims for itself; in Plan
+        // mode the same plan (replaced by the coming proposal) does not.
+        let current = plan(&[], &["urn:s"]);
+        let state = settle(Mode::Auto, Some(&current), &plans, &edited, &[]);
+        assert_eq!(
+            state.state(&rule("urn:s", &[])),
+            RuleState::ClaimedSatisfied
+        );
+        let state = settle(Mode::Plan, Some(&current), &plans, &edited, &[]);
+        assert_eq!(state.state(&rule("urn:s", &[])), RuleState::Open);
     }
 
     #[test]
     fn switched_off_every_rule_is_open_but_the_proposals_claim() {
         let plans = [approved(&["urn:a"], &["urn:b"], &["urn:c"], 0)];
+        let edited = edits(&["a.rs"]);
         let claimed = vec!["urn:e".to_string()];
-        let settle = Settlement::new(Mode::Plan, None, &plans, 1, &claimed, false);
+        let state = Settlement::new(Mode::Plan, None, &plans, &edited, &claimed, false, true);
         for iri in ["urn:a", "urn:b", "urn:c"] {
-            assert_eq!(settle.state(&rule(iri, &[])), RuleState::Open, "{iri}");
+            assert_eq!(state.state(&rule(iri, &[])), RuleState::Open, "{iri}");
         }
-        assert_eq!(settle.state(&rule("urn:d", &["urn:ad"])), RuleState::Open);
+        assert_eq!(state.state(&rule("urn:d", &["urn:ad"])), RuleState::Open);
         assert_eq!(
-            settle.state(&rule("urn:e", &[])),
-            RuleState::ClaimedSatisfied(None)
+            state.state(&rule("urn:e", &[])),
+            RuleState::ClaimedSatisfied
         );
+    }
+
+    #[test]
+    fn with_satisfied_off_no_claim_settles() {
+        // A resumed task's journal holds claims from when the field was on.
+        let current = plan(&[], &["urn:s"]);
+        let claimed = vec!["urn:p".to_string()];
+        let state = Settlement::new(Mode::Auto, Some(&current), &[], &[], &claimed, true, false);
+        assert_eq!(state.state(&rule("urn:s", &[])), RuleState::Open);
+        assert_eq!(state.state(&rule("urn:p", &[])), RuleState::Open);
     }
 
     #[test]
@@ -380,12 +497,8 @@ mod tests {
             "addressed by approved plan 2"
         );
         assert_eq!(
-            RuleState::ClaimedSatisfied(Some(1)).note().unwrap(),
+            RuleState::ClaimedSatisfied.note().unwrap(),
             "plan says already satisfied"
-        );
-        assert_eq!(
-            RuleState::Deferred(3).note().unwrap(),
-            "deferred by approved plan 3"
         );
     }
 }

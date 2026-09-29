@@ -294,6 +294,29 @@ async fn a_replan_while_every_error_is_planned_is_held_once() {
     assert_eq!(intent_details(&runner, "replan_held").len(), 1);
 }
 
+/// A path the failed output names outside its error lines (here a test
+/// runner's progress line naming other.py) does not defeat the hold: the
+/// error files are read from the error lines and their locations.
+#[tokio::test]
+async fn a_path_named_outside_the_error_lines_does_not_defeat_the_hold() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = approved(&fixture).await;
+    let command = "printf 'collecting other.py\\nerror[E0308]: mismatched types\\n  --> labels.py:1:1\\n'; exit 1";
+    step(
+        &fixture,
+        &mut runner,
+        json!({"action":"command","command":command}),
+    )
+    .await;
+    step(&fixture, &mut runner, replan()).await;
+    assert_eq!(runner.task.mode, Mode::Auto);
+    assert_eq!(
+        intent_details(&runner, "replan_held"),
+        ["labels.py: The helper needs its own module"]
+    );
+}
+
 #[tokio::test]
 async fn a_replan_is_not_held_with_an_error_outside_the_plan_or_no_error() {
     let _env_lock = ENVIRONMENT.lock().await;

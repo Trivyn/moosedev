@@ -120,7 +120,7 @@ pub struct Runner {
     source_budget: Option<usize>,
     /// The receipt of the step prompt being sent (`context_plan`), taken by
     /// its `model_requests` entry.
-    context_plan: Option<serde_json::Value>,
+    context_plan: Option<context_plan::ContextPlan>,
     /// This step's scope and the scope files left out for space, decided at
     /// its start.
     scope: step_scope::StepScope,

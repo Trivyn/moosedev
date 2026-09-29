@@ -797,21 +797,17 @@ fn plan_gate(task: &Task, plan: &super::runner::Plan, standing: &[String]) -> Ga
             labels.join("\n"),
         );
     }
-    if !plan.satisfied.is_empty() {
+    let satisfied = plan.satisfied_claims();
+    if !satisfied.is_empty() {
         // A claim for the human to weigh: the plan says the existing code
         // already holds these rules, so it neither implements nor defers them.
-        let mut iris: Vec<String> = plan
-            .satisfied
-            .iter()
-            .take(OPEN_RULES_SHOWN)
-            .cloned()
-            .collect();
-        let more = plan.satisfied.len().saturating_sub(OPEN_RULES_SHOWN);
+        let mut iris: Vec<String> = satisfied.iter().take(OPEN_RULES_SHOWN).cloned().collect();
+        let more = satisfied.len().saturating_sub(OPEN_RULES_SHOWN);
         if more > 0 {
             iris.push(format!("… and {more} more"));
         }
         gate.block(
-            format!("Says {} rule(s) already hold", plan.satisfied.len()),
+            format!("Says {} rule(s) already hold", satisfied.len()),
             iris.join("\n"),
         );
     }

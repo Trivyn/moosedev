@@ -54,6 +54,19 @@ pub struct Plan {
     pub open_choices: Vec<OpenChoice>,
 }
 
+impl Plan {
+    /// The `satisfied` claims every consumer reads: none while
+    /// `MOOSEDEV_HARNESS_PLAN_SATISFIED=off`, even when a resumed task's
+    /// journal holds some from when the field was on.
+    pub fn satisfied_claims(&self) -> &[String] {
+        if super::rule_state::plan_satisfied_enabled() {
+            &self.satisfied
+        } else {
+            &[]
+        }
+    }
+}
+
 /// A governing rule a proposed plan leaves open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

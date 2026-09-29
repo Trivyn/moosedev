@@ -681,7 +681,9 @@ impl Runner {
 
     /// The event of an outlined read, or a read outside the scope, of `file`
     /// served since the model last did anything but look (reads, inspects
-    /// and searches).
+    /// and searches), while the file on disk is still the text it served (the
+    /// read snapshot the serve recorded). A file changed since is served
+    /// again: its repeat is not "unchanged".
     fn served_since_progress(&self, file: &str) -> Option<usize> {
         let served = [
             format!("{OUTLINED_SERVED} {file} "),
@@ -690,6 +692,7 @@ impl Runner {
         self.looking_run(self.task.events.len())
             .find(|(_, event)| served.iter().any(|at| event.message.starts_with(at)))
             .map(|(index, _)| index)
+            .filter(|_| self.read_is_current(file))
     }
 
     /// Whether the Last result is the whole current text of `file`, served

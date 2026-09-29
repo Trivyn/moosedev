@@ -10,8 +10,9 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 /// The receipt of one step prompt. The section byte counts (head, source,
-/// navigation, history, state, observations) add up to `total`, the prompt's
-/// length before the output schema; `rules` is a part of `head`.
+/// navigation, history, state, observations), the output schema and the
+/// repair note add up to `total`, the prompt text sent; `rules` is a part of
+/// `head`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(super) struct ContextPlan {
     /// The step's scope files, in scope order.
@@ -29,6 +30,13 @@ pub(super) struct ContextPlan {
     pub head_bytes: usize,
     /// Guidance, harness state and the allowed actions.
     pub state_bytes: usize,
+    /// The output schema appended to the prompt under the json_schema
+    /// contract; 0 under tools, whose definitions travel beside the prompt.
+    pub schema_bytes: usize,
+    /// The note a repair attempt appends: why the last candidate was
+    /// rejected.
+    pub repair_bytes: usize,
+    /// The prompt text sent: every section above, the schema and the note.
     pub total: usize,
     /// The prompt budget: what the prompt and output schema may take.
     pub budget: usize,
@@ -82,6 +90,10 @@ impl SourcePlan {
 #[derive(Debug, Clone, Default, Serialize)]
 pub(super) struct HistoryPlan {
     pub bytes: usize,
+    /// The one-line earlier tasks under their header. 0 also when the
+    /// history's byte budget clipped that header off: the history is then
+    /// cut mid-text, and what is left of the block cannot be told from the
+    /// current task's turns.
     pub earlier_tasks: usize,
 }
 
@@ -123,7 +135,7 @@ impl ContextPlan {
         let settled = |name: &str| rules.settled.get(name).copied().unwrap_or(0);
         let source = &self.source;
         format!(
-            "rules {} full {} line {} title {} settled d{} p{} s{} f{}{}; source {} budget {} full {} outline {} listed {} (in scope {}, out {}); scope {} pre {} skip {}; hist {} ({} earlier); nav {}; obs {}; head {}; state {}; total {}/{}",
+            "rules {} full {} line {} title {} settled d{} p{} s{}{}; source {} budget {} full {} outline {} listed {} (in scope {}, out {}); scope {} pre {} skip {}; hist {} ({} earlier); nav {}; obs {}; head {}; state {}; schema {}; repair {}; total {}/{}",
             kb(rules.bytes),
             sum(&rules.full),
             sum(&rules.one_line),
@@ -131,7 +143,6 @@ impl ContextPlan {
             settled("decided"),
             settled("addressed"),
             settled("satisfied"),
-            settled("deferred"),
             if self.rules.decided_by_supported { "" } else { " (no decided_by)" },
             kb(source.bytes),
             kb(source.budget),
@@ -149,6 +160,8 @@ impl ContextPlan {
             kb(self.observations_bytes),
             kb(self.head_bytes),
             kb(self.state_bytes),
+            kb(self.schema_bytes),
+            kb(self.repair_bytes),
             kb(self.total).trim_end_matches("KB"),
             kb(self.budget),
         )
@@ -169,6 +182,7 @@ mod tests {
             observations_bytes: 8_000,
             head_bytes: 40_100,
             state_bytes: 1_234,
+            schema_bytes: 12_000,
             total: 58_300,
             budget: 98_976,
             ..Default::default()
@@ -194,7 +208,7 @@ mod tests {
         };
         assert_eq!(
             plan.compact(),
-            "rules 26.8KB full 45 line 12 title 0 settled d12 p0 s0 f0; source 30.1KB budget 40.0KB full 4 outline 6 listed 0 (in scope 1, out 3); scope 2 pre 1 skip 0; hist 2.1KB (2 earlier); nav 1.2KB; obs 8.0KB; head 40.1KB; state 1.2KB; total 58.3/99.0KB"
+            "rules 26.8KB full 45 line 12 title 0 settled d12 p0 s0; source 30.1KB budget 40.0KB full 4 outline 6 listed 0 (in scope 1, out 3); scope 2 pre 1 skip 0; hist 2.1KB (2 earlier); nav 1.2KB; obs 8.0KB; head 40.1KB; state 1.2KB; schema 12.0KB; repair 0.0KB; total 58.3/99.0KB"
         );
 
         // Far past any real prompt (100 KB at most), the line stays small:
@@ -206,7 +220,7 @@ mod tests {
             plan.rules.receipt.one_line.insert(kind.into(), count);
             plan.rules.receipt.title_only.insert(kind.into(), count);
         }
-        for name in ["decided", "addressed", "satisfied", "deferred"] {
+        for name in super::super::rule_state::SETTLED_NAMES {
             plan.rules.receipt.settled.insert(name, count);
         }
         plan.rules.receipt.bytes = bytes;
@@ -228,6 +242,8 @@ mod tests {
         plan.observations_bytes = bytes;
         plan.head_bytes = bytes;
         plan.state_bytes = bytes;
+        plan.schema_bytes = bytes;
+        plan.repair_bytes = bytes;
         plan.total = bytes;
         plan.budget = bytes;
         // A 100-file scope names no file.

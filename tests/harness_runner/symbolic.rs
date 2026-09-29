@@ -5024,7 +5024,7 @@ async fn rules_a_decision_settles_are_not_sent_back_or_left_open() {
     assert!(intent_details(&runner, "constraint_coverage").is_empty());
     assert_eq!(
         intent_details(&runner, "rules_settled"),
-        vec!["decided 2, addressed 0, satisfied 0, deferred 0 of 2 rule(s)"]
+        vec!["decided 2, addressed 0, satisfied 0 of 2 rule(s)"]
     );
     let prompt = fixture.last_model_prompt("harness_action");
     let rules = rules_section(&prompt);
@@ -5091,7 +5091,7 @@ async fn a_rule_an_earlier_approved_plan_addressed_is_settled_when_replanning() 
     assert!(runner.task.plan.as_ref().unwrap().open_rules.is_empty());
     assert_eq!(
         intent_details(&runner, "rules_settled"),
-        vec!["decided 0, addressed 1, satisfied 0, deferred 0 of 1 rule(s)"]
+        vec!["decided 0, addressed 1, satisfied 0 of 1 rule(s)"]
     );
     let planning = fixture.last_model_prompt("harness_action");
     let rules = rules_section(&planning);
@@ -5139,7 +5139,7 @@ async fn a_plan_says_a_rule_already_holds_and_that_claim_mints_no_edge() {
     );
     assert_eq!(
         intent_details(&runner, "rules_settled"),
-        vec!["decided 0, addressed 0, satisfied 1, deferred 0 of 2 rule(s)"]
+        vec!["decided 0, addressed 0, satisfied 1 of 2 rule(s)"]
     );
 
     runner.approve_plan().await.unwrap();
@@ -5181,6 +5181,67 @@ async fn a_plan_says_a_rule_already_holds_and_that_claim_mints_no_edge() {
         .cloned()
         .expect("the note was typed");
     assert_eq!(request.addressed_rules, vec![UNLINKED.to_string()]);
+}
+
+/// `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` while alive.
+struct SatisfiedOff;
+
+impl SatisfiedOff {
+    fn new() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_PLAN_SATISFIED", "off");
+        Self
+    }
+}
+
+impl Drop for SatisfiedOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_PLAN_SATISFIED");
+    }
+}
+
+/// A task resumed with `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` whose journal
+/// already holds `satisfied` claims behaves as before the field existed: the
+/// claims settle no rule, leave none closed at approval, are not journaled or
+/// kept on the approved plan, and are neither shown nor sent to the model.
+#[tokio::test]
+async fn switched_off_satisfied_ignores_the_claims_a_resumed_journal_holds() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    fixture.shared.lock().unwrap().governing_rules = vec![preserve_rule(), unlinked_rule()];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"plan","summary":"Add a normalize helper so labels never exceed one line","files":["labels.py"],"checks":["true"],"addresses":["[Constraint] Labels never exceed one line"],"satisfied":["Preserve display label behavior"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(
+        runner.task.plan.as_ref().unwrap().satisfied,
+        vec![PRESERVE.to_string()]
+    );
+
+    let _off = SatisfiedOff::new();
+    // The gate's "Says N rule(s) already hold" line reads these.
+    assert!(runner
+        .task
+        .plan
+        .as_ref()
+        .unwrap()
+        .satisfied_claims()
+        .is_empty());
+    runner.approve_plan().await.unwrap();
+    let claimed = intent_details(&runner, "rules_claimed_satisfied");
+    let kept = runner.task.approved_plans[0].satisfied.clone();
+    add_helper(&fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    let building = fixture.last_model_prompt("harness_action");
+    assert!(claimed.is_empty(), "{claimed:?}");
+    assert!(kept.is_empty(), "{kept:?}");
+    let rules = rules_section(&building);
+    assert!(
+        rules.contains(&format!("({PRESERVE})\nvia: linked to labels.py\nhasDescription: Display labels render exactly as before.\n")),
+        "{rules}"
+    );
+    assert!(!rules.contains("plan says already satisfied"), "{rules}");
+    assert!(!building.contains("\"satisfied\""), "{building}");
 }
 
 /// Both switches off, the rules settle by nothing and plans carry no

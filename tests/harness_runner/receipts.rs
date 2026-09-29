@@ -72,8 +72,10 @@ fn usize_at(value: &Value, key: &str) -> u64 {
 }
 
 /// Every step-action entry's receipt against its own prompt: the sections
-/// add up to the prompt, the rules section is as long as it says, and one
-/// compact intent event, within the intent cap, was journaled per request.
+/// add up to the step prompt, and with the output schema and any repair note
+/// to the prompt sent (`total`); the rules section is as long as it says, and
+/// one compact intent event, within the intent cap, was journaled per
+/// request.
 fn assert_receipts(runner: &Runner) -> Vec<Value> {
     let requests = action_requests(runner);
     assert!(!requests.is_empty());
@@ -82,7 +84,17 @@ fn assert_receipts(runner: &Runner) -> Vec<Value> {
         let plan = &entry["context_plan"];
         assert!(plan.is_object(), "no context_plan on {entry}");
         let prompt = step_prompt(entry);
-        assert_eq!(usize_at(plan, "total"), prompt.len() as u64);
+        let sent = entry["prompt"].as_str().unwrap();
+        assert_eq!(usize_at(plan, "total"), sent.len() as u64, "{plan}");
+        let schema = sent[prompt.len()..]
+            .find("\nYour last candidate was rejected:")
+            .unwrap_or(sent.len() - prompt.len());
+        assert_eq!(usize_at(plan, "schema_bytes"), schema as u64, "{plan}");
+        assert_eq!(
+            usize_at(plan, "repair_bytes"),
+            (sent.len() - prompt.len() - schema) as u64,
+            "{plan}"
+        );
         let sections: u64 = [
             "head_bytes",
             "navigation_bytes",
@@ -94,7 +106,12 @@ fn assert_receipts(runner: &Runner) -> Vec<Value> {
         .sum::<u64>()
             + usize_at(&plan["source"], "bytes")
             + usize_at(&plan["history"], "bytes");
-        assert_eq!(sections, usize_at(plan, "total"), "{plan}");
+        assert_eq!(sections, prompt.len() as u64, "{plan}");
+        assert_eq!(
+            sections + usize_at(plan, "schema_bytes") + usize_at(plan, "repair_bytes"),
+            usize_at(plan, "total"),
+            "{plan}"
+        );
         assert_eq!(
             usize_at(&plan["rules"], "bytes"),
             rules_section(prompt).len() as u64,
@@ -144,6 +161,11 @@ async fn every_step_action_request_carries_its_context_plan() {
     assert_eq!(requests[2]["attempt"], 2);
 
     let plans = assert_receipts(&runner);
+    // Under the json_schema contract every request appends the schema; only
+    // the repair appends the rejection note, and its receipt counts it.
+    assert!(plans.iter().all(|plan| usize_at(plan, "schema_bytes") > 0));
+    assert_eq!(usize_at(&plans[1], "repair_bytes"), 0);
+    assert!(usize_at(&plans[2], "repair_bytes") > 0, "{}", plans[2]);
     let rules = &plans[0]["rules"];
     assert_eq!(rules["full"], json!({"Constraint": 1, "Requirement": 1}));
     assert_eq!(rules["one_line"], json!({}));
