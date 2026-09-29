@@ -271,6 +271,7 @@ mod tests {
             kind: "Requirement".into(),
             claim: String::new(),
             via: String::new(),
+            decided_by: Vec::new(),
         }
     }
 

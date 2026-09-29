@@ -974,6 +974,26 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
         "rejected",
     );
     graph::relate(&state, &rejected, "concerns", &billing).unwrap();
+    // A spec approval marker motivated by a rule never decides it: `need`
+    // stays decided by its decision alone, and a rule only the marker is
+    // motivated by stays undecided.
+    let marked = record_with(
+        &state,
+        "Constraint",
+        "Harness marked constraint",
+        "Approved but not yet taken up.",
+        "accepted",
+    );
+    graph::relate(&state, &marked, "concerns", &billing).unwrap();
+    let marker = record_with(
+        &state,
+        "ArchitecturalDecision",
+        "Harness spec approval",
+        "Approved specification.\n\nspec-approval: docs/harness.md\nspec-sha256: fixture",
+        "accepted",
+    );
+    graph::relate(&state, &marker, "isMotivatedBy", &need).unwrap();
+    graph::relate(&state, &marker, "isMotivatedBy", &marked).unwrap();
     // A first read materializes inferred inverse edges; pin the revision after
     // it, so the walk below is held to changing nothing.
     linked_context(&state, "harness", &[]);
@@ -981,7 +1001,7 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
 
     let response = linked_context(&state, "harness", &["src/harness.rs"]);
     let evidence = evidence_section(&response.context);
-    // Both rules the walk reached are listed once, under Project rules.
+    // The rules the walk reached are listed once, under Project rules.
     assert!(!evidence.contains(&format!("({need})")), "{evidence}");
     assert!(!evidence.contains(&format!("({driver})")), "{evidence}");
     assert!(
@@ -998,18 +1018,36 @@ async fn linked_evidence_hops_follow_motivation_lessons_supersession_and_lifecyc
     assert_eq!(
         governing,
         vec![
+            (marked.as_str(), "via: component Billing"),
             (driver.as_str(), "via: motivates Harness current decision"),
             (need.as_str(), "via: motivates Harness current decision"),
         ],
         "accepted Constraints and Requirements govern; proposed and rejected never do"
     );
+    // Context contract 3: each rule names the accepted decisions motivated by
+    // it, whichever direction the edge was asserted in; the approval marker
+    // is never one of them.
+    assert!(response.context_contracts.contains(&3));
+    let decided: Vec<_> = response
+        .governing_rules
+        .iter()
+        .map(|rule| (rule.iri.as_str(), rule.decided_by.clone()))
+        .collect();
+    assert_eq!(
+        decided,
+        vec![
+            (marked.as_str(), vec![]),
+            (driver.as_str(), vec![decision.clone()]),
+            (need.as_str(), vec![decision.clone()]),
+        ]
+    );
     // Constraints lead, so a Requirement can never take a Constraint's claim.
-    assert_eq!(response.governing_rules[0].kind, "Constraint");
-    assert_eq!(response.governing_rules[1].kind, "Requirement");
-    assert!(response.governing_rules[0]
+    assert_eq!(response.governing_rules[1].kind, "Constraint");
+    assert_eq!(response.governing_rules[2].kind, "Requirement");
+    assert!(response.governing_rules[1]
         .claim
         .starts_with("hasDescription: A driving constraint.\nmotivates: "));
-    assert!(response.governing_rules[1]
+    assert!(response.governing_rules[2]
         .claim
         .starts_with("hasDescription: The harness needs fees.\n"));
     assert!(evidence.contains(&format!(

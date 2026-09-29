@@ -84,10 +84,16 @@ pub fn context_snapshot(
         let governed = super::spec::spec_components_for_files(state, &walked)?;
         let linked = graph::linked_evidence(state, &walked, &governed)?;
         file_record_iris.extend(linked.excluded.iter().cloned());
-        governing_rules = graph::governing_rules(&linked, request.rule_claim_bytes)
+        let rules = graph::governing_rules(&linked, request.rule_claim_bytes);
+        // Context contract 3: the accepted decisions that settle each rule,
+        // so the runner can tell a rule already decided from an open one.
+        let rule_iris: Vec<String> = rules.iter().map(|rule| rule.iri.clone()).collect();
+        let decided = super::spec::rule_decisions(state, &rule_iris)?;
+        governing_rules = rules
             .into_iter()
             .map(|rule| GoverningRule {
                 via: rule.hop.via(&rule.source),
+                decided_by: decided.get(&rule.iri).cloned().unwrap_or_default(),
                 iri: rule.iri,
                 label: rule.label,
                 kind: rule.kind,
@@ -302,7 +308,7 @@ pub fn context_snapshot(
         delivery_receipt,
         capture_contracts: vec![2, 3],
         intent_contracts: vec![2],
-        context_contracts: vec![1, 2],
+        context_contracts: vec![1, 2, 3],
         governing_rules,
     })
 }

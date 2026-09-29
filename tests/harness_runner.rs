@@ -656,6 +656,7 @@ async fn a_new_file_is_written_at_once_when_its_rules_were_in_view() {
         kind: "Constraint".into(),
         claim: "hasDescription: Every governed file starts with a header line.\n".into(),
         via: "via: component Governed".into(),
+        decided_by: Vec::new(),
     };
     fixture.shared.lock().unwrap().file_rules = vec![(
         "governed.txt".into(),
@@ -853,6 +854,7 @@ async fn prompt_frames_guidance_and_lists_project_rules_before_actions() {
         kind: "Constraint".into(),
         claim: "hasDescription: A retry loop stops after the configured attempt limit.\n".into(),
         via: "via: component Transfers".into(),
+        decided_by: Vec::new(),
     }];
     let mut runner = Runner::create(
         fixture.root.clone(),
@@ -907,6 +909,7 @@ fn coverage_rules() -> Vec<GoverningRule> {
             kind: "Constraint".into(),
             claim: "hasDescription: An interrupted upload resumes from the chunk the server acknowledged.\n".into(),
             via: "via: component Transfers".into(),
+            decided_by: Vec::new(),
         },
         GoverningRule {
             iri: "urn:rule:audit".into(),
@@ -914,6 +917,7 @@ fn coverage_rules() -> Vec<GoverningRule> {
             kind: "Requirement".into(),
             claim: "hasDescription: Each transfer attempt appends one audit entry with its outcome.\n".into(),
             via: "via: linked to code.txt".into(),
+            decided_by: Vec::new(),
         },
     ]
 }
@@ -3447,6 +3451,7 @@ async fn a_message_naming_a_rule_the_plan_does_not_implement_replans() {
         kind: "Constraint".into(),
         claim: "hasDescription: A retry loop stops after the configured attempt limit.\n".into(),
         via: "via: component Transfers".into(),
+        decided_by: Vec::new(),
     }];
     for _ in 0..2 {
         fixture.conversational(json!({"action":"reply","message":"Let's fix code.txt first."}));
@@ -3600,6 +3605,7 @@ async fn a_prompt_crowded_by_budgeted_rule_claims_is_rebuilt_with_the_floor() {
             kind: "Requirement".into(),
             claim: format!("hasDescription: {}\n", "x".repeat(120_000)),
             via: "via: component Uploads".into(),
+            decided_by: Vec::new(),
         }];
     }
     let mut runner = fixture.interactive().await;
@@ -4778,12 +4784,14 @@ async fn editing_an_approved_spec_is_journaled_and_named_at_completion() {
             stale: false,
             record_count: 3,
             open_rules: None,
+            covers: Vec::new(),
         },
         ApprovedSpecStatus {
             path: "old-spec.md".into(),
             stale: true,
             record_count: 2,
             open_rules: None,
+            covers: Vec::new(),
         },
     ];
     let mut runner = fixture.ready_for_final().await;
