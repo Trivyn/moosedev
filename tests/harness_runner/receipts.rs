@@ -259,6 +259,36 @@ async fn the_scoped_rule_walk_exclusion_is_journaled_on_change() {
     );
 }
 
+/// A change back to nothing withheld is journaled as `none`, so the same set
+/// withheld again later is a transition and journaled again, not suppressed by
+/// the stale last event. A task that never withheld anything journals nothing.
+#[tokio::test]
+async fn the_scoped_rule_walk_exclusion_journals_the_change_back_to_none() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "rules_scope_excluded").is_empty());
+
+    let withheld = vec![RuleScopeExclusion {
+        component: "badciv-sim".into(),
+        via: "Unidirectional dependency graph".into(),
+        rules: 29,
+    }];
+    for excluded in [withheld.clone(), vec![], vec![], withheld] {
+        fixture.shared.lock().unwrap().excluded_components = excluded;
+        fixture.conversational(json!({"action":"reply","message":"Done.","then":"wait"}));
+        runner.advance().await.unwrap();
+        runner.submit_message("Next.".into()).await.unwrap();
+    }
+    let sim = "badciv-sim: 29 via \"Unidirectional dependency graph\"";
+    assert_eq!(
+        intent_details(&runner, "rules_scope_excluded"),
+        [sim, "none", sim]
+    );
+}
+
 /// `MOOSEDEV_HARNESS_PROMPT_BYTES` for the life of the guard. Hold
 /// [`ENVIRONMENT`] with it.
 struct PromptBytes;

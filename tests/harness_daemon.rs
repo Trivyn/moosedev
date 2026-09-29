@@ -1294,6 +1294,80 @@ async fn a_linked_decision_does_not_carry_other_components_rules() {
     );
 }
 
+/// The scoped walk counts a withheld rule once, by IRI: a rule that both
+/// concerns and constrains an excluded component, or concerns two of them, is
+/// one rule, not two. And when nothing but the dossiers is linked, the topic
+/// fallback does not show the rules the counted line says are not shown.
+#[tokio::test]
+async fn withheld_rules_are_counted_once_and_stay_out_of_the_topic_fallback() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let symbol = install_module_index(&state);
+    let harness = record(&state, "SystemComponent", "Harness");
+    graph::declare_component_paths(&state, &harness, &["src/".into()]).unwrap();
+    let billing = record(&state, "SystemComponent", "Billing");
+    graph::declare_component_paths(&state, &billing, &["billing/".into()]).unwrap();
+    let ledger = record(&state, "SystemComponent", "Ledger");
+    graph::declare_component_paths(&state, &ledger, &["ledger/".into()]).unwrap();
+    let decision = direct_decision(&state, symbol, "Harness boundary decision");
+    for component in [&harness, &billing, &ledger] {
+        graph::relate(&state, &decision, "concerns", component).unwrap();
+    }
+    // Both predicates to Billing, and a second excluded component.
+    let foreign = record_with(
+        &state,
+        "Constraint",
+        "Billing foreign invariant",
+        "Billing foreign invariant claim.",
+        "accepted",
+    );
+    graph::relate(&state, &foreign, "concerns", &billing).unwrap();
+    graph::relate(&state, &foreign, "constrains", &billing).unwrap();
+    graph::relate(&state, &foreign, "concerns", &ledger).unwrap();
+    // Not a rule and linked to nothing: the fallback may show it.
+    let lesson = record_with(
+        &state,
+        "Lesson",
+        "Billing foreign invariant history",
+        "Billing foreign invariant lesson.",
+        "accepted",
+    );
+
+    let response = linked_context(&state, "billing foreign invariant", &["src/harness.rs"]);
+    // Counted under whichever excluded component comes first by IRI.
+    let [only] = response.excluded_components.as_slice() else {
+        panic!("{:?}", response.excluded_components);
+    };
+    assert!(["Billing", "Ledger"].contains(&only.component.as_str()));
+    assert_eq!(
+        (only.via.as_str(), only.rules),
+        ("Harness boundary decision", 1)
+    );
+    assert!(
+        response.context.contains(&format!(
+            "\n1 rule of {} (Constraint: 1), reached through decision \"Harness boundary decision\", is not shown for these files; search project knowledge to see them.\n",
+            only.component
+        )),
+        "{}",
+        response.context
+    );
+    let evidence = evidence_section(&response.context);
+    assert!(
+        evidence.starts_with("\nTopic evidence (fallback;"),
+        "{evidence}"
+    );
+    assert!(evidence.contains(&lesson), "{evidence}");
+    assert!(!evidence.contains(&foreign), "{evidence}");
+    // The name-only inventory may list it (it names every record, to search
+    // by); the fallback does not deliver it.
+    assert!(
+        !response.records.iter().any(|record| record.iri == foreign
+            && record.provenance.iter().any(|via| via == "topic fallback")),
+        "{:?}",
+        response.records
+    );
+}
+
 /// A file inside a nested component is governed by its own component's rules
 /// and by every enclosing component's (a whole-project spec's), each named
 /// with its via line; a file outside the nested component gets only the

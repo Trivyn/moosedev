@@ -102,8 +102,10 @@ Prompt budget. A request may take three bytes a token of the role's
 `context_window_tokens` less 4,096 tokens for the answer, at most 160,000
 bytes; the step prompt's budget is that less a 1 KB repair reserve. The
 source share (two fifths) and the rule-claim share (a quarter) scale with it.
-`MOOSEDEV_HARNESS_PROMPT_BYTES` sets the cap as a byte count; `100000`
-restores the cap used before badciv run 15, when rules took 37.6 KB of a
+`MOOSEDEV_HARNESS_PROMPT_BYTES` sets the cap as a byte count of at least
+16,000; any other value (zero, a unit, a number below the minimum) is a
+configuration error that stops the step before the request, naming the
+variable, never a silent default. `100000` restores the cap used before badciv run 15, when rules took 37.6 KB of a
 100 KB prompt in a 131,072-token window and left 22.9 KB for source. Keep
 the configured window at or below what the server can take in: LM Studio
 holds a fixed per-model generation reserve out of the loaded context (about
@@ -1032,8 +1034,12 @@ the whole approved plan while its summary fits an eighth of the prompt budget,
 never less than 4 KB (12.4 KB at a 100 KB budget, 20 KB at 160 KB): the same
 bytes every step, so it stays in the cached prefix and the builder does not
 page it from the journal (badciv run 14's builder inspected its 10.6 KB plan
-43 times). `MOOSEDEV_HARNESS_WHOLE_PLAN=off` restores the focused view. In
-Plan mode, and in Auto for a larger plan, each step's prompt shows a
+43 times). The whole plan is shown only while the source keeps its whole
+share beside it and the 8 KB observation floor; a prompt with less room shows
+the focused view, so the whole plan never shows less source, or overflows,
+where the focused view would not. `MOOSEDEV_HARNESS_WHOLE_PLAN=off` restores
+the focused view. In Plan mode, and in Auto for a larger plan or a crowded
+prompt, each step's prompt shows a
 4 KB view of it: the first paragraph, then the paragraphs naming the file the
 step is about, the files the latest failed command names and the plan files not
 yet edited, then the rest while they fit, in the plan's order, with a closing
@@ -1103,7 +1109,11 @@ contract 3 and intent contract 2.
   line ("31 rules of badciv-sim and badciv-tui (Constraint: …; Requirement: …),
   reached through decision "…", are not shown for these files; search project
   knowledge to see them."), `ContextResponse.excluded_components` carries it,
-  and the runner journals `rules_scope_excluded` when it changes. Components
+  and the runner journals `rules_scope_excluded` when it changes (`none` when
+  it changes back to nothing withheld). A withheld rule is counted once, by
+  IRI, however many `concerns`/`constrains` edges tie it to the excluded
+  components, and the topic fallback leaves the withheld rules out, so the
+  line's "not shown" stays true. Components
   from `realizes`, declared paths and approved specs are unaffected, as are the
   linked records themselves. `MOOSEDEV_HARNESS_RULE_WALK_SCOPED=off` (a daemon
   setting) restores the unscoped walk.

@@ -6,7 +6,8 @@
 use super::{Mode, Runner};
 
 /// Summary bytes a step prompt shows of the plan, focused on the step: in
-/// Plan mode, and in Auto for a plan larger than [`whole_plan_budget`].
+/// Plan mode, and in Auto for a plan larger than [`whole_plan_budget`] or one
+/// the prompt has no room for beside the source's share.
 pub(super) const PLAN_VIEW_BYTES: usize = 4_000;
 
 /// Whether an Auto step is shown the whole approved plan when it fits
@@ -193,28 +194,28 @@ fn paragraphs(summary: &str) -> Vec<&str> {
 }
 
 impl Runner {
-    /// The current plan's summary as this step is shown it. In Auto it is
-    /// the whole approved plan when it fits [`whole_plan_budget`]: the same
+    /// The whole approved plan, when an Auto step may be shown it: the
+    /// switch is on and the summary fits [`whole_plan_budget`]. The same
     /// bytes every step, so the builder need not page it from the journal.
-    /// Otherwise, and in Plan mode, it is focused on the file the step is
-    /// about, the files the latest failure names and the plan files not yet
-    /// edited. Only the step prompt shows this view; the capture note
-    /// excerpts plans on its own.
-    pub(super) fn plan_summary_view(&self) -> Option<String> {
-        self.step_plan_view(whole_plan_enabled())
+    /// The step prompt still falls back to [`Self::focused_plan_view`] when
+    /// the whole plan would take bytes the source's share needs, so it never
+    /// shows less source, or overflows, where the focused view would not.
+    pub(super) fn whole_plan_view(&self) -> Option<String> {
+        let plan = self.task.plan.as_ref()?;
+        if !whole_plan_enabled() || self.task.mode != Mode::Auto {
+            return None;
+        }
+        let budget = whole_plan_budget(self.prompt_budget().ok()?);
+        (escaped_len(&plan.summary) <= budget).then(|| plan.summary.clone())
     }
 
-    /// [`Self::plan_summary_view`] with the whole-plan switch given.
-    fn step_plan_view(&self, whole: bool) -> Option<String> {
+    /// The current plan's summary focused on the file the step is about, the
+    /// files the latest failure names and the plan files not yet edited: what
+    /// a step is shown in Plan mode, and in Auto when the whole plan is not
+    /// ([`Self::whole_plan_view`]). Only the step prompt shows these views;
+    /// the capture note excerpts plans on its own.
+    pub(super) fn focused_plan_view(&self) -> Option<String> {
         let plan = self.task.plan.as_ref()?;
-        if whole && self.task.mode == Mode::Auto {
-            let budget = self
-                .prompt_budget()
-                .map_or(PLAN_VIEW_BYTES, whole_plan_budget);
-            if escaped_len(&plan.summary) <= budget {
-                return Some(plan.summary.clone());
-            }
-        }
         let mut focus: Vec<String> = self
             .source_ranking()
             .into_iter()
@@ -386,12 +387,11 @@ mod tests {
         runner.task.mode = Mode::Auto;
         runner.task.approved_revision = Some("fixture".into());
 
-        let whole = runner.plan_summary_view().unwrap();
-        assert_eq!(whole, summary);
+        assert_eq!(runner.whole_plan_view().as_deref(), Some(summary.as_str()));
         let (on, _) = runner.prompt(&context, &[]).unwrap();
         assert!(plan_line(&on).contains(&serde_json::to_string(&summary).unwrap()));
         // The focused view is today's, from the same state.
-        let focused = runner.step_plan_view(false).unwrap();
+        let focused = runner.focused_plan_view().unwrap();
         assert!(focused.contains("[Plan shown in part:"), "{focused}");
         assert!(escaped_len(&focused) <= PLAN_VIEW_BYTES);
 
@@ -399,10 +399,10 @@ mod tests {
         // view differs, and it is the focused one.
         std::env::set_var("MOOSEDEV_HARNESS_WHOLE_PLAN", "off");
         let off = runner.prompt(&context, &[]).map(|(prompt, _)| prompt);
-        let off_view = runner.plan_summary_view();
+        let off_view = runner.whole_plan_view();
         std::env::remove_var("MOOSEDEV_HARNESS_WHOLE_PLAN");
         let off = off.unwrap();
-        assert_eq!(off_view.as_deref(), Some(focused.as_str()));
+        assert_eq!(off_view, None);
         let escaped = |text: &str| {
             let json = serde_json::to_string(text).unwrap();
             json[1..json.len() - 1].to_owned()
@@ -413,16 +413,19 @@ mod tests {
         let oversized = long_summary(12);
         assert!(oversized.len() > 10_624);
         runner.task.plan = Some(plan(oversized));
-        assert_eq!(runner.plan_summary_view(), runner.step_plan_view(false));
-        assert!(runner
-            .plan_summary_view()
-            .unwrap()
-            .contains("[Plan shown in part:"));
+        assert_eq!(runner.whole_plan_view(), None);
+        let focused_oversized = runner.focused_plan_view().unwrap();
+        assert!(focused_oversized.contains("[Plan shown in part:"));
+        let (prompt, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(plan_line(&prompt).contains(&escaped(&focused_oversized)));
 
         // Plan mode is focused whatever the size.
         runner.task.plan = Some(plan(summary));
         runner.task.mode = Mode::Plan;
-        assert_eq!(runner.plan_summary_view().unwrap(), focused);
+        assert_eq!(runner.whole_plan_view(), None);
+        assert_eq!(runner.focused_plan_view().unwrap(), focused);
+        let (prompt, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(plan_line(&prompt).contains(&escaped(&focused)));
         server.abort();
     }
 

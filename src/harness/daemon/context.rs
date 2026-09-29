@@ -153,10 +153,15 @@ pub fn context_snapshot(
             context.push_str(&format!("Recall: {RECALL}\n"));
         }
         if linked.records.is_empty() {
+            // Neither the dossiers' records nor the rules the scoped walk
+            // withheld: the counted line below says those are not shown.
             let fallback: Vec<_> =
                 graph::relevant_context_snapshot(state, Some(&request.topic), 5, false)?
                     .into_iter()
-                    .filter(|record| !linked.excluded.contains(&record.iri))
+                    .filter(|record| {
+                        !linked.excluded.contains(&record.iri)
+                            && !linked.withheld.contains(&record.iri)
+                    })
                     .collect();
             context.push_str("\nTopic evidence (fallback; nothing is linked beyond the file dossiers; complete claims; up to six relationships per record):\n");
             render_topic_records(state, &mut context, &fallback);

@@ -235,24 +235,28 @@ impl Runner {
             }
         }
         // Rules the daemon's scoped walk kept out of these files, journaled on
-        // change like the delivery above.
-        if !response.excluded_components.is_empty() {
-            let detail = response
+        // change like the delivery above. A change back to nothing withheld is
+        // journaled as `none`, so the last event is always the current state
+        // and a later recurrence of the same set is journaled again.
+        let detail = if response.excluded_components.is_empty() {
+            "none".to_owned()
+        } else {
+            response
                 .excluded_components
                 .iter()
                 .map(|entry| format!("{}: {} via \"{}\"", entry.component, entry.rules, entry.via))
                 .collect::<Vec<_>>()
-                .join("; ");
-            let unchanged = self
-                .task
-                .intent_events
-                .iter()
-                .rev()
-                .find(|event| event.kind == "rules_scope_excluded")
-                .is_some_and(|last| last.detail == detail);
-            if !unchanged {
-                self.intent_event("rules_scope_excluded", &detail);
-            }
+                .join("; ")
+        };
+        let last = self
+            .task
+            .intent_events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "rules_scope_excluded")
+            .map(|event| event.detail.as_str());
+        if last.unwrap_or("none") != detail {
+            self.intent_event("rules_scope_excluded", &detail);
         }
         let turn = self.ensure_knowledge_turn(&topic, &response.revision);
         turn.retrieval_topic = topic;

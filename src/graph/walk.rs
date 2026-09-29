@@ -131,6 +131,10 @@ pub struct LinkedEvidence {
     /// the scoped walk left out, because their paths cover none of the walked
     /// files. Only components that withheld at least one rule are listed.
     pub excluded_components: Vec<ExcludedComponent>,
+    /// IRIs of the rules those components withheld, each once. A fallback that
+    /// renders records beside the walk leaves these out, so the counted line
+    /// saying they are not shown stays true.
+    pub withheld: BTreeSet<String>,
 }
 
 /// A component whose rules the scoped walk did not deliver: it was reached only
@@ -144,7 +148,9 @@ pub struct ExcludedComponent {
     pub via_kind: String,
     /// Title of that record.
     pub via: String,
-    /// Accepted rules of the component not delivered by any other hop, per kind.
+    /// Accepted rules of the component not delivered by any other hop, per
+    /// kind. A rule is counted once: under its first component in IRI order,
+    /// however many edges link it to the excluded components.
     pub rules: BTreeMap<String, usize>,
 }
 
@@ -349,7 +355,9 @@ pub fn linked_evidence(
         })
         .collect();
     // Count what the narrowing withheld: accepted rules of each out-of-scope
-    // component that no other hop delivered.
+    // component that no other hop delivered. `collect_records` returns a rule
+    // once per linking predicate (`concerns` and `constrains`), and a rule may
+    // concern several excluded components, so each is counted once by IRI.
     let delivered: BTreeSet<&str> = records
         .iter()
         .chain(&direct_rules)
@@ -357,12 +365,14 @@ pub fn linked_evidence(
         .chain(excluded.iter().map(String::as_str))
         .collect();
     let mut excluded_components = Vec::new();
+    let mut withheld = BTreeSet::new();
     for (component, record) in out_of_scope {
         let mut rules = BTreeMap::<String, usize>::new();
         for rule in collect_records(state, &pairs.component, &component)? {
             if is_rule_kind(&rule.kind)
                 && is_accepted(&rule.status)
                 && !delivered.contains(rule.iri.as_str())
+                && withheld.insert(rule.iri)
             {
                 *rules.entry(rule.kind).or_default() += 1;
             }
@@ -381,6 +391,7 @@ pub fn linked_evidence(
         excluded,
         direct_rules,
         excluded_components,
+        withheld,
     })
 }
 
