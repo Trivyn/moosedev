@@ -3,6 +3,7 @@ use super::context_plan::{ContextPlan, HistoryPlan, RulesPlan, SourcePlan};
 use super::plan_choices::{self, ProposedChoice};
 use super::rule_state::{self, RuleState, RulesReceipt};
 use super::source::{protected_source, source_budget, SourceView};
+use super::symbolic;
 use super::task::KnowledgeSearchResult;
 use super::tools;
 use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
@@ -76,9 +77,12 @@ const OPEN_CHOICES_MEANING: &str = " Its open_choices lists up to 3 questions th
 /// Added to [`ACTION_MEANINGS`] while plans may say a rule already holds
 /// ([`rule_state::plan_satisfied_enabled`]).
 const SATISFIED_MEANING: &str = " Its satisfied lists the label of each project rule the existing code already satisfies unchanged; a rule is in addresses or satisfied, not both.";
+/// Added to [`ACTION_MEANINGS`] while plans may name the files they leave as
+/// stubs ([`symbolic::plan_stubs_enabled`]).
+const STUBS_MEANING: &str = " Its stubs lists the planned files it deliberately leaves holding stubs for a later task, such as a scaffold's placeholder functions; finishing does not require their stubs to be written. Leave it empty when every planned file is to be written in full.";
 
-/// [`ACTION_MEANINGS`], with `satisfied` and `open_choices` while plans may
-/// carry them.
+/// [`ACTION_MEANINGS`], with `satisfied`, `stubs` and `open_choices` while
+/// plans may carry them.
 fn action_meanings() -> String {
     const ADDRESSES: &str = "and leave it empty when there are none.";
     let mut fields = String::new();
@@ -86,6 +90,10 @@ fn action_meanings() -> String {
     if rule_state::plan_satisfied_enabled() {
         fields.push_str(",satisfied");
         meanings.push_str(SATISFIED_MEANING);
+    }
+    if symbolic::plan_stubs_enabled() {
+        fields.push_str(",stubs");
+        meanings.push_str(STUBS_MEANING);
     }
     if plan_choices::enabled() {
         fields.push_str(",open_choices");
@@ -1025,6 +1033,9 @@ impl Runner {
                 if !rule_state::plan_satisfied_enabled() {
                     plan.satisfied.clear();
                 }
+                if !symbolic::plan_stubs_enabled() {
+                    plan.stubs.clear();
+                }
                 plan
             });
             Ok(format!(
@@ -1479,6 +1490,8 @@ pub(super) enum Action {
         #[serde(default)]
         satisfied: Vec<String>,
         #[serde(default)]
+        stubs: Vec<String>,
+        #[serde(default)]
         open_choices: Vec<ProposedChoice>,
     },
     Edit {
@@ -1752,7 +1765,7 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone()),("satisfied",a.clone()),("open_choices",plan_choices::schema())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("apply_fix",&[("fix",json!({"type":"integer","minimum":1}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
+    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone()),("satisfied",a.clone()),("stubs",a.clone()),("open_choices",plan_choices::schema())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("apply_fix",&[("fix",json!({"type":"integer","minimum":1}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
     if mode == Mode::Plan {
         retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
     }
@@ -1761,6 +1774,9 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
     }
     if !rule_state::plan_satisfied_enabled() {
         without_plan_field(&mut actions, "satisfied");
+    }
+    if !symbolic::plan_stubs_enabled() {
+        without_plan_field(&mut actions, "stubs");
     }
     if !fixes {
         retain_actions(&mut actions, |name| name != "apply_fix");
@@ -2465,10 +2481,12 @@ mod tests {
                 "checks",
                 "addresses",
                 "satisfied",
+                "stubs",
                 "open_choices"
             ]
         );
         assert_eq!(on["properties"]["satisfied"], on["properties"]["addresses"]);
+        assert_eq!(on["properties"]["stubs"], on["properties"]["addresses"]);
         without_plan_field(&mut actions, "satisfied");
         let no_satisfied = plan(&actions);
         assert!(no_satisfied["properties"].get("satisfied").is_none());
@@ -2481,9 +2499,12 @@ mod tests {
                 "files",
                 "checks",
                 "addresses",
+                "stubs",
                 "open_choices"
             ]
         );
+        without_plan_field(&mut actions, "stubs");
+        assert!(plan(&actions)["properties"].get("stubs").is_none());
         without_plan_field(&mut actions, "open_choices");
         assert_eq!(
             required(&plan(&actions)),
@@ -2491,9 +2512,11 @@ mod tests {
         );
 
         let meanings = action_meanings();
-        assert!(meanings.contains("plan(summary,files,checks,addresses,satisfied,open_choices)"));
+        assert!(
+            meanings.contains("plan(summary,files,checks,addresses,satisfied,stubs,open_choices)")
+        );
         assert!(meanings.contains(&format!(
-            "and leave it empty when there are none.{SATISFIED_MEANING}{OPEN_CHOICES_MEANING}"
+            "and leave it empty when there are none.{SATISFIED_MEANING}{STUBS_MEANING}{OPEN_CHOICES_MEANING}"
         )));
     }
 

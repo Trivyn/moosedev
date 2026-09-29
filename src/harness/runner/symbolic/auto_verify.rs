@@ -103,7 +103,7 @@ impl Runner {
             .iter()
             .all(|file| matches!(self.workspace.read(file), Ok(Some(_))))
             && self.planned_files_unedited().is_empty();
-        if !every_file_done || !self.planned_stubs().is_empty() {
+        if !every_file_done || !self.planned_stubs_split().1.is_empty() {
             return false;
         }
         let state = self.symbolic_state_mut();

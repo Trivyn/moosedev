@@ -66,6 +66,8 @@ pub(super) enum Step {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         satisfied: Vec<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        stubs: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         open_choices: Vec<OpenChoice>,
     },
     Edit {
@@ -295,6 +297,7 @@ impl Runner {
                 checks,
                 addresses,
                 satisfied,
+                stubs,
                 open_choices,
             } => {
                 // Switched off, a field is not offered; any sent anyway are
@@ -309,12 +312,18 @@ impl Runner {
                 } else {
                     Vec::new()
                 };
+                let stubs = if super::symbolic::plan_stubs_enabled() {
+                    stubs
+                } else {
+                    Vec::new()
+                };
                 return Ok(Step::Plan {
                     summary,
                     files,
                     checks,
                     addresses,
                     satisfied,
+                    stubs,
                     open_choices,
                 });
             }

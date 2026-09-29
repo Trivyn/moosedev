@@ -705,6 +705,7 @@ impl Runner {
         let dropped = |file: &String| files.contains(file);
         if let Some(plan) = self.task.plan.as_mut() {
             plan.files.retain(|file| !dropped(file));
+            plan.stubs.retain(|file| !dropped(file));
         }
         if let Some(approved) = self.task.approved_plans.last_mut() {
             approved.files.retain(|file| !dropped(file));
