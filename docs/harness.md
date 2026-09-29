@@ -1653,7 +1653,17 @@ contract 3 and intent contract 2.
   second plan approval. `MOOSEDEV_HARNESS_SCOPE_CHOICE=off` keeps the
   automatic replan: the edit is discarded and the task re-enters Plan mode
   naming the file (`scope_escape_replan`, three per task; the fourth parks for
-  guidance as `scope_escape_exhausted`). A no-op edit (the result equals
+  guidance as `scope_escape_exhausted`). An edit outside the plan to a file
+  an earlier approved plan of the task listed (a replan narrowed the plan and
+  dropped it) is not asked about: the human approved that file once, so it
+  joins the plan as `add` would, and the edit goes on (`scope_auto_added`).
+  Not a file the human declined (`refuse` at a scope or missing-module
+  question) or removed (`drop` at a missing planned file) in this task
+  (`scope_declined` in the journal's symbolic state); and a file bringing rules
+  the approval does not address, or an amendment that fails, is undone and
+  asked about as before (`scope_auto_add_refused`, with the rule labels or the
+  error). `MOOSEDEV_HARNESS_SCOPE_AUTO_ADD=off` asks about every file outside
+  the plan. A no-op edit (the result equals
   the current source) runs the required checks instead of consuming the repair
   budget (`noop_edit_continuation`), unless the language server has settled
   errors in that source: then the edit is repaired with their count and the
@@ -1684,7 +1694,17 @@ contract 3 and intent contract 2.
   check result or human answer since approval continues the approved plan
   instead of reopening planning (`replan_continuation`, unbounded); a replan
   while already planning changes nothing (`replan_noop`). A real replan keeps
-  the files already read (`model_replan`).
+  the files already read (`model_replan`). A model replan while every current
+  error is in the approved plan's files (the settled language-server errors
+  and the files the latest failed command names, as source by scope finds
+  them) is held once per edit count (`replan_held`, "files: reason";
+  `replan_held_at` in the symbolic state): the task stays in approved work and
+  the model is told "Replan held once: every current error is in the approved
+  files (…)", then the language-server block, the latest failure's error lines
+  grouped by file (2,000 bytes at most), and "Fix them within the plan; replan
+  again if the plan itself is wrong." A second replan at the same edit count
+  goes through; no hold when an error is outside the plan or there is none.
+  `MOOSEDEV_HARNESS_REPLAN_HOLD=off` lets every replan through.
 - Amending an approved plan. While the task plans again after an approval (a
   replan, human guidance or `/plan`) and the stored plan is still the latest
   approved one, the prompt labels it "Approved plan (amend it; keep what still

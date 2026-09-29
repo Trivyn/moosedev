@@ -12,6 +12,8 @@ use moosedev::harness::response::ActionContract;
 use moosedev::harness::runner::{CheckResult, FailedRun, Mode, PermissionGrant, Phase, Runner};
 use serde_json::{json, Value};
 
+#[path = "harness_runner/consumers.rs"]
+mod consumers;
 #[path = "harness_runner/links.rs"]
 mod links;
 #[path = "harness_runner/mock.rs"]

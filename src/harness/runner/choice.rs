@@ -12,6 +12,13 @@ pub(super) fn scope_choice_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_SCOPE_CHOICE").map_or(true, |value| value.trim() != "off")
 }
 
+/// Whether an edit outside the plan to a file an earlier approved plan of the
+/// task listed joins the plan without asking.
+/// `MOOSEDEV_HARNESS_SCOPE_AUTO_ADD=off` asks about every such file, as before.
+fn scope_auto_add_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_SCOPE_AUTO_ADD").map_or(true, |value| value.trim() != "off")
+}
+
 /// Whether a module declaration or import naming a file that neither exists
 /// nor is planned asks the human. `MOOSEDEV_HARNESS_STRUCTURAL_ASK=off` leaves
 /// it to the model, as before, for study variants.
@@ -86,6 +93,57 @@ impl Runner {
         self.event(format!("Harness question: {}", choice.prompt));
         self.task.pending_choice = Some(choice);
         self.task.phase = Phase::AwaitingChoice;
+    }
+
+    /// In Auto, before the scope check: an edit outside the plan to a file an
+    /// earlier approved plan of this task listed joins the plan as the human's
+    /// `add` would, without asking, since the human approved that file once
+    /// (a replan that narrowed the plan dropped it). Not a file the human
+    /// declined or removed. The amendment is `add`'s, so a file bringing
+    /// rules the approval does not address, or an amendment that fails, is
+    /// undone and the scope check asks as before (`scope_auto_add_refused`).
+    pub(super) async fn auto_scope_add(&mut self, action: &model::Action) {
+        let task = &self.task;
+        if !scope_auto_add_enabled()
+            || task.mode != Mode::Auto
+            || task.phase != Phase::Working
+            || task.approved_revision.is_none()
+        {
+            return;
+        }
+        let Some(file) = self.edit_target(action) else {
+            return;
+        };
+        let Some(plan) = task.plan.as_ref() else {
+            return;
+        };
+        let declined = task
+            .symbolic
+            .as_ref()
+            .is_some_and(|state| state.scope_declined.contains(&file));
+        if plan.files.contains(&file)
+            || declined
+            || !task
+                .approved_plans
+                .iter()
+                .any(|approved| approved.files.contains(&file))
+        {
+            return;
+        }
+        let refused = match self.add_to_approved_plan(&file).await {
+            Ok(unaddressed) if unaddressed.is_empty() => None,
+            Ok(unaddressed) => Some(unaddressed.join("; ")),
+            Err(error) => Some(format!("{error:#}")),
+        };
+        match refused {
+            None => {
+                self.intent_event("scope_auto_added", &file);
+                self.event(format!(
+                    "Harness added {file} to the approved plan: an earlier approved plan of this task listed it."
+                ));
+            }
+            Some(why) => self.intent_event("scope_auto_add_refused", &format!("{file}: {why}")),
+        }
     }
 
     /// The model proposed an edit to `file`, outside the approved `plan_files`.
@@ -351,6 +409,9 @@ impl Runner {
             }
             (ChoiceKind::ScopeAdd { file }, "refuse") => {
                 let scope = self.plan_files_listing();
+                self.symbolic_state_mut()
+                    .scope_declined
+                    .insert(file.clone());
                 self.settle_choice(&pending, key);
                 self.task.phase = Phase::Working;
                 self.task.last_response = format!(
@@ -400,6 +461,9 @@ impl Runner {
                 );
             }
             (ChoiceKind::MissingModule { file, declared_in }, "refuse") => {
+                self.symbolic_state_mut()
+                    .scope_declined
+                    .insert(file.clone());
                 self.settle_choice(&pending, key);
                 self.task.phase = Phase::Working;
                 self.task.last_response = format!(
@@ -419,6 +483,9 @@ impl Runner {
             (ChoiceKind::MissingPlannedFile { files }, "drop") => {
                 self.require_approval().await?;
                 self.drop_from_approved_plan(files);
+                self.symbolic_state_mut()
+                    .scope_declined
+                    .extend(files.iter().cloned());
                 self.settle_choice(&pending, key);
                 self.event(format!(
                     "Human removed {} from the approved plan.",

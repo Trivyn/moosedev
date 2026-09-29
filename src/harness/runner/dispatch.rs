@@ -385,6 +385,9 @@ impl Runner {
         // A scope escape arrives here as a replan too; only the model's own
         // replan can be continued.
         let proposed_replan = matches!(action, model::Action::Replan { .. });
+        // A file an earlier approved plan listed joins the plan without
+        // asking, so the scope check below lets its edit through.
+        self.auto_scope_add(&action).await;
         let Some(action) = self.symbolic_intercept(action)? else {
             self.source_outlines_seen();
             return self.persist();
@@ -725,6 +728,9 @@ impl Runner {
             }
             Step::Replan { reason } => {
                 if proposed_replan {
+                    if self.hold_replan(&files, &reason) {
+                        return Ok(());
+                    }
                     self.intent_event("model_replan", &reason);
                 }
                 self.enter_replan(reason);

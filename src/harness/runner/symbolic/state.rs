@@ -95,6 +95,17 @@ pub struct SymbolicState {
     /// cycle: each is asked once; cleared when a plan is approved.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub asked_missing: BTreeSet<String>,
+    /// Files the human declined to add to the approved plan (a scope or
+    /// missing-module `refuse`) or removed from it (`drop` at a missing
+    /// planned file): an earlier approved plan listing one never adds it by
+    /// itself again in this task.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub scope_declined: BTreeSet<String>,
+    /// The edit count at which a model replan was last held because every
+    /// current error was in the approved files: a second replan at the same
+    /// count goes through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_held_at: Option<usize>,
     #[serde(default)]
     pub retypes: usize,
     /// Model replans answered by continuing the approved plan because nothing

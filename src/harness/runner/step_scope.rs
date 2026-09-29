@@ -10,6 +10,7 @@
 //! the working set. An empty scope is today's behaviour everywhere.
 //! `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches all of it off
 //! (Requirement e9166711).
+use super::dispatch::error_lines;
 use super::source::{files_named_in, protected_source, source_block};
 use super::{ContextResponse, Mode, Runner, MAX_FILES};
 use std::collections::BTreeSet;
@@ -20,6 +21,9 @@ const PRELOAD_MAX_FILES: usize = 24;
 const PRELOAD_SHARE: usize = 10;
 /// The scope note is at most this long; the preload check holds it back.
 pub(super) const SCOPE_NOTE_BYTES: usize = 400;
+/// Bytes a failed run's error lines may take, grouped by file
+/// ([`errors_by_file`]).
+pub(super) const FAILURE_ERRORS_BYTES: usize = 2_000;
 
 /// Whether source is selected by scope. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off`
 /// restores the working set of reads alone.
@@ -90,6 +94,78 @@ fn named_candidates<'a>(output: &str, repo: &'a [String]) -> Vec<&'a String> {
     repo.iter()
         .filter(|file| names.contains(file.rsplit('/').next().unwrap_or(file)))
         .collect()
+}
+
+/// The error lines of a failed run's `output` ([`error_lines`]), grouped
+/// under the repository file each names, or that the `--> file:line` under
+/// it points at, in the order the output first names each file; lines naming
+/// no project file come last. Within `limit` bytes, with a counted line for
+/// the rest. Empty when the output has no error lines.
+pub(super) fn errors_by_file(output: &str, repo: &[String], limit: usize) -> String {
+    type Groups<'a> = Vec<(Option<String>, Vec<&'a str>)>;
+    fn add<'a>(groups: &mut Groups<'a>, file: Option<String>, line: &'a str) {
+        match groups.iter_mut().find(|(known, _)| *known == file) {
+            Some((_, lines)) if lines.contains(&line) => {}
+            Some((_, lines)) => lines.push(line),
+            None => groups.push((file, vec![line])),
+        }
+    }
+    let errors = error_lines(output);
+    let candidates = named_candidates(output, repo);
+    let named = |line: &str| files_named_in(line, &candidates).into_iter().next();
+    let mut groups: Groups = Vec::new();
+    // An error line waiting for the location printed under it.
+    let mut pending: Option<&str> = None;
+    for line in output.lines().map(str::trim) {
+        if !errors.contains(line) {
+            continue;
+        }
+        if line.starts_with("--> ") {
+            let file = named(line);
+            if let Some(error) = pending.take() {
+                add(&mut groups, file.clone(), error);
+            }
+            add(&mut groups, file, line);
+            continue;
+        }
+        if let Some(error) = pending.take() {
+            add(&mut groups, None, error);
+        }
+        match named(line) {
+            Some(file) => add(&mut groups, Some(file), line),
+            None => pending = Some(line),
+        }
+    }
+    if let Some(error) = pending {
+        add(&mut groups, None, error);
+    }
+    groups.sort_by_key(|(file, _)| file.is_none());
+    let mut out = String::new();
+    let mut omitted = 0;
+    for (file, lines) in groups {
+        let heading = format!(
+            "{}:\n",
+            file.as_deref().unwrap_or("(no project file named)")
+        );
+        let mut block = String::new();
+        for line in lines {
+            let entry = format!("  {line}\n");
+            let heading_cost = if block.is_empty() { heading.len() } else { 0 };
+            if out.len() + block.len() + heading_cost + entry.len() > limit {
+                omitted += 1;
+                continue;
+            }
+            if block.is_empty() {
+                block.push_str(&heading);
+            }
+            block.push_str(&entry);
+        }
+        out.push_str(&block);
+    }
+    if omitted > 0 {
+        out.push_str(&format!("{omitted} more error line(s) not shown.\n"));
+    }
+    out
 }
 
 impl Runner {
@@ -392,6 +468,30 @@ mod tests {
         for whole in ["", ".", "./"] {
             assert!(!covered(whole, "src/lib.rs"));
         }
+    }
+
+    #[test]
+    fn a_failed_runs_error_lines_are_grouped_by_the_file_they_point_at() {
+        let repo: Vec<String> = ["a/src/lib.rs", "a/src/grid.rs"].map(String::from).to_vec();
+        let output = "   Compiling a v0.1.0\n\
+error[E0308]: mismatched types\n  --> a/src/grid.rs:12:5\n   |\n\
+error[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n\
+error[E0599]: no method `rows`\n  --> a/src/grid.rs:40:1\n\
+error: aborting due to 3 previous errors\n\
+error: could not compile `a`\n";
+        assert_eq!(
+            errors_by_file(output, &repo, FAILURE_ERRORS_BYTES),
+            "a/src/grid.rs:\n  error[E0308]: mismatched types\n  --> a/src/grid.rs:12:5\n  error[E0599]: no method `rows`\n  --> a/src/grid.rs:40:1\n\
+a/src/lib.rs:\n  error[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n\
+(no project file named):\n  error: aborting due to 3 previous errors\n"
+        );
+        let bounded = errors_by_file(output, &repo, 80);
+        assert!(bounded.len() <= 80 + 40, "{bounded}");
+        assert!(
+            bounded.ends_with("more error line(s) not shown.\n"),
+            "{bounded}"
+        );
+        assert_eq!(errors_by_file("all good\n", &repo, 100), "");
     }
 
     #[test]
