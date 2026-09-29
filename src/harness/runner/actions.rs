@@ -1167,6 +1167,38 @@ pub(super) fn strip_same_junk(text: &str, repair: &SpanRepair) -> String {
 mod tests {
     use super::*;
 
+    /// badciv run 14 (c7abc2d0) read `parse.rs` 12 times, a headless capture
+    /// confirmation between every two: the confirmation is not progress, so
+    /// the serves before it still count.
+    #[tokio::test]
+    async fn a_serve_before_a_capture_checkpoint_still_counts_as_a_repeat() {
+        use super::super::task::fingerprint;
+        use super::super::test_support::{context_router, serve, Project};
+        let project = Project::new("served-repeat-checkpoint");
+        let text = "fn parse() {}\n";
+        std::fs::write(project.0.join("parse.rs"), text).unwrap();
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Build".into())
+            .await
+            .unwrap();
+        runner
+            .symbolic_state_mut()
+            .read_snapshots
+            .insert("parse.rs".into(), fingerprint(&Some(text.to_string())));
+        let served = format!("{OUTLINED_SERVED} parse.rs ({} bytes):\n{text}", text.len());
+        runner.event(served.clone());
+        runner.event("Human confirmed that no durable knowledge changed at this checkpoint.");
+        runner.event(served);
+        runner.event("Human accepted captured knowledge.\n{}");
+        runner.task.last_response = "Command: cargo test".into();
+        let reason = runner.served_repeat("parse.rs", "Edit it").unwrap();
+        assert!(reason.contains("already served 2 time(s)"), "{reason}");
+        // A human answer ends the looking run: the next read is served.
+        runner.event("Human response: read it again");
+        assert_eq!(runner.served_repeat("parse.rs", "Edit it"), None);
+        server.abort();
+    }
+
     /// badciv b443836f and edc914f6: invented project roots before `&&`.
     #[test]
     fn a_cd_into_a_missing_absolute_path_is_dropped() {

@@ -258,3 +258,45 @@ async fn the_scoped_rule_walk_exclusion_is_journaled_on_change() {
         ["badciv-sim: 29 via \"Unidirectional dependency graph\""]
     );
 }
+
+/// `MOOSEDEV_HARNESS_PROMPT_BYTES` for the life of the guard. Hold
+/// [`ENVIRONMENT`] with it.
+struct PromptBytes;
+
+impl PromptBytes {
+    fn new(value: &str) -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_PROMPT_BYTES", value);
+        Self
+    }
+}
+
+impl Drop for PromptBytes {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_PROMPT_BYTES");
+    }
+}
+
+/// 2A: at qwen's 131,072-token window the step budget is the 160,000-byte
+/// cap less the repair reserve, where it was 98,976 under the fixed 100 KB
+/// cap; `MOOSEDEV_HARNESS_PROMPT_BYTES=100000` restores that.
+#[tokio::test]
+async fn a_wide_window_budgets_up_to_the_prompt_cap() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let mut config = fixture.config();
+    config.context_window_tokens = 131_072;
+    runner.configure(config, None);
+    let budget = |runner: &Runner| {
+        let requests = action_requests(runner);
+        usize_at(&requests.last().unwrap()["context_plan"], "budget")
+    };
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert_eq!(budget(&runner), 160_000 - 1_024);
+
+    let _cap = PromptBytes::new("100000");
+    fixture.conversational(json!({"action":"reply","message":"Read it.","then":"wait"}));
+    runner.advance().await.unwrap();
+    assert_eq!(budget(&runner), 100_000 - 1_024);
+}

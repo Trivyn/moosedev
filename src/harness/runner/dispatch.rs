@@ -1466,7 +1466,8 @@ impl Runner {
     /// that could change its output has happened since: no applied edit, no
     /// human message or decision, no permission change. Rerunning it would
     /// print the same thing (badciv a2e43815 ran one `ls` of the cargo
-    /// registry four times in a row).
+    /// registry four times in a row). A capture checkpoint's confirmation or
+    /// review is no such change ([`review::is_human_progress`]).
     fn unchanged_command_run(&self, command: &str) -> Option<usize> {
         let prefix = format!("Command: {command}\nPermission grants: ");
         let last = self
@@ -1477,7 +1478,7 @@ impl Runner {
         let changed = self.task.events[last + 1..].iter().any(|event| {
             let message = event.message.as_str();
             message.starts_with("Applied edit")
-                || message.starts_with("Human ")
+                || review::is_human_progress(message)
                 || message.starts_with("Task permission")
         });
         (!changed).then_some(last)
@@ -1485,8 +1486,9 @@ impl Runner {
 
     /// The journal index of an earlier `inspect` of the same page within the
     /// current run of inspects: back to the last other model action or human
-    /// message. Journal events never change, so within such a run a second
-    /// request for a page the model already had can only be a loop.
+    /// message (not a capture confirmation or review, which changes nothing
+    /// the model reads). Journal events never change, so within such a run a
+    /// second request for a page the model already had can only be a loop.
     fn repeated_inspect(&self, event: usize, offset: usize) -> Option<usize> {
         let action = format!(
             "Model action: {}",
@@ -1499,7 +1501,7 @@ impl Runner {
             if message == action {
                 return Some(index);
             }
-            if message.starts_with("Human ")
+            if review::is_human_progress(message)
                 || (message.starts_with("Model action: ")
                     && !message.starts_with("Model action: {\"action\":\"inspect\""))
             {
@@ -1573,7 +1575,9 @@ impl Runner {
 
     /// The journal events before `before`, latest first, back to the model's
     /// last progress: the last human message, applied edit, guarded edit
-    /// attempt or model action other than a read, inspect or search.
+    /// attempt or model action other than a read, inspect or search. A
+    /// capture checkpoint's confirmation or review is not progress
+    /// ([`review::is_human_progress`]).
     pub(super) fn looking_run(&self, before: usize) -> impl Iterator<Item = (usize, &Event)> {
         self.task.events[..before.min(self.task.events.len())]
             .iter()
@@ -1589,7 +1593,7 @@ impl Runner {
                 let guarded_edit = ["First-edit guard:", "Edit guard:", "Fix guard:"]
                     .iter()
                     .any(|guard| message.starts_with(guard));
-                !(message.starts_with("Human ")
+                !(review::is_human_progress(message)
                     || message.starts_with("Applied edit")
                     || guarded_edit
                     || (message.starts_with("Model action: ") && !looking))
@@ -1716,7 +1720,7 @@ impl Runner {
             .task
             .events
             .iter()
-            .rposition(|event| event.message.starts_with("Human "))
+            .rposition(|event| review::is_human_progress(&event.message))
             .map_or(0, |index| index + 1);
         let now = (self.task.edits.len(), self.task.check_results.len());
         let progressed = self
@@ -2011,6 +2015,110 @@ mod recovery_tests {
         resumed.resume().await.unwrap();
         assert_eq!(resumed.task.phase, Phase::AwaitingInput);
         assert!(resumed.task.last_response.contains("unknown"));
+        server.abort();
+    }
+}
+
+#[cfg(test)]
+mod human_progress_tests {
+    //! badciv run 14 (c7abc2d0): every headless capture checkpoint journaled
+    //! "Human confirmed…", which ended each guard's window, so 15 rounds of
+    //! inspect, `ls`, read and `cargo test` ran without a refusal.
+    use super::test_support::{context_router, serve, Project};
+    use super::*;
+
+    const CONFIRMED: &str = "Human confirmed that no durable knowledge changed at this checkpoint.";
+    const ACCEPTED: &str = "Human accepted captured knowledge.\n{}";
+    const REJECTED: &str = "Human rejected captured knowledge.\n{}";
+    const ANSWER: &str = "Human response: use the fixture file";
+
+    async fn runner(prefix: &str) -> (Runner, Project, tokio::task::JoinHandle<()>) {
+        let project = Project::new(prefix);
+        let (daemon, server) = serve(context_router(), &project).await;
+        let runner = Runner::create(project.0.clone(), daemon, "Build the map".into())
+            .await
+            .unwrap();
+        (runner, project, server)
+    }
+
+    #[tokio::test]
+    async fn a_command_repeated_across_a_capture_checkpoint_is_refused() {
+        let (mut runner, _project, server) = runner("progress-command").await;
+        runner.event("Command: cargo test\nPermission grants: none\nSuccess: true\nok");
+        let ran = runner.task.events.len() - 1;
+        for neutral in [CONFIRMED, ACCEPTED, REJECTED] {
+            runner.event(neutral);
+            assert_eq!(runner.unchanged_command_run("cargo test"), Some(ran));
+        }
+        assert!(runner.refuse_repeated_command("cargo test"));
+        assert!(runner
+            .task
+            .last_response
+            .starts_with("Not run: this exact command ran at event"));
+        // A human answer can change what the command prints.
+        runner.event(ANSWER);
+        assert_eq!(runner.unchanged_command_run("cargo test"), None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_inspect_repeated_across_a_capture_checkpoint_is_refused() {
+        let (mut runner, _project, server) = runner("progress-inspect").await;
+        let inspect = format!(
+            "Model action: {}",
+            serde_json::to_string(&Step::Inspect {
+                event: 0,
+                offset: 0
+            })
+            .unwrap()
+        );
+        runner.event(inspect.clone());
+        let first = runner.task.events.len() - 1;
+        runner.event(CONFIRMED);
+        runner.event(ACCEPTED);
+        // This step's own journaled action.
+        runner.event(inspect.clone());
+        assert_eq!(runner.repeated_inspect(0, 0), Some(first));
+        assert!(runner.refuse_repeated_inspect(0, 0));
+        runner.event(ANSWER);
+        runner.event(inspect);
+        assert_eq!(runner.repeated_inspect(0, 0), None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_looking_run_continues_across_a_capture_checkpoint() {
+        let (mut runner, _project, server) = runner("progress-looking").await;
+        let read = "Model action: {\"action\":\"read\",\"file\":\"src/parse.rs\"}";
+        runner.event(read);
+        runner.event(format!("{READ_REFUSED} `src/parse.rs` is current"));
+        let refused = runner.task.events.len() - 1;
+        runner.event(CONFIRMED);
+        runner.event(REJECTED);
+        runner.event(read);
+        let before = runner.task.events.len() - 1;
+        let run: Vec<usize> = runner.looking_run(before).map(|(index, _)| index).collect();
+        assert!(run.contains(&refused), "{run:?}");
+        // So a second refused read parks, as it does with no checkpoint.
+        runner.refuse_read("src/parse.rs", "`src/parse.rs` is current");
+        assert_eq!(runner.task.phase, Phase::AwaitingInput);
+        // A human answer ends the run.
+        runner.event(ANSWER);
+        runner.event(read);
+        let before = runner.task.events.len() - 1;
+        assert_eq!(runner.looking_run(before).count(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_capture_checkpoint_does_not_rearm_a_continued_reply() {
+        let (mut runner, _project, server) = runner("progress-reply").await;
+        runner.task.phase = Phase::Working;
+        assert!(runner.continue_after_reply("I will now write the test."));
+        runner.event(CONFIRMED);
+        assert!(!runner.continue_after_reply("I will now write the test."));
+        runner.event(ANSWER);
+        assert!(runner.continue_after_reply("I will now write the test."));
         server.abort();
     }
 }
