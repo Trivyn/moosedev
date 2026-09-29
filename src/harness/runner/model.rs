@@ -19,7 +19,12 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-const MAX_CONTEXT: usize = 100_000;
+/// Bytes a prompt may take at most, whatever the model's window, unless
+/// `MOOSEDEV_HARNESS_PROMPT_BYTES` says otherwise ([`prompt_cap`]). 160 KB is
+/// about 50k tokens: well inside a 131k window after LM Studio's fixed
+/// generation reserve (Lesson 5ac2174a). The cap was 100 KB through badciv
+/// run 14, whose 37.6 KB of rules left 22.9 KB of source in a 131k window.
+const DEFAULT_PROMPT_CAP: usize = 160_000;
 const REPAIR_RESERVE: usize = 1024;
 /// Bytes held back for conversation history and repository navigation, which
 /// are budgeted after the observations block.
@@ -258,6 +263,8 @@ impl std::error::Error for NoopEdit {}
 pub(super) struct PromptOverflow {
     pub budget: usize,
     pub window_tokens: usize,
+    /// The prompt cap in use ([`prompt_cap`]).
+    pub cap: usize,
     pub sections: Vec<(&'static str, usize)>,
     /// The file too large to show in full: path, bytes, source budget.
     pub file: Option<(String, usize, usize)>,
@@ -286,9 +293,10 @@ impl PromptOverflow {
             .map(|(name, bytes)| format!("{name} {bytes}"))
             .collect();
         format!(
-            "Stopped before asking the model: {cause}\nPrompt budget: {} bytes, from context_window_tokens {} (at most {MAX_CONTEXT} bytes).\nRequired bytes: {}.\nNarrow the task: reply with guidance naming a smaller part of the work, or /plan. The task returns to Plan and its working set is cleared.",
+            "Stopped before asking the model: {cause}\nPrompt budget: {} bytes, from context_window_tokens {} (at most {} bytes, MOOSEDEV_HARNESS_PROMPT_BYTES).\nRequired bytes: {}.\nNarrow the task: reply with guidance naming a smaller part of the work, or /plan. The task returns to Plan and its working set is cleared.",
             self.budget,
             self.window_tokens,
+            self.cap,
             sizes.join(", ")
         )
     }
@@ -311,6 +319,39 @@ impl std::fmt::Display for PromptOverflow {
     }
 }
 impl std::error::Error for PromptOverflow {}
+
+/// Whether the Auto state names the planned files not yet written
+/// (`MOOSEDEV_HARNESS_UNWRITTEN_LINE`, default on).
+fn unwritten_line_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_UNWRITTEN_LINE").map_or(true, |value| value.trim() != "off")
+}
+
+/// The prompt cap: `MOOSEDEV_HARNESS_PROMPT_BYTES` when it is a byte count,
+/// else [`DEFAULT_PROMPT_CAP`]. `100000` restores the cap before badciv run 15.
+pub(super) fn prompt_cap() -> usize {
+    parse_prompt_cap(
+        std::env::var("MOOSEDEV_HARNESS_PROMPT_BYTES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_prompt_cap(value: Option<&str>) -> usize {
+    value
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(DEFAULT_PROMPT_CAP)
+}
+
+/// Bytes a request to `config`'s model may take: three bytes a token of the
+/// window less 4,096 tokens for the answer, at most `cap`. The step prompt's
+/// budget is this less [`REPAIR_RESERVE`].
+pub(super) fn prompt_limit(config: &LlmConfig, cap: usize) -> usize {
+    config
+        .context_window_tokens
+        .saturating_sub(4096)
+        .saturating_mul(3)
+        .min(cap)
+}
 
 /// The never-truncated part of a step prompt, split where the step prompt
 /// places optional sections between them. `head` changes only when rules,
@@ -533,14 +574,7 @@ impl Runner {
 
     pub(super) fn prompt_budget(&self) -> Result<usize> {
         let config = self.active_config()?;
-        Ok(MAX_CONTEXT
-            .min(
-                config
-                    .context_window_tokens
-                    .saturating_sub(4096)
-                    .saturating_mul(3),
-            )
-            .saturating_sub(REPAIR_RESERVE))
+        Ok(prompt_limit(&config, prompt_cap()).saturating_sub(REPAIR_RESERVE))
     }
 
     pub(super) async fn model_json<T: serde::de::DeserializeOwned>(
@@ -563,12 +597,7 @@ impl Runner {
             self.active_role().as_str()
         );
         // Never silently truncate governing knowledge to fit the model.
-        let limit = MAX_CONTEXT.min(
-            config
-                .context_window_tokens
-                .saturating_sub(4096)
-                .saturating_mul(3),
-        );
+        let limit = prompt_limit(&config, prompt_cap());
         anyhow::ensure!(prompt.len() <= limit, "required context is {} bytes (budget {limit}); narrow the working set or increase the configured context window", prompt.len());
         // Only the step action uses the configured contract; the capture note
         // stays schema-constrained.
@@ -1017,6 +1046,7 @@ impl Runner {
             self.task.guidance, self.task.mode, self.task.phase,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
         );
+        state.push_str(&self.unwritten_line());
         if let Some(diagnostics) = &self.task.diagnostics {
             state.push_str(&diagnostics.render(super::dispatch::DIAGNOSTICS_BYTES));
         }
@@ -1056,6 +1086,7 @@ impl Runner {
         let overflow = |file: Option<(String, usize, usize)>| PromptOverflow {
             budget: limit,
             window_tokens: config.context_window_tokens,
+            cap: prompt_cap(),
             sections: vec![
                 ("project rules", rules.len()),
                 ("accepted knowledge", context.context.len()),
@@ -1091,6 +1122,28 @@ impl Runner {
             fixed,
             rules: rules_receipt,
         })
+    }
+
+    /// The state line naming the approved plan's files that do not exist
+    /// yet, in Auto; empty when there are none, in Plan mode, or with
+    /// `MOOSEDEV_HARNESS_UNWRITTEN_LINE=off`. badciv run 14's builder looped
+    /// 15 times through checks and reads until it wrote the one planned file
+    /// it had not, which nothing in the prompt named.
+    fn unwritten_line(&self) -> String {
+        if !unwritten_line_enabled()
+            || self.task.mode != Mode::Auto
+            || self.task.approved_revision.is_none()
+        {
+            return String::new();
+        }
+        let unwritten = self.unwritten_planned_files();
+        if unwritten.is_empty() {
+            return String::new();
+        }
+        format!(
+            "Planned files not yet written: {} (the plan is not done until they exist)\n",
+            unwritten.join(", ")
+        )
     }
 
     /// Bytes of source outlines (with the scope note) a prompt on `context`
@@ -1701,6 +1754,129 @@ pub(super) fn is_action_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::harness::runner::test_support::{context_router, serve, test_config, Project};
+
+    /// 2A: the limit follows the window up to the cap: 160,000 bytes at
+    /// qwen's 131,072 tokens, as before below the old 100 KB cap, and
+    /// `MOOSEDEV_HARNESS_PROMPT_BYTES=100000` restores the old cap.
+    #[test]
+    fn the_prompt_limit_follows_the_window_up_to_the_cap() {
+        let window = |tokens: usize| LlmConfig {
+            context_window_tokens: tokens,
+            ..test_config()
+        };
+        let cap = parse_prompt_cap(None);
+        assert_eq!(cap, 160_000);
+        assert_eq!(prompt_limit(&window(131_072), cap), 160_000);
+        assert_eq!(prompt_limit(&window(262_144), cap), 160_000);
+        // Small windows are unchanged: three bytes a token less 4,096 tokens.
+        assert_eq!(prompt_limit(&window(32_768), cap), 86_016);
+        assert_eq!(prompt_limit(&window(16_384), cap), 36_864);
+        assert_eq!(prompt_limit(&window(4_000), cap), 0);
+        // The override, and a value that is not a byte count.
+        assert_eq!(parse_prompt_cap(Some("100000")), 100_000);
+        assert_eq!(parse_prompt_cap(Some(" 120000 ")), 120_000);
+        assert_eq!(parse_prompt_cap(Some("big")), 160_000);
+        assert_eq!(
+            prompt_limit(&window(131_072), parse_prompt_cap(Some("100000"))),
+            100_000
+        );
+    }
+
+    #[tokio::test]
+    async fn the_step_budget_is_the_limit_less_the_repair_reserve() {
+        let project = Project::new("prompt-budget");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Build".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        assert_eq!(runner.prompt_budget().unwrap(), 84_992);
+        runner.configure(
+            LlmConfig {
+                context_window_tokens: 131_072,
+                ..test_config()
+            },
+            None,
+        );
+        assert_eq!(
+            runner.prompt_budget().unwrap(),
+            prompt_limit(runner.config.as_ref().unwrap(), prompt_cap()) - REPAIR_RESERVE
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn the_overflow_names_the_cap_in_use() {
+        let overflow = PromptOverflow {
+            budget: 98_976,
+            window_tokens: 131_072,
+            cap: 100_000,
+            sections: vec![("project rules", 120_000)],
+            file: None,
+        };
+        let guidance = overflow.guidance();
+        assert!(
+            guidance.contains(
+                "from context_window_tokens 131072 (at most 100000 bytes, MOOSEDEV_HARNESS_PROMPT_BYTES)"
+            ),
+            "{guidance}"
+        );
+    }
+
+    /// 4B: in Auto under an approved plan the state names the planned files
+    /// not yet on disk, in plan order; nothing when all exist, in Plan mode,
+    /// or with `MOOSEDEV_HARNESS_UNWRITTEN_LINE=off`.
+    #[tokio::test]
+    async fn the_auto_state_names_the_planned_files_not_yet_written() {
+        let project = Project::new("unwritten-line");
+        std::fs::create_dir_all(project.0.join("src")).unwrap();
+        std::fs::write(project.0.join("src/lib.rs"), "pub mod parse;\n").unwrap();
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Build".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        let context = runner.context.clone().unwrap();
+        let files = ["src/lib.rs", "src/parse.rs", "tests/tiny_fixture.rs"];
+        runner.task.plan = Some(
+            serde_json::from_value(json!({
+                "summary": "Write the parser and its fixture test.",
+                "files": files,
+                "checks": ["true"]
+            }))
+            .unwrap(),
+        );
+        let line = "Planned files not yet written: src/parse.rs, tests/tiny_fixture.rs (the plan is not done until they exist)\n";
+        let state = |runner: &Runner| {
+            runner
+                .mandatory_prompt(&context, OBSERVATION_FLOOR)
+                .unwrap()
+                .state
+        };
+        // Plan mode: no line.
+        assert!(!state(&runner).contains("Planned files not yet written"));
+        runner.task.mode = Mode::Auto;
+        runner.task.approved_revision = Some("fixture".into());
+        let shown = state(&runner);
+        assert!(
+            shown.contains(&format!("Edits already applied to: []\n{line}")),
+            "{shown}"
+        );
+        let (prompt, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(prompt.contains(line));
+
+        std::env::set_var("MOOSEDEV_HARNESS_UNWRITTEN_LINE", "off");
+        let off = state(&runner);
+        std::env::remove_var("MOOSEDEV_HARNESS_UNWRITTEN_LINE");
+        assert_eq!(off, shown.replacen(line, "", 1));
+
+        // Once every planned file exists, the line is gone.
+        std::fs::write(project.0.join("src/parse.rs"), "").unwrap();
+        std::fs::create_dir_all(project.0.join("tests")).unwrap();
+        std::fs::write(project.0.join("tests/tiny_fixture.rs"), "").unwrap();
+        assert!(!state(&runner).contains("Planned files not yet written"));
+        server.abort();
+    }
 
     #[test]
     fn the_narrowed_offer_writes_only_missing_files_and_says_so() {

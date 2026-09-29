@@ -98,6 +98,21 @@ that origin in `allowed_origins` (or `MOOSEDEV_ALLOWED_ORIGINS`) makes its
 authority a trusted host as well. A daemon reads the file once at startup, so a
 change needs a daemon restart; the harness reads it at launch and on `/model`.
 
+Prompt budget. A request may take three bytes a token of the role's
+`context_window_tokens` less 4,096 tokens for the answer, at most 160,000
+bytes; the step prompt's budget is that less a 1 KB repair reserve. The
+source share (two fifths) and the rule-claim share (a quarter) scale with it.
+`MOOSEDEV_HARNESS_PROMPT_BYTES` sets the cap as a byte count; `100000`
+restores the cap used before badciv run 15, when rules took 37.6 KB of a
+100 KB prompt in a 131,072-token window and left 22.9 KB for source. Keep
+the configured window at or below what the server can take in: LM Studio
+holds a fixed per-model generation reserve out of the loaded context (about
+37k tokens for gemma; Lesson 5ac2174a), and a prompt over what is left is
+silently cut in the middle. 160 KB is about 50k tokens, well inside qwen's
+131k window (LM Studio loads it at 262,144). A prompt
+whose protected part does not fit stops before the request, naming the
+budget, the window and the cap in use.
+
 There are two roles, and the role follows the task's mode. `plan` answers while the
 task is in Plan: planning actions, replies, and `/approve-spec` extraction.
 `implement` answers once a plan is approved: its actions, and the final capture
@@ -302,7 +317,17 @@ A free command identical to one that already ran is not run again when nothing
 could have changed its output since: no applied edit, no human message or
 decision, and no permission change. The model is pointed at the earlier result
 (`command_repeat_refused`). A second such repeat parks the task for the human
-instead of spending more model calls. A failed command whose error lines and locations
+instead of spending more model calls. A capture checkpoint's confirmation
+("Human confirmed that no durable knowledge changed at this checkpoint.") and
+a capture review decision ("Human accepted captured knowledge…", "Human
+rejected captured knowledge…") are not human messages for this guard or any
+other window that ends at one (the inspect and read repeats, served outlined
+reads, a continued reply): they settle knowledge, not the work. Human
+guidance and answers, approvals, choices, grants and denials still end a
+window. badciv run 14 (c7abc2d0) looped 15 times through inspecting the plan,
+`ls`, a read and `cargo test` with no refusal, because a headless run
+confirms every checkpoint and each confirmation ended the windows. This is a
+fix, with no switch. A failed command whose error lines and locations
 (`error…` and `--> file:line` lines) are exactly those of the previous failed
 command, although edits were applied in between, ends with a note saying so:
 the edits did not change what fails, so read the code and definitions the
@@ -1002,7 +1027,13 @@ position persists across interruption. The Journal view displays a compact
 index; complete requests and observations remain in the task JSON. Unchanged checkpoints skip redundant
 file rewrites; changed checkpoints retain atomic publication and fsync.
 A plan summary may be as long as the work needs (64 KB guards only against
-runaway output). The task keeps the whole plan; each step's prompt shows a
+runaway output). The task keeps the whole plan. In Auto, a step's prompt shows
+the whole approved plan while its summary fits an eighth of the prompt budget,
+never less than 4 KB (12.4 KB at a 100 KB budget, 20 KB at 160 KB): the same
+bytes every step, so it stays in the cached prefix and the builder does not
+page it from the journal (badciv run 14's builder inspected its 10.6 KB plan
+43 times). `MOOSEDEV_HARNESS_WHOLE_PLAN=off` restores the focused view. In
+Plan mode, and in Auto for a larger plan, each step's prompt shows a
 4 KB view of it: the first paragraph, then the paragraphs naming the file the
 step is about, the files the latest failed command names and the plan files not
 yet edited, then the rest while they fit, in the plan's order, with a closing
@@ -1282,7 +1313,9 @@ contract 3 and intent contract 2.
   view before its first write without its dossier growing every prompt.
 - Source bounded by scope. The task keeps the full text of every working-set
   file, but a prompt shows it in full only within a source budget: two fifths
-  of the prompt budget, which follows the role's `context_window_tokens`, and
+  of the prompt budget, which follows the role's `context_window_tokens`
+  (three bytes a token of the window less 4,096 tokens, at most 160,000
+  bytes; see "Prompt budget" above), and
   never more than the budget leaves after the protected part and this step's
   observations. The observations reserve is what the observations block will
   actually show, up to the 8 KB floor; the last result is known when the
@@ -1546,6 +1579,14 @@ contract 3 and intent contract 2.
   files never written; the checks passed on older tests and it reached final
   review as a false completion. Auto-verify never meets this gate: it fires
   only when every planned file exists and was edited.
+- Unwritten planned files in the state. In Auto under an approved plan, the
+  harness state gains one line while any planned file does not exist yet:
+  "Planned files not yet written: a, b (the plan is not done until they
+  exist)", in plan order, and nothing once they all exist. It is read from
+  disk each step, so it adds no model decision. badciv run 14's builder
+  looped through checks and reads for 69 actions until it wrote the one
+  planned file it had not (`tests/tiny_fixture.rs`); nothing in the prompt
+  named it. `MOOSEDEV_HARNESS_UNWRITTEN_LINE=off` switches it off.
 - Stubs. A finish while a planned file still holds a stub marker of its
   language is sent back once for that source, naming each file and line
   (`finish_refused_stubs`); a repeat finish goes on to the checks. Each
