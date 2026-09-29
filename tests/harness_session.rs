@@ -66,6 +66,7 @@ async fn context(
         delivery_receipt,
         records: vec![],
         governing_rules: vec![],
+        excluded_components: vec![],
         approved_specs: vec![],
         context,
         files: request

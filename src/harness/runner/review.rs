@@ -238,8 +238,8 @@ impl Runner {
         }
         self.emit_capture_review_events(&id, &item.response, accept, &rejected);
         self.event(format!(
-            "Human {} captured knowledge{}.\n{}",
-            if accept { "accepted" } else { "rejected" },
+            "{}{}.\n{}",
+            capture_reviewed(accept),
             dropped_titles(&item.request, &rejected),
             serde_json::to_string(&item.request)?
         ));
@@ -347,8 +347,8 @@ impl Runner {
         );
         self.task.review_drops.remove(&request.operation_id);
         self.event(format!(
-            "Human {} captured knowledge{}.\n{}",
-            if accept { "accepted" } else { "rejected" },
+            "{}{}.\n{}",
+            capture_reviewed(accept),
             dropped_titles(&request, &rejected),
             serde_json::to_string(&self.task.capture_request)?
         ));
@@ -452,7 +452,7 @@ impl Runner {
                 && self.task.reviews.is_empty(),
             "no no-change review pending"
         );
-        self.event("Human confirmed that no durable knowledge changed at this checkpoint.");
+        self.event(NO_KNOWLEDGE_CONFIRMED);
         if self.task.batch_capture && !self.task.capture_due {
             self.task.capture_due = self
                 .task
@@ -529,5 +529,67 @@ fn dropped_titles(request: &CaptureRequest, rejected: &[usize]) -> String {
         String::new()
     } else {
         format!("; dropped: {}", titles.join("; "))
+    }
+}
+
+/// The journal line of a confirmation that a capture checkpoint changed no
+/// durable knowledge. Headless runs journal one at every checkpoint.
+const NO_KNOWLEDGE_CONFIRMED: &str =
+    "Human confirmed that no durable knowledge changed at this checkpoint.";
+
+/// The journal prefixes of a capture review decision, accepted and rejected.
+const CAPTURE_REVIEWED: [&str; 2] = [
+    "Human accepted captured knowledge",
+    "Human rejected captured knowledge",
+];
+
+/// The journal prefix of the human's decision on a capture.
+fn capture_reviewed(accept: bool) -> &'static str {
+    CAPTURE_REVIEWED[usize::from(!accept)]
+}
+
+/// Whether a journal event is the human changing what the model works
+/// with: guidance, an answer, an approval, a grant or a denial. A capture
+/// checkpoint's confirmation or review decision settles knowledge, not the
+/// work, so it is neutral: a window of looking or of unchanged commands runs
+/// on across it. badciv run 14 (c7abc2d0) looped 15 times through inspect,
+/// `ls`, read and `cargo test` without a refusal, because every headless
+/// checkpoint journaled "Human confirmed…" and ended the window.
+pub(super) fn is_human_progress(message: &str) -> bool {
+    message.starts_with("Human ")
+        && message != NO_KNOWLEDGE_CONFIRMED
+        && !CAPTURE_REVIEWED
+            .iter()
+            .any(|prefix| message.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_confirmations_and_reviews_are_not_human_progress() {
+        for neutral in [
+            "Human confirmed that no durable knowledge changed at this checkpoint.",
+            "Human accepted captured knowledge.\n{}",
+            "Human accepted captured knowledge; dropped: A; B.\n{}",
+            "Human rejected captured knowledge.\n{}",
+        ] {
+            assert!(!is_human_progress(neutral), "{neutral}");
+        }
+        for progress in [
+            "Human response: use the fixture",
+            "Human approved the plan and entered Auto.",
+            "Human sent the work back at review: write the test",
+            "Human approved task-scoped permission p1 for exact pending command c.",
+            "Human denied permission request: p1",
+            "Human chose for open choice 1: A",
+            "Human added a.rs to the approved plan.",
+        ] {
+            assert!(is_human_progress(progress), "{progress}");
+        }
+        assert!(!is_human_progress("Applied edit to a.rs"));
+        assert_eq!(capture_reviewed(true), "Human accepted captured knowledge");
+        assert_eq!(capture_reviewed(false), "Human rejected captured knowledge");
     }
 }

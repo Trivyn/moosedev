@@ -51,6 +51,8 @@ pub(super) struct Script {
     pub(super) context: Option<String>,
     /// Governing rules the full context returns.
     pub(super) governing_rules: Vec<GoverningRule>,
+    /// Components the full context reports its scoped rule walk left out.
+    pub(super) excluded_components: Vec<RuleScopeExclusion>,
     /// Records the context route returns, with the claims it supplied.
     pub(super) context_records: Vec<ContextRecord>,
     /// Governing-rule claims come only with a rule-claim budget, as claims
@@ -300,6 +302,7 @@ pub(super) async fn context(
                 records: vec![],
                 governing_rules: vec![],
                 approved_specs: vec![],
+                excluded_components: vec![],
             }),
         );
     }
@@ -343,6 +346,7 @@ pub(super) async fn context(
                 )
                 .collect(),
             approved_specs: script.approved_specs.clone(),
+            excluded_components: script.excluded_components.clone(),
             context: script.context.clone().unwrap_or_else(|| {
                 "Constraint: Preserve the public behavior. Requirement: repair the implementation."
                     .into()

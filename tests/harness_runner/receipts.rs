@@ -2,7 +2,7 @@
 //! journals what each prompt section took, whole on its `model_requests`
 //! entry and compact as one `context_plan` intent event.
 use super::mock::*;
-use moosedev::harness::protocol::GoverningRule;
+use moosedev::harness::protocol::{GoverningRule, RuleScopeExclusion};
 use moosedev::harness::response::ActionContract;
 use moosedev::harness::runner::Runner;
 use serde_json::{json, Value};
@@ -226,4 +226,107 @@ async fn the_receipt_counts_the_earlier_tasks_the_history_shows() {
     assert!(usize_at(&plans[0]["history"], "bytes") > 0);
     let compact = intent_details(&runner, "context_plan").pop().unwrap();
     assert!(compact.contains("(2 earlier)"), "{compact}");
+}
+
+/// What the daemon's scoped rule walk left out is journaled once, as one
+/// `rules_scope_excluded` event, not on every refresh.
+#[tokio::test]
+async fn the_scoped_rule_walk_exclusion_is_journaled_on_change() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().excluded_components = vec![RuleScopeExclusion {
+        component: "badciv-sim".into(),
+        via: "Unidirectional dependency graph".into(),
+        rules: 29,
+    }];
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"reply","message":"Read it.","then":"wait"}));
+    runner.advance().await.unwrap();
+    let refreshes = fixture
+        .shared
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|request| request["kind"] == "context")
+        .count();
+    assert!(refreshes >= 2, "{refreshes} context refreshes");
+    assert_eq!(
+        intent_details(&runner, "rules_scope_excluded"),
+        ["badciv-sim: 29 via \"Unidirectional dependency graph\""]
+    );
+}
+
+/// A change back to nothing withheld is journaled as `none`, so the same set
+/// withheld again later is a transition and journaled again, not suppressed by
+/// the stale last event. A task that never withheld anything journals nothing.
+#[tokio::test]
+async fn the_scoped_rule_walk_exclusion_journals_the_change_back_to_none() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "rules_scope_excluded").is_empty());
+
+    let withheld = vec![RuleScopeExclusion {
+        component: "badciv-sim".into(),
+        via: "Unidirectional dependency graph".into(),
+        rules: 29,
+    }];
+    for excluded in [withheld.clone(), vec![], vec![], withheld] {
+        fixture.shared.lock().unwrap().excluded_components = excluded;
+        fixture.conversational(json!({"action":"reply","message":"Done.","then":"wait"}));
+        runner.advance().await.unwrap();
+        runner.submit_message("Next.".into()).await.unwrap();
+    }
+    let sim = "badciv-sim: 29 via \"Unidirectional dependency graph\"";
+    assert_eq!(
+        intent_details(&runner, "rules_scope_excluded"),
+        [sim, "none", sim]
+    );
+}
+
+/// `MOOSEDEV_HARNESS_PROMPT_BYTES` for the life of the guard. Hold
+/// [`ENVIRONMENT`] with it.
+struct PromptBytes;
+
+impl PromptBytes {
+    fn new(value: &str) -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_PROMPT_BYTES", value);
+        Self
+    }
+}
+
+impl Drop for PromptBytes {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_PROMPT_BYTES");
+    }
+}
+
+/// 2A: at qwen's 131,072-token window the step budget is the 160,000-byte
+/// cap less the repair reserve, where it was 98,976 under the fixed 100 KB
+/// cap; `MOOSEDEV_HARNESS_PROMPT_BYTES=100000` restores that.
+#[tokio::test]
+async fn a_wide_window_budgets_up_to_the_prompt_cap() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let mut config = fixture.config();
+    config.context_window_tokens = 131_072;
+    runner.configure(config, None);
+    let budget = |runner: &Runner| {
+        let requests = action_requests(runner);
+        usize_at(&requests.last().unwrap()["context_plan"], "budget")
+    };
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert_eq!(budget(&runner), 160_000 - 1_024);
+
+    let _cap = PromptBytes::new("100000");
+    fixture.conversational(json!({"action":"reply","message":"Read it.","then":"wait"}));
+    runner.advance().await.unwrap();
+    assert_eq!(budget(&runner), 100_000 - 1_024);
 }

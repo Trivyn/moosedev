@@ -127,6 +127,31 @@ pub struct LinkedEvidence {
     /// dossier order. Together with the rules the walk reached they are the
     /// governing rules of the files.
     pub direct_rules: Vec<LinkedRecord>,
+    /// Components a directly linked record concerns or constrains whose rules
+    /// the scoped walk left out, because their paths cover none of the walked
+    /// files. Only components that withheld at least one rule are listed.
+    pub excluded_components: Vec<ExcludedComponent>,
+    /// IRIs of the rules those components withheld, each once. A fallback that
+    /// renders records beside the walk leaves these out, so the counted line
+    /// saying they are not shown stays true.
+    pub withheld: BTreeSet<String>,
+}
+
+/// A component whose rules the scoped walk did not deliver: it was reached only
+/// through a directly linked record's `concerns`/`constrains`, and its declared
+/// paths cover none of the walked files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcludedComponent {
+    /// The component's display name.
+    pub component: String,
+    /// Kind of the directly linked record that reached it.
+    pub via_kind: String,
+    /// Title of that record.
+    pub via: String,
+    /// Accepted rules of the component not delivered by any other hop, per
+    /// kind. A rule is counted once: under its first component in IRI order,
+    /// however many edges link it to the excluded components.
+    pub rules: BTreeMap<String, usize>,
 }
 
 /// Walk from the code of `files` to the governing knowledge linked around it.
@@ -137,10 +162,26 @@ pub struct LinkedEvidence {
 /// components the direct records concern or constrain, plus `governed`:
 /// components the caller knows the files are about although no path places
 /// them there, such as the components an approved spec's records govern.
+///
+/// With `scoped`, a component reached only through a direct record's
+/// `concerns`/`constrains` joins the walk only when its paths cover one of
+/// `files` or it declares no paths at all (path containment cannot judge it).
+/// A decision linked to one crate that also concerns its neighbours otherwise
+/// carries every neighbour's rules into that crate's files (badciv run 14: 31
+/// badciv-sim and badciv-tui rules in every badciv-map prompt). The left-out
+/// components are reported in [`LinkedEvidence::excluded_components`], so the
+/// narrowing is disclosed rather than silent. The direct records themselves,
+/// `governed`, realized and path-contained components are unaffected.
+///
+/// The harness context request is the only caller: dossiers, hover and the MCP
+/// tools list a record's components through the dossier, not through this
+/// walk, so the scoping has no other surface to diverge from. `scoped` exists
+/// for the harness off switch (`MOOSEDEV_HARNESS_RULE_WALK_SCOPED=off`).
 pub fn linked_evidence(
     state: &AppState,
     files: &[String],
     governed: &[String],
+    scoped: bool,
 ) -> anyhow::Result<LinkedEvidence> {
     let terms = CodeTerms::resolve(state)?;
     let pairs = LinkPairs::resolve(state)?;
@@ -187,13 +228,28 @@ pub fn linked_evidence(
         )?,
     ];
     let system_component = state.resolve_class("SystemComponent")?;
+    let has_paths = |iri: &str| {
+        catalog
+            .iter()
+            .any(|entry| entry.iri.as_deref() == Some(iri) && !entry.covers_paths.is_empty())
+    };
+    // Out-of-scope components, each under the first record that reached it.
+    let mut out_of_scope: BTreeMap<String, &RecordSummary> = BTreeMap::new();
     for record in &sources {
         for pair in &record_to_component {
             for iri in linked_records(state, pair, &record.iri)? {
                 let is_component = NamedNode::new(iri.as_str()).is_ok_and(|node| {
                     asserted_project_types(state, &node).contains(&system_component)
                 });
-                if is_component {
+                if !is_component {
+                    continue;
+                }
+                // Every component covering a walked file is already in
+                // `components` (path containment above), so a component with
+                // paths that is not there covers none of them.
+                if scoped && !components.contains(&iri) && has_paths(&iri) {
+                    out_of_scope.entry(iri).or_insert(*record);
+                } else {
                     components.insert(iri);
                 }
             }
@@ -298,11 +354,115 @@ pub fn linked_evidence(
             })
         })
         .collect();
+    // Count what the narrowing withheld: accepted rules of each out-of-scope
+    // component that no other hop delivered. `collect_records` returns a rule
+    // once per linking predicate (`concerns` and `constrains`), and a rule may
+    // concern several excluded components, so each is counted once by IRI.
+    let delivered: BTreeSet<&str> = records
+        .iter()
+        .chain(&direct_rules)
+        .map(|record| record.iri.as_str())
+        .chain(excluded.iter().map(String::as_str))
+        .collect();
+    let mut excluded_components = Vec::new();
+    let mut withheld = BTreeSet::new();
+    for (component, record) in out_of_scope {
+        let mut rules = BTreeMap::<String, usize>::new();
+        for rule in collect_records(state, &pairs.component, &component)? {
+            if is_rule_kind(&rule.kind)
+                && is_accepted(&rule.status)
+                && !delivered.contains(rule.iri.as_str())
+                && withheld.insert(rule.iri)
+            {
+                *rules.entry(rule.kind).or_default() += 1;
+            }
+        }
+        if !rules.is_empty() {
+            excluded_components.push(ExcludedComponent {
+                component: component_label(state, &component),
+                via_kind: record.kind.clone(),
+                via: record.title.clone(),
+                rules,
+            });
+        }
+    }
     Ok(LinkedEvidence {
         records,
         excluded,
         direct_rules,
+        excluded_components,
+        withheld,
     })
+}
+
+/// The counted line disclosing the scoped walk's narrowing (Constraint
+/// 6effd7c5 rule 3), or an empty string when nothing was left out. Components
+/// are grouped under the record that reached them, in the order given.
+pub fn render_excluded_components(excluded: &[ExcludedComponent]) -> String {
+    let mut groups: Vec<(&str, &str, Vec<&ExcludedComponent>)> = Vec::new();
+    for entry in excluded {
+        match groups
+            .iter_mut()
+            .find(|(kind, via, _)| *kind == entry.via_kind && *via == entry.via)
+        {
+            Some((_, _, members)) => members.push(entry),
+            None => groups.push((&entry.via_kind, &entry.via, vec![entry])),
+        }
+    }
+    if groups.is_empty() {
+        return String::new();
+    }
+    let segments: Vec<String> = groups
+        .iter()
+        .map(|(kind, via, members)| {
+            let mut per_kind = BTreeMap::<&str, usize>::new();
+            for member in members {
+                for (rule_kind, n) in &member.rules {
+                    *per_kind.entry(rule_kind).or_default() += n;
+                }
+            }
+            let count: usize = per_kind.values().sum();
+            let noun = if count == 1 { "rule" } else { "rules" };
+            let kinds = per_kind
+                .iter()
+                .map(|(kind, n)| format!("{kind}: {n}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let names: Vec<&str> = members
+                .iter()
+                .map(|member| member.component.as_str())
+                .collect();
+            format!(
+                "{count} {noun} of {} ({kinds}), reached through {} \"{via}\",",
+                join_names(&names),
+                kind_noun(kind)
+            )
+        })
+        .collect();
+    let total: usize = excluded.iter().flat_map(|entry| entry.rules.values()).sum();
+    let verb = if total == 1 { "is" } else { "are" };
+    format!(
+        "{} {verb} not shown for these files; search project knowledge to see them.",
+        segments.join(" and ")
+    )
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn join_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// A record kind as prose: "decision" for an ArchitecturalDecision.
+fn kind_noun(kind: &str) -> String {
+    match kind {
+        "ArchitecturalDecision" => "decision".to_string(),
+        "AntiPattern" => "anti-pattern".to_string(),
+        other => other.to_lowercase(),
+    }
 }
 
 /// Render the walk's records: header, `via:` line and claim body per record,
@@ -880,5 +1040,52 @@ mod tests {
             Some("urn:current"),
             "a proposed successor does not unseat the accepted head"
         );
+    }
+
+    /// The narrowing's counted line groups components under the record that
+    /// reached them and counts the withheld rules per kind; nothing left out
+    /// renders nothing.
+    #[test]
+    fn excluded_components_render_one_counted_line() {
+        let entry =
+            |component: &str, kind: &str, via: &str, rules: &[(&str, usize)]| ExcludedComponent {
+                component: component.into(),
+                via_kind: kind.into(),
+                via: via.into(),
+                rules: rules.iter().map(|(k, n)| (k.to_string(), *n)).collect(),
+            };
+        assert_eq!(render_excluded_components(&[]), "");
+        let excluded = [
+            entry(
+                "badciv-sim",
+                "ArchitecturalDecision",
+                "Unidirectional dependency graph",
+                &[("Constraint", 20), ("Requirement", 9)],
+            ),
+            entry(
+                "badciv-tui",
+                "ArchitecturalDecision",
+                "Unidirectional dependency graph",
+                &[("Requirement", 2)],
+            ),
+        ];
+        assert_eq!(
+            render_excluded_components(&excluded),
+            "31 rules of badciv-sim and badciv-tui (Constraint: 20; Requirement: 11), reached \
+             through decision \"Unidirectional dependency graph\", are not shown for these \
+             files; search project knowledge to see them."
+        );
+        let mut more = excluded.to_vec();
+        more.push(entry(
+            "spec",
+            "Constraint",
+            "Pure core",
+            &[("Constraint", 1)],
+        ));
+        assert!(render_excluded_components(&more).contains(
+            "(Constraint: 20; Requirement: 11), reached through decision \"Unidirectional \
+             dependency graph\", and 1 rule of spec (Constraint: 1), reached through \
+             constraint \"Pure core\", are not shown"
+        ));
     }
 }

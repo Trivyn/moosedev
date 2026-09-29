@@ -1471,6 +1471,80 @@ async fn interrupted_command_intent_asks_a_human_never_replays() {
     assert!(!fixture.root.join("duplicated-marker").exists());
 }
 
+/// badciv run 14 (c7abc2d0): a headless run confirms "no durable knowledge
+/// changed" at every capture checkpoint, and that confirmation ended the
+/// repeated-command guard's window, so `cargo test` reran 15 times without a
+/// refusal. The confirmation is not progress: the repeat is still refused.
+#[tokio::test]
+async fn a_repeated_command_is_refused_across_a_headless_capture_confirmation() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = Runner::create(
+        fixture.root.clone(),
+        fixture.url.clone(),
+        "Inspect the existing code".into(),
+    )
+    .await
+    .unwrap();
+    runner.configure(fixture.config(), None);
+    fixture.reply("harness_action", json!({"action":"plan","summary":"Inspect code without changes","files":["code.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    if runner.task.phase == Phase::AwaitingReview {
+        runner.confirm_no_knowledge().await.unwrap();
+    }
+    runner.approve_plan().await.unwrap();
+    let confirmed = "Human confirmed that no durable knowledge changed at this checkpoint.";
+    let runs = |runner: &Runner| {
+        runner
+            .task
+            .events
+            .iter()
+            .filter(|e| e.message.starts_with("Command: ls code.txt\n"))
+            .count()
+    };
+    // The headless driver's loop: advance, confirming every checkpoint.
+    async fn step(fixture: &Fixture, runner: &mut Runner) {
+        fixture.reply(
+            "harness_action",
+            json!({"action":"command","command":"ls code.txt"}),
+        );
+        for _ in 0..4 {
+            match runner.task.phase {
+                Phase::AwaitingReview => runner.confirm_no_knowledge().await.unwrap(),
+                _ if fixture.shared.lock().unwrap().replies.is_empty() => return,
+                _ => runner.advance().await.unwrap(),
+            }
+        }
+    }
+    step(&fixture, &mut runner).await;
+    assert_eq!(runs(&runner), 1);
+    let ran = runner
+        .task
+        .events
+        .iter()
+        .rposition(|e| e.message.starts_with("Command: ls code.txt\n"))
+        .unwrap();
+    // The checkpoint after the command, confirmed as a headless run does.
+    if runner.task.phase != Phase::AwaitingReview {
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    runner.confirm_no_knowledge().await.unwrap();
+    assert!(runner.task.events[ran..]
+        .iter()
+        .any(|e| e.message == confirmed));
+    step(&fixture, &mut runner).await;
+    assert_eq!(runs(&runner), 1, "the repeat did not run");
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("Not run: this exact command ran at event"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
 #[tokio::test]
 async fn completed_verification_requires_human_confirmation_and_durable_checkpoint() {
     let _env_lock = ENVIRONMENT.lock().await;
@@ -2984,14 +3058,16 @@ async fn a_long_plan_is_accepted_and_each_step_sees_the_part_it_needs() {
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"read","file":"code.txt"}));
     runner.advance().await.unwrap();
+    // Larger than the whole plan an Auto step shows at this window (an
+    // eighth of its 84,992-byte budget), so the step sees the focused part.
     let summary = [
         "Repair the output of code.txt.".to_string(),
-        format!("notes.txt: record the reasoning. {}", "n".repeat(2_500)),
+        format!("notes.txt: record the reasoning. {}", "n".repeat(5_000)),
         format!("code.txt: fix the output line. {}", "c".repeat(2_500)),
-        format!("Verification: run the check. {}", "v".repeat(1_500)),
+        format!("Verification: run the check. {}", "v".repeat(3_500)),
     ]
     .join("\n\n");
-    assert!(summary.len() > 6_000);
+    assert!(summary.len() > 84_992 / 8);
     fixture.conversational(json!({"action":"plan","summary":summary,"files":["code.txt","notes.txt"],"checks":["true"]}));
     runner.advance().await.unwrap();
     assert_eq!(

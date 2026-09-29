@@ -167,6 +167,22 @@ pub struct ContextResponse {
     /// file still matches the approved digest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approved_specs: Vec<ApprovedSpecStatus>,
+    /// Components whose rules the scoped rule walk withheld from the requested
+    /// files: reached only through a linked record's `concerns`/`constrains`,
+    /// with paths covering none of the files. The model-facing `context`
+    /// carries the counted line; this is for the runner's journal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_components: Vec<RuleScopeExclusion>,
+}
+
+/// One component the scoped rule walk left out, and what reached it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleScopeExclusion {
+    pub component: String,
+    /// Title of the directly linked record that concerns or constrains it.
+    pub via: String,
+    /// Accepted rules of the component withheld.
+    pub rules: usize,
 }
 
 /// An approved specification's standing against its file on disk.

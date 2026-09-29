@@ -19,7 +19,12 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-const MAX_CONTEXT: usize = 100_000;
+/// Bytes a prompt may take at most, whatever the model's window, unless
+/// `MOOSEDEV_HARNESS_PROMPT_BYTES` says otherwise ([`prompt_cap`]). 160 KB is
+/// about 50k tokens: well inside a 131k window after LM Studio's fixed
+/// generation reserve (Lesson 5ac2174a). The cap was 100 KB through badciv
+/// run 14, whose 37.6 KB of rules left 22.9 KB of source in a 131k window.
+const DEFAULT_PROMPT_CAP: usize = 160_000;
 const REPAIR_RESERVE: usize = 1024;
 /// Bytes held back for conversation history and repository navigation, which
 /// are budgeted after the observations block.
@@ -258,6 +263,8 @@ impl std::error::Error for NoopEdit {}
 pub(super) struct PromptOverflow {
     pub budget: usize,
     pub window_tokens: usize,
+    /// The prompt cap in use ([`prompt_cap`]).
+    pub cap: usize,
     pub sections: Vec<(&'static str, usize)>,
     /// The file too large to show in full: path, bytes, source budget.
     pub file: Option<(String, usize, usize)>,
@@ -286,9 +293,10 @@ impl PromptOverflow {
             .map(|(name, bytes)| format!("{name} {bytes}"))
             .collect();
         format!(
-            "Stopped before asking the model: {cause}\nPrompt budget: {} bytes, from context_window_tokens {} (at most {MAX_CONTEXT} bytes).\nRequired bytes: {}.\nNarrow the task: reply with guidance naming a smaller part of the work, or /plan. The task returns to Plan and its working set is cleared.",
+            "Stopped before asking the model: {cause}\nPrompt budget: {} bytes, from context_window_tokens {} (at most {} bytes, MOOSEDEV_HARNESS_PROMPT_BYTES).\nRequired bytes: {}.\nNarrow the task: reply with guidance naming a smaller part of the work, or /plan. The task returns to Plan and its working set is cleared.",
             self.budget,
             self.window_tokens,
+            self.cap,
             sizes.join(", ")
         )
     }
@@ -311,6 +319,53 @@ impl std::fmt::Display for PromptOverflow {
     }
 }
 impl std::error::Error for PromptOverflow {}
+
+/// Whether the Auto state names the planned files not yet written
+/// (`MOOSEDEV_HARNESS_UNWRITTEN_LINE`, default on).
+fn unwritten_line_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_UNWRITTEN_LINE").map_or(true, |value| value.trim() != "off")
+}
+
+/// The smallest prompt cap `MOOSEDEV_HARNESS_PROMPT_BYTES` may set. Below it
+/// the protected prompt (instructions, action meanings and output schema)
+/// leaves next to nothing for rules, plan and source.
+const MIN_PROMPT_CAP: usize = 16_000;
+
+/// The prompt cap: `MOOSEDEV_HARNESS_PROMPT_BYTES` when set, else
+/// [`DEFAULT_PROMPT_CAP`]. `100000` restores the cap before badciv run 15.
+/// A value that is not a byte count of at least [`MIN_PROMPT_CAP`] is a
+/// configuration error, never a silent default: the step stops before asking
+/// the model, naming the variable.
+pub(super) fn prompt_cap() -> Result<usize> {
+    parse_prompt_cap(
+        std::env::var("MOOSEDEV_HARNESS_PROMPT_BYTES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_prompt_cap(value: Option<&str>) -> Result<usize> {
+    let Some(raw) = value.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(DEFAULT_PROMPT_CAP);
+    };
+    match raw.parse::<usize>() {
+        Ok(cap) if cap >= MIN_PROMPT_CAP => Ok(cap),
+        _ => anyhow::bail!(
+            "MOOSEDEV_HARNESS_PROMPT_BYTES must be a byte count of at least {MIN_PROMPT_CAP}; got {raw:?}"
+        ),
+    }
+}
+
+/// Bytes a request to `config`'s model may take: three bytes a token of the
+/// window less 4,096 tokens for the answer, at most `cap`. The step prompt's
+/// budget is this less [`REPAIR_RESERVE`].
+pub(super) fn prompt_limit(config: &LlmConfig, cap: usize) -> usize {
+    config
+        .context_window_tokens
+        .saturating_sub(4096)
+        .saturating_mul(3)
+        .min(cap)
+}
 
 /// The never-truncated part of a step prompt, split where the step prompt
 /// places optional sections between them. `head` changes only when rules,
@@ -533,14 +588,7 @@ impl Runner {
 
     pub(super) fn prompt_budget(&self) -> Result<usize> {
         let config = self.active_config()?;
-        Ok(MAX_CONTEXT
-            .min(
-                config
-                    .context_window_tokens
-                    .saturating_sub(4096)
-                    .saturating_mul(3),
-            )
-            .saturating_sub(REPAIR_RESERVE))
+        Ok(prompt_limit(&config, prompt_cap()?).saturating_sub(REPAIR_RESERVE))
     }
 
     pub(super) async fn model_json<T: serde::de::DeserializeOwned>(
@@ -563,12 +611,7 @@ impl Runner {
             self.active_role().as_str()
         );
         // Never silently truncate governing knowledge to fit the model.
-        let limit = MAX_CONTEXT.min(
-            config
-                .context_window_tokens
-                .saturating_sub(4096)
-                .saturating_mul(3),
-        );
+        let limit = prompt_limit(&config, prompt_cap()?);
         anyhow::ensure!(prompt.len() <= limit, "required context is {} bytes (budget {limit}); narrow the working set or increase the configured context window", prompt.len());
         // Only the step action uses the configured contract; the capture note
         // stays schema-constrained.
@@ -960,40 +1003,49 @@ impl Runner {
         // Replanning approved work, the planner amends the approved plan and
         // sees it whole (bounded), so it does not page it from the journal.
         let amending = self.amending_approved_plan();
-        let plan = self.task.plan.clone().map(|mut plan| {
-            plan.summary = if amending {
-                self.approved_plan_view()
-            } else {
-                self.plan_summary_view()
-            }
-            .unwrap_or_default();
-            // What the human decided of the plan's open choices, in the plan
-            // itself; the rules it leaves open and the questions still
-            // unanswered are the human's gate, not the model's.
-            let decided = plan_choices::decided(&plan.open_choices);
-            if !decided.is_empty() {
-                plan.summary = format!("{}\n\n{decided}", plan.summary);
-            }
-            plan.open_rules.clear();
-            plan.open_choices.clear();
-            // Claims a resumed journal holds from when the field was on.
-            if !rule_state::plan_satisfied_enabled() {
-                plan.satisfied.clear();
-            }
-            plan
-        });
         prompt.push_str(&format!(
-            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n{}: {}\n",
-            config.model,
-            self.task.objective,
-            context.context,
-            if amending {
-                "Approved plan (amend it; keep what still holds)"
-            } else {
-                "Plan"
-            },
-            serde_json::to_string(&plan)?,
+            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
+            config.model, self.task.objective, context.context,
         ));
+        // The Plan line, ending the head, for a given summary view. Chosen
+        // below, once the rest of the protected prompt is known.
+        let plan_line = |summary: Option<String>| -> Result<String> {
+            let plan = self.task.plan.clone().map(|mut plan| {
+                plan.summary = summary.unwrap_or_default();
+                // What the human decided of the plan's open choices, in the plan
+                // itself; the rules it leaves open and the questions still
+                // unanswered are the human's gate, not the model's.
+                let decided = plan_choices::decided(&plan.open_choices);
+                if !decided.is_empty() {
+                    plan.summary = format!("{}\n\n{decided}", plan.summary);
+                }
+                plan.open_rules.clear();
+                plan.open_choices.clear();
+                // Claims a resumed journal holds from when the field was on.
+                if !rule_state::plan_satisfied_enabled() {
+                    plan.satisfied.clear();
+                }
+                plan
+            });
+            Ok(format!(
+                "{}: {}\n",
+                if amending {
+                    "Approved plan (amend it; keep what still holds)"
+                } else {
+                    "Plan"
+                },
+                serde_json::to_string(&plan)?,
+            ))
+        };
+        let focused_plan = plan_line(if amending {
+            self.approved_plan_view()
+        } else {
+            self.focused_plan_view()
+        })?;
+        let whole_plan = self
+            .whole_plan_view()
+            .map(|summary| plan_line(Some(summary)))
+            .transpose()?;
         // After the source, not before it: a dossier changes when the graph
         // gains a record or an edited file's definitions change, and ahead of
         // the source every such change cost its whole prefix (about 2.4 KB of
@@ -1017,6 +1069,7 @@ impl Runner {
             self.task.guidance, self.task.mode, self.task.phase,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
         );
+        state.push_str(&self.unwritten_line());
         if let Some(diagnostics) = &self.task.diagnostics {
             state.push_str(&diagnostics.render(super::dispatch::DIAGNOSTICS_BYTES));
         }
@@ -1043,19 +1096,39 @@ impl Runner {
             }
         };
         let limit = self.prompt_budget()?;
+        let cap = prompt_cap()?;
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
         let outlines = protected_source(&blocks) + self.scope_note().len();
-        let fixed = prompt.len()
-            + SOURCE_HEADER.len()
-            + "{}\n".len()
-            + dossier_block.len()
-            + state.len()
-            + schema_bytes;
+        let rest =
+            SOURCE_HEADER.len() + "{}\n".len() + dossier_block.len() + state.len() + schema_bytes;
+        // The whole plan only while the source keeps its whole share beside
+        // it and the observation floor: its extra bytes then come out of the
+        // optional sections, never out of source, and cannot overflow a
+        // prompt the focused view fits. The floor, not this step's reserve,
+        // so every build of one step (the retrieval preflight's too) chooses
+        // the same view.
+        let plan = match whole_plan {
+            Some(whole)
+                if prompt.len()
+                    + whole.len()
+                    + rest
+                    + outlines
+                    + OBSERVATION_FLOOR
+                    + source_budget(limit, 0, 0)
+                    <= limit =>
+            {
+                whole
+            }
+            _ => focused_plan,
+        };
+        prompt.push_str(&plan);
+        let fixed = prompt.len() + rest;
         let known = rules.len() + context.context.len() + dossiers.len() + schema_bytes;
         let overflow = |file: Option<(String, usize, usize)>| PromptOverflow {
             budget: limit,
             window_tokens: config.context_window_tokens,
+            cap,
             sections: vec![
                 ("project rules", rules.len()),
                 ("accepted knowledge", context.context.len()),
@@ -1091,6 +1164,28 @@ impl Runner {
             fixed,
             rules: rules_receipt,
         })
+    }
+
+    /// The state line naming the approved plan's files that do not exist
+    /// yet, in Auto; empty when there are none, in Plan mode, or with
+    /// `MOOSEDEV_HARNESS_UNWRITTEN_LINE=off`. badciv run 14's builder looped
+    /// 15 times through checks and reads until it wrote the one planned file
+    /// it had not, which nothing in the prompt named.
+    fn unwritten_line(&self) -> String {
+        if !unwritten_line_enabled()
+            || self.task.mode != Mode::Auto
+            || self.task.approved_revision.is_none()
+        {
+            return String::new();
+        }
+        let unwritten = self.unwritten_planned_files();
+        if unwritten.is_empty() {
+            return String::new();
+        }
+        format!(
+            "Planned files not yet written: {} (the plan is not done until they exist)\n",
+            unwritten.join(", ")
+        )
     }
 
     /// Bytes of source outlines (with the scope note) a prompt on `context`
@@ -1701,6 +1796,220 @@ pub(super) fn is_action_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::harness::runner::test_support::{context_router, serve, test_config, Project};
+
+    /// 2A: the limit follows the window up to the cap: 160,000 bytes at
+    /// qwen's 131,072 tokens, as before below the old 100 KB cap, and
+    /// `MOOSEDEV_HARNESS_PROMPT_BYTES=100000` restores the old cap.
+    #[test]
+    fn the_prompt_limit_follows_the_window_up_to_the_cap() {
+        let window = |tokens: usize| LlmConfig {
+            context_window_tokens: tokens,
+            ..test_config()
+        };
+        let cap = parse_prompt_cap(None).unwrap();
+        assert_eq!(cap, 160_000);
+        assert_eq!(prompt_limit(&window(131_072), cap), 160_000);
+        assert_eq!(prompt_limit(&window(262_144), cap), 160_000);
+        // Small windows are unchanged: three bytes a token less 4,096 tokens.
+        assert_eq!(prompt_limit(&window(32_768), cap), 86_016);
+        assert_eq!(prompt_limit(&window(16_384), cap), 36_864);
+        assert_eq!(prompt_limit(&window(4_000), cap), 0);
+        // The override.
+        assert_eq!(parse_prompt_cap(Some("100000")).unwrap(), 100_000);
+        assert_eq!(parse_prompt_cap(Some(" 120000 ")).unwrap(), 120_000);
+        assert_eq!(parse_prompt_cap(Some("16000")).unwrap(), MIN_PROMPT_CAP);
+        assert_eq!(parse_prompt_cap(Some("  ")).unwrap(), DEFAULT_PROMPT_CAP);
+        assert_eq!(
+            prompt_limit(&window(131_072), parse_prompt_cap(Some("100000")).unwrap()),
+            100_000
+        );
+    }
+
+    /// A prompt cap that is not a byte count, is zero or is below the
+    /// minimum is a configuration error naming the variable, never the
+    /// default in silence. [`prompt_cap`] feeds [`Runner::prompt_budget`] and
+    /// the request limit through `?`, so the step stops before any request.
+    #[test]
+    fn an_invalid_prompt_cap_is_a_configuration_error() {
+        for value in ["big", "0", "15999", "-1", "1e5", "100 KB"] {
+            let error = parse_prompt_cap(Some(value)).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "MOOSEDEV_HARNESS_PROMPT_BYTES must be a byte count of at least 16000; got {value:?}"
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_step_budget_is_the_limit_less_the_repair_reserve() {
+        let project = Project::new("prompt-budget");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Build".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        assert_eq!(runner.prompt_budget().unwrap(), 84_992);
+        runner.configure(
+            LlmConfig {
+                context_window_tokens: 131_072,
+                ..test_config()
+            },
+            None,
+        );
+        assert_eq!(
+            runner.prompt_budget().unwrap(),
+            prompt_limit(runner.config.as_ref().unwrap(), prompt_cap().unwrap()) - REPAIR_RESERVE
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn the_overflow_names_the_cap_in_use() {
+        let overflow = PromptOverflow {
+            budget: 98_976,
+            window_tokens: 131_072,
+            cap: 100_000,
+            sections: vec![("project rules", 120_000)],
+            file: None,
+        };
+        let guidance = overflow.guidance();
+        assert!(
+            guidance.contains(
+                "from context_window_tokens 131072 (at most 100000 bytes, MOOSEDEV_HARNESS_PROMPT_BYTES)"
+            ),
+            "{guidance}"
+        );
+    }
+
+    /// 1A never costs what the focused view would not: the whole plan is
+    /// shown only while the source keeps its whole share beside it and the
+    /// observation floor. A protected prompt that leaves less room falls back
+    /// to the focused view, so the source keeps its share, and a prompt the
+    /// whole plan would overflow is built with the focused one instead.
+    #[tokio::test]
+    async fn the_whole_plan_yields_to_the_source_share_and_never_overflows() {
+        let project = Project::new("whole-plan-room");
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Build".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        let summary = (0..8)
+            .map(|i| {
+                format!(
+                    "Part {i}: src/parse.rs does step {i}. {}",
+                    "x".repeat(1_000)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        runner.task.plan = Some(
+            serde_json::from_value(json!({
+                "summary": summary,
+                "files": ["src/parse.rs"],
+                "checks": ["true"]
+            }))
+            .unwrap(),
+        );
+        runner.task.mode = Mode::Auto;
+        runner.task.approved_revision = Some("fixture".into());
+        let base = runner.context.clone().unwrap();
+        let whole = serde_json::to_string(&summary).unwrap();
+        let focused = serde_json::to_string(&runner.focused_plan_view().unwrap()).unwrap();
+        assert_eq!(runner.whole_plan_view().as_deref(), Some(summary.as_str()));
+        assert!(whole.len() > focused.len() + 4_000);
+
+        let limit = runner.prompt_budget().unwrap();
+        let share = source_budget(limit, 0, 0);
+        let outlines = protected_source(&runner.source_blocks()) + runner.scope_note().len();
+        let unpadded = runner.mandatory_prompt(&base, OBSERVATION_FLOOR).unwrap();
+        assert!(unpadded.head.contains(&whole), "room: the whole plan");
+        // Accepted knowledge padded by `pad` bytes, the rest unchanged.
+        let padded = |pad: usize| {
+            let mut context = base.clone();
+            context.context.push_str(&"k".repeat(pad));
+            context
+        };
+        // One byte past the room for the whole plan beside the source share.
+        let past_share = limit - (unpadded.fixed + outlines + OBSERVATION_FLOOR + share) + 1;
+        let context = padded(past_share);
+        let tight = runner
+            .mandatory_prompt(&context, OBSERVATION_FLOOR)
+            .unwrap();
+        assert!(tight.head.contains(&focused) && !tight.head.contains(&whole));
+        assert_eq!(tight.source.budget, share, "the source keeps its share");
+        let (prompt, source) = runner.prompt(&context, &[]).unwrap();
+        assert!(prompt.contains(&focused) && !prompt.contains(&whole));
+        assert_eq!(source.budget, share);
+
+        // One byte past what the whole plan's protected prompt fits: the
+        // step is built with the focused plan, not stopped by an overflow.
+        let past_limit = limit - (unpadded.fixed + outlines) + 1;
+        let context = padded(past_limit);
+        let whole_fixed = unpadded.fixed + past_limit;
+        assert!(whole_fixed + outlines > limit);
+        assert!(whole_fixed - (whole.len() - focused.len()) + outlines <= limit);
+        let (prompt, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(prompt.contains(&focused) && !prompt.contains(&whole));
+        server.abort();
+    }
+
+    /// 4B: in Auto under an approved plan the state names the planned files
+    /// not yet on disk, in plan order; nothing when all exist, in Plan mode,
+    /// or with `MOOSEDEV_HARNESS_UNWRITTEN_LINE=off`.
+    #[tokio::test]
+    async fn the_auto_state_names_the_planned_files_not_yet_written() {
+        let project = Project::new("unwritten-line");
+        std::fs::create_dir_all(project.0.join("src")).unwrap();
+        std::fs::write(project.0.join("src/lib.rs"), "pub mod parse;\n").unwrap();
+        let (daemon, server) = serve(context_router(), &project).await;
+        let mut runner = Runner::create(project.0.clone(), daemon, "Build".into())
+            .await
+            .unwrap();
+        runner.configure(test_config(), None);
+        let context = runner.context.clone().unwrap();
+        let files = ["src/lib.rs", "src/parse.rs", "tests/tiny_fixture.rs"];
+        runner.task.plan = Some(
+            serde_json::from_value(json!({
+                "summary": "Write the parser and its fixture test.",
+                "files": files,
+                "checks": ["true"]
+            }))
+            .unwrap(),
+        );
+        let line = "Planned files not yet written: src/parse.rs, tests/tiny_fixture.rs (the plan is not done until they exist)\n";
+        let state = |runner: &Runner| {
+            runner
+                .mandatory_prompt(&context, OBSERVATION_FLOOR)
+                .unwrap()
+                .state
+        };
+        // Plan mode: no line.
+        assert!(!state(&runner).contains("Planned files not yet written"));
+        runner.task.mode = Mode::Auto;
+        runner.task.approved_revision = Some("fixture".into());
+        let shown = state(&runner);
+        assert!(
+            shown.contains(&format!("Edits already applied to: []\n{line}")),
+            "{shown}"
+        );
+        let (prompt, _) = runner.prompt(&context, &[]).unwrap();
+        assert!(prompt.contains(line));
+
+        std::env::set_var("MOOSEDEV_HARNESS_UNWRITTEN_LINE", "off");
+        let off = state(&runner);
+        std::env::remove_var("MOOSEDEV_HARNESS_UNWRITTEN_LINE");
+        assert_eq!(off, shown.replacen(line, "", 1));
+
+        // Once every planned file exists, the line is gone.
+        std::fs::write(project.0.join("src/parse.rs"), "").unwrap();
+        std::fs::create_dir_all(project.0.join("tests")).unwrap();
+        std::fs::write(project.0.join("tests/tiny_fixture.rs"), "").unwrap();
+        assert!(!state(&runner).contains("Planned files not yet written"));
+        server.abort();
+    }
 
     #[test]
     fn the_narrowed_offer_writes_only_missing_files_and_says_so() {

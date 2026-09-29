@@ -22,6 +22,13 @@ fn claim_budget() -> usize {
         .unwrap_or(12_000)
 }
 
+/// Whether the rule walk keeps a linked record's other components out of the
+/// files' rules when their paths cover none of the files (default on;
+/// `MOOSEDEV_HARNESS_RULE_WALK_SCOPED=off` restores the unscoped walk).
+fn rule_walk_scoped() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_RULE_WALK_SCOPED").map_or(true, |value| value.trim() != "off")
+}
+
 pub fn context_snapshot(
     state: &AppState,
     request: &ContextRequest,
@@ -47,6 +54,7 @@ pub fn context_snapshot(
     let mut record_indexes = std::collections::BTreeMap::new();
     let mut file_record_iris = Vec::new();
     let mut delivery_receipt = None;
+    let mut excluded_components = Vec::new();
     let evidence_iris = if request.evidence_only {
         // An evidence-only request (the model's search) returns only atomic
         // record blocks. When the caller supplies a byte budget the daemon,
@@ -82,7 +90,7 @@ pub fn context_snapshot(
                 .cloned(),
         );
         let governed = super::spec::spec_components_for_files(state, &walked)?;
-        let linked = graph::linked_evidence(state, &walked, &governed)?;
+        let linked = graph::linked_evidence(state, &walked, &governed, rule_walk_scoped())?;
         file_record_iris.extend(linked.excluded.iter().cloned());
         let rules = graph::governing_rules(&linked, request.rule_claim_bytes);
         // Context contract 3: the accepted decisions that settle each rule,
@@ -145,10 +153,15 @@ pub fn context_snapshot(
             context.push_str(&format!("Recall: {RECALL}\n"));
         }
         if linked.records.is_empty() {
+            // Neither the dossiers' records nor the rules the scoped walk
+            // withheld: the counted line below says those are not shown.
             let fallback: Vec<_> =
                 graph::relevant_context_snapshot(state, Some(&request.topic), 5, false)?
                     .into_iter()
-                    .filter(|record| !linked.excluded.contains(&record.iri))
+                    .filter(|record| {
+                        !linked.excluded.contains(&record.iri)
+                            && !linked.withheld.contains(&record.iri)
+                    })
                     .collect();
             context.push_str("\nTopic evidence (fallback; nothing is linked beyond the file dossiers; complete claims; up to six relationships per record):\n");
             render_topic_records(state, &mut context, &fallback);
@@ -178,6 +191,20 @@ pub fn context_snapshot(
                 ));
             }
         }
+        // The scoped walk's narrowing, disclosed with a counted line.
+        let excluded_line = graph::render_excluded_components(&linked.excluded_components);
+        if !excluded_line.is_empty() {
+            context.push_str(&format!("\n{excluded_line}\n"));
+        }
+        excluded_components = linked
+            .excluded_components
+            .iter()
+            .map(|entry| RuleScopeExclusion {
+                component: entry.component.clone(),
+                via: entry.via.clone(),
+                rules: entry.rules.values().sum(),
+            })
+            .collect();
         Vec::new()
     };
     let root = state.project_root();
@@ -310,6 +337,7 @@ pub fn context_snapshot(
         intent_contracts: vec![2],
         context_contracts: vec![1, 2, 3],
         governing_rules,
+        excluded_components,
     })
 }
 
