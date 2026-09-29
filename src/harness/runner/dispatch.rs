@@ -324,7 +324,7 @@ impl Runner {
             let text = self.workspace.read(&file)?;
             self.task.source.insert(file, text);
         }
-        let built = match self.prompt(&context, &files) {
+        let built = match self.prompt_with_plan(&context, &files) {
             // Rule claims past the daemon's fixed floor are the first thing a
             // crowded prompt gives up: ask again for the floor alone, so the
             // budget share never stops a step that fitted before it.
@@ -345,17 +345,18 @@ impl Runner {
                     "rule_claims_floor",
                     "prompt overflowed with the rule-claim budget; rebuilt with the fixed floor",
                 );
-                self.prompt(&floor, &files).map(|built| (floor, built))
+                self.prompt_with_plan(&floor, &files)
+                    .map(|built| (floor, built))
             }
             built => built.map(|built| (context, built)),
         };
-        let (context, (prompt, source)) = match built {
+        let (context, (prompt, source, plan)) = match built {
             // The scope's own rules must never stop a step: without them and
             // the preloads, the prompt is the one the step had before.
             Err(error) if error.is::<model::PromptOverflow>() && !rule_files.is_empty() => {
                 self.withdraw_scope_preload();
                 let context = self.refresh(&targets).await?;
-                let built = self.prompt(&context, &files)?;
+                let built = self.prompt_with_plan(&context, &files)?;
                 (context, built)
             }
             built => built?,
@@ -378,6 +379,10 @@ impl Runner {
         if let Some(receipt) = source.receipt() {
             self.intent_event("source_delivery", &receipt);
         }
+        // What each section of this prompt took, on every request: compact
+        // in the intent journal, whole on the request's journal entry.
+        self.intent_event("context_plan", &plan.compact());
+        self.context_plan = Some(serde_json::to_value(&plan)?);
         let output: ModelOutput = self
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;

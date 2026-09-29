@@ -1302,6 +1302,28 @@ contract 3 and intent contract 2.
   file's tier, size and reason (`kept` for a file held from the last prompt),
   and the model request records `source_outlined`, `source_full` and
   `source_budget`.
+- Context plan receipt. Every step-action request records what each prompt
+  section took. Its `model_requests` entry carries `context_plan`: `scope`,
+  `preloaded` and `preload_skipped` (the step's scope files, the ones
+  preloaded, and the ones left out for space); `rules` (the rules section's
+  `bytes`, the rules shown `full`, `one_line` and `title_only` by kind, the
+  `settled` rules by state, and `decided_by_supported`, whether the daemon
+  reports the decisions that settle a rule, context contract 3); `source`
+  (the section's `bytes`, entity dossiers included, the files shown `full`,
+  as an `outline` or `listed`, the full-source `budget`, and the files shown
+  in full in and out of the scope, `scope_full` and `nonscope_full`);
+  `history` (`bytes` and the `earlier_tasks` lines it shows);
+  `navigation_bytes`, `observations_bytes`, `head_bytes` and `state_bytes`;
+  `total`, the prompt's length before the output schema, which those
+  sections add up to; and `budget`, the prompt budget. Each request also
+  journals one `context_plan` intent event with the counts on one line, for
+  example `rules 26.8KB full 45 line 12 title 0 settled d12 p0 s0 f0; source
+  30.1KB budget 40.0KB full 4 outline 6 listed 0 (in scope 4, out 0); scope 9
+  pre 5 skip 0; hist 2.1KB (2 earlier); nav 1.2KB; obs 8.0KB; head 40.1KB;
+  state 1.2KB; total 58.3/99.0KB` (settled: `d` decided, `p` addressed by an
+  approved plan, `s` said satisfied, `f` deferred). A repair request gets its
+  own receipt. The receipt only journals, as `source_delivery` does, so it
+  has no switch.
 - Source swap notice. When a prompt shows as an outline a file the previous
   prompt showed in full, the outlines section opens by naming it, with the
   working set's size and the source budget, and `source_swap` is journaled.

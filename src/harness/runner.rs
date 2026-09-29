@@ -26,6 +26,7 @@ mod actions;
 mod approval;
 mod capture;
 mod choice;
+mod context_plan;
 mod dispatch;
 mod finish;
 mod index;
@@ -117,6 +118,9 @@ pub struct Runner {
     language: langserver::LanguageState,
     /// The source budget of the prompt being sent, for its journal entry.
     source_budget: Option<usize>,
+    /// The receipt of the step prompt being sent (`context_plan`), taken by
+    /// its `model_requests` entry.
+    context_plan: Option<serde_json::Value>,
     /// This step's scope and the scope files left out for space, decided at
     /// its start.
     scope: step_scope::StepScope,
@@ -416,6 +420,7 @@ impl Runner {
             language_settings: None,
             language: Default::default(),
             source_budget: None,
+            context_plan: None,
             scope: Default::default(),
         };
         let context = runner.refresh(&[]).await?;
@@ -472,6 +477,7 @@ impl Runner {
             language_settings: None,
             language: Default::default(),
             source_budget: None,
+            context_plan: None,
             scope: Default::default(),
         };
         if missing_guidance {

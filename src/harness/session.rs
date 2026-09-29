@@ -374,7 +374,7 @@ fn recent_turns(turns: &[String], budget: usize) -> String {
     turns[start..].join(TURN_SEPARATOR)
 }
 
-const EARLIER_TASKS_HEADER: &str = "Earlier tasks in this conversation (history; where it disagrees with the current source above, the source is right):";
+pub(crate) const EARLIER_TASKS_HEADER: &str = "Earlier tasks in this conversation (history; where it disagrees with the current source above, the source is right):";
 const EARLIER_TASKS_BYTES: usize = 4_096;
 const EARLIER_REQUEST_BYTES: usize = 200;
 const EARLIER_ANSWER_BYTES: usize = 300;

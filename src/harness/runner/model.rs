@@ -1,4 +1,5 @@
 //! Model requests, prompts, schemas, and streamed prose decoding.
+use super::context_plan::{ContextPlan, HistoryPlan, RulesPlan, SourcePlan};
 use super::plan_choices::{self, ProposedChoice};
 use super::rule_state::{self, RuleState, RulesReceipt};
 use super::source::{protected_source, source_budget, SourceView};
@@ -324,6 +325,8 @@ struct Mandatory {
     source: SourceView,
     /// Bytes of everything but the source text and outlines.
     fixed: usize,
+    /// What the rules section in `head` delivered.
+    rules: RulesReceipt,
 }
 
 /// One physical generation: action JSON text (json_schema contract, capture note)
@@ -628,7 +631,12 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
+            let context_plan = if name == "harness_action" {
+                self.context_plan.take()
+            } else {
+                None
+            };
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"context_plan":context_plan,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model
@@ -911,7 +919,7 @@ impl Runner {
         // Where each rule stands, once for the rules and the planning echo;
         // a proposed plan settles nothing.
         let states = self.settlement(&[]).states(&context.governing_rules);
-        let (rules, _receipt) = project_rules(
+        let (rules, rules_receipt) = project_rules(
             &self.rules_with_retrieved_claims(&context.governing_rules),
             &states,
         );
@@ -1064,6 +1072,7 @@ impl Runner {
             remaining: limit.saturating_sub(required),
             source,
             fixed,
+            rules: rules_receipt,
         })
     }
 
@@ -1192,17 +1201,30 @@ impl Runner {
     }
 
     /// The step prompt and what it showed of the working-set source.
+    #[cfg(test)]
     pub(super) fn prompt(
         &self,
         context: &ContextResponse,
         files: &[String],
     ) -> Result<(String, SourceView)> {
+        self.prompt_with_plan(context, files)
+            .map(|(prompt, source, _)| (prompt, source))
+    }
+
+    /// The step prompt, what it showed of the working-set source, and the
+    /// receipt of what each section took ([`ContextPlan`]).
+    pub(super) fn prompt_with_plan(
+        &self,
+        context: &ContextResponse,
+        files: &[String],
+    ) -> Result<(String, SourceView, ContextPlan)> {
         let Mandatory {
             head,
             source_text,
             state,
             mut remaining,
             source,
+            rules,
             ..
         } = self.mandatory_prompt(context, self.observation_reserve()?)?;
         let last = self.last_result();
@@ -1258,13 +1280,31 @@ impl Runner {
         // observations that change every step. Historical intentions still
         // precede the current execution state; the approved plan, which
         // governs like the knowledge beside it, comes before them.
+        let head_bytes = head.len();
         let mut prompt = head;
         prompt.push_str(&source_text);
         prompt.push_str(&navigation);
         prompt.push_str(&history);
         prompt.push_str(&state);
         prompt.push_str(&observations);
-        Ok((prompt, source))
+        let plan = ContextPlan {
+            scope: self.scope.files.clone(),
+            preloaded: self.task.source_preloaded.iter().cloned().collect(),
+            preload_skipped: self.scope.skipped.clone(),
+            rules: RulesPlan {
+                receipt: rules,
+                decided_by_supported: context.context_contracts.contains(&3),
+            },
+            source: SourcePlan::new(source_text.len(), &source, &self.scope.files),
+            history: HistoryPlan::new(&history),
+            navigation_bytes: navigation.len(),
+            observations_bytes: observations.len(),
+            head_bytes,
+            state_bytes: state.len(),
+            total: prompt.len(),
+            budget: self.prompt_budget()?,
+        };
+        Ok((prompt, source, plan))
     }
 
     pub(super) fn preserve_stream(&mut self) {
