@@ -1312,6 +1312,39 @@ contract 3 and intent contract 2.
   model reading its files in
   a cycle through a budget one file short (badciv 7e0c50eb) is told it is
   swapping, rather than finding out one read at a time.
+- Source by scope. Each step has a scope, chosen from its state rather than
+  from what the model happened to read: the plan's files, then the files
+  earlier approved plans of the task listed, then in Auto the files the
+  current errors are in (settled language-server errors and the files the
+  latest failed command names), or in Plan the approved spec in play and the
+  files it covers. That spec's approval is current, rules are still open, and
+  its components cover a place (whole-project coverage `.` names none); the
+  objective, the guidance or a read names it, or it is the only such spec.
+  Scope files on disk that are not in the working set join it as preloaded
+  source: no recency, read snapshot or read file, and in Plan mode their
+  governing rules arrive as `rule_files` without dossiers. At most 24 are
+  preloaded, their outlines within a tenth of the prompt budget, and only
+  while the prompt keeps full source's whole share and the observation floor
+  with their outlines added, so a preload never shrinks what a step shows in
+  full or overflows a prompt that fitted. The rest are named in the source
+  section ("Scope files not loaded for space: …; read one to load it."). A
+  preloaded file that leaves the scope unread leaves the working set;
+  `scope_preload` is journaled when the set changes. Should the rules the
+  scope brought still overflow the prompt after the rule-claim floor, the
+  step withdraws its preloads and is built without them (`scope_preload`
+  "withdrawn"), so the scope never stops a step. Scope files rank after
+  the files a step needs and before recency (reason `scope`). A preloaded
+  file shown in full counts as read for the redundant-read refusal and for
+  edit grounding, and an edit to it reads it in and proceeds in the same step
+  when the read brings no governing knowledge the proposal had not seen; an
+  outlined one still meets the edit guards. An empty scope changes nothing.
+- Reads outside the scope. With a non-empty scope, a `read` of an existing
+  file outside it that the model has not read is served as the Last result,
+  "Current text of `<file>` (outside this step's scope; not added to the
+  working set):", journaled as `Served read outside scope:` with
+  `read_served_outside_scope`, paged and refused on repeat as a served
+  outlined read is. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches scope,
+  preloading and these serves off.
 - Redundant reads. A model `read` of a file the producing prompt already
   shows in full is refused without touching the tiers (the refusal gives the
   next action: plan in Plan mode; edit, check or finish while working). A

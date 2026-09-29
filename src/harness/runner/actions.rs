@@ -46,6 +46,14 @@ pub(super) enum Step {
     ReadOutlined {
         file: String,
     },
+    /// A model read of an existing file outside the step's non-empty scope
+    /// that the model has not read. It journals as the read the model
+    /// proposed; dispatch serves the file's current text as the Last result
+    /// without adding it to the working set.
+    #[serde(rename = "read")]
+    ReadOutsideScope {
+        file: String,
+    },
     Search {
         query: String,
     },
@@ -602,6 +610,17 @@ pub(super) fn outlined_text_response(file: &str, text: &str) -> String {
     )
 }
 
+/// The journal prefix of a read outside the step's scope the harness served.
+pub(super) const OUTSIDE_SCOPE_SERVED: &str = "Served read outside scope:";
+
+/// The Last result serving `text`, the current text of `file`, which is
+/// outside the step's scope.
+pub(super) fn outside_scope_text_response(file: &str, text: &str) -> String {
+    format!(
+        "Current text of `{file}` (outside this step's scope; not added to the working set):\n{text}"
+    )
+}
+
 impl Runner {
     /// What a model read of `file` becomes: a read into the working set; a
     /// refusal when it would add nothing ([`Self::redundant_read`]); or, for a
@@ -612,6 +631,26 @@ impl Runner {
     /// file until the model makes progress: the repeat is refused, and a
     /// further one parks as any repeated refusal does.
     fn read_step(&self, file: String) -> Step {
+        // Outside the step's scope a read shows the file once, as the Last
+        // result, and the working set stays the scope's.
+        if self.outside_scope(&file) {
+            return match self.served_since_progress(&file) {
+                Some(event) => {
+                    let next = if self.task.mode == Mode::Plan {
+                        "Propose the plan with what it showed"
+                    } else {
+                        "Take the plan's next step with what it showed"
+                    };
+                    Step::ReadRefused {
+                        reason: format!(
+                            "`{file}` is unchanged and already served as the Last result at event {event}. {next}, or inspect event {event}."
+                        ),
+                        file,
+                    }
+                }
+                None => Step::ReadOutsideScope { file },
+            };
+        }
         let reason = match self.redundant_read(&file) {
             None => return Step::Read { file },
             Some(reason) => reason,
@@ -640,12 +679,16 @@ impl Runner {
         }
     }
 
-    /// The event of an outlined read of `file` served since the model last
-    /// did anything but look (reads, inspects and searches).
+    /// The event of an outlined read, or a read outside the scope, of `file`
+    /// served since the model last did anything but look (reads, inspects
+    /// and searches).
     fn served_since_progress(&self, file: &str) -> Option<usize> {
-        let served = format!("{OUTLINED_SERVED} {file} ");
+        let served = [
+            format!("{OUTLINED_SERVED} {file} "),
+            format!("{OUTSIDE_SCOPE_SERVED} {file} "),
+        ];
         self.looking_run(self.task.events.len())
-            .find(|(_, event)| event.message.starts_with(&served))
+            .find(|(_, event)| served.iter().any(|at| event.message.starts_with(at)))
             .map(|(index, _)| index)
     }
 
@@ -667,7 +710,9 @@ impl Runner {
     /// it reads next (badciv 40cef4a5, Lesson f5d2b5f9). Reads the guards
     /// make are never judged here.
     fn redundant_read(&self, file: &str) -> Option<String> {
-        let read = self.task.read_files.iter().any(|known| known == file);
+        // A preloaded file shown in full was seen as a read one is.
+        let read =
+            self.task.read_files.iter().any(|known| known == file) || self.preloaded_in_full(file);
         if read && self.task.source_full.contains(file) {
             // badciv 1e6cd3e7: without a next step, a planner that wanted to
             // "verify" read the same file again and parked.

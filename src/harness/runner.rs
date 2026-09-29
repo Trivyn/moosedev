@@ -42,6 +42,7 @@ mod scope;
 mod source;
 mod spec;
 mod spec_scope;
+mod step_scope;
 pub use spec::spec_approval_objective;
 mod symbolic;
 mod task;
@@ -116,6 +117,9 @@ pub struct Runner {
     language: langserver::LanguageState,
     /// The source budget of the prompt being sent, for its journal entry.
     source_budget: Option<usize>,
+    /// This step's scope and the scope files left out for space, decided at
+    /// its start.
+    scope: step_scope::StepScope,
 }
 
 pub use crate::harness::{DEFAULT_GUIDANCE, GUIDANCE_FILE};
@@ -385,6 +389,7 @@ impl Runner {
             source_outlined: Default::default(),
             source_outlined_seen: Default::default(),
             source_full: Default::default(),
+            source_preloaded: Default::default(),
             standing_guidance: Some(standing_guidance),
         };
         let mut runner = Self {
@@ -411,6 +416,7 @@ impl Runner {
             language_settings: None,
             language: Default::default(),
             source_budget: None,
+            scope: Default::default(),
         };
         let context = runner.refresh(&[]).await?;
         Self::validate_daemon_contracts(&context)?;
@@ -466,6 +472,7 @@ impl Runner {
             language_settings: None,
             language: Default::default(),
             source_budget: None,
+            scope: Default::default(),
         };
         if missing_guidance {
             // A journal from before the guidance file gets the compiled default.

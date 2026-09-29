@@ -512,6 +512,12 @@ pub struct Task {
     /// they fit: a file that changes tier resends the prompt after it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub(super) source_full: std::collections::BTreeSet<String>,
+    /// Working-set files the harness loaded because they are in the step's
+    /// scope, not because the model read them: no recency, read snapshot or
+    /// read file. A model read makes one an ordinary working-set file; one
+    /// that leaves the scope unread leaves the working set.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(super) source_preloaded: std::collections::BTreeSet<String>,
     /// The standing guidance this task was created with, replayed verbatim on
     /// resume. `None` only in journals written before the guidance file.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -67,7 +67,9 @@ impl Runner {
             .iter()
             .map(|definition| definition.file.clone())
             .filter(|defining| {
-                !self.task.read_files.contains(defining) && !self.read_is_current(defining)
+                !self.task.read_files.contains(defining)
+                    && !self.read_is_current(defining)
+                    && !self.preloaded_in_full(defining)
             })
             .collect();
         if response.mismatches.is_empty() && unread.is_empty() {
@@ -179,6 +181,7 @@ impl Runner {
             if read.len() >= MAX_GROUNDING_READS
                 || read.contains(&defining)
                 || self.task.read_files.contains(&defining)
+                || self.preloaded_in_full(&defining)
             {
                 continue;
             }
