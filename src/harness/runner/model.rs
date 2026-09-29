@@ -1624,6 +1624,7 @@ mod tests {
             kind: kind.into(),
             claim: claim.into(),
             via: "via: component Map".into(),
+            decided_by: Vec::new(),
         };
         let rendered = project_rules(&[
             rule("urn:a", "Constraint", "hasDescription: a\n"),
@@ -1690,6 +1691,7 @@ mod tests {
             kind: "Constraint".into(),
             claim: String::new(),
             via: "via: component map".into(),
+            decided_by: Vec::new(),
         }];
         let (before, _) = runner.prompt(&context, &[]).unwrap();
         assert!(before.contains("1 project rule(s) named without their claim"));
@@ -1856,6 +1858,7 @@ mod tests {
                 kind: "Constraint".into(),
                 claim: "hasDescription: A retry loop stops after the configured limit.\n".into(),
                 via: "via: component Transfers".into(),
+                decided_by: Vec::new(),
             },
             GoverningRule {
                 iri: "urn:rule:b".into(),
@@ -1863,6 +1866,7 @@ mod tests {
                 kind: "Requirement".into(),
                 claim: String::new(),
                 via: "via: linked to src/send.rs".into(),
+                decided_by: Vec::new(),
             },
         ];
         assert_eq!(

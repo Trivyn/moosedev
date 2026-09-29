@@ -55,6 +55,11 @@ pub struct GoverningRule {
     pub claim: String,
     /// The `via:` line naming what reached the rule.
     pub via: String,
+    /// IRIs of the accepted ArchitecturalDecisions (not spec approval
+    /// markers) that are `isMotivatedBy` the rule: the decisions that settle
+    /// it. Empty from a daemon without context contract 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decided_by: Vec<String>,
 }
 
 fn constraint_kind() -> String {
@@ -145,7 +150,8 @@ pub struct ContextResponse {
     #[serde(default)]
     pub intent_contracts: Vec<u32>,
     /// Supported context-request contracts: 1 accepts `rule_files`, 2
-    /// `rule_claim_bytes`.
+    /// `rule_claim_bytes`, 3 fills each rule's `decided_by` and each
+    /// approved spec's `covers`.
     #[serde(default)]
     pub context_contracts: Vec<u32>,
     /// The governing rules of the requested files, direct rules first and
@@ -177,6 +183,11 @@ pub struct ApprovedSpecStatus {
     /// read as "nothing open".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_rules: Option<Vec<String>>,
+    /// The paths the approval's recorded components cover, whole-project
+    /// coverage (`"."`) excluded. Empty from a daemon without context
+    /// contract 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

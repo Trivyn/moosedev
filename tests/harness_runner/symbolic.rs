@@ -1199,6 +1199,7 @@ async fn only_action_and_capture_note_schemas_are_ever_requested() {
         kind: "Requirement".into(),
         claim: "hasDescription: A rendered name never changes between views.\n".into(),
         via: "via: component Labels".into(),
+        decided_by: Vec::new(),
     }];
     fixture.note(
         "The helper strips whitespace so labels compare equal; keep normalization in one place.",
@@ -1733,6 +1734,7 @@ async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
             kind: "Requirement".into(),
             claim: "hasDescription: Display labels render as before.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
         GoverningRule {
             iri: UNLINKED.into(),
@@ -1740,6 +1742,7 @@ async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
             kind: "Constraint".into(),
             claim: "hasDescription: A label is a single line.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
     ];
     let mut runner = fixture.interactive().await;
@@ -1828,6 +1831,7 @@ async fn capture_sees_every_approved_plan_and_carries_the_rules_they_address() {
         stale: false,
         record_count: 3,
         open_rules: Some(vec!["Labels are localized".into()]),
+        covers: Vec::new(),
     }];
     for _ in 0..4 {
         match runner.task.phase {
@@ -1855,6 +1859,7 @@ async fn a_returned_plan_names_each_rule_by_its_kind() {
         kind: "Requirement".into(),
         claim: "hasDescription: Display labels render exactly as before.\n".into(),
         via: "via: linked to labels.py".into(),
+        decided_by: Vec::new(),
     }];
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"plan","summary":"Add a helper","files":["labels.py"],"checks":["true"],"addresses":[]}));
@@ -3603,6 +3608,7 @@ async fn adding_a_file_governed_by_rules_the_plan_does_not_address_replans() {
             kind: "Constraint".into(),
             claim: "hasDescription: A module-level constant is never reassigned.\n".into(),
             via: "via: linked to other.py".into(),
+            decided_by: Vec::new(),
         },
     )];
     let mut runner = escaped_to_other(&fixture).await;
@@ -4111,6 +4117,7 @@ fn preserve_rule() -> GoverningRule {
         kind: "Requirement".into(),
         claim: "hasDescription: Display labels render exactly as before.\n".into(),
         via: "via: linked to labels.py".into(),
+        decided_by: Vec::new(),
     }
 }
 
@@ -4723,6 +4730,7 @@ async fn addressed_rules_are_withheld_while_planned_files_hold_stubs() {
             kind: "Requirement".into(),
             claim: "hasDescription: Display labels render as before.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
         GoverningRule {
             iri: UNLINKED.into(),
@@ -4730,6 +4738,7 @@ async fn addressed_rules_are_withheld_while_planned_files_hold_stubs() {
             kind: "Constraint".into(),
             claim: "hasDescription: A label is a single line.\n".into(),
             via: "via: linked to labels.py".into(),
+            decided_by: Vec::new(),
         },
     ];
     std::fs::write(

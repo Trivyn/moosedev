@@ -1,7 +1,7 @@
 //! Explicit spec approval. Preparation is graph-read-only and freezes every
 //! identity and lifecycle effect in the operation journal. Approval rechecks
 //! both source and accepted-knowledge revisions before one graph transaction.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use axum::extract::State;
 use axum::Json;
@@ -1645,6 +1645,7 @@ pub(super) fn approved_spec_statuses(state: &AppState) -> anyhow::Result<Vec<App
         .iter()
         .map(|(_, marker)| marker.iri.as_str())
         .collect();
+    let catalog = graph::load_components(state)?;
     for (path, marker) in &markers {
         let path = path.clone();
         let current = std::fs::read(root.join(&path)).ok().map(sha256_hex);
@@ -1655,10 +1656,29 @@ pub(super) fn approved_spec_statuses(state: &AppState) -> anyhow::Result<Vec<App
                 open_rules.push(record.title.clone());
             }
         }
+        // The paths the approval's own components cover: where the spec's
+        // work lives. Whole-project coverage names no place to look.
+        let mut covers = Vec::new();
+        for component in marker_components(state, &marker.iri) {
+            let Some(entry) = catalog
+                .iter()
+                .find(|entry| entry.iri.as_deref() == Some(component.as_str()))
+            else {
+                continue;
+            };
+            for covered in &entry.covers_paths {
+                if covered != graph::COVERS_WHOLE_PROJECT {
+                    covers.push(covered.clone());
+                }
+            }
+        }
+        covers.sort();
+        covers.dedup();
         statuses.push(ApprovedSpecStatus {
             stale: current.is_none() || current != marker.source_sha256,
             record_count: records.len(),
             open_rules: Some(open_rules),
+            covers,
             path,
         });
     }
@@ -1666,16 +1686,51 @@ pub(super) fn approved_spec_statuses(state: &AppState) -> anyhow::Result<Vec<App
     Ok(statuses)
 }
 
-/// Whether an accepted ArchitecturalDecision that is not a spec approval
-/// marker (of this spec or any other that shares the record) is motivated by
-/// `record`. Until one is, the record is work the spec asks for that no
-/// recorded decision has taken up.
+/// The accepted decisions that settle each of `rules` (see
+/// [`deciding_decisions`]), keyed by rule IRI. The approval markers and the
+/// predicate resolve once for the whole list.
+pub(super) fn rule_decisions(
+    state: &AppState,
+    rules: &[String],
+) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+    let motivated_by = state.resolve_object_property("isMotivatedBy")?;
+    let markers = current_approval_markers(state)?;
+    let marker_iris: Vec<&str> = markers
+        .iter()
+        .map(|(_, marker)| marker.iri.as_str())
+        .collect();
+    let mut decisions = BTreeMap::new();
+    for rule in rules {
+        if !decisions.contains_key(rule) {
+            let deciding = deciding_decisions(state, &motivated_by, &marker_iris, rule)?;
+            decisions.insert(rule.clone(), deciding);
+        }
+    }
+    Ok(decisions)
+}
+
+/// Whether an accepted decision has taken up `record` (see
+/// [`deciding_decisions`]). Until one has, the record is work the spec asks
+/// for that no recorded decision has taken up.
 fn motivates_a_decision(
     state: &AppState,
     motivated_by: &str,
     markers: &[&str],
     record: &str,
 ) -> anyhow::Result<bool> {
+    Ok(!deciding_decisions(state, motivated_by, markers, record)?.is_empty())
+}
+
+/// The accepted ArchitecturalDecisions that are not spec approval markers (of
+/// this spec or any other that shares the record) and are motivated by
+/// `record`, in IRI order.
+fn deciding_decisions(
+    state: &AppState,
+    motivated_by: &str,
+    markers: &[&str],
+    record: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut decisions = Vec::new();
     for quad in state.store.quads_for_pattern(
         None,
         Some(NamedNodeRef::new(motivated_by)?),
@@ -1694,10 +1749,12 @@ fn motivates_a_decision(
         }
         let class = graph::require_information_record(state, &subject)?;
         if graph::local_name(&class) == "ArchitecturalDecision" {
-            return Ok(true);
+            decisions.push(subject.as_str().to_string());
         }
     }
-    Ok(false)
+    decisions.sort();
+    decisions.dedup();
+    Ok(decisions)
 }
 
 fn current_approval_for_path(
@@ -2355,6 +2412,10 @@ mod tests {
         let main = preview.component.clone().unwrap();
         let approved = approve("spec-parts");
         assert!(approved.checkpoint.conforms);
+        // The approval covers what its components cover, the whole-project
+        // `.` of the spec's own component aside.
+        let covers = || approved_spec_statuses(&state).unwrap()[0].covers.clone();
+        assert_eq!(covers(), ["sim/"]);
         let concerns = state.resolve_object_property("concerns").unwrap();
         let edges = |title: &str| {
             let iri = &approved
@@ -2427,6 +2488,8 @@ mod tests {
         let preview = prepare("spec-drop", vec![]).unwrap();
         assert!(!preview.already_approved);
         let dropped = approve("spec-drop");
+        // The part is no longer the approval's own: only `.` is left.
+        assert!(covers().is_empty(), "{:?}", covers());
         for record in &dropped.records {
             assert_eq!(
                 direct_objects(&state, &record.iri, &concerns).unwrap(),
@@ -2563,6 +2626,10 @@ mod tests {
         .unwrap();
         assert!(scoped.files.is_empty());
         assert_eq!(scoped.governing_rules.len(), 1);
+        // Only the approval marker is motivated by the rule, and a marker
+        // never decides one. The approval covers the crate it scoped.
+        assert!(scoped.governing_rules[0].decided_by.is_empty());
+        assert_eq!(scoped.approved_specs[0].covers, ["crate/"]);
         assert_eq!(
             rules(vec!["crate/src/lib.rs".into()]),
             ["Crate parses maps"]

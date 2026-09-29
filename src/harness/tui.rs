@@ -3320,6 +3320,7 @@ mod tests {
                 kind: "Constraint".into(),
                 claim: "Parsing must not depend on iteration order.".into(),
                 via: "src/parser.rs".into(),
+                decided_by: Vec::new(),
             }],
             records: vec![],
             delivery_receipt: None,
