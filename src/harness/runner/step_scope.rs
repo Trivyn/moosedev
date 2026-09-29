@@ -2,17 +2,18 @@
 //! plan item 5, Requirement 6ffabf80). The scope is chosen from the step's
 //! state, never from what the model happened to read: the plan's files, the
 //! files earlier approved plans of this task listed, then in Auto the files
-//! the current errors are in, or in Plan the files of the approved spec in
-//! play. Scope files not yet in the working set join it as preloaded source
-//! (shown as the working set is, never touching recency, read snapshots or
-//! the read files), within a small share of the prompt; a read of a file
-//! outside a non-empty scope is served as the Last result without joining
-//! the working set. An empty scope is today's behaviour everywhere.
-//! `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches all of it off
-//! (Requirement e9166711).
+//! the current errors are in and the approved spec in play (the spec file
+//! alone), or in Plan that spec and the files it covers. Scope files not
+//! yet in the working set join it as preloaded source (shown as the working
+//! set is, never touching recency, read snapshots or the read files), within
+//! a small share of the prompt; a read of a file outside a non-empty scope
+//! is served as the Last result without joining the working set. An empty
+//! scope is today's behaviour everywhere. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off`
+//! switches all of it off (Requirement e9166711).
 use super::dispatch::error_lines;
 use super::source::{files_named_in, protected_source, source_block};
 use super::{ContextResponse, Mode, Runner, MAX_FILES};
+use crate::harness::protocol::ApprovedSpecStatus;
 use std::collections::BTreeSet;
 
 /// At most this many files are preloaded at once.
@@ -221,9 +222,11 @@ impl Runner {
     }
 
     /// This step's scope, in order and deduplicated: the plan's files, the
-    /// files earlier approved plans listed, then the current error files
-    /// (Auto) or the approved spec in play's files (Plan). Empty when the
-    /// switch is off or nothing is in scope.
+    /// files earlier approved plans listed, then in Auto the current error
+    /// files and the approved spec in play ([`Self::specs_in_play`]), so the
+    /// builder keeps the spec its plan implements in view; in Plan the spec
+    /// in play and the files it covers. Empty when the switch is off or
+    /// nothing is in scope.
     pub(super) fn step_scope(&self, repo: &[String]) -> Vec<String> {
         if !enabled() {
             return Vec::new();
@@ -238,22 +241,39 @@ impl Runner {
         for file in planned.chain(approved) {
             push_unique(&mut files, file);
         }
-        let state = match self.task.mode {
-            Mode::Auto => self.current_error_files(repo),
-            Mode::Plan => self.spec_scope_files(repo),
-        };
+        let specs = self.specs_in_play(&files);
+        let mut state = Vec::new();
+        if self.task.mode == Mode::Auto {
+            state = self.current_error_files(repo);
+        }
+        for spec in specs {
+            // The spec itself, so the planner and the builder keep it in view.
+            if repo.binary_search(&spec.path).is_ok() {
+                push_unique(&mut state, &spec.path);
+            }
+            // In Auto the plan chose the files to work on; the spec's other
+            // files are the planner's.
+            if self.task.mode == Mode::Plan {
+                for file in repo {
+                    if spec.covers.iter().any(|path| covered(path, file)) {
+                        push_unique(&mut state, file);
+                    }
+                }
+            }
+        }
         for file in &state {
             push_unique(&mut files, file);
         }
         files
     }
 
-    /// The approved spec in play and the repository files it covers: a spec whose
-    /// approval is current, with rules still open and a place it covers,
-    /// that the objective, the guidance or a read names, or else the only
-    /// such spec. A spec covering the whole project names no place, so it is
-    /// never in play here.
-    fn spec_scope_files(&self, repo: &[String]) -> Vec<String> {
+    /// The approved specs in play: specs whose approval is current, with
+    /// rules still open and a place they cover, that the objective, the
+    /// guidance or a read names; else the only such spec; else those that
+    /// cover the most of `planned` (the plans' files), when any covers one.
+    /// A spec covering the whole project names no place, so it is never in
+    /// play here.
+    fn specs_in_play(&self, planned: &[String]) -> Vec<&ApprovedSpecStatus> {
         let Some(context) = self.context.as_ref() else {
             return Vec::new();
         };
@@ -278,24 +298,26 @@ impl Runner {
             })
             .copied()
             .collect();
-        let chosen = match (named.is_empty(), in_play.len()) {
-            (false, _) => named,
-            (true, 1) => in_play,
-            _ => Vec::new(),
-        };
-        let mut files = Vec::new();
-        for spec in chosen {
-            // The spec itself, so the planner keeps it in view.
-            if repo.binary_search(&spec.path).is_ok() {
-                push_unique(&mut files, &spec.path);
-            }
-            for file in repo {
-                if spec.covers.iter().any(|path| covered(path, file)) {
-                    push_unique(&mut files, file);
-                }
-            }
+        if !named.is_empty() {
+            return named;
         }
-        files
+        if in_play.len() == 1 {
+            return in_play;
+        }
+        let covering = |spec: &ApprovedSpecStatus| {
+            planned
+                .iter()
+                .filter(|file| spec.covers.iter().any(|path| covered(path, file)))
+                .count()
+        };
+        let most = in_play.iter().map(|spec| covering(spec)).max().unwrap_or(0);
+        if most == 0 {
+            return Vec::new();
+        }
+        in_play
+            .into_iter()
+            .filter(|spec| covering(spec) == most)
+            .collect()
     }
 
     /// Preloaded files the model has not read, in the working set.
@@ -491,7 +513,6 @@ mod tests {
     use super::super::test_support::{context_router, serve, test_config, Project};
     use super::super::{ApprovedPlan, Plan};
     use super::*;
-    use crate::harness::protocol::ApprovedSpecStatus;
 
     #[test]
     fn a_covered_directory_takes_what_is_under_it_and_the_project_nothing() {
@@ -693,6 +714,70 @@ a/src/lib.rs:\n  error[E0425]: cannot find value `x`\n  --> a/src/lib.rs:3:9\n\
                 .to_string(),
         );
         assert_eq!(runner.current_error_files(&repo), ["b/src/lib.rs"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn in_auto_the_scope_adds_the_spec_in_play_but_not_its_other_files() {
+        let project = Project::new("scope-auto-spec");
+        let repo = write(
+            &project,
+            &[
+                "map.md",
+                "sim.md",
+                "map/src/lib.rs",
+                "map/src/parse.rs",
+                "sim/src/lib.rs",
+            ],
+            1,
+        );
+        let (mut runner, server) = runner(&project, "Carry on").await;
+        runner.task.mode = Mode::Auto;
+        runner.context.as_mut().unwrap().approved_specs = vec![
+            spec("map.md", &["map/"], true),
+            spec("sim.md", &["sim/"], true),
+        ];
+        // Neither spec named and two in play: the one covering the plan's
+        // files is the spec in play, and only the spec file joins.
+        runner.task.plan = Some(plan(&["map/src/lib.rs"]));
+        assert_eq!(runner.step_scope(&repo), ["map/src/lib.rs", "map.md"]);
+        // The spec covering the most of the plan's files.
+        runner.task.plan = Some(plan(&[
+            "sim/src/lib.rs",
+            "map/src/lib.rs",
+            "map/src/parse.rs",
+        ]));
+        assert_eq!(
+            runner.step_scope(&repo),
+            [
+                "sim/src/lib.rs",
+                "map/src/lib.rs",
+                "map/src/parse.rs",
+                "map.md"
+            ]
+        );
+        // A plan neither spec covers has no spec in play.
+        runner.task.plan = Some(plan(&["Cargo.toml"]));
+        assert_eq!(runner.step_scope(&repo), ["Cargo.toml"]);
+        // A spec the objective names is in play whatever the plan covers,
+        // after the plan's files and the current error files.
+        runner.task.plan = Some(plan(&["map/src/lib.rs"]));
+        runner.task.objective = "Build what sim.md describes".into();
+        runner.event(
+            "Command: cargo build\nPermission grants: none\nSuccess: false\nerror[E0425]: cannot find value `x`\n --> map/src/parse.rs:1:1"
+                .to_string(),
+        );
+        assert_eq!(
+            runner.step_scope(&repo),
+            ["map/src/lib.rs", "map/src/parse.rs", "sim.md"]
+        );
+        // In Plan the covering spec brings the files it covers too.
+        runner.task.mode = Mode::Plan;
+        runner.task.objective = "Carry on".into();
+        assert_eq!(
+            runner.step_scope(&repo),
+            ["map/src/lib.rs", "map.md", "map/src/parse.rs"]
+        );
         server.abort();
     }
 
