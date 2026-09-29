@@ -428,6 +428,7 @@ impl Runner {
                     summary: plan.summary.clone(),
                     files: plan.files.clone(),
                     addresses: plan.addresses.clone(),
+                    satisfied: plan.satisfied.clone(),
                     rules_in_view: Vec::new(),
                     deferred: Vec::new(),
                     edit_start: 0,

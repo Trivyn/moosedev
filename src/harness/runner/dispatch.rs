@@ -491,15 +491,21 @@ impl Runner {
                 files,
                 checks,
                 addresses,
+                satisfied,
                 open_choices,
             } => {
                 let context = self.refresh(&files).await?;
                 // Before anything is stored: a plan whose summary skips a
-                // governing rule goes back once with a note naming it.
-                if self.plan_coverage_return(&summary, &context) {
+                // governing rule goes back once with a note naming it. A
+                // rule already settled, or one the plan says the existing
+                // code satisfies, needs no answer.
+                let (claimed, _) = symbolic::satisfied_entries(&satisfied, &addresses, &context);
+                if self.plan_coverage_return(&summary, &context, &claimed) {
                     return self.persist();
                 }
                 let addresses = self.resolve_plan_addresses(&addresses, &context);
+                let satisfied = self.resolve_plan_satisfied(&satisfied, &addresses, &context);
+                self.journal_rules_settled(&context.governing_rules, &satisfied);
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));
@@ -508,6 +514,7 @@ impl Runner {
                     files,
                     checks,
                     addresses,
+                    satisfied,
                     open_rules: Vec::new(),
                     open_choices,
                 });

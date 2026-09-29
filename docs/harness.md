@@ -1131,6 +1131,29 @@ contract 3 and intent contract 2.
   rules. (It used to repeat each as a header, `via:` line and "claim under
   Project rules" pointer, about 180 bytes per rule: 15.6 KB for 86 rules in
   badciv 7e0c50eb.)
+- Rules by state. Each governing rule has a state for the step, by
+  precedence: decided (the daemon's `decided_by`, context contract 3, names
+  an accepted decision `isMotivatedBy` it), addressed by approved plan N of
+  this task (its `addresses`, and an edit was made under it: a plan replaced
+  before any edit implemented nothing), claimed satisfied (the proposed
+  plan's `satisfied`, or an approved plan's), deferred by approved plan N
+  (the open rules its approval deferred), else open. In Auto the rules the
+  approved plan addresses stay open, so the builder keeps the claims it
+  implements; a proposed plan settles nothing but through its own
+  `satisfied`. A settled Requirement renders as one line, `[Requirement]
+  label (iri) — decided by <AD> | addressed by approved plan N | plan says
+  already satisfied | deferred by approved plan N; <via>`, in delivered
+  order, and a closing line counts them with the search route. Constraints
+  always render in full whatever their state: a decision addressing a
+  Constraint does not retire it (Lesson f07aacbb). A settled rule of either
+  kind needs no answer: plan coverage does not send a plan back for it, the
+  plan does not leave it open, add-to-plan does not ask about it, and the
+  Plan-mode echo names only the open rules and counts the rest ("(n settled
+  rule(s) need no answer)"). `Step::Plan` journals `rules_settled` ("decided
+  a, addressed b, satisfied c, deferred d of n rule(s)") when any is settled.
+  Against an older daemon (no `decided_by`) settlement falls back to plans.
+  `MOOSEDEV_HARNESS_RULES_BY_STATE=off` treats every rule as open except the
+  proposed plan's own `satisfied` claims.
 
   Requirements are governing rules because they are what an approved spec
   mostly records: `/approve-spec` links both kinds to the covering component,
@@ -1170,8 +1193,21 @@ contract 3 and intent contract 2.
   in `approved_plans` with its addresses, the rules delivered at its approval
   and where its edits begin; a replan replaces the current plan but not this
   history, and a new objective clears it.
+- Plan satisfied. A plan may also list, in `satisfied`, the rules the
+  existing code already satisfies unchanged; in the strict schema it is
+  required and may be empty, like `addresses`. Entries resolve as `addresses`
+  do (`plan_satisfied`, `plan_satisfied_unresolved`), and `addresses` wins
+  when both name a rule. It is a claim only: the claimed rules settle for
+  coverage and are not left open, the plan gate shows "Says N rule(s) already
+  hold", `/approve` journals `rules_claimed_satisfied` and keeps the claims on
+  the approved plan, and capture never turns them into `isMotivatedBy` edges.
+  With the field on, the rules header asks the plan to say that the existing
+  code already satisfies a rule as a fourth answer.
+  `MOOSEDEV_HARNESS_PLAN_SATISFIED=off` removes `satisfied` from the schema,
+  the action meanings and the rules header, and drops any a model sends.
 - Open rules at plan approval. When a plan is stored, the delivered rules it
-  does not list in `addresses` are kept on the plan as `open_rules` (IRI,
+  does not list in `addresses`, and that nothing settles (see Rules by
+  state), are kept on the plan as `open_rules` (IRI,
   label, kind), whatever its summary says of them: `addresses` is the
   structural record of what the plan implements, and a summary that says a
   rule "is deferred outside this objective" or "does not apply" leaves it

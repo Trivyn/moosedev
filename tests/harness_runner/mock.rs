@@ -269,7 +269,7 @@ pub(super) async fn context(
             Json(ContextResponse {
                 capture_contracts: vec![2, 3],
                 intent_contracts: vec![2],
-                context_contracts: vec![1, 2],
+                context_contracts: vec![1, 2, 3],
                 project_root: script.root.to_string_lossy().into_owned(),
                 revision: script.revision.clone(),
                 evidence_iris: knowledge
@@ -298,7 +298,7 @@ pub(super) async fn context(
         Json(ContextResponse {
             capture_contracts: vec![2, 3],
             intent_contracts: vec![2],
-            context_contracts: vec![1, 2],
+            context_contracts: vec![1, 2, 3],
             project_root: script.root.to_string_lossy().into_owned(),
             revision: script.revision.clone(),
             evidence_iris: vec![],

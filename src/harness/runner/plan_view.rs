@@ -277,6 +277,7 @@ mod tests {
             files: vec!["a.rs".into()],
             checks: vec!["true".into()],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

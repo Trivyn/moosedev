@@ -8,6 +8,7 @@ mod auto_verify;
 pub(super) use auto_verify::AUTO_VERIFY_FAILED;
 mod capture_note;
 mod coverage;
+pub(super) use coverage::satisfied_entries;
 mod evidence;
 mod grounding;
 mod scope;
@@ -648,6 +649,7 @@ mod tests {
             files: vec!["command".into()],
             checks: vec![],
             addresses: vec![],
+            satisfied: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

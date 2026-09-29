@@ -55,6 +55,8 @@ pub(super) enum Step {
         checks: Vec<String>,
         addresses: Vec<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        satisfied: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         open_choices: Vec<OpenChoice>,
     },
     Edit {
@@ -283,12 +285,18 @@ impl Runner {
                 files,
                 checks,
                 addresses,
+                satisfied,
                 open_choices,
             } => {
-                // Switched off, the field is not offered; any sent anyway
-                // are dropped rather than judged.
+                // Switched off, a field is not offered; any sent anyway are
+                // dropped rather than judged.
                 let open_choices = if plan_choices::enabled() {
                     plan_choices::open_choices(open_choices)
+                } else {
+                    Vec::new()
+                };
+                let satisfied = if super::rule_state::plan_satisfied_enabled() {
+                    satisfied
                 } else {
                     Vec::new()
                 };
@@ -297,6 +305,7 @@ impl Runner {
                     files,
                     checks,
                     addresses,
+                    satisfied,
                     open_choices,
                 });
             }

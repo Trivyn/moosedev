@@ -36,9 +36,16 @@ pub struct Plan {
     /// summary's prose, become the capture's `isMotivatedBy` edges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
+    /// IRIs of the governing rules the model says the existing code already
+    /// satisfies unchanged, resolved like `addresses` (which wins when both
+    /// name a rule). A claim only: it settles the rule for coverage and the
+    /// approval gate, and never becomes a knowledge edge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub satisfied: Vec<String>,
     /// The governing rules delivered for the plan files that the plan leaves
-    /// open: not in `addresses`, whatever its summary says of them. The
-    /// approval gate names them; `/approve` records them as deferred.
+    /// open: not in `addresses` or `satisfied`, whatever its summary says of
+    /// them. The approval gate names them; `/approve` records them as
+    /// deferred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_rules: Vec<OpenRule>,
     /// Questions the planner left for the human to decide before building,
@@ -83,6 +90,9 @@ pub struct ApprovedPlan {
     pub files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
+    /// The plan's `satisfied` claims at approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub satisfied: Vec<String>,
     /// IRIs of every governing rule delivered for the plan files at approval.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules_in_view: Vec<String>,

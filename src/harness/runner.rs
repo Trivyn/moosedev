@@ -37,6 +37,7 @@ mod plan_choices;
 mod plan_view;
 mod recovery;
 mod review;
+mod rule_state;
 mod scope;
 mod source;
 mod spec;
