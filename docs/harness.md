@@ -1507,6 +1507,13 @@ contract 3 and intent contract 2.
   test" with a `write` of `lib.rs` holding only the `#[cfg(test)]` module,
   deleting every type and `mod` declaration. A genuine deletion is made with
   `replace`. A file of a language with no grammar is not judged.
+  A declaration that another file of the working set or the approved plan
+  defines on disk (same kind and name) has moved, not been deleted, and does
+  not count: a plan that splits a file into modules writes the modules first,
+  then the file without what moved. badciv run 15's split of `lib.rs` into
+  `error.rs`, `codes.rs` and friends was refused three times and parked before
+  this. The refusal says so ("To move declarations to another file, write that
+  file first").
   `MOOSEDEV_HARNESS_WRITE_GUARD=off` applies such writes as before.
 - Vacuous checks. A required check is passed on its exit status, so a test
   command that runs no test passes it while proving only that the code builds.

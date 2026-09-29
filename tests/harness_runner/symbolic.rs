@@ -4689,6 +4689,49 @@ async fn a_write_that_deletes_most_of_a_files_declarations_is_repaired() {
     assert!(intent_details(&runner, "destructive_write_refused").is_empty());
 }
 
+/// badciv run 15: a plan splitting lib.rs into modules wrote the module
+/// first, then lib.rs without what moved; the guard refused it three times
+/// and parked. A declaration another file of the plan now defines is not
+/// deleted, so the write applies; one defined nowhere else still counts.
+#[tokio::test]
+async fn a_write_moving_declarations_into_a_planned_module_applies() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("lib.rs"), LIB_RS).unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"lib.rs"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Move the map types into types.rs","files":["lib.rs","types.rs"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+
+    let types = "pub enum Terrain {\n    Ocean,\n}\n\npub struct Tile {\n    pub terrain: Terrain,\n}\n\npub struct Map {\n    pub tiles: Vec<Tile>,\n}\n";
+    let lib = "pub mod codes;\npub mod parse;\npub mod types;\n\npub use types::*;\n";
+    fixture.conversational(json!({"action":"write","file":"types.rs","content":types}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"write","file":"lib.rs","content":lib}));
+    // The step after an edit may be the capture checkpoint's; advance until
+    // the queued write has been taken.
+    for _ in 0..3 {
+        if runner.task.edits.len() == 2 {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("lib.rs")).unwrap(),
+        lib,
+        "{:?}",
+        runner
+            .task
+            .events
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+    assert!(intent_details(&runner, "destructive_write_refused").is_empty());
+}
+
 /// badciv P5 attempts 2 and 3: old_text matched only after decoding JSON
 /// escapes, and new_text mixed real line breaks with literal `\n`, which
 /// was written into code. The replace is a repair naming the line.
