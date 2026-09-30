@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::config::{self, Environment, ModelFile, ModelRole};
 use super::protocol::{ContextRequest, ContextResponse};
-use super::response::{ActionContract, ResponsePolicy};
+use super::response::{ActionContract, ActionStreaming, ResponsePolicy};
 use crate::config::{ProviderLayer, DEFAULT_API_KEY_ENV};
 use crate::{llm::LlmConfig, runtime};
 
@@ -277,6 +277,7 @@ pub struct RoleSettings {
     pub config: LlmConfig,
     pub response_policy: ResponsePolicy,
     pub action_contract: ActionContract,
+    pub action_streaming: ActionStreaming,
 }
 
 /// `config` and `response_policy` are the default every role uses; `plan` and
@@ -287,6 +288,8 @@ pub struct ProviderSettings {
     pub response_policy: ResponsePolicy,
     /// `None` leaves the runner on `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
     pub action_contract: Option<ActionContract>,
+    /// `None` leaves the runner streaming only interactive actions.
+    pub action_streaming: Option<ActionStreaming>,
     pub plan: Option<RoleSettings>,
     pub implement: Option<RoleSettings>,
     pub index_refresh: config::IndexRefresh,
@@ -348,10 +351,21 @@ fn resolve(environment: &Environment, layers: &[&dyn ProviderLayer]) -> Result<R
             .unwrap_or_default();
     let action_contract =
         ActionContract::parse(pick("MOOSEDEV_HARNESS_ACTION_CONTRACT").as_deref())?;
+    let action_streaming =
+        ActionStreaming::parse(pick("MOOSEDEV_HARNESS_ACTION_STREAMING").as_deref())?;
+    // The most specific table's routing wins whole; tables are not merged.
+    config.provider_routing = layers.iter().find_map(|layer| layer.provider_routing());
+    if let Some(routing) = &config.provider_routing {
+        ensure!(
+            routing.is_object(),
+            "provider_routing must be a table, such as {{ order = [\"provider\"] }}"
+        );
+    }
     Ok(RoleSettings {
         config,
         response_policy,
         action_contract,
+        action_streaming,
     })
 }
 
@@ -363,6 +377,7 @@ impl ProviderSettings {
         Self {
             response_policy: ResponsePolicy::Auto,
             action_contract: None,
+            action_streaming: None,
             plan: None,
             implement: None,
             index_refresh: config::IndexRefresh::default(),
@@ -376,6 +391,7 @@ impl ProviderSettings {
                 context_window_tokens: crate::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
                 structured_output: crate::llm::StructuredOutputMode::Auto,
                 timeouts: Default::default(),
+                provider_routing: None,
             },
         }
     }
@@ -403,6 +419,7 @@ impl ProviderSettings {
             config: default.config,
             response_policy: default.response_policy,
             action_contract: Some(default.action_contract),
+            action_streaming: Some(default.action_streaming),
             index_refresh: file.index_refresh,
             standing_read_paths: file.sandbox.read_paths.clone(),
             language: LanguageSettings::of(&file.lsp),
@@ -419,6 +436,7 @@ impl ProviderSettings {
             config: self.config.clone(),
             response_policy: self.response_policy,
             action_contract: self.action_contract.unwrap_or_default(),
+            action_streaming: self.action_streaming.unwrap_or_default(),
         })
     }
 
@@ -855,8 +873,42 @@ mod tests {
     }
 
     #[test]
+    fn provider_routing_and_action_streaming_come_from_the_file() {
+        let text = "[harness.model]\nmodel = \"base\"\naction_streaming = \"always\"\nprovider_routing = { order = [\"CoreWeave\"], allow_fallbacks = false }\n\n[harness.model.implement]\nmodel = \"small\"\nprovider_routing = { require_parameters = true }\n";
+        let root = project(&[("moosedev.toml", text)]);
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap();
+        let plan = settings.for_role(ModelRole::Plan);
+        assert_eq!(
+            plan.config.provider_routing,
+            Some(serde_json::json!({"order":["CoreWeave"],"allow_fallbacks":false}))
+        );
+        assert_eq!(plan.action_streaming, ActionStreaming::Always);
+        // A role's table replaces the default's whole; tables are not merged.
+        let implement = settings.for_role(ModelRole::Implement);
+        assert_eq!(
+            implement.config.provider_routing,
+            Some(serde_json::json!({"require_parameters":true}))
+        );
+        assert_eq!(implement.action_streaming, ActionStreaming::Always);
+        assert_eq!(settings.action_streaming, Some(ActionStreaming::Always));
+
+        let root = project(&[("moosedev.toml", "[harness.model]\nmodel = \"base\"\n")]);
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap();
+        assert!(settings.config.provider_routing.is_none());
+        assert_eq!(settings.action_streaming, Some(ActionStreaming::Auto));
+    }
+
+    #[test]
     fn invalid_file_values_fail_with_their_table() {
         for (text, expected) in [
+            (
+                "[harness.model]\nprovider_routing = \"CoreWeave\"\n",
+                "provider_routing must be a table",
+            ),
+            (
+                "[harness.model]\naction_streaming = \"sometimes\"\n",
+                "MOOSEDEV_HARNESS_ACTION_STREAMING",
+            ),
             (
                 "[harness.model]\ncontext_window_tokens = 100\n",
                 "[harness.model] in moosedev.toml",

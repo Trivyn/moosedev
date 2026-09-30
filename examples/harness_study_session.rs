@@ -68,6 +68,7 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
         config: LlmConfig::from_env()?,
         // One frozen model for every role; moosedev.toml is never read here.
         action_contract: None,
+        action_streaming: None,
         plan: None,
         implement: None,
         // Studies index through the frozen producer only; a PATH producer

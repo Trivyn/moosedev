@@ -1478,7 +1478,7 @@ impl Runner {
     /// print the same thing (badciv a2e43815 ran one `ls` of the cargo
     /// registry four times in a row). A capture checkpoint's confirmation or
     /// review is no such change ([`review::is_human_progress`]).
-    fn unchanged_command_run(&self, command: &str) -> Option<usize> {
+    pub(super) fn unchanged_command_run(&self, command: &str) -> Option<usize> {
         let prefix = format!("Command: {command}\nPermission grants: ");
         let last = self
             .task
@@ -1500,12 +1500,23 @@ impl Runner {
     /// the model reads). Journal events never change, so within such a run a
     /// second request for a page the model already had can only be a loop.
     fn repeated_inspect(&self, event: usize, offset: usize) -> Option<usize> {
+        // The last event is this step's own journaled action.
+        let before = self.task.events.len().checked_sub(1)?;
+        self.repeated_inspect_before(event, offset, before)
+    }
+
+    /// [`Self::repeated_inspect`] over the journal before index `before`: for
+    /// an inspect not yet journaled, the whole journal.
+    pub(super) fn repeated_inspect_before(
+        &self,
+        event: usize,
+        offset: usize,
+        before: usize,
+    ) -> Option<usize> {
         let action = format!(
             "Model action: {}",
             serde_json::to_string(&Step::Inspect { event, offset }).ok()?
         );
-        // The last event is this step's own journaled action.
-        let before = self.task.events.len().checked_sub(1)?;
         for (index, earlier) in self.task.events[..before].iter().enumerate().rev() {
             let message = earlier.message.as_str();
             if message == action {

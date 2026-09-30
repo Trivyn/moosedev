@@ -67,6 +67,10 @@ pub struct RequestUsage {
     /// The JSON body was fully received or SSE reached its valid completion marker.
     /// Independent of content validity and of whether usage was reported.
     pub response_complete: bool,
+    /// The upstream provider a routing endpoint named in its response
+    /// (OpenRouter's top-level `provider`); a scalar copy, never the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// Called synchronously before send and on termination (including future Drop).
@@ -129,6 +133,7 @@ impl RequestObservation {
                 raw_usage: None,
                 tokens: TokenUsage::default(),
                 response_complete: false,
+                provider: None,
             };
             let started = Instant::now();
             (binding.observer)(receipt.clone());
@@ -177,8 +182,23 @@ impl RequestObservation {
         request
     }
 
+    /// Record the upstream provider a stream named in a frame other than the
+    /// one carrying usage.
+    pub fn provider(&mut self, provider: &str) {
+        if let Some(active) = &mut self.0 {
+            active.receipt.provider = Some(provider.to_owned());
+        }
+    }
+
     pub fn observe(&mut self, body: &Value) {
         if let Some(active) = &mut self.0 {
+            if let Some(provider) = body
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|provider| !provider.trim().is_empty())
+            {
+                active.receipt.provider = Some(provider.to_owned());
+            }
             if let Some(usage) = body.get("usage").filter(|usage| !usage.is_null()) {
                 // Stream snapshots are cumulative. Replace, never sum them.
                 active.receipt.tokens = TokenUsage::from_provider(usage);
@@ -261,7 +281,7 @@ mod tests {
 
     fn stream_body() -> String {
         event(
-            json!({"choices":[{"delta":{"content":"héllo 🫎"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}),
+            json!({"provider":"CoreWeave","choices":[{"delta":{"content":"héllo 🫎"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}),
         ) + &event(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}))
             + &event(json!({"choices":[],"usage":{
                 "prompt_tokens":10,"completion_tokens":4,"total_tokens":14,
@@ -339,6 +359,10 @@ mod tests {
             receipts[3].raw_usage.as_ref().unwrap()["provider_extension"],
             99
         );
+        // The routing endpoint's upstream provider, copied as a scalar from
+        // a frame that is not the one carrying the final usage.
+        assert_eq!(receipts[3].provider.as_deref(), Some("CoreWeave"));
+        assert!(receipts[1].provider.is_none());
         let serialized = serde_json::to_string(&*receipts).unwrap();
         for forbidden in [
             "private-api-key",

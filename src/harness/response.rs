@@ -2,6 +2,7 @@
 //! Probes are neutral, bounded, and cancellation-safe: dropping this future drops
 //! its HTTP request. No probe response is dispatched as a harness action.
 use crate::llm::normalize::normalize;
+use crate::llm::profile::{call_dialect, probe_multiple_calls, ProviderProfile};
 use crate::llm::{
     CompletionError, LlmConfig, OpenAiCompatClient, StructuredOutputMode, UsageContext,
     UsageObserver,
@@ -9,7 +10,7 @@ use crate::llm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{atomic::AtomicU8, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -78,6 +79,43 @@ impl ActionContract {
     }
 }
 
+/// Whether action requests stream. `auto` streams them only when batch
+/// capture delivers assistant text as it arrives (the interactive runner);
+/// `always` streams headless runs too, so the idle timeout can cut a provider
+/// that stalls mid-response instead of waiting out the whole-request bound.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionStreaming {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl ActionStreaming {
+    /// `MOOSEDEV_HARNESS_ACTION_STREAMING`: `auto` (default), `always` or `never`.
+    pub(super) fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("auto") => Ok(Self::Auto),
+            Some("always") => Ok(Self::Always),
+            Some("never") => Ok(Self::Never),
+            Some(value) => anyhow::bail!(
+                "MOOSEDEV_HARNESS_ACTION_STREAMING must be auto, always or never; got {value:?}"
+            ),
+        }
+    }
+
+    /// Whether an action request streams, given whether batch capture wants
+    /// its text as it arrives.
+    pub fn streams(self, batch_capture: bool) -> bool {
+        match self {
+            Self::Auto => batch_capture,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
 /// This in-memory key contains credentials. Never serialize it into a receipt.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResponseKey {
@@ -88,6 +126,9 @@ pub struct ResponseKey {
     structured_output: StructuredOutputMode,
     policy: ResponsePolicy,
     contract: ActionContract,
+    /// The provider-routing object, serialized: a different route is a
+    /// different provider and is probed afresh.
+    provider_routing: Option<String>,
 }
 
 pub fn cache_key(
@@ -103,6 +144,10 @@ pub fn cache_key(
         structured_output: config.structured_output,
         policy,
         contract,
+        provider_routing: config
+            .provider_routing
+            .as_ref()
+            .map(|routing| routing.to_string()),
     }
 }
 
@@ -114,6 +159,15 @@ pub struct ProbeAttempt {
     pub diagnostic: Option<String>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    /// Wall-clock milliseconds of the request; absent in earlier receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// How a tools probe's call arrived (`native` or a text dialect).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<String>,
+    /// The provider refused `tool_choice: "required"` and the probe fell back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tool_choice_fallback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +178,25 @@ pub struct ResponseReceipt {
     /// The action contract the probes verified; absent in receipts from earlier builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<ActionContract>,
+    /// What the probes saw the provider do; absent in receipts from earlier builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProviderProfile>,
+}
+
+impl ResponseReceipt {
+    /// This receipt without its wall-clock times, for text a prompt may
+    /// show: timings differ every run, so they would make prompts differ.
+    pub fn without_timings(&self) -> Self {
+        let mut receipt = self.clone();
+        for attempt in &mut receipt.attempts {
+            attempt.elapsed_ms = None;
+        }
+        if let Some(profile) = &mut receipt.profile {
+            profile.nonstream_ms = None;
+            profile.stream_ms = None;
+        }
+        receipt
+    }
 }
 
 pub struct PreparedResponse {
@@ -133,7 +206,8 @@ pub struct PreparedResponse {
 
 #[derive(Debug)]
 pub struct ProbeError {
-    pub receipt: ResponseReceipt,
+    /// Boxed: the receipt carries every attempt and the profile.
+    pub receipt: Box<ResponseReceipt>,
     pub cause: CompletionError,
 }
 impl std::fmt::Display for ProbeError {
@@ -169,7 +243,13 @@ pub async fn prepare_with_observer(
 /// Probe the path the coding model's actions will use. Under the tools contract
 /// the probe asks for one call of a trivial `ready` tool; a thinking model under
 /// the provider default gets room (1024 tokens) to finish, reasoning-off keeps 128.
-/// A tool_choice fallback costs an extra request, so that contract's allowance is 6.
+/// Once both paths pass, a tools-contract probe also asks for two calls where
+/// one is allowed, to see whether the provider enforces single calls; that
+/// probe never fails preparation. A tool_choice fallback costs an extra
+/// request, so that contract's allowance is 7.
+///
+/// The receipt's [`ProviderProfile`] records what the probes saw. It is a
+/// starting point: callers let later responses correct it.
 pub async fn prepare_for_contract(
     config: &LlmConfig,
     policy: ResponsePolicy,
@@ -181,10 +261,11 @@ pub async fn prepare_for_contract(
         resolved: None,
         attempts: vec![],
         contract: Some(contract),
+        profile: None,
     };
     let mut reasoning_off = policy == ResponsePolicy::ReasoningOff;
     let allowance = Arc::new(AtomicU8::new(match contract {
-        ActionContract::Tools => 6,
+        ActionContract::Tools => 7,
         ActionContract::JsonSchema => 4,
     }));
     let mut base_client = OpenAiCompatClient::new_with_structured_output(
@@ -192,7 +273,8 @@ pub async fn prepare_for_contract(
         config.api_key.clone(),
         config.structured_output,
     )
-    .with_timeouts(config.timeouts);
+    .with_timeouts(config.timeouts)
+    .with_provider_routing(config.provider_routing.clone());
     if let Some(observer) = observer {
         base_client = base_client.with_usage_observer(
             observer,
@@ -212,10 +294,14 @@ pub async fn prepare_for_contract(
             .with_request_allowance(Some(allowance.clone()));
         let mut failure = None;
         for stream in [false, true] {
+            let started = Instant::now();
             let result = match contract {
-                ActionContract::JsonSchema => probe(&client, &config.model, stream).await,
+                ActionContract::JsonSchema => probe(&client, &config.model, stream)
+                    .await
+                    .map(|()| ToolsProbe::default()),
                 ActionContract::Tools => probe_tools(&client, &config.model, stream, limit).await,
             };
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let usage = client.take_usage_observation();
             let prompt_tokens = usage.map(|value| value.0);
             let completion_tokens = usage.map(|value| value.1);
@@ -235,6 +321,11 @@ pub async fn prepare_for_contract(
                 }),
                 prompt_tokens,
                 completion_tokens,
+                elapsed_ms: Some(elapsed_ms),
+                dialect: result.as_ref().ok().and_then(|probe| probe.dialect.clone()),
+                tool_choice_fallback: result
+                    .as_ref()
+                    .is_ok_and(|probe| probe.tool_choice_fallback),
             });
             if let Err(error) = result {
                 failure = Some(error);
@@ -248,6 +339,29 @@ pub async fn prepare_for_contract(
                 } else {
                     ResponsePolicy::ProviderDefault
                 });
+                let passed = &receipt.attempts[receipt.attempts.len() - 2..];
+                let multiple_calls_seen = match contract {
+                    ActionContract::Tools => {
+                        let seen = tokio::time::timeout(
+                            probe_time_bound(limit),
+                            probe_multiple_calls(&client, &config.model),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
+                        // Its usage is the probe's, not the first action's.
+                        client.take_usage_observation();
+                        seen
+                    }
+                    ActionContract::JsonSchema => None,
+                };
+                receipt.profile = Some(ProviderProfile {
+                    multiple_calls_seen,
+                    call_dialect: passed[0].dialect.clone(),
+                    served_by: client.served_by(),
+                    nonstream_ms: passed[0].elapsed_ms,
+                    stream_ms: passed[1].elapsed_ms,
+                });
                 return Ok(PreparedResponse {
                     client: client.without_output_limit().with_request_allowance(None),
                     receipt,
@@ -258,7 +372,12 @@ pub async fn prepare_for_contract(
             {
                 reasoning_off = true;
             }
-            Some(cause) => return Err(ProbeError { receipt, cause }),
+            Some(cause) => {
+                return Err(ProbeError {
+                    receipt: Box::new(receipt),
+                    cause,
+                })
+            }
         }
     }
 }
@@ -276,12 +395,19 @@ fn probe_time_bound(limit: u32) -> Duration {
     Duration::from_secs(if limit > 128 { 300 } else { 60 })
 }
 
+/// What a passing tools probe showed beyond passing.
+#[derive(Debug, Default)]
+struct ToolsProbe {
+    dialect: Option<String>,
+    tool_choice_fallback: bool,
+}
+
 async fn probe_tools(
     client: &OpenAiCompatClient,
     model: &str,
     stream: bool,
     limit: u32,
-) -> Result<(), CompletionError> {
+) -> Result<ToolsProbe, CompletionError> {
     const PROMPT: &str =
         "This is a neutral connection test. Call the ready tool once with status \"ok\".";
     let tools = json!([{"type":"function","function":{
@@ -322,7 +448,10 @@ async fn probe_tools(
             "Neutral response probe did not call ready with status ok".into(),
         ));
     }
-    Ok(())
+    Ok(ToolsProbe {
+        dialect: Some(call_dialect(call.source).to_owned()),
+        tool_choice_fallback: completion.tool_choice_fallback.is_some(),
+    })
 }
 
 async fn probe(
@@ -452,6 +581,7 @@ mod tests {
             context_window_tokens: 32768,
             structured_output: StructuredOutputMode::Auto,
             timeouts: Default::default(),
+            provider_routing: None,
         };
         let task = tokio::spawn(async move {
             axum::serve(
@@ -648,6 +778,9 @@ mod tests {
     struct ToolStub {
         requests: Arc<Mutex<Vec<serde_json::Value>>>,
         text_call: bool,
+        /// Answer the multiple-call probe with both calls, as a provider that
+        /// ignores `parallel_tool_calls: false` does.
+        multi_calls: bool,
     }
 
     async fn tool_complete(
@@ -655,6 +788,16 @@ mod tests {
         Json(body): Json<serde_json::Value>,
     ) -> Response {
         stub.requests.lock().unwrap().push(body.clone());
+        if body["tools"][0]["function"]["name"] == "first_check" {
+            let check = |name: &str| json!({"id":name,"type":"function","function":{"name":name,"arguments":"{}"}});
+            let calls = if stub.multi_calls {
+                vec![check("first_check"), check("second_check")]
+            } else {
+                vec![check("first_check")]
+            };
+            return Json(json!({"provider":"Upstream","choices":[{"message":{"content":"","tool_calls":calls},"finish_reason":"tool_calls"}]}))
+                .into_response();
+        }
         let text = "{\"name\":\"ready\",\"parameters\":{\"status\":\"ok\"}}";
         let call = json!({"id":"probe","type":"function","function":{"name":"ready","arguments":"{\"status\":\"ok\"}"}});
         if body["stream"] == true {
@@ -690,6 +833,7 @@ mod tests {
             context_window_tokens: 32768,
             structured_output: StructuredOutputMode::Auto,
             timeouts: Default::default(),
+            provider_routing: None,
         };
         let task = tokio::spawn(async move {
             axum::serve(
@@ -720,20 +864,34 @@ mod tests {
             assert_eq!(prepared.receipt.resolved, Some(policy));
             assert_eq!(prepared.receipt.attempts.len(), 2);
             let requests = requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
+            // Two ready probes, then the multiple-call probe.
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[2]["tools"][1]["function"]["name"], "second_check");
+            assert_eq!(requests[2]["parallel_tool_calls"], false);
+            let profile = prepared.receipt.profile.clone().unwrap();
+            assert_eq!(profile.multiple_calls_seen, Some(false));
+            assert_eq!(profile.call_dialect.as_deref(), Some("native"));
+            assert_eq!(profile.served_by, ["Upstream"]);
+            assert!(profile.nonstream_ms.is_some() && profile.stream_ms.is_some());
+            assert!(prepared
+                .receipt
+                .attempts
+                .iter()
+                .all(|attempt| attempt.elapsed_ms.is_some() && !attempt.tool_choice_fallback));
             for request in requests.iter() {
                 assert_eq!(request["max_tokens"], limit, "{policy:?}");
                 assert!(request.get("response_format").is_none());
                 assert_eq!(request["tool_choice"], "required");
-                assert_eq!(request["tools"][0]["function"]["name"], "ready");
                 assert_eq!(
                     request.get("reasoning_effort").is_some(),
                     policy == ResponsePolicy::ReasoningOff
                 );
             }
+            assert_eq!(requests[0]["tools"][0]["function"]["name"], "ready");
             task.abort();
         }
-        // A model that writes the call as text (Llama on LM Studio) still passes.
+        // A model that writes the call as text (Llama on LM Studio) still
+        // passes, and the profile names the dialect.
         let (config, task) = tool_server(ToolStub {
             text_call: true,
             ..ToolStub::default()
@@ -748,6 +906,27 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(prepared.receipt.attempts.len(), 2);
+        let profile = prepared.receipt.profile.unwrap();
+        assert_eq!(profile.call_dialect.as_deref(), Some("json"));
+        task.abort();
+        // A provider that ignores parallel_tool_calls answers both checks.
+        let (config, task) = tool_server(ToolStub {
+            multi_calls: true,
+            ..ToolStub::default()
+        })
+        .await;
+        let prepared = prepare_for_contract(
+            &config,
+            ResponsePolicy::ReasoningOff,
+            ActionContract::Tools,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            prepared.receipt.profile.unwrap().multiple_calls_seen,
+            Some(true)
+        );
         task.abort();
     }
 
@@ -873,12 +1052,13 @@ mod tests {
                 context_window_tokens: 32768,
                 structured_output: StructuredOutputMode::Auto,
                 timeouts: Default::default(),
+                provider_routing: None,
             };
             let (observer, receipts) = accounting_observer();
             let result = prepare_with_observer(&config, ResponsePolicy::Auto, Some(observer)).await;
             let (passed, response_receipt) = match result {
                 Ok(prepared) => (true, prepared.receipt),
-                Err(error) => (false, error.receipt),
+                Err(error) => (false, *error.receipt),
             };
             let receipts = receipts.lock().unwrap();
             let finished: Vec<_> = receipts
@@ -955,11 +1135,12 @@ mod tests {
                 context_window_tokens: 32768,
                 structured_output: StructuredOutputMode::Auto,
                 timeouts: Default::default(),
+                provider_routing: None,
             };
             let result = prepare(&config, ResponsePolicy::Auto).await;
             let (passed, receipt) = match result {
                 Ok(prepared) => (true, prepared.receipt),
-                Err(error) => (false, error.receipt),
+                Err(error) => (false, *error.receipt),
             };
             observations.push(json!({"model":model,"endpoint":config.base_url,"passed":passed,"response_receipt":receipt}));
             let manifest = json!({"purpose":"Native neutral response compatibility; no coding task or output execution","timestamp":chrono::Utc::now().to_rfc3339(),"source_sha256":source_hashes,"request_options":{"temperature":0,"max_tokens":128,"schema_name":"harness_response_probe","schema_mode":"auto","timeout_seconds":60,"maximum_wire_requests":4,"reasoning_off_wire_value":{"reasoning_effort":"none"}},"observations":observations});

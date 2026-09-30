@@ -306,6 +306,9 @@ pub(super) struct CompletionStream {
     stopped: bool,
     pub(super) done: bool,
     pub(super) usage: Option<serde_json::Value>,
+    /// The upstream provider any frame named (OpenRouter's top-level
+    /// `provider`), which need not be the frame that carries usage.
+    pub(super) provider: Option<String>,
     saw_reasoning: bool,
     /// Tool-contract streams accumulate `delta.tool_calls` by index instead of refusing them.
     tools: bool,
@@ -421,6 +424,13 @@ impl CompletionStream {
             .map_err(|error| format!("LLM stream event decode: {error}"))?;
         if value.get("usage").is_some_and(|usage| !usage.is_null()) {
             self.usage = Some(value.clone());
+        }
+        if let Some(provider) = value["provider"]
+            .as_str()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+        {
+            self.provider = Some(provider.to_owned());
         }
         if let Some(error) = value.get("error") {
             return Err(CompletionError::InvalidResponse(format!(

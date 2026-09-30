@@ -683,7 +683,7 @@ impl Runner {
     /// tiers: an outlined file read again was refused, and small models
     /// re-read it anyway or edited blind. A serve is repeated only once the
     /// Last result has moved on from it ([`Self::served_repeat`]).
-    fn read_step(&self, file: String) -> Step {
+    pub(super) fn read_step(&self, file: String) -> Step {
         // Outside the step's scope a read shows the file as the Last result,
         // and the working set stays the scope's.
         if self.outside_scope(&file) {
@@ -899,7 +899,7 @@ impl Runner {
 /// or one followed by `;`, after which the rest runs in the project root
 /// anyway; a rest with `||`, whose fallback dropping the `cd` would skip; and
 /// `&&` on another line, which the shell rejects.
-fn missing_cd(
+pub(super) fn missing_cd(
     command: &str,
     exists: impl Fn(&std::path::Path) -> bool,
 ) -> Option<(String, String)> {

@@ -106,6 +106,16 @@ pub(super) struct Decoded {
     /// A `reply` call sent beside an action: its text became the message and
     /// the action ran.
     pub(super) reply_as_message: bool,
+    /// Calls ahead of the one that ran that the harness would have refused,
+    /// so a later call ran instead (a provider that ignores
+    /// `parallel_tool_calls: false`).
+    pub(super) passed_over: Vec<String>,
+}
+
+/// Whether several calls in one response run the first, as before the harness
+/// chose the first it would not refuse: `MOOSEDEV_HARNESS_MULTI_CALL=first`.
+pub(super) fn first_call_only() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_MULTI_CALL").is_ok_and(|value| value.trim() == "first")
 }
 
 /// Decode the first native call, or a call written as text that names an
@@ -114,10 +124,18 @@ pub(super) struct Decoded {
 /// Only harness policy lives here; the model's syntax was read by
 /// [`normalize`](crate::llm::normalize::normalize). An `Err` is the correction
 /// for an unusable response; it spends a repair.
+///
+/// Of several calls, the first that `refused` (the harness's own refusal
+/// checks, by tool name and arguments) would not turn away runs; when every
+/// one would be, the first does, and meets its refusal. Without that, a
+/// provider that returns several reads with a redundant one first had the
+/// harness refuse the same read until it parked (badciv on OpenRouter,
+/// 2026-09-29).
 pub(super) fn decode(
     normalized: &Normalized,
     schema: &Value,
     conversational: bool,
+    refused: &dyn Fn(&str, &Map<String, Value>) -> bool,
 ) -> Result<Decoded, String> {
     let allowed = names(schema);
     let listing = allowed.join(", ");
@@ -159,6 +177,24 @@ pub(super) fn decode(
         }
     }
     let reply_as_message = narration.is_some();
+    let mut passed_over = Vec::new();
+    if calls.len() > 1 {
+        let runs = |call: &&NormalCall| {
+            allowed.contains(&call.name)
+                && call
+                    .arguments
+                    .as_ref()
+                    .is_ok_and(|arguments| !refused(&call.name, arguments))
+        };
+        if let Some(position) = calls.iter().position(runs).filter(|position| *position > 0) {
+            passed_over = calls[..position]
+                .iter()
+                .map(|call| call.name.clone())
+                .collect();
+            let chosen = calls.remove(position);
+            calls.insert(0, chosen);
+        }
+    }
     let Some((call, rest)) = calls.split_first() else {
         return Err(format!(
             "the response contained no tool call; {ONE_TOOL} (tools now: {listing})"
@@ -198,5 +234,6 @@ pub(super) fn decode(
         text,
         ignored: rest.iter().map(|call| call.name.clone()).collect(),
         reply_as_message,
+        passed_over,
     })
 }

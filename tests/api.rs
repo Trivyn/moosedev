@@ -57,6 +57,7 @@ fn unconfigured_llm() -> LlmConfig {
         context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
         structured_output: moosedev::llm::StructuredOutputMode::Auto,
         timeouts: Default::default(),
+        provider_routing: None,
     }
 }
 

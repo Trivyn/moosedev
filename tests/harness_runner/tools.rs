@@ -150,6 +150,118 @@ async fn only_the_first_of_several_tool_calls_runs_and_the_rest_are_journaled() 
         .contains("one action runs per step"));
 }
 
+/// A provider that ignores `parallel_tool_calls: false` (OpenRouter, 2026-09-29)
+/// sent several reads with an already-read file first; running the first had
+/// the harness refuse the same read until it parked. The first call the
+/// harness would not refuse runs instead.
+#[tokio::test]
+async fn of_several_calls_the_first_the_harness_would_not_refuse_runs() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("other.txt"), "other\n").unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let both = || {
+        tool_answer(
+            "",
+            &[
+                ("read", r#"{"file":"code.txt"}"#),
+                ("read", r#"{"file":"other.txt"}"#),
+            ],
+        )
+    };
+    fixture.reply("harness_action", both());
+    runner.advance().await.unwrap();
+    assert_eq!(
+        runner.task.read_files,
+        vec!["code.txt".to_string(), "other.txt".to_string()]
+    );
+    assert_eq!(
+        intent_details(&runner, "tool_calls_passed_over"),
+        ["ran read; passed over read, which the harness would refuse"]
+    );
+    let multi = intent_details(&runner, "provider_multi_call");
+    assert_eq!(multi.len(), 1, "{multi:?}");
+    assert!(multi[0].starts_with("2 calls in one response"), "{multi:?}");
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .contains("the first the harness would not refuse")));
+
+    // Every call would be refused: the first runs and meets its refusal, and
+    // the multiple calls are journaled once per task.
+    fixture.reply("harness_action", both());
+    runner.advance().await.unwrap();
+    assert_eq!(intent_details(&runner, "tool_calls_passed_over").len(), 1);
+    assert_eq!(intent_details(&runner, "provider_multi_call").len(), 1);
+    assert!(!intent_details(&runner, "read_repeat_refused").is_empty());
+
+    // Switched off, the first call runs whatever the harness would do with it.
+    std::env::set_var("MOOSEDEV_HARNESS_MULTI_CALL", "first");
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("other.txt"), "other\n").unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.reply("harness_action", both());
+    let result = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_MULTI_CALL");
+    result.unwrap();
+    assert_eq!(runner.task.read_files, vec!["code.txt".to_string()]);
+    assert!(intent_details(&runner, "tool_calls_passed_over").is_empty());
+}
+
+/// A routing endpoint that serves requests from a new upstream provider is
+/// journaled each time, so a run's evidence shows mixed backends.
+#[tokio::test]
+async fn a_new_upstream_provider_is_journaled() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let serve = |fixture: &Fixture, provider: &str| {
+        fixture.shared.lock().unwrap().provider = Some(provider.into());
+    };
+    serve(&fixture, "CoreWeave");
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"search","query":"code"}));
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "provider_changed").is_empty());
+    serve(&fixture, "DeepInfra");
+    fixture.conversational(json!({"action":"search","query":"other"}));
+    runner.advance().await.unwrap();
+    serve(&fixture, "CoreWeave");
+    fixture.conversational(json!({"action":"search","query":"more"}));
+    runner.advance().await.unwrap();
+    assert_eq!(
+        intent_details(&runner, "provider_changed"),
+        ["CoreWeave -> DeepInfra"]
+    );
+}
+
+/// Headless runs stream actions only when asked, so a provider that stalls
+/// mid-response meets the idle timeout instead of the whole-request bound.
+#[tokio::test]
+async fn action_streaming_always_streams_a_headless_action() {
+    use moosedev::harness::response::ActionStreaming;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    runner.task.batch_capture = false;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    runner.set_action_streaming(ActionStreaming::Always);
+    fixture.conversational(json!({"action":"search","query":"code"}));
+    runner.advance().await.unwrap();
+    runner.set_action_streaming(ActionStreaming::Never);
+    runner.task.batch_capture = true;
+    fixture.conversational(json!({"action":"search","query":"other"}));
+    runner.advance().await.unwrap();
+    let streamed: Vec<bool> = action_requests(&fixture)
+        .iter()
+        .map(|request| request["body"]["stream"] == true)
+        .collect();
+    assert_eq!(streamed, [false, true, false]);
+}
+
 #[tokio::test]
 async fn malformed_tool_arguments_are_repaired_or_spend_a_repair_attempt() {
     let fixture = Fixture::new().await;

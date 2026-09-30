@@ -305,6 +305,7 @@ mod tests {
                 context_window_tokens: 32768,
                 structured_output: StructuredOutputMode::Required,
                 timeouts: Default::default(),
+                provider_routing: None,
             },
             None,
         );
