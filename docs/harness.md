@@ -235,13 +235,15 @@ the same request would repeat, so the step parks with what happened
 
 `max_output_tokens` (`MOOSEDEV_LLM_MAX_OUTPUT_TOKENS`, default 16,384, `0` for
 no cap; per role like the other model keys) is sent as `max_tokens` on every
-request after the preflight, which keeps its own small limits. A planning
-action gets at least 32,768 so a summary up to its 64,000-byte bound fits, and
-no request asks for more than the room its prompt leaves in the model's window
+request after the preflight, which keeps its own small limits, and no request
+asks for more than the room its prompt leaves in the model's window
 (the prompt estimated at 3 bytes a token, never below 1,024). The largest
 legitimate responses seen were whole-file writes of about 14k tokens; without
 a cap, OpenRouter runaways ran to 30-105k tokens over 9-45 minutes a request
-and put steps past their hour in 5 of 6 replicates. The llm layer reports a
+and put steps past their hour in 5 of 6 replicates. Nearly all of them were
+repeated tool calls, not long answers, so planning gets no higher floor: a
+plan cut at the cap is repaired with a shorter summary, and a planner that
+needs more can set `max_output_tokens` in its role table. The llm layer reports a
 stop at the limit (`finish_reason: "length"`) as `CompletionError::OutputLimit`;
 the harness treats it as invalid model output for any request, journals
 `output_limit_reached`, and the repair asks for what fits: a shorter plan

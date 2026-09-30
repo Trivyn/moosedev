@@ -55,10 +55,6 @@ const PENDING_SEARCH_PREFIX_RESERVE: usize = 256;
 const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
 const SOURCE_HEADER: &str = "\nCurrent source, refreshed before this action:\n";
 
-/// The least output a planning action may generate: a summary up to
-/// [`MAX_PLAN_SUMMARY`] bytes, with its file and rule lists, fits.
-const PLAN_OUTPUT_TOKENS: u32 = 32_768;
-
 /// The compiled opening of the role. The project's standing guidance
 /// (`.moosedev/GUIDANCE.md` or the compiled default) follows it.
 const ROLE_OPENING: &str = "You are the coding sensor in MOOSEDev. The deterministic harness owns memory, capture, permissions and tests.\n";
@@ -576,23 +572,15 @@ impl Runner {
     }
 
     /// The `max_tokens` one request carries: the configured cap
-    /// ([`Self::output_cap`]), raised to [`PLAN_OUTPUT_TOKENS`] for a
-    /// planning action so a summary up to its bound fits, and lowered to the
-    /// room the prompt leaves in the model's window (the prompt estimated at
-    /// the prompt budget's 3 bytes a token, never below 1,024), so a small
-    /// model is not asked for more than it can hold. `None` sends no cap.
-    fn request_output_limit(
-        &self,
-        config: &LlmConfig,
-        name: &str,
-        prompt_bytes: usize,
-    ) -> Option<u32> {
-        let configured = self.output_cap()?;
-        let wanted = if name == "harness_action" && self.task.mode == Mode::Plan {
-            configured.max(PLAN_OUTPUT_TOKENS)
-        } else {
-            configured
-        };
+    /// ([`Self::output_cap`]), lowered to the room the prompt leaves in the
+    /// model's window (the prompt estimated at the prompt budget's 3 bytes a
+    /// token, never below 1,024), so a small model is not asked for more than
+    /// it can hold. `None` sends no cap. Planning gets no higher floor: in the
+    /// badciv replicates every long planning response was repeated tool
+    /// calls, never a long plan (Lesson a4a37768); a plan cut at the cap is
+    /// repaired with a shorter summary.
+    fn request_output_limit(&self, config: &LlmConfig, prompt_bytes: usize) -> Option<u32> {
+        let wanted = self.output_cap()?;
         let room = config
             .context_window_tokens
             .saturating_sub(prompt_bytes / 3 + 1)
@@ -763,7 +751,7 @@ impl Runner {
         let context_plan = context_plan.map(serde_json::to_value).transpose()?;
         // Every request carries the output cap, so a runaway generation stops
         // at it instead of running for minutes (badciv orC: 30-105k tokens).
-        let output_limit = self.request_output_limit(&config, name, request.len());
+        let output_limit = self.request_output_limit(&config, request.len());
         let client = match output_limit {
             Some(tokens) => client.with_output_limit(tokens),
             None => client.without_output_limit(),

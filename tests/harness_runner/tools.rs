@@ -260,33 +260,22 @@ async fn a_response_past_the_size_limit_parks() {
 }
 
 /// Every action request carries the output cap, so a runaway generation
-/// stops there (badciv orC: 30-105k-token responses ran 9-45 minutes). A
-/// planning action gets room for a full summary, and no request asks for
-/// more than the room its prompt leaves in the window.
+/// stops there (badciv orC: 30-105k-token responses ran 9-45 minutes),
+/// planning included, and no request asks for more than the room its prompt
+/// leaves in the window.
 #[tokio::test]
 async fn action_requests_carry_an_output_cap_sized_to_the_window() {
     let _env_lock = ENVIRONMENT.lock().await;
-    let default = moosedev::harness::response::DEFAULT_MAX_OUTPUT_TOKENS;
+    let default = u64::from(moosedev::harness::response::DEFAULT_MAX_OUTPUT_TOKENS);
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;
     fixture.edit();
     runner.advance().await.unwrap();
     let actions = action_requests(&fixture);
-    let fits = |request: &Value| {
-        let tokens = request["body"]["max_tokens"].as_u64().unwrap();
-        let prompt = request["body"]["messages"][0]["content"]
-            .as_str()
-            .unwrap()
-            .len() as u64;
-        (tokens, tokens + prompt / 3 < 32768)
-    };
-    // Planning (the read and the plan): a summary up to its bound fits.
-    let (planning, fit) = fits(&actions[0]);
-    assert!(planning > u64::from(default) && fit, "{planning}");
-    // Working: the configured cap, journaled on the request entry.
-    let (working, fit) = fits(actions.last().unwrap());
-    assert_eq!(working, u64::from(default));
-    assert!(fit);
+    // Planning and working alike: the configured cap.
+    for request in [&actions[0], actions.last().unwrap()] {
+        assert_eq!(request["body"]["max_tokens"].as_u64(), Some(default));
+    }
     assert_eq!(
         runner.task.model_requests.last().unwrap()["max_output_tokens"],
         default
