@@ -44,6 +44,7 @@ async fn each_role_is_answered_by_its_own_model_and_journaled() {
         response_policy: ResponsePolicy::Auto,
         action_contract: ActionContract::Tools,
         action_streaming: Default::default(),
+        max_output_tokens: Some(moosedev::harness::response::DEFAULT_MAX_OUTPUT_TOKENS),
     };
     runner.set_role(ModelRole::Plan, Some(role("planner", 65536)));
     runner.set_role(ModelRole::Implement, Some(role("implementer", 16384)));

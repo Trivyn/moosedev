@@ -99,6 +99,8 @@ pub struct Runner {
     response_policy: Option<ResponsePolicy>,
     action_contract: Option<ActionContract>,
     action_streaming: Option<ActionStreaming>,
+    /// The configured output cap, once a provider configured this runner.
+    max_output_tokens: Option<Option<u32>>,
     /// Set by `configure_provider`; a runner nobody configured never indexes.
     index_refresh: Option<config::IndexRefresh>,
     /// `[harness.sandbox].read_paths`: standing capability, granted without a
@@ -412,6 +414,7 @@ impl Runner {
             response_policy: None,
             action_contract: None,
             action_streaming: None,
+            max_output_tokens: None,
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -470,6 +473,7 @@ impl Runner {
             response_policy: None,
             action_contract: None,
             action_streaming: None,
+            max_output_tokens: None,
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -531,6 +535,7 @@ impl Runner {
             self.set_action_contract(contract);
         }
         self.action_streaming = provider.action_streaming;
+        self.max_output_tokens = Some(provider.max_output_tokens);
         self.set_role(ModelRole::Plan, provider.plan.clone());
         self.set_role(ModelRole::Implement, provider.implement.clone());
         self.index_refresh = Some(provider.index_refresh);

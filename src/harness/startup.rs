@@ -278,6 +278,9 @@ pub struct RoleSettings {
     pub response_policy: ResponsePolicy,
     pub action_contract: ActionContract,
     pub action_streaming: ActionStreaming,
+    /// `max_tokens` on every model request after the preflight; `None` sends
+    /// none.
+    pub max_output_tokens: Option<u32>,
 }
 
 /// `config` and `response_policy` are the default every role uses; `plan` and
@@ -290,6 +293,8 @@ pub struct ProviderSettings {
     pub action_contract: Option<ActionContract>,
     /// `None` leaves the runner streaming only interactive actions.
     pub action_streaming: Option<ActionStreaming>,
+    /// The default role's output cap; `None` sends no `max_tokens`.
+    pub max_output_tokens: Option<u32>,
     pub plan: Option<RoleSettings>,
     pub implement: Option<RoleSettings>,
     pub index_refresh: config::IndexRefresh,
@@ -353,6 +358,9 @@ fn resolve(environment: &Environment, layers: &[&dyn ProviderLayer]) -> Result<R
         ActionContract::parse(pick("MOOSEDEV_HARNESS_ACTION_CONTRACT").as_deref())?;
     let action_streaming =
         ActionStreaming::parse(pick("MOOSEDEV_HARNESS_ACTION_STREAMING").as_deref())?;
+    let max_output_tokens = super::response::parse_max_output_tokens(
+        pick("MOOSEDEV_LLM_MAX_OUTPUT_TOKENS").as_deref(),
+    )?;
     // The most specific table's routing wins whole; tables are not merged.
     config.provider_routing = layers.iter().find_map(|layer| layer.provider_routing());
     if let Some(routing) = &config.provider_routing {
@@ -366,6 +374,7 @@ fn resolve(environment: &Environment, layers: &[&dyn ProviderLayer]) -> Result<R
         response_policy,
         action_contract,
         action_streaming,
+        max_output_tokens,
     })
 }
 
@@ -378,6 +387,7 @@ impl ProviderSettings {
             response_policy: ResponsePolicy::Auto,
             action_contract: None,
             action_streaming: None,
+            max_output_tokens: Some(super::response::DEFAULT_MAX_OUTPUT_TOKENS),
             plan: None,
             implement: None,
             index_refresh: config::IndexRefresh::default(),
@@ -420,6 +430,7 @@ impl ProviderSettings {
             response_policy: default.response_policy,
             action_contract: Some(default.action_contract),
             action_streaming: Some(default.action_streaming),
+            max_output_tokens: default.max_output_tokens,
             index_refresh: file.index_refresh,
             standing_read_paths: file.sandbox.read_paths.clone(),
             language: LanguageSettings::of(&file.lsp),
@@ -437,6 +448,7 @@ impl ProviderSettings {
             response_policy: self.response_policy,
             action_contract: self.action_contract.unwrap_or_default(),
             action_streaming: self.action_streaming.unwrap_or_default(),
+            max_output_tokens: self.max_output_tokens,
         })
     }
 
@@ -899,6 +911,25 @@ mod tests {
     }
 
     #[test]
+    fn the_output_cap_defaults_and_each_role_can_set_or_clear_it() {
+        let text = "[harness.model]\nmodel = \"base\"\n\n[harness.model.plan]\nmax_output_tokens = 32000\n\n[harness.model.implement]\nmax_output_tokens = 0\n";
+        let root = project(&[("moosedev.toml", text)]);
+        let settings = ProviderSettings::load_with(&root, &Environment::of(&[], &[])).unwrap();
+        assert_eq!(
+            settings.max_output_tokens,
+            Some(super::super::response::DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            settings.for_role(ModelRole::Plan).max_output_tokens,
+            Some(32000)
+        );
+        assert_eq!(
+            settings.for_role(ModelRole::Implement).max_output_tokens,
+            None
+        );
+    }
+
+    #[test]
     fn invalid_file_values_fail_with_their_table() {
         for (text, expected) in [
             (
@@ -908,6 +939,10 @@ mod tests {
             (
                 "[harness.model]\naction_streaming = \"sometimes\"\n",
                 "MOOSEDEV_HARNESS_ACTION_STREAMING",
+            ),
+            (
+                "[harness.model]\nmax_output_tokens = -5\n",
+                "max_output_tokens",
             ),
             (
                 "[harness.model]\ncontext_window_tokens = 100\n",

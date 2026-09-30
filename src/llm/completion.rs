@@ -23,6 +23,9 @@ pub enum CompletionError {
     /// The response's content passed the size limit: a runaway generation,
     /// which resending would repeat.
     TooLarge(String),
+    /// The provider stopped the response at its output token limit
+    /// (`finish_reason: "length"`): what came back is incomplete.
+    OutputLimit(String),
     Provider(EngineError),
 }
 
@@ -40,7 +43,8 @@ impl std::fmt::Display for CompletionError {
             | Self::InvalidResponse(message)
             | Self::Transport(message)
             | Self::ToolArgumentsIncomplete(message)
-            | Self::TooLarge(message) => f.write_str(message),
+            | Self::TooLarge(message)
+            | Self::OutputLimit(message) => f.write_str(message),
             Self::Provider(error) => std::fmt::Display::fmt(error, f),
         }
     }
@@ -92,6 +96,9 @@ pub(super) fn complete_content(
     let choice = &value["choices"][0];
     let message = &choice["message"];
     if strict {
+        if choice["finish_reason"] == "length" {
+            return Err(output_limit());
+        }
         if choice["finish_reason"].as_str() != Some("stop") {
             return Err(CompletionError::Incomplete(format!(
                 "LLM completion ended without successful stop: {}",
@@ -158,6 +165,9 @@ pub(super) fn complete_tool_message(
     }
     let choice = &value["choices"][0];
     let message = &choice["message"];
+    if choice["finish_reason"] == "length" {
+        return Err(output_limit());
+    }
     if !choice["finish_reason"].as_str().is_some_and(tool_finish) {
         return Err(CompletionError::Incomplete(format!(
             "LLM completion ended without successful stop: {}",
@@ -296,6 +306,11 @@ pub(super) fn first_json_object(text: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// A response the provider stopped at its output token limit.
+fn output_limit() -> CompletionError {
+    CompletionError::OutputLimit("LLM response stopped at the output token limit".into())
 }
 
 /// The most content (text, reasoning and tool-call arguments) one response
@@ -514,6 +529,9 @@ impl CompletionStream {
                 }
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
+                if reason == "length" {
+                    return Err(output_limit());
+                }
                 if reason != "stop" && !(self.tools && tool_finish(reason)) {
                     return Err(CompletionError::Incomplete(format!(
                         "LLM stream ended with {reason}"
@@ -633,5 +651,29 @@ mod tests {
             .find_map(|_| stream.feed(frame(&chunk, 0).as_bytes(), &|_| {}).err())
             .expect("content past the limit is refused");
         assert!(matches!(error, CompletionError::TooLarge(_)), "{error}");
+    }
+
+    /// A response the provider stopped at its output limit is a fact callers
+    /// act on (the harness repairs it): it is not a generic incomplete.
+    #[test]
+    fn a_length_stop_is_an_output_limit_on_every_path() {
+        let content = serde_json::json!({"choices":[{"message":{"content":"half a fi"},"finish_reason":"length"}]});
+        assert!(matches!(
+            complete_content(&content, true),
+            Err(CompletionError::OutputLimit(_))
+        ));
+        let tools = serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"write","arguments":"{\"file\":\"a"}}]},"finish_reason":"length"}]});
+        assert!(matches!(
+            complete_tool_message(&tools),
+            Err(CompletionError::OutputLimit(_))
+        ));
+        let mut stream = CompletionStream::default();
+        let error = stream
+            .feed(
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"length\"}]}\n\n",
+                &|_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(error, CompletionError::OutputLimit(_)), "{error}");
     }
 }

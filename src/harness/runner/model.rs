@@ -55,6 +55,10 @@ const PENDING_SEARCH_PREFIX_RESERVE: usize = 256;
 const JSON_SCHEMA_MARKER: &str = "\nRequired JSON schema:\n";
 const SOURCE_HEADER: &str = "\nCurrent source, refreshed before this action:\n";
 
+/// The least output a planning action may generate: a summary up to
+/// [`MAX_PLAN_SUMMARY`] bytes, with its file and rule lists, fits.
+const PLAN_OUTPUT_TOKENS: u32 = 32_768;
+
 /// The compiled opening of the role. The project's standing guidance
 /// (`.moosedev/GUIDANCE.md` or the compiled default) follows it.
 const ROLE_OPENING: &str = "You are the coding sensor in MOOSEDev. The deterministic harness owns memory, capture, permissions and tests.\n";
@@ -571,6 +575,48 @@ impl Runner {
         Ok(prepared.client)
     }
 
+    /// The `max_tokens` one request carries: the configured cap
+    /// ([`Self::output_cap`]), raised to [`PLAN_OUTPUT_TOKENS`] for a
+    /// planning action so a summary up to its bound fits, and lowered to the
+    /// room the prompt leaves in the model's window (the prompt estimated at
+    /// the prompt budget's 3 bytes a token, never below 1,024), so a small
+    /// model is not asked for more than it can hold. `None` sends no cap.
+    fn request_output_limit(
+        &self,
+        config: &LlmConfig,
+        name: &str,
+        prompt_bytes: usize,
+    ) -> Option<u32> {
+        let configured = self.output_cap()?;
+        let wanted = if name == "harness_action" && self.task.mode == Mode::Plan {
+            configured.max(PLAN_OUTPUT_TOKENS)
+        } else {
+            configured
+        };
+        let room = config
+            .context_window_tokens
+            .saturating_sub(prompt_bytes / 3 + 1)
+            .max(1024);
+        Some(wanted.min(u32::try_from(room).unwrap_or(u32::MAX)))
+    }
+
+    /// The most tokens one model response may generate: the active role's
+    /// setting, else the runner's, else `MOOSEDEV_LLM_MAX_OUTPUT_TOKENS` and
+    /// its default ([`response::DEFAULT_MAX_OUTPUT_TOKENS`]). `None` sends no
+    /// cap.
+    pub(super) fn output_cap(&self) -> Option<u32> {
+        match (self.role_settings(), self.max_output_tokens) {
+            (Some(settings), _) => settings.max_output_tokens,
+            (None, Some(cap)) => cap,
+            (None, None) => response::parse_max_output_tokens(
+                std::env::var("MOOSEDEV_LLM_MAX_OUTPUT_TOKENS")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or(Some(response::DEFAULT_MAX_OUTPUT_TOKENS)),
+        }
+    }
+
     /// The governing rules with the claims the model already retrieved: a
     /// rule named without its claim takes the claim a search of this task
     /// returned for it, while all claims fit the rule-claim budget. A search
@@ -715,6 +761,13 @@ impl Runner {
             self.intent_event("context_plan", &plan.compact());
         }
         let context_plan = context_plan.map(serde_json::to_value).transpose()?;
+        // Every request carries the output cap, so a runaway generation stops
+        // at it instead of running for minutes (badciv orC: 30-105k tokens).
+        let output_limit = self.request_output_limit(&config, name, request.len());
+        let client = match output_limit {
+            Some(tokens) => client.with_output_limit(tokens),
+            None => client.without_output_limit(),
+        };
         {
             // Bind audit metadata to the source actually delivered, rather than
             // rereading files that may have changed while preparing the request.
@@ -724,7 +777,7 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"context_plan":context_plan,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"context_plan":context_plan,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"max_output_tokens":output_limit,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model
@@ -767,6 +820,29 @@ impl Runner {
                     self.streaming = None;
                     self.journal_served_by(&client);
                     generated
+                }
+                // The provider stopped the response at the output limit: the
+                // candidate is incomplete, not missing. It is invalid model
+                // output, so the repair loop corrects it with how to fit, and
+                // a repeat parks once the repair budget is spent, whatever
+                // the request was.
+                Err(crate::llm::CompletionError::OutputLimit(_)) => {
+                    self.streaming = None;
+                    let limit = output_limit.map_or_else(
+                        || "the provider's output limit".to_owned(),
+                        |tokens| format!("the output limit of {tokens} tokens"),
+                    );
+                    let guidance = match (name, self.task.mode) {
+                        ("harness_action", Mode::Plan) => "Propose the plan again with a shorter summary: name each change and the files it touches, not the code",
+                        ("harness_action", _) => "Write a large file in parts: write its first part, then extend it with replace; or make the change with replace",
+                        _ => "Answer again more briefly",
+                    };
+                    self.intent_event("output_limit_reached", &format!("{name}: {limit}"));
+                    self.persist()?;
+                    return Err(anyhow::anyhow!(
+                        "the response stopped at {limit} before it was complete, so nothing was applied. {guidance}"
+                    )
+                    .context(InvalidModelOutput));
                 }
                 Err(error) => {
                     self.preserve_stream();

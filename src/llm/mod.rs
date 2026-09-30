@@ -1738,7 +1738,7 @@ mod tests {
         ));
         assert!(matches!(
             complete_content(&make(json!({"content":"{}"}), json!("length")), true),
-            Err(CompletionError::Incomplete(_))
+            Err(CompletionError::OutputLimit(_))
         ));
         assert!(matches!(
             complete_content(

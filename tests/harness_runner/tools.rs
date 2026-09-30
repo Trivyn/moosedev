@@ -259,6 +259,88 @@ async fn a_response_past_the_size_limit_parks() {
     );
 }
 
+/// Every action request carries the output cap, so a runaway generation
+/// stops there (badciv orC: 30-105k-token responses ran 9-45 minutes). A
+/// planning action gets room for a full summary, and no request asks for
+/// more than the room its prompt leaves in the window.
+#[tokio::test]
+async fn action_requests_carry_an_output_cap_sized_to_the_window() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let default = moosedev::harness::response::DEFAULT_MAX_OUTPUT_TOKENS;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    let actions = action_requests(&fixture);
+    let fits = |request: &Value| {
+        let tokens = request["body"]["max_tokens"].as_u64().unwrap();
+        let prompt = request["body"]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .len() as u64;
+        (tokens, tokens + prompt / 3 < 32768)
+    };
+    // Planning (the read and the plan): a summary up to its bound fits.
+    let (planning, fit) = fits(&actions[0]);
+    assert!(planning > u64::from(default) && fit, "{planning}");
+    // Working: the configured cap, journaled on the request entry.
+    let (working, fit) = fits(actions.last().unwrap());
+    assert_eq!(working, u64::from(default));
+    assert!(fit);
+    assert_eq!(
+        runner.task.model_requests.last().unwrap()["max_output_tokens"],
+        default
+    );
+
+    // A small window: the cap shrinks to the room the prompt leaves.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let mut config = fixture.config();
+    config.context_window_tokens = 12_000;
+    runner.configure(config, None);
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let request = action_requests(&fixture).pop().unwrap();
+    let tokens = request["body"]["max_tokens"].as_u64().unwrap();
+    let prompt = request["body"]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .len() as u64;
+    assert!(tokens < 12_000 && tokens + prompt / 3 < 12_000, "{tokens}");
+}
+
+/// An action the provider stopped at the output cap is repaired with how to
+/// split the work, not rejected and resent unchanged; the repair budget
+/// bounds it.
+#[tokio::test]
+async fn an_action_stopped_at_the_output_cap_is_repaired_then_parks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let cut = || json!({"content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"read","arguments":"{\"file\":\"code"}}],"finish_reason":"length"});
+    fixture.reply("harness_action", cut());
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.read_files, vec!["code.txt".to_string()]);
+    assert_eq!(intent_details(&runner, "output_limit_reached").len(), 1);
+    let repaired = action_requests(&fixture);
+    assert!(
+        repaired[1]["body"]
+            .to_string()
+            .contains("stopped at the output limit"),
+        "the correction names the limit and how to split the work"
+    );
+
+    // Three in a row spend the repair budget and stop for the human.
+    for _ in 0..3 {
+        fixture.reply("harness_action", cut());
+    }
+    let result = runner.advance().await;
+    assert!(result.is_err() || runner.task.phase == Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "output_limit_reached").len(), 4);
+    assert!(runner.task.edits.is_empty());
+}
+
 /// Headless runs stream actions only when asked, so a provider that stalls
 /// mid-response meets the idle timeout instead of the whole-request bound.
 #[tokio::test]

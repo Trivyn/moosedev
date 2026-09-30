@@ -48,6 +48,8 @@ pub struct ModelKeys {
     pub response_policy: Option<String>,
     pub action_contract: Option<String>,
     pub action_streaming: Option<String>,
+    /// The most tokens one model response may generate; 0 for no cap.
+    pub max_output_tokens: Option<u64>,
     /// Sent verbatim as each request's `provider` object (OpenRouter provider
     /// routing: `order`, `allow_fallbacks`, `require_parameters`, …).
     pub provider_routing: Option<serde_json::Value>,
@@ -77,6 +79,9 @@ impl ProviderLayer for ModelKeys {
             "MOOSEDEV_HARNESS_RESPONSE_POLICY" => self.response_policy.clone(),
             "MOOSEDEV_HARNESS_ACTION_CONTRACT" => self.action_contract.clone(),
             "MOOSEDEV_HARNESS_ACTION_STREAMING" => self.action_streaming.clone(),
+            "MOOSEDEV_LLM_MAX_OUTPUT_TOKENS" => {
+                self.max_output_tokens.map(|tokens| tokens.to_string())
+            }
             "MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS" => {
                 self.connect_timeout_secs.map(|secs| secs.to_string())
             }
