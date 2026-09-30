@@ -215,13 +215,51 @@ fn in_string(line: &str, at: usize, syntax: &StubSyntax) -> bool {
     !commented && syntax.quotes.iter().any(|quote| quote_open(before, *quote))
 }
 
+/// `entries` resolved to the planned `files`, once each in the order first
+/// named, and the entries naming none. An entry names a file by its path
+/// (`./` and surrounding space ignored) or by a suffix of whole path
+/// components only one planned file ends with (`src/lib.rs`). Blank entries are neither.
+fn stub_entries(entries: &[String], files: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut resolved: Vec<String> = Vec::new();
+    let mut unknown = Vec::new();
+    for entry in entries {
+        let name = entry.trim().trim_start_matches("./");
+        if name.is_empty() {
+            continue;
+        }
+        let suffix = format!("/{name}");
+        let exact = files.iter().find(|file| file.as_str() == name);
+        let mut by_suffix = files.iter().filter(|file| file.ends_with(&suffix));
+        let file = exact.or_else(|| match (by_suffix.next(), by_suffix.next()) {
+            (Some(file), None) => Some(file),
+            _ => None,
+        });
+        match file {
+            Some(file) if !resolved.contains(file) => resolved.push(file.clone()),
+            Some(_) => {}
+            None => unknown.push(entry.trim().to_owned()),
+        }
+    }
+    (resolved, unknown)
+}
+
+/// Whether plans may name the files they leave as stubs (`stubs`).
+/// `MOOSEDEV_HARNESS_PLAN_STUBS=off` removes the field from the schema, and
+/// every consumer then reads none, so every stub is judged.
+pub(in crate::harness::runner) fn plan_stubs_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_PLAN_STUBS").map_or(true, |value| value.trim() != "off")
+}
+
 use super::super::Runner;
 use anyhow::Result;
+
+/// A stub left in a planned file: `(file, line, stub)`, 1-based line.
+pub(in crate::harness::runner) type Stub = (String, usize, String);
 
 impl Runner {
     /// Stubs left in the plan's files, as `(file, line, stub)`, read from
     /// disk.
-    pub(in crate::harness::runner) fn planned_stubs(&self) -> Vec<(String, usize, String)> {
+    pub(in crate::harness::runner) fn planned_stubs(&self) -> Vec<Stub> {
         let Some(plan) = self.task.plan.as_ref() else {
             return Vec::new();
         };
@@ -233,6 +271,44 @@ impl Runner {
                     .map(move |(line, stub)| (file.clone(), line, stub))
             })
             .collect()
+    }
+
+    /// [`Self::planned_stubs`] split into those in files the plan says it
+    /// leaves as stubs, and the rest. The finish gate and auto-verify judge
+    /// only the rest: a scaffold plan that asks for stubs is done once they
+    /// are written (badciv run 15, where the refusal had the builder write
+    /// the whole parser in the scaffold step).
+    pub(in crate::harness::runner) fn planned_stubs_split(&self) -> (Vec<Stub>, Vec<Stub>) {
+        let left = self
+            .task
+            .plan
+            .as_ref()
+            .map_or(&[][..], |plan| plan.stub_files());
+        self.planned_stubs()
+            .into_iter()
+            .partition(|(file, _, _)| left.contains(file))
+    }
+
+    /// A proposed plan's `stubs` entries resolved to its `files`, once each
+    /// in the order first named ([`stub_entries`]). An entry naming no
+    /// planned file is journaled and dropped, never returned to the model.
+    pub(in crate::harness::runner) fn resolve_plan_stubs(
+        &mut self,
+        stubs: &[String],
+        files: &[String],
+    ) -> Vec<String> {
+        let (resolved, unknown) = stub_entries(stubs, files);
+        if !unknown.is_empty() {
+            self.intent_event("plan_stubs_unresolved", &unknown.join("; "));
+            self.event(format!(
+                "Plan stubs entries ignored: {} named no planned file.",
+                unknown.join("; ")
+            ));
+        }
+        if !resolved.is_empty() {
+            self.intent_event("plan_stubs", &resolved.join(" "));
+        }
+        resolved
     }
 
     /// Stubs left in `file`, as `(line, stub)`, read from disk. A file that
@@ -293,11 +369,11 @@ impl Runner {
             .collect()
     }
 
-    /// Send a finish back while planned files hold stubs: once per source
-    /// state, so a repeat finish goes on to the checks, which decide. True
-    /// when the finish was refused.
+    /// Send a finish back while planned files hold stubs the plan does not
+    /// leave: once per source state, so a repeat finish goes on to the
+    /// checks, which decide. True when the finish was refused.
     pub(in crate::harness::runner) fn refuse_stubbed_finish(&mut self) -> bool {
-        let stubs = self.planned_stubs();
+        let (_, stubs) = self.planned_stubs_split();
         if stubs.is_empty() {
             return false;
         }
@@ -383,7 +459,7 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_code, line_stub, text_stubs};
+    use super::{is_code, line_stub, stub_entries, text_stubs};
     use crate::code::substrate::lang::stub_syntax_for;
 
     #[test]
@@ -562,5 +638,43 @@ mod tests {
         );
         let ts = "/*\n throw new Error(\"Not implemented\");\n*/\nexport const x = 1;\n";
         assert!(stubs(ts, typescript).is_empty());
+    }
+
+    #[test]
+    fn plan_stub_entries_resolve_to_planned_files_by_path_or_unique_suffix() {
+        let files: Vec<String> = [
+            "badciv-map/src/lib.rs",
+            "badciv-sim/src/lib.rs",
+            "Cargo.toml",
+        ]
+        .map(String::from)
+        .to_vec();
+        let entries: Vec<String> = [
+            " ./badciv-map/src/lib.rs ",
+            "badciv-map/src/lib.rs",
+            "src/lib.rs",
+            "Cargo.toml",
+            "",
+            "tui.rs",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (resolved, unknown) = stub_entries(&entries, &files);
+        assert_eq!(resolved, ["badciv-map/src/lib.rs", "Cargo.toml"]);
+        // Two planned files end with src/lib.rs, so that entry names neither.
+        assert_eq!(unknown, ["src/lib.rs", "tui.rs"]);
+        // A suffix matches whole path components only.
+        let (resolved, unknown) = stub_entries(
+            &[
+                "sim/src/lib.rs".to_owned(),
+                "badciv-sim/src/lib.rs".to_owned(),
+            ],
+            &files,
+        );
+        assert_eq!(resolved, ["badciv-sim/src/lib.rs"]);
+        assert_eq!(unknown, ["sim/src/lib.rs"]);
+        let nested = ["crates/sim/src/lib.rs".to_owned()];
+        let (resolved, _) = stub_entries(&["sim/src/lib.rs".to_owned()], &nested);
+        assert_eq!(resolved, nested);
     }
 }

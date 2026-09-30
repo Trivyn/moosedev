@@ -36,8 +36,15 @@ fn description(name: &str) -> &'static str {
         "read" => "Read a project file together with its governing knowledge.",
         "search" => "Search accepted project knowledge first, then repository matches.",
         "inspect" => "Page the complete output of a journal event.",
-        "plan" if super::rule_state::plan_satisfied_enabled() => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and those the existing code already satisfies unchanged (satisfied).",
-        "plan" => "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses).",
+        "plan" => match (
+            super::rule_state::plan_satisfied_enabled(),
+            super::symbolic::plan_stubs_enabled(),
+        ) {
+            (true, true) => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and those the existing code already satisfies unchanged (satisfied), and any planned files it deliberately leaves as stubs for a later task (stubs).",
+            (true, false) => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and those the existing code already satisfies unchanged (satisfied).",
+            (false, true) => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and any planned files it deliberately leaves as stubs for a later task (stubs).",
+            (false, false) => "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses).",
+        },
         "replace" => "Replace exactly one unique literal occurrence of old_text in a file.",
         "write" => "Write a file's whole UTF-8 content, creating missing parent directories; null content requests deletion.",
         "apply_fix" => "Apply a quick fix the language server offered, by the number listed under an error or lint.",

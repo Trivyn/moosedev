@@ -811,6 +811,15 @@ fn plan_gate(task: &Task, plan: &super::runner::Plan, standing: &[String]) -> Ga
             iris.join("\n"),
         );
     }
+    let stubs = plan.stub_files();
+    if !stubs.is_empty() {
+        // Approving the plan approves these: finishing will not require
+        // their stubs to be written.
+        gate.block(
+            format!("Leaves stubs in {} file(s)", stubs.len()),
+            stubs.join("\n"),
+        );
+    }
     for (index, choice) in plan.open_choices.iter().enumerate() {
         let chosen = choice
             .answer
@@ -2852,6 +2861,7 @@ mod tests {
             checks: vec!["pytest -q".into()],
             addresses: vec![],
             satisfied: vec![],
+            stubs: vec![],
             open_rules: vec![rule(1), rule(2)],
             open_choices: vec![super::super::runner::OpenChoice {
                 question: "Which separator?".into(),
@@ -2898,11 +2908,21 @@ mod tests {
         );
 
         let plan = task.plan.as_mut().unwrap();
+        plan.stubs = vec!["labels.py".into()];
+        let text = gate(&task, &[]).to_plain();
+        assert!(
+            text.contains("\nLeaves stubs in 1 file(s):\n  labels.py\n"),
+            "{text}"
+        );
+
+        let plan = task.plan.as_mut().unwrap();
         plan.open_rules.clear();
         plan.open_choices.clear();
         plan.satisfied.clear();
+        plan.stubs.clear();
         let text = gate(&task, &[]).to_plain();
         assert!(!text.contains("Leaves open") && !text.contains("Open choice"));
+        assert!(!text.contains("Leaves stubs"), "{text}");
         assert!(!text.contains("/choose") && text.contains("/approve  execute the plan\n"));
     }
 
@@ -2916,6 +2936,7 @@ mod tests {
             checks: vec!["pytest -q".into()],
             addresses: vec![],
             satisfied: vec![],
+            stubs: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });
@@ -3002,6 +3023,7 @@ mod tests {
             checks: vec!["pytest -q".into()],
             addresses: vec![],
             satisfied: vec![],
+            stubs: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

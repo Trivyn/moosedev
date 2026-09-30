@@ -63,17 +63,22 @@ impl Runner {
                 format!("Required checks passed {passed} test(s).")
             });
         }
-        let stubs = self.planned_stubs();
+        // Stubs the plan says it leaves are still stubs: the review names
+        // them apart, so a scaffold's are not read as unfinished work.
+        let listing = |stubs: &[(String, usize, String)]| {
+            stubs
+                .iter()
+                .take(8)
+                .map(|(file, line, marker)| format!("{file}:{line} {marker}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (left, stubs) = self.planned_stubs_split();
         if !stubs.is_empty() {
-            facts.push(format!(
-                "Stubs left in planned files: {}.",
-                stubs
-                    .iter()
-                    .take(8)
-                    .map(|(file, line, marker)| format!("{file}:{line} {marker}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            facts.push(format!("Stubs left in planned files: {}.", listing(&stubs)));
+        }
+        if !left.is_empty() {
+            facts.push(format!("Stubs the plan leaves: {}.", listing(&left)));
         }
         let (kept, withheld, _) = self.addressed_split();
         if !withheld.is_empty() {

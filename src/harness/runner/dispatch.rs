@@ -551,6 +551,7 @@ impl Runner {
                 checks,
                 addresses,
                 satisfied,
+                stubs,
                 open_choices,
             } => {
                 let context = self.refresh(&files).await?;
@@ -565,6 +566,7 @@ impl Runner {
                 let addresses = self.resolve_plan_addresses(&addresses, &context);
                 let satisfied = self.resolve_plan_satisfied(&satisfied, &addresses, &context);
                 self.journal_rules_settled(&context.governing_rules, &satisfied);
+                let stubs = self.resolve_plan_stubs(&stubs, &files);
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));
@@ -574,6 +576,7 @@ impl Runner {
                     checks,
                     addresses,
                     satisfied,
+                    stubs,
                     open_rules: Vec::new(),
                     open_choices,
                 });
@@ -1135,9 +1138,16 @@ impl Runner {
                 // unaddressed rule returns a plan: it can add a test, and if it
                 // does not, the task still finishes — with the journal and the
                 // completion line saying what actually happened. A project with
-                // no tests yet is never wedged.
+                // no tests yet is never wedged, and neither is a plan that
+                // leaves stubs: the approved scaffold has nothing to test yet
+                // (the a4b rerun's skeleton plan cost 2 parks this way).
                 self.intent_event("check_vacuous", &format!("{reason}: {command}"));
-                if self.vacuous_returns() < VACUOUS_RETURN_LIMIT {
+                let scaffold = self
+                    .task
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| !plan.stub_files().is_empty());
+                if !scaffold && self.vacuous_returns() < VACUOUS_RETURN_LIMIT {
                     self.intent_event("check_vacuous_returned", &command);
                     self.task.phase = Phase::Working;
                     self.task.last_response = format!(

@@ -1532,7 +1532,10 @@ contract 3 and intent contract 2.
   owns that output. After one return the task may finish anyway — a project
   with no tests yet is not trapped — but `check_vacuous_unmet` is journaled and
   the completion line says the checks passed while verifying nothing, instead
-  of claiming verification that did not happen.
+  of claiming verification that did not happen. A plan that leaves stubs on
+  purpose (`stubs`, below) is a scaffold with nothing to test yet: its vacuous
+  check is journaled as unmet without the return (the a4b rerun's skeleton
+  plan cost 2 parks and 2 hints to the return).
 - Harness questions. When the symbolic layer cannot default a decision (Constraint
   cd9f1a96 keeps such decisions from the model), the task parks in
   `AwaitingChoice` with a `pending_choice`: an id, its kind (`scope_add` with
@@ -1642,10 +1645,27 @@ contract 3 and intent contract 2.
   and the gate says nothing; test files are not judged. The model's
   finish, a no-op edit and auto-verify all pass the language-server gate, the
   unfinished-plan gate and this one before Verifying (`begin_verification`).
+  A plan may name planned files it leaves as stubs on purpose (`stubs`, a
+  scaffold a later task fills in). Each entry resolves to a planned file by
+  its path or by a suffix of whole path components only one planned file ends
+  with (`plan_stubs`);
+  any other is journaled and dropped (`plan_stubs_unresolved`). The approval
+  gate lists them ("Leaves stubs in N file(s)"), so approving the plan
+  approves them: neither this gate nor auto-verify judges their stubs, a check
+  that runs no tests is not returned for one, dropping a planned file at a
+  question drops its declaration too, review
+  evidence names them apart ("Stubs the plan leaves: …", which does not offer
+  /rework), and addressed rules for those files are still withheld. badciv run
+  15's scaffold plan asked for `parse_map` as a "minimal stub"; the refusal had
+  the builder write the whole parser in the scaffold step, and step 2's split
+  of that parser into modules then met the write guard.
+  `MOOSEDEV_HARNESS_PLAN_STUBS=off` removes the field, and every stub is
+  judged.
 - Auto-verify (offloading change 1). The harness runs the required checks
   itself, without a model step, when an applied edit's language-server result
   was settled with no errors, warnings or lints, every planned file exists and
-  was edited since approval, no stub marker is left and no required check
+  was edited since approval, no stub marker is left outside the files the
+  plan leaves as stubs, and no required check
   already failed against this source (`auto_verify`). An approval keeps
   counting from the earlier approval (`symbolic.cycle_edit_start`), so only
   added files wait for an edit, when the task re-entered Plan through a scope

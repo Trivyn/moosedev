@@ -15,7 +15,7 @@ mod scope;
 mod stall;
 mod state;
 mod stubs;
-pub(super) use stubs::{code_at, quote_open};
+pub(super) use stubs::{code_at, plan_stubs_enabled, quote_open};
 
 use super::actions::Step;
 use super::model::{Action, NoopEdit};
@@ -729,6 +729,7 @@ mod tests {
             checks: vec![],
             addresses: vec![],
             satisfied: vec![],
+            stubs: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

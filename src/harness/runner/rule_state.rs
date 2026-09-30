@@ -303,6 +303,7 @@ mod tests {
             checks: vec![],
             addresses: strings(addresses),
             satisfied: strings(satisfied),
+            stubs: vec![],
             open_rules: vec![],
             open_choices: vec![],
         }

@@ -313,6 +313,7 @@ mod tests {
             checks: vec!["true".into()],
             addresses: vec![],
             satisfied: vec![],
+            stubs: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });
@@ -333,6 +334,7 @@ mod tests {
             checks: vec!["true".into()],
             addresses: vec![],
             satisfied: vec![],
+            stubs: vec![],
             open_rules: vec![],
             open_choices: vec![],
         }

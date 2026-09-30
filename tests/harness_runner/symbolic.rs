@@ -695,6 +695,97 @@ async fn a_finish_with_stubs_in_planned_files_is_sent_back_once() {
     assert_eq!(intent_details(&runner, "finish_refused_stubs").len(), 1);
 }
 
+/// badciv run 15: the scaffold plan asked for `parse_map` as a "minimal
+/// stub", the gate refused the finish, and the builder wrote the whole parser
+/// in the scaffold step. Stubs in a file the approved plan names in `stubs`
+/// are the plan's to leave; review evidence still names them.
+#[tokio::test]
+async fn a_finish_keeps_the_stubs_the_approved_plan_leaves() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    // The scaffold's check runs no tests: with stubs left on purpose there is
+    // nothing to test yet, so it is not returned for a test.
+    let plan = json!({"action":"plan","summary":"Scaffold: render_name stays a stub for the next task","files":["labels.py"],"checks":["echo 'running 0 tests'"],"stubs":["./labels.py","missing.py"]});
+    let stub_and_finish = |fixture: &Fixture| {
+        fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    raise NotImplementedError\n"}));
+        fixture.conversational(json!({"action":"finish","summary":"Scaffold done."}));
+    };
+
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    assert!(fixture
+        .last_model_prompt("harness_action")
+        .contains("Its stubs lists the planned files"));
+    fixture.conversational(plan.clone());
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    assert_eq!(runner.task.plan.as_ref().unwrap().stubs, ["labels.py"]);
+    assert_eq!(intent_details(&runner, "plan_stubs"), ["labels.py"]);
+    assert_eq!(
+        intent_details(&runner, "plan_stubs_unresolved"),
+        ["missing.py"]
+    );
+    runner.approve_plan().await.unwrap();
+    stub_and_finish(&fixture);
+    fixture.note("Scaffolded render_name.");
+    fixture.typed(vec![]);
+    for _ in 0..16 {
+        if runner.task.phase == Phase::AwaitingReview {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert!(intent_details(&runner, "finish_refused_stubs").is_empty());
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    assert_eq!(intent_details(&runner, "check_vacuous").len(), 1);
+    assert!(intent_details(&runner, "check_vacuous_returned").is_empty());
+    let evidence = runner
+        .task
+        .symbolic
+        .as_ref()
+        .and_then(|state| state.capture_note.as_ref())
+        .map(|note| note.evidence.clone())
+        .unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|fact| fact == "Stubs the plan leaves: labels.py:2 raise NotImplementedError."),
+        "{evidence:?}"
+    );
+    assert!(
+        !evidence
+            .iter()
+            .any(|fact| fact.starts_with("Stubs left in planned files")),
+        "{evidence:?}"
+    );
+
+    // Switched off, the field is not offered and every stub is judged.
+    std::env::set_var("MOOSEDEV_HARNESS_PLAN_STUBS", "off");
+    let fixture = symbolic_fixture().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    let prompt = fixture.last_model_prompt("harness_action");
+    fixture.conversational(plan);
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    let kept = runner.task.plan.as_ref().unwrap().stubs.clone();
+    stub_and_finish(&fixture);
+    let calls = fixture.model_calls();
+    while fixture.model_calls() < calls + 2 {
+        runner.advance().await.unwrap();
+    }
+    std::env::remove_var("MOOSEDEV_HARNESS_PLAN_STUBS");
+    assert!(!prompt.contains("Its stubs lists"), "{prompt}");
+    assert!(kept.is_empty());
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        intent_details(&runner, "finish_refused_stubs"),
+        vec!["labels.py:2 raise NotImplementedError"]
+    );
+}
+
 #[tokio::test]
 async fn a_replace_already_applied_is_a_noop_that_runs_the_checks() {
     // badciv e3c533b4: a4b re-sent the `#[ignore]` it had already added;
@@ -4305,7 +4396,7 @@ async fn the_plan_choices_switch_removes_open_choices() {
         .contains(&json!("open_choices")));
     assert!(fixture
         .last_model_prompt("harness_action")
-        .contains("plan(summary,files,checks,addresses,satisfied,open_choices)"));
+        .contains("plan(summary,files,checks,addresses,satisfied,stubs,open_choices)"));
     assert_eq!(runner.task.plan.as_ref().unwrap().open_choices.len(), 1);
 
     std::env::set_var("MOOSEDEV_HARNESS_PLAN_CHOICES", "off");
@@ -4328,7 +4419,7 @@ async fn the_plan_choices_switch_removes_open_choices() {
     assert!(off["properties"].get("satisfied").is_some());
     assert!(fixture
         .last_model_prompt("harness_action")
-        .contains("plan(summary,files,checks,addresses,satisfied)"));
+        .contains("plan(summary,files,checks,addresses,satisfied,stubs)"));
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert!(runner.task.plan.as_ref().unwrap().open_choices.is_empty());
 }
@@ -5158,7 +5249,7 @@ async fn a_plan_says_a_rule_already_holds_and_that_claim_mints_no_edge() {
     fixture.conversational(json!({"action":"read","file":"labels.py"}));
     runner.advance().await.unwrap();
     let planning = fixture.last_model_prompt("harness_action");
-    assert!(planning.contains("plan(summary,files,checks,addresses,satisfied,open_choices)"));
+    assert!(planning.contains("plan(summary,files,checks,addresses,satisfied,stubs,open_choices)"));
     assert!(planning.contains("that the existing code already satisfies it unchanged"));
     fixture.conversational(json!({"action":"plan","summary":"Add a normalize helper so labels never exceed one line","files":["labels.py"],"checks":["true"],"addresses":["[Constraint] Labels never exceed one line"],"satisfied":["Preserve display label behavior","No such rule",UNLINKED]}));
     runner.advance().await.unwrap();
@@ -5343,7 +5434,7 @@ async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() 
             .is_none());
         assert_eq!(
             plan_tool["function"]["description"],
-            "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses)."
+            "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and any planned files it deliberately leaves as stubs for a later task (stubs)."
         );
         prompts.push(fixture.last_model_prompt("harness_action"));
     }
@@ -5351,7 +5442,7 @@ async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() 
     let prompt = &prompts[0];
     assert!(!prompt.contains("satisfied"), "{prompt}");
     assert!(!prompt.contains("settled"), "{prompt}");
-    assert!(prompt.contains("plan(summary,files,checks,addresses,open_choices)"));
+    assert!(prompt.contains("plan(summary,files,checks,addresses,stubs,open_choices)"));
     let rules = rules_section(prompt);
     let before = format!("hard requirements for any change that touches them; for each, your plan says it implements the rule, that the rule does not apply to this change, or that it is deferred because it lies outside this objective; list only the ones it implements in addresses):\n\n[Requirement] Preserve display label behavior ({PRESERVE})\nvia: linked to labels.py\nhasDescription: Display labels render exactly as before.\n\n[Constraint] Labels never exceed one line ({UNLINKED})\nvia: linked to labels.py\nhasDescription: A label is a single line.\n");
     let output_rule = rules

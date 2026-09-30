@@ -42,6 +42,12 @@ pub struct Plan {
     /// approval gate, and never becomes a knowledge edge.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub satisfied: Vec<String>,
+    /// Planned files the plan leaves holding stubs on purpose (a scaffold a
+    /// later task fills in), each one of `files`. Approving the plan approves
+    /// them: the finish gate and auto-verify do not judge their stubs, and
+    /// review evidence still names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stubs: Vec<String>,
     /// The governing rules delivered for the plan files that the plan leaves
     /// open: not in `addresses` or `satisfied`, whatever its summary says of
     /// them. The approval gate names them; `/approve` records them as
@@ -61,6 +67,17 @@ impl Plan {
     pub fn satisfied_claims(&self) -> &[String] {
         if super::rule_state::plan_satisfied_enabled() {
             &self.satisfied
+        } else {
+            &[]
+        }
+    }
+
+    /// The `stubs` files every consumer reads: none while
+    /// `MOOSEDEV_HARNESS_PLAN_STUBS=off`, even when a resumed task's journal
+    /// holds some from when the field was on.
+    pub fn stub_files(&self) -> &[String] {
+        if super::symbolic::plan_stubs_enabled() {
+            &self.stubs
         } else {
             &[]
         }
