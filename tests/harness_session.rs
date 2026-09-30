@@ -119,6 +119,18 @@ fn tool_message(answer: &Value) -> (Value, &'static str) {
 
 async fn model(State(state): State<Shared>, Json(request): Json<Value>) -> Json<Value> {
     let tools = request["tools"].as_array().cloned();
+    // The preflight's multiple-call probe: this provider enforces one call.
+    if tools.as_ref().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool["function"]["name"] == "first_check")
+    }) {
+        return Json(
+            json!({"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{
+            "id":"check","type":"function","function":{"name":"first_check","arguments":"{}"}
+        }]},"finish_reason":"tool_calls"}]}),
+        );
+    }
     let probe = tools
         .as_ref()
         .is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == "ready"));

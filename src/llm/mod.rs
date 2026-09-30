@@ -7,6 +7,7 @@
 
 mod completion;
 pub mod normalize;
+pub mod profile;
 mod usage;
 use completion::{complete_content, complete_tool_message, CompletionStream, MAX_STREAM_BYTES};
 pub use completion::{
@@ -172,6 +173,10 @@ pub struct LlmConfig {
     pub structured_output: StructuredOutputMode,
     /// Request bounds; see [`LlmTimeouts`].
     pub timeouts: LlmTimeouts,
+    /// A provider-routing object sent verbatim as the request's `provider`
+    /// field (OpenRouter's `order`, `allow_fallbacks`, `require_parameters`,
+    /// `quantizations`, …). Set only from the harness configuration's layers.
+    pub provider_routing: Option<serde_json::Value>,
 }
 
 impl LlmConfig {
@@ -229,6 +234,7 @@ impl LlmConfig {
             context_window_tokens,
             structured_output: StructuredOutputMode::parse(structured_output)?,
             timeouts: LlmTimeouts::default(),
+            provider_routing: None,
         })
     }
 }
@@ -262,6 +268,14 @@ pub struct OpenAiCompatClient {
     stream_usage_unsupported: Arc<AtomicU8>,
     /// Set once the provider refuses `tool_choice: "required"`; later tool requests use `"auto"`.
     tool_choice_required_unsupported: Arc<AtomicU8>,
+    /// Set once a tool response carried more than one call although the
+    /// request asked for one (`parallel_tool_calls: false`).
+    multi_call_observed: Arc<AtomicU8>,
+    /// Sent as the request's `provider` object; see [`LlmConfig::provider_routing`].
+    provider_routing: Option<serde_json::Value>,
+    /// The distinct upstream providers a routing endpoint named in its
+    /// responses (OpenRouter's top-level `provider`), in the order first seen.
+    served_by: Arc<std::sync::Mutex<Vec<String>>>,
     timeouts: LlmTimeouts,
 }
 
@@ -344,8 +358,38 @@ impl OpenAiCompatClient {
             usage_binding: None,
             stream_usage_unsupported: Arc::new(AtomicU8::new(0)),
             tool_choice_required_unsupported: Arc::new(AtomicU8::new(0)),
+            multi_call_observed: Arc::new(AtomicU8::new(0)),
+            provider_routing: None,
+            served_by: Arc::default(),
             timeouts,
         }
+    }
+
+    /// Send `routing` as every request's `provider` object (OpenRouter
+    /// provider routing); `None` sends none.
+    pub fn with_provider_routing(mut self, routing: Option<serde_json::Value>) -> Self {
+        self.provider_routing = routing;
+        self
+    }
+
+    /// Record that a tool response carried more than one call. True the first
+    /// time for this client and its clones, so the caller journals it once.
+    pub fn note_multi_call(&self) -> bool {
+        self.multi_call_observed.swap(1, Ordering::AcqRel) == 0
+    }
+
+    /// Whether a tool response from this provider has carried more than one call.
+    pub fn multi_call_observed(&self) -> bool {
+        self.multi_call_observed.load(Ordering::Acquire) != 0
+    }
+
+    /// The distinct upstream providers named in responses so far, in the
+    /// order first seen; shared by clones. Empty for an endpoint that names none.
+    pub fn served_by(&self) -> Vec<String> {
+        self.served_by
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
     }
 
     /// Apply configured request bounds. This rebuilds the connection pool, so
@@ -395,7 +439,7 @@ impl OpenAiCompatClient {
                 })
                 .map_err(|_| {
                     CompletionError::InvalidResponse(
-                        "Neutral response probes exhausted their four-request allowance".into(),
+                        "Neutral response probes exhausted their request allowance".into(),
                     )
                 })?;
         }
@@ -408,6 +452,9 @@ impl OpenAiCompatClient {
         }
         if let Some(tokens) = self.max_output_tokens {
             body["max_tokens"] = json!(tokens);
+        }
+        if let Some(routing) = &self.provider_routing {
+            body["provider"] = routing.clone();
         }
     }
 
@@ -429,6 +476,9 @@ impl OpenAiCompatClient {
             usage_binding: self.usage_binding.clone(),
             stream_usage_unsupported: self.stream_usage_unsupported.clone(),
             tool_choice_required_unsupported: self.tool_choice_required_unsupported.clone(),
+            multi_call_observed: self.multi_call_observed.clone(),
+            provider_routing: self.provider_routing.clone(),
+            served_by: self.served_by.clone(),
             timeouts: self.timeouts,
         }
     }
@@ -912,6 +962,10 @@ impl OpenAiCompatClient {
             if let Some(usage) = &stream.usage {
                 self.record_usage(usage);
             }
+            if let Some(provider) = &stream.provider {
+                self.note_provider(provider);
+                observation.provider(provider);
+            }
             stream.finish()?;
             Ok(stream.into_tool_completion())
         }
@@ -937,9 +991,26 @@ impl OpenAiCompatClient {
         reported.then_some(usage)
     }
 
+    /// Remember an upstream provider a response named, once, in the order
+    /// first seen.
+    fn note_provider(&self, provider: &str) {
+        let provider = provider.trim();
+        if provider.is_empty() {
+            return;
+        }
+        if let Ok(mut seen) = self.served_by.lock() {
+            if !seen.iter().any(|known| known == provider) {
+                seen.push(provider.to_owned());
+            }
+        }
+    }
+
     /// Accumulate `usage.prompt_tokens` / `usage.completion_tokens` from a
     /// chat-completions response body; absent fields count as 0.
     fn record_usage(&self, body: &serde_json::Value) {
+        if let Some(provider) = body["provider"].as_str() {
+            self.note_provider(provider);
+        }
         if body["usage"]["prompt_tokens"].is_u64() && body["usage"]["completion_tokens"].is_u64() {
             self.usage.reported.store(1, Ordering::Release);
         }
@@ -1930,6 +2001,77 @@ mod tests {
         assert_eq!(requests[2]["tool_choice"], "auto");
         assert_eq!(requests[2]["stream"], true);
         assert_eq!(client.take_usage(), (8, 4));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_routing_travels_as_the_provider_object_on_every_request() {
+        #[derive(Clone, Default)]
+        struct Requests(Arc<Mutex<Vec<serde_json::Value>>>);
+        async fn complete(
+            State(requests): State<Requests>,
+            Json(body): Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            requests.0.lock().unwrap().push(body.clone());
+            Json(json!({
+                "provider": "CoreWeave",
+                "choices":[{"message":{"role":"assistant","content":"","tool_calls":[
+                    {"id":"c1","type":"function","function":{"name":"read","arguments":"{\"file\":\"a.py\"}"}}
+                ]},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":4,"completion_tokens":2}
+            }))
+            .into_response()
+        }
+        let requests = Requests::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(complete))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let routing = json!({"order":["CoreWeave"],"allow_fallbacks":false});
+        let client = OpenAiCompatClient::new(format!("http://{address}/v1"), "test")
+            .with_provider_routing(Some(routing.clone()));
+        let tools = json!([{"type":"function","function":{"name":"read","description":"Read a file.",
+            "parameters":{"type":"object","properties":{"file":{"type":"string"}},"required":["file"],"additionalProperties":false}}}]);
+        for stream in [false, true] {
+            client
+                .chat_completion_tools_checked("model", "prompt", tools.clone(), stream, |_| {})
+                .await
+                .unwrap();
+        }
+        client
+            .with_fresh_usage()
+            .chat_completion_json_prompted_checked(
+                "model",
+                "prompt",
+                None,
+                "probe",
+                json!({"type":"object"}),
+            )
+            .await
+            .ok();
+        let unrouted = OpenAiCompatClient::new(format!("http://{address}/v1"), "test");
+        unrouted
+            .chat_completion_tools_checked("model", "prompt", tools, false, |_| {})
+            .await
+            .unwrap();
+        let requests = requests.0.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[..3] {
+            assert_eq!(request["provider"], routing, "{request}");
+        }
+        assert!(requests[3].get("provider").is_none());
+
+        // Every response named one upstream provider; clones share what was seen.
+        assert_eq!(client.served_by(), ["CoreWeave"]);
+        assert_eq!(client.with_fresh_usage().served_by(), ["CoreWeave"]);
+
+        // The multi-call flag is shared by clones and reported once.
+        assert!(!client.multi_call_observed());
+        assert!(client.with_fresh_usage().note_multi_call());
+        assert!(!client.note_multi_call());
+        assert!(client.multi_call_observed());
         server.abort();
     }
 }

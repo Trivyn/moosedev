@@ -36,6 +36,11 @@ pub trait ProviderLayer {
     fn get(&self, variable: &str) -> Option<String>;
     /// The variable holding the API key; never a value from the environment.
     fn api_key_env(&self) -> Option<String>;
+    /// A provider-routing table sent as the request's `provider` object; from
+    /// the layers only, since a table has no environment spelling.
+    fn provider_routing(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 impl ProviderLayer for ProviderKeys {

@@ -87,6 +87,7 @@ async fn query_runs_pure_symbolic_over_recorded_decisions() {
             context_window_tokens: moosedev::llm::DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
             structured_output: moosedev::llm::StructuredOutputMode::Auto,
             timeouts: Default::default(),
+            provider_routing: None,
         },
     )
     .expect("bootstrap app state");

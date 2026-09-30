@@ -79,6 +79,8 @@ index_refresh = "auto"                # auto | frozen-python | off
 [harness.model]                       # the harness default; unset keys inherit [model]
 response_policy = "auto"              # auto | provider-default | reasoning-off
 action_contract = "tools"             # tools | json_schema
+action_streaming = "auto"             # auto | always | never
+# provider_routing = { order = ["CoreWeave"], allow_fallbacks = false }
 
 [harness.model.plan]                  # unset keys inherit [harness.model], then [model]
 model = "qwen/qwen3.8-27b"
@@ -186,6 +188,42 @@ This setting fixes the observed Qwen MLX response routing on LM Studio; it is no
 assumed to work on every provider. Reasoning text never becomes an executable
 action. A model/endpoint/settings change invalidates the compatibility cache.
 
+The same preflight records a provider profile (`llm::profile::ProviderProfile`,
+the receipt's `profile`), from what the probes saw rather than from a table of
+named providers:
+- `call_dialect`: whether the probe's call came as `native` tool calls or as
+  text the normalizer read (`hermes` for Qwen's `<tool_call>{…}</tool_call>`,
+  `json`, `gemma`);
+- `multiple_calls_seen`: under the tools contract, one more request asks for
+  two calls while allowing one. Two back means the provider ignores
+  `parallel_tool_calls: false`; one is weaker evidence, since the model may
+  simply have chosen one. This probe never fails preparation;
+- `served_by`: the upstream providers a routing endpoint named in its
+  responses (OpenRouter's top-level `provider`);
+- `nonstream_ms`, `stream_ms`: each passing probe's wall-clock time, also on
+  every attempt as `elapsed_ms`.
+
+The profile is a starting point; later responses override it. Several calls in
+one action response journal `provider_multi_call` once per task, beside what the
+preflight saw, and each new upstream provider journals `provider_changed`
+(`CoreWeave -> DeepInfra`). Every usage receipt carries the `provider` that
+served it. The layer (`llm::normalize`, `llm::profile`) depends on no harness
+type, so it can stand alone.
+
+`provider_routing`, a table in `[harness.model]` or a role table, is sent as
+each request's `provider` object: OpenRouter's `order`, `allow_fallbacks`,
+`require_parameters`, `quantizations` and the rest. It comes from the file only.
+A role's table replaces the default's whole, and a different routing is probed
+afresh. Pinning a provider keeps a run's requests on one backend: unpinned,
+OpenRouter's qwen3.8-27b is served by 16 providers from fp4 to bf16.
+
+`action_streaming` (`MOOSEDEV_HARNESS_ACTION_STREAMING`) chooses whether action
+requests stream. `auto` streams them only when batch capture shows assistant text
+as it arrives (the interactive runner). `always` streams headless runs too, so
+`idle_timeout_secs` cuts a provider that stalls mid-response instead of the
+whole-request `first_chunk_timeout_secs`: 4 of 43 non-streamed OpenRouter
+requests hung for the full 300 s.
+
 `MOOSEDEV_HARNESS_ACTION_CONTRACT` selects how the model answers action
 decisions: `tools` (default) or `json_schema`. Any other value is a configuration
 error. Under `tools`, each action request offers one function per action the
@@ -209,7 +247,15 @@ arguments (the same model left `write` without `content` under the harness's
 long prompt) runs better on `json_schema`: set it per role with
 `[harness.model.implement] action_contract = "json_schema"`.
 
-Only the first call runs. Later calls are journaled as `extra_tool_calls_ignored`,
+One call runs. Of several, it is the first the harness would not refuse as it
+stands: a read its read checks turn away, a repeat inspect of a page in the
+current run, or an exact rerun of a command nothing could have changed. The
+calls passed over are journaled as `tool_calls_passed_over`. When every call
+would be refused, the first runs and meets its refusal. A provider that ignored
+`parallel_tool_calls: false` sent qwen's 3–6 reads with an already-read file
+first, and running the first parked the step three times in 45 s (OpenRouter,
+2026-09-29). `MOOSEDEV_HARNESS_MULTI_CALL=first` runs the first call whatever
+it is. Later calls are journaled as `extra_tool_calls_ignored`,
 and the session notes that one action runs per step. The exception is a `reply`
 sent beside an action: that is the model narrating what it is about to do, so the
 action runs and the reply's text becomes its message (`reply_as_message`).

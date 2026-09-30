@@ -10,13 +10,13 @@ use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::config::ModelRole;
 use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningRule;
-use crate::harness::response::{self, ActionContract};
+use crate::harness::response::{self, ActionContract, ActionStreaming};
 use crate::harness::startup::RoleSettings;
 use crate::llm::normalize::{normalize, Note};
 use crate::llm::{CompletionError, LlmConfig, OpenAiCompatClient, ToolCompletion, UsageContext};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -496,6 +496,21 @@ impl Runner {
         }
     }
 
+    /// Whether action requests stream: the active role's choice, else the
+    /// runner's, else `MOOSEDEV_HARNESS_ACTION_STREAMING`.
+    pub(super) fn action_streaming(&self) -> ActionStreaming {
+        match (self.role_settings(), self.action_streaming) {
+            (Some(settings), _) => settings.action_streaming,
+            (None, Some(streaming)) => streaming,
+            (None, None) => ActionStreaming::parse(
+                std::env::var("MOOSEDEV_HARNESS_ACTION_STREAMING")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or_default(),
+        }
+    }
+
     async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
         let policy = match (self.role_settings(), self.response_policy) {
             (Some(settings), _) => settings.response_policy,
@@ -521,18 +536,20 @@ impl Runner {
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.task.response_receipt = Some(error.receipt.clone());
+                self.task.response_receipt = Some((*error.receipt).clone());
                 self.event(format!(
                     "Model response compatibility failed: {}",
-                    serde_json::to_string(&error.receipt)?
+                    serde_json::to_string(&error.receipt.without_timings())?
                 ));
                 self.persist()?;
                 return Err(error.into());
             }
         };
+        // The journal, which prompts show, leaves out wall-clock times: they
+        // differ every run and would change the prompt. The task keeps them.
         let notice = format!(
             "Model response compatibility verified: {}",
-            serde_json::to_string(&prepared.receipt)?
+            serde_json::to_string(&prepared.receipt.without_timings())?
         );
         self.task.response_receipt = Some(prepared.receipt);
         self.event(notice.clone());
@@ -741,6 +758,7 @@ impl Runner {
             let generated = match result {
                 Ok(generated) => {
                     self.streaming = None;
+                    self.journal_served_by(&client);
                     generated
                 }
                 Err(error) => {
@@ -752,7 +770,9 @@ impl Runner {
             };
             let text = match generated {
                 Generated::Content(text) => text,
-                Generated::Tools(completion) => self.decode_tool_completion(completion, &schema)?,
+                Generated::Tools(completion) => {
+                    self.decode_tool_completion(completion, &schema, &client)?
+                }
             };
             self.task.model_requests.last_mut().unwrap()["response"] = Value::String(text.clone());
             self.persist()?;
@@ -812,7 +832,35 @@ impl Runner {
         &mut self,
         completion: ToolCompletion,
         schema: &Value,
+        client: &OpenAiCompatClient,
     ) -> Result<String> {
+        // One call was asked for (`parallel_tool_calls: false`) and several
+        // came back: the provider does not enforce it, whatever the preflight
+        // saw. Journaled once per task, beside what the preflight recorded.
+        if completion.tool_calls.len() > 1 {
+            client.note_multi_call();
+            if !self
+                .task
+                .intent_events
+                .iter()
+                .any(|event| event.kind == "provider_multi_call")
+            {
+                let preflight = self
+                    .task
+                    .response_receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.profile.as_ref())
+                    .and_then(|profile| profile.multiple_calls_seen)
+                    .map_or("not probed", |seen| if seen { "seen" } else { "not seen" });
+                self.intent_event(
+                    "provider_multi_call",
+                    &format!(
+                        "{} calls in one response; preflight: multiple calls {preflight}",
+                        completion.tool_calls.len()
+                    ),
+                );
+            }
+        }
         if let Some(message) = &completion.tool_choice_fallback {
             if !self
                 .task
@@ -827,7 +875,11 @@ impl Runner {
             entry["tool_calls"] = json!(completion.tool_calls);
         }
         let normalized = normalize(&completion);
-        match tools::decode(&normalized, schema, self.task.batch_capture) {
+        let first_only = tools::first_call_only();
+        let refused = |name: &str, arguments: &Map<String, Value>| {
+            !first_only && self.would_refuse(name, arguments)
+        };
+        match tools::decode(&normalized, schema, self.task.batch_capture, &refused) {
             Ok(decoded) => {
                 for note in &normalized.notes {
                     match note {
@@ -848,16 +900,33 @@ impl Runner {
                 if decoded.reply_as_message {
                     self.intent_event("reply_as_message", &decoded.name);
                 }
+                if !decoded.passed_over.is_empty() {
+                    self.intent_event(
+                        "tool_calls_passed_over",
+                        &format!(
+                            "ran {}; passed over {}, which the harness would refuse",
+                            decoded.name,
+                            decoded.passed_over.join(", ")
+                        ),
+                    );
+                }
                 if !decoded.ignored.is_empty() {
                     let ignored = decoded.ignored.join(", ");
                     self.intent_event(
                         "extra_tool_calls_ignored",
                         &format!("ran {}; ignored {ignored}", decoded.name),
                     );
-                    self.event(format!(
-                        "Only the first tool call ran ({}); one action runs per step. Ignored: {ignored}.",
-                        decoded.name
-                    ));
+                    self.event(if decoded.passed_over.is_empty() {
+                        format!(
+                            "Only the first tool call ran ({}); one action runs per step. Ignored: {ignored}.",
+                            decoded.name
+                        )
+                    } else {
+                        format!(
+                            "Only one tool call ran ({}), the first the harness would not refuse; one action runs per step. Ignored: {ignored}.",
+                            decoded.name
+                        )
+                    });
                 }
                 Ok(decoded.text)
             }
@@ -880,8 +949,71 @@ impl Runner {
         }
     }
 
+    /// Journal `provider_changed` each time a routing endpoint names an
+    /// upstream provider it has not served from before: requests are then
+    /// served by different backends (models, quantizations), which a run's
+    /// evidence must show.
+    fn journal_served_by(&mut self, client: &OpenAiCompatClient) {
+        let seen = client.served_by();
+        if seen.len() < 2 {
+            return;
+        }
+        let detail = seen.join(" -> ");
+        if !self
+            .task
+            .intent_events
+            .iter()
+            .any(|event| event.kind == "provider_changed" && event.detail == detail)
+        {
+            self.intent_event("provider_changed", &detail);
+        }
+    }
+
+    /// Whether the harness would turn this call away as it stands: a read
+    /// its read checks refuse, a repeat inspect of a page in the current run,
+    /// or an exact rerun of a command nothing could have changed. Used only
+    /// to choose among several calls in one response.
+    fn would_refuse(&self, name: &str, arguments: &Map<String, Value>) -> bool {
+        match name {
+            "read" => arguments
+                .get("file")
+                .and_then(Value::as_str)
+                .is_some_and(|file| {
+                    matches!(
+                        self.read_step(file.to_owned()),
+                        super::actions::Step::ReadRefused { .. }
+                    )
+                }),
+            "inspect" => arguments
+                .get("event")
+                .and_then(Value::as_u64)
+                .and_then(|event| usize::try_from(event).ok())
+                .is_some_and(|event| {
+                    let offset = arguments
+                        .get("offset")
+                        .and_then(Value::as_u64)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .unwrap_or(0);
+                    self.repeated_inspect_before(event, offset, self.task.events.len())
+                        .is_some()
+                }),
+            // As dispatch will run it: a leading `cd` to a missing directory
+            // is dropped first (`without_missing_cd`).
+            "command" => arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| {
+                    let command = super::actions::missing_cd(command, |path| path.exists())
+                        .map_or_else(|| command.to_owned(), |(_, rest)| rest);
+                    self.unchanged_command_run(&command).is_some()
+                }),
+            _ => false,
+        }
+    }
+
     /// One physical generation of `request`: streamed when batch capture delivers
-    /// assistant text as it arrives, otherwise a single structured response.
+    /// assistant text as it arrives or `action_streaming` is `always`, otherwise
+    /// a single structured response.
     /// Under the tools contract the request carries `tools` instead of a schema.
     async fn generate_candidate(
         &mut self,
@@ -892,7 +1024,8 @@ impl Runner {
         schema: &Value,
         tools: Option<&Value>,
     ) -> Result<Generated, CompletionError> {
-        let streamed = self.task.batch_capture && name == "harness_action";
+        let streamed =
+            name == "harness_action" && self.action_streaming().streams(self.task.batch_capture);
         if let Some(tools) = tools {
             if !streamed {
                 return client

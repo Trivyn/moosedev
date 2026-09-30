@@ -4,7 +4,7 @@ use super::{
     executor::{self, Workspace},
     progress::{Progress, ProgressSender},
     protocol::*,
-    response::{ActionContract, ResponseKey, ResponsePolicy, ResponseReceipt},
+    response::{ActionContract, ActionStreaming, ResponseKey, ResponsePolicy, ResponseReceipt},
     startup::{ProviderSettings, RoleSettings},
 };
 use crate::llm::{LlmConfig, OpenAiCompatClient};
@@ -98,6 +98,7 @@ pub struct Runner {
     model_clients: Vec<(ResponseKey, OpenAiCompatClient)>,
     response_policy: Option<ResponsePolicy>,
     action_contract: Option<ActionContract>,
+    action_streaming: Option<ActionStreaming>,
     /// Set by `configure_provider`; a runner nobody configured never indexes.
     index_refresh: Option<config::IndexRefresh>,
     /// `[harness.sandbox].read_paths`: standing capability, granted without a
@@ -410,6 +411,7 @@ impl Runner {
             model_clients: vec![],
             response_policy: None,
             action_contract: None,
+            action_streaming: None,
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -467,6 +469,7 @@ impl Runner {
             model_clients: vec![],
             response_policy: None,
             action_contract: None,
+            action_streaming: None,
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -527,6 +530,7 @@ impl Runner {
         if let Some(contract) = provider.action_contract {
             self.set_action_contract(contract);
         }
+        self.action_streaming = provider.action_streaming;
         self.set_role(ModelRole::Plan, provider.plan.clone());
         self.set_role(ModelRole::Implement, provider.implement.clone());
         self.index_refresh = Some(provider.index_refresh);
@@ -560,6 +564,12 @@ impl Runner {
     /// `MOOSEDEV_HARNESS_ACTION_CONTRACT`.
     pub fn set_action_contract(&mut self, contract: ActionContract) {
         self.action_contract = Some(contract);
+    }
+
+    /// Choose whether action requests stream instead of reading
+    /// `MOOSEDEV_HARNESS_ACTION_STREAMING`.
+    pub fn set_action_streaming(&mut self, streaming: ActionStreaming) {
+        self.action_streaming = Some(streaming);
     }
 
     pub fn daemon_url(&self) -> &str {

@@ -18,6 +18,7 @@
 //! (validated against the caller's type).
 
 pub mod gemma;
+pub mod hermes;
 pub mod json;
 pub mod json_schema;
 
@@ -85,10 +86,15 @@ pub trait Dialect: Sync {
     /// The call `content` holds, arguments as JSON text; `None` when it is
     /// not one. The name is not checked against any offered tools.
     fn text_call(&self, content: &str) -> Option<ToolCall>;
+    /// Every call `content` holds, for a dialect that can write several in
+    /// one answer; by default the one [`Dialect::text_call`] reads.
+    fn text_calls(&self, content: &str) -> Vec<ToolCall> {
+        self.text_call(content).into_iter().collect()
+    }
 }
 
 /// Tried in order; the first dialect that recognises the content wins.
-pub static DIALECTS: &[&dyn Dialect] = &[&json::Json, &gemma::Gemma];
+pub static DIALECTS: &[&dyn Dialect] = &[&hermes::Hermes, &json::Json, &gemma::Gemma];
 
 /// The call `content` holds in any supported dialect, with that dialect's name.
 pub fn text_call(content: &str) -> Option<(&'static str, ToolCall)> {
@@ -97,17 +103,27 @@ pub fn text_call(content: &str) -> Option<(&'static str, ToolCall)> {
         .find_map(|dialect| Some((dialect.name(), dialect.text_call(content)?)))
 }
 
-/// Normalize a tool-contract completion. Text is read as a call only when no
+/// Normalize a tool-contract completion. Text is read as calls only when no
 /// native call came back: beside a native call, text is the model talking.
+/// The first dialect that finds any call in the text reads all of them, so a
+/// text answer with several calls reaches the caller's one-action policy the
+/// way several native calls do.
 pub fn normalize(completion: &ToolCompletion) -> Normalized {
     let mut notes = Vec::new();
     if completion.tool_calls.is_empty() {
-        if let Some((dialect, call)) = text_call(&completion.content) {
+        let found = DIALECTS.iter().find_map(|dialect| {
+            let calls = dialect.text_calls(&completion.content);
+            (!calls.is_empty()).then(|| (dialect.name(), calls))
+        });
+        if let Some((dialect, calls)) = found {
             notes.push(Note::TextCall { dialect });
-            let call = normal_call(&call, CallSource::Text { dialect }, &mut notes);
+            let calls = calls
+                .iter()
+                .map(|call| normal_call(call, CallSource::Text { dialect }, &mut notes))
+                .collect();
             return Normalized {
                 content: String::new(),
-                calls: vec![call],
+                calls,
                 notes,
             };
         }

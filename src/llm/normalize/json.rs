@@ -29,7 +29,7 @@ impl Dialect for Json {
     }
 }
 
-fn call_from_value(value: &Value) -> Option<ToolCall> {
+pub(super) fn call_from_value(value: &Value) -> Option<ToolCall> {
     let object = value.as_object()?;
     let (name, arguments) = match object.get("function").and_then(|f| f.as_object()) {
         Some(function) => (

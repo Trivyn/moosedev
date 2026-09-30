@@ -47,6 +47,10 @@ pub struct ModelKeys {
     pub structured_output: Option<String>,
     pub response_policy: Option<String>,
     pub action_contract: Option<String>,
+    pub action_streaming: Option<String>,
+    /// Sent verbatim as each request's `provider` object (OpenRouter provider
+    /// routing: `order`, `allow_fallbacks`, `require_parameters`, …).
+    pub provider_routing: Option<serde_json::Value>,
     pub connect_timeout_secs: Option<u64>,
     pub first_chunk_timeout_secs: Option<u64>,
     pub idle_timeout_secs: Option<u64>,
@@ -56,6 +60,10 @@ pub struct ModelKeys {
 impl ProviderLayer for ModelKeys {
     fn api_key_env(&self) -> Option<String> {
         self.api_key_env.clone()
+    }
+
+    fn provider_routing(&self) -> Option<serde_json::Value> {
+        self.provider_routing.clone()
     }
 
     fn get(&self, variable: &str) -> Option<String> {
@@ -68,6 +76,7 @@ impl ProviderLayer for ModelKeys {
             "MOOSEDEV_LLM_STRUCTURED_OUTPUT" => self.structured_output.clone(),
             "MOOSEDEV_HARNESS_RESPONSE_POLICY" => self.response_policy.clone(),
             "MOOSEDEV_HARNESS_ACTION_CONTRACT" => self.action_contract.clone(),
+            "MOOSEDEV_HARNESS_ACTION_STREAMING" => self.action_streaming.clone(),
             "MOOSEDEV_LLM_CONNECT_TIMEOUT_SECS" => {
                 self.connect_timeout_secs.map(|secs| secs.to_string())
             }

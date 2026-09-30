@@ -2028,6 +2028,7 @@ mod tests {
                     context_window_tokens: DEFAULT_LLM_CONTEXT_WINDOW_TOKENS,
                     structured_output: StructuredOutputMode::Auto,
                     timeouts: Default::default(),
+                    provider_routing: None,
                 },
             )
             .unwrap()

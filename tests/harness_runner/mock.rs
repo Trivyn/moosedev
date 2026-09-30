@@ -114,6 +114,8 @@ pub(super) struct Script {
     pub(super) capture_type_status: Option<u16>,
     /// Action requests with `tool_choice: "required"` are refused (HTTP 400).
     pub(super) reject_required_tool_choice: bool,
+    /// The upstream provider a routing endpoint names in action responses.
+    pub(super) provider: Option<String>,
 }
 
 pub(super) type Shared = Arc<Mutex<Script>>;
@@ -139,7 +141,11 @@ pub(super) async fn model(
 /// tool requests (actions), or the JSON schema name.
 pub(super) fn request_schema(body: &Value) -> String {
     match body["tools"].as_array() {
-        Some(tools) if tools.iter().any(|tool| tool["function"]["name"] == "ready") => {
+        Some(tools)
+            if tools.iter().any(|tool| {
+                ["ready", "first_check"].contains(&tool["function"]["name"].as_str().unwrap_or(""))
+            }) =>
+        {
             "harness_response_probe".into()
         }
         Some(_) => "harness_action".into(),
@@ -209,7 +215,17 @@ pub(super) fn model_response(state: Shared, body: Value) -> (StatusCode, Json<Va
     let name = schema.as_str();
     let tools = body["tools"].is_array();
     if name == "harness_response_probe" {
-        let mut response = if tools {
+        // The multiple-call probe: this provider enforces one call.
+        let check = body["tools"][0]["function"]["name"] == "first_check";
+        let mut response = if check {
+            json!({"choices":[{
+                "message":{"role":"assistant","content":"","tool_calls":[{
+                    "id":"check","type":"function",
+                    "function":{"name":"first_check","arguments":"{}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]})
+        } else if tools {
             json!({"choices":[{
                 "message":{"role":"assistant","content":"","tool_calls":[{
                     "id":"probe","type":"function",
@@ -258,6 +274,9 @@ pub(super) fn model_response(state: Shared, body: Value) -> (StatusCode, Json<Va
     };
     if let Some(usage) = &script.usage {
         response["usage"] = usage.clone();
+    }
+    if let Some(provider) = &script.provider {
+        response["provider"] = json!(provider);
     }
     (StatusCode::OK, Json(response))
 }
@@ -789,6 +808,7 @@ impl Fixture {
             context_window_tokens: 32768,
             structured_output: moosedev::llm::StructuredOutputMode::Required,
             timeouts: Default::default(),
+            provider_routing: None,
         }
     }
 
