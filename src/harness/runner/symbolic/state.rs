@@ -43,6 +43,11 @@ pub struct SymbolicState {
     /// again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unfinished_accepted_at: Option<usize>,
+    /// The edit count at which the human answered "work" to the unedited
+    /// planned files question; a finish at that source state parks instead
+    /// of asking again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unedited_work_at: Option<usize>,
     /// The edit count a clean, freshly checked edit armed auto-verify at; taken
     /// by the next advance whether it fires or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]

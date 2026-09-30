@@ -510,6 +510,8 @@ impl Runner {
                 .await?;
             }
             (ChoiceKind::UneditedPlannedFiles { files }, "work") => {
+                let at = self.task.edits.len();
+                self.symbolic_state_mut().unedited_work_at = Some(at);
                 self.settle_choice(&pending, key);
                 self.task.phase = Phase::Working;
                 self.task.last_response = format!(
@@ -706,6 +708,7 @@ impl Runner {
         if let Some(plan) = self.task.plan.as_mut() {
             plan.files.retain(|file| !dropped(file));
             plan.stubs.retain(|file| !dropped(file));
+            plan.unchanged.retain(|file| !dropped(file));
         }
         if let Some(approved) = self.task.approved_plans.last_mut() {
             approved.files.retain(|file| !dropped(file));

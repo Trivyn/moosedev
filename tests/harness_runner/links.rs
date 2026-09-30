@@ -118,18 +118,12 @@ async fn steering_during_link_review_rederives_associations() {
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     runner.approve_plan().await.unwrap();
     assert_eq!(runner.task.phase, Phase::Working);
-    // The edit was made under the earlier approval: the first finish is sent
-    // back once for the unedited planned file, and the repeat asks the human,
-    // who says it needs no change.
-    for _ in 0..2 {
-        finish(&fixture);
-        runner.advance().await.unwrap();
-    }
-    verify_unedited(&mut runner).await;
-    assert_eq!(
-        intent_details(&runner, "finish_refused_unfinished"),
-        vec!["missing: []; unedited: [labels.py]"]
-    );
+    // The edit was made under the earlier approval, and the new plan keeps
+    // its file: that edit still covers it, so the finish verifies with no
+    // send-back.
+    finish(&fixture);
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "finish_refused_unfinished").is_empty());
     assert_eq!(runner.task.phase, Phase::AwaitingReview);
     assert_eq!(runner.task.reviews.len(), 1);
     let fresh = runner.task.reviews[0]
@@ -381,18 +375,12 @@ async fn no_persisted_state_is_awaiting_plan_with_capture_due() {
     assert_journal_invariant(&fixture, "replan after steering");
     runner.approve_plan().await.unwrap();
     assert_journal_invariant(&fixture, "second approval");
-    // The edit was made under the earlier approval: the first finish is sent
-    // back once for the unedited planned file, and the repeat asks the human,
-    // who says it needs no change.
-    for _ in 0..2 {
-        finish(&fixture);
-        runner.advance().await.unwrap();
-    }
-    verify_unedited(&mut runner).await;
-    assert_eq!(
-        intent_details(&runner, "finish_refused_unfinished"),
-        vec!["missing: []; unedited: [labels.py]"]
-    );
+    // The edit was made under the earlier approval, and the new plan keeps
+    // its file: that edit still covers it, so the finish verifies with no
+    // send-back.
+    finish(&fixture);
+    runner.advance().await.unwrap();
+    assert!(intent_details(&runner, "finish_refused_unfinished").is_empty());
     assert_eq!(
         runner.task.phase,
         Phase::Verifying,

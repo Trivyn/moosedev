@@ -238,6 +238,27 @@ async fn a_new_upstream_provider_is_journaled() {
     );
 }
 
+/// A response past the content limit is a runaway: the same request would
+/// repeat it, so the step parks with what happened instead of being resent.
+#[tokio::test]
+async fn a_response_past_the_size_limit_parks() {
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let huge = "x".repeat(5 * 1024 * 1024);
+    fixture.reply(
+        "harness_action",
+        tool_answer("", &[("read", &format!("{{\"file\":\"{huge}\"}}"))]),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "response_size_exceeded").len(), 1);
+    assert!(
+        runner.task.last_response.contains("passed the size limit"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
 /// Headless runs stream actions only when asked, so a provider that stalls
 /// mid-response meets the idle timeout instead of the whole-request bound.
 #[tokio::test]

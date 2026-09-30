@@ -304,6 +304,7 @@ mod tests {
             addresses: strings(addresses),
             satisfied: strings(satisfied),
             stubs: vec![],
+            unchanged: vec![],
             open_rules: vec![],
             open_choices: vec![],
         }

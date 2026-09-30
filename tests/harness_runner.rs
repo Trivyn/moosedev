@@ -3149,10 +3149,27 @@ async fn alternating_inspects_of_the_same_pages_are_refused_then_parked() {
     runner.advance().await.unwrap();
     assert!(runner.task.last_response.starts_with("Journal event"));
 
+    // Each page has left the prompt, so each is served once more: the model
+    // no longer has it (badciv replicates, 3 of 6).
+    for offset in [0, second] {
+        fixture.conversational(inspect(offset));
+        runner.advance().await.unwrap();
+        assert!(
+            runner.task.last_response.starts_with("Journal event"),
+            "{}",
+            runner.task.last_response
+        );
+    }
+    assert_eq!(runner.task.phase, Phase::Planning);
+
+    // A third request for a page served twice is refused, truthfully and
+    // with a next step Plan mode allows; the second refusal parks.
     fixture.conversational(inspect(0));
     runner.advance().await.unwrap();
     assert!(
-        runner.task.last_response.starts_with("Not shown again"),
+        runner.task.last_response.starts_with("Not shown again")
+            && runner.task.last_response.contains("already shown 2 times")
+            && runner.task.last_response.contains("propose the plan"),
         "{}",
         runner.task.last_response
     );
@@ -3278,6 +3295,8 @@ async fn an_outlined_file_read_again_is_served_without_rotating_the_tiers() {
     );
     assert_eq!(runner.task.phase, Phase::Planning);
     assert_eq!(intent_details(&runner, "outlined_read_served").len(), 1);
+    // An outlined file is not read back in full (that would rotate the
+    // tiers), so a second refusal of the same file parks.
     fixture.conversational(json!({"action":"read","file":"a.rs"}));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
@@ -3355,7 +3374,12 @@ async fn alternating_served_reads_of_two_outlined_files_park() {
         "{}",
         runner.task.last_response
     );
+    // Refusals park per file: b.rs is refused once, and a second refusal of
+    // a.rs parks.
     fixture.conversational(read("b.rs"));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    fixture.conversational(read("a.rs"));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
     assert_eq!(intent_details(&runner, "outlined_read_served").len(), 4);
@@ -3386,9 +3410,17 @@ async fn serving_outlined_reads_switched_off_refuses_them_then_parks() {
     assert_eq!(intent_details(&runner, "read_repeat_refused").len(), 1);
     assert!(intent_details(&runner, "outlined_read_served").is_empty());
 
-    // b.rs is still in full: reading it adds nothing either, and a second
-    // refusal while only looking parks the task.
+    // b.rs is still in full: reading it adds nothing either, but refusals of
+    // different files do not add up. A second refusal of a.rs while only
+    // looking parks the task.
     fixture.conversational(read("b.rs"));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("Not read again: b.rs is shown in full"));
+    fixture.conversational(read("a.rs"));
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
     assert!(runner.task.last_response.contains("Guidance is needed"));

@@ -231,6 +231,23 @@ impl Runner {
                 self.persist()?;
                 return Ok(());
             }
+            // A response past the content limit is a runaway generation: the
+            // same request would repeat it, so stop for the human with what
+            // happened instead of leaving the step to be resent unchanged.
+            if let Some(crate::llm::CompletionError::TooLarge(detail)) =
+                error.downcast_ref::<crate::llm::CompletionError>()
+            {
+                self.intent_event("response_size_exceeded", detail);
+                self.task.last_response = format!(
+                    "The model's response passed the size limit ({detail}); sending the same request again would repeat it. Guidance is needed: say what to write next, or /plan to split the work."
+                );
+                self.event(self.task.last_response.clone());
+                self.task.phase = Phase::AwaitingInput;
+                self.task.turn_finished = true;
+                self.park_under_approved_plan();
+                self.persist()?;
+                return Ok(());
+            }
         }
         self.persist()?;
         result
@@ -418,6 +435,10 @@ impl Runner {
             .map_err(|error| error.context(model::InvalidModelOutput))?;
         self.candidate_accepted();
         self.source_outlines_seen();
+        // What the prompt that produced this action showed as the Last
+        // result, before its narration replaces it: gates that judge whether
+        // text is still in view read this.
+        let shown = self.task.last_response.clone();
         if !message.trim().is_empty() {
             self.task.last_response = message.clone();
             self.event(format!("Assistant: {message}"));
@@ -438,7 +459,7 @@ impl Runner {
         );
         match step {
             Step::Inspect { event, offset } => {
-                if self.refuse_repeated_inspect(event, offset) {
+                if self.refuse_repeated_inspect(event, offset, &shown) {
                     return self.persist();
                 }
                 // A page is as large as the next prompt can show unclipped, so
@@ -552,6 +573,7 @@ impl Runner {
                 addresses,
                 satisfied,
                 stubs,
+                unchanged,
                 open_choices,
             } => {
                 let context = self.refresh(&files).await?;
@@ -567,6 +589,7 @@ impl Runner {
                 let satisfied = self.resolve_plan_satisfied(&satisfied, &addresses, &context);
                 self.journal_rules_settled(&context.governing_rules, &satisfied);
                 let stubs = self.resolve_plan_stubs(&stubs, &files);
+                let unchanged = self.resolve_plan_unchanged(&unchanged, &files);
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));
@@ -577,6 +600,7 @@ impl Runner {
                     addresses,
                     satisfied,
                     stubs,
+                    unchanged,
                     open_rules: Vec::new(),
                     open_choices,
                 });
@@ -1234,6 +1258,13 @@ pub(super) const DIAGNOSTICS_BYTES: usize = 4_000;
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";
 pub(super) const READ_REFUSED: &str = "Not read again:";
+
+/// Whether an inspect of a page that has left the prompt is served again
+/// (once) instead of refused. `MOOSEDEV_HARNESS_INSPECT_RESERVE=off`
+/// restores the refusal of any repeat in the run.
+fn inspect_reserve_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_INSPECT_RESERVE").map_or(true, |value| value.trim() != "off")
+}
 /// Room for the "Journal event N, bytes a..b of c:" line above a page.
 const INSPECT_HEADER_RESERVE: usize = 96;
 /// Bytes kept for the note that says where a served outlined read that did
@@ -1494,58 +1525,82 @@ impl Runner {
         (!changed).then_some(last)
     }
 
-    /// The journal index of an earlier `inspect` of the same page within the
-    /// current run of inspects: back to the last other model action or human
-    /// message (not a capture confirmation or review, which changes nothing
-    /// the model reads). Journal events never change, so within such a run a
-    /// second request for a page the model already had can only be a loop.
-    fn repeated_inspect(&self, event: usize, offset: usize) -> Option<usize> {
-        // The last event is this step's own journaled action.
-        let before = self.task.events.len().checked_sub(1)?;
-        self.repeated_inspect_before(event, offset, before)
+    /// Whether the Last result, which the prompt shows, is this page.
+    fn inspect_page_showing(event: usize, offset: usize, shown: &str) -> bool {
+        shown.starts_with(&format!("Journal event {event}, bytes {offset}.."))
     }
 
-    /// [`Self::repeated_inspect`] over the journal before index `before`: for
-    /// an inspect not yet journaled, the whole journal.
-    pub(super) fn repeated_inspect_before(
+    /// Whether an inspect of this page, journaled at or after `before`,
+    /// would be refused: it was requested earlier in the run and either the
+    /// prompt still shows it or it was already served twice.
+    /// `shown` is the Last result the prompt that asked for it showed.
+    pub(super) fn inspect_refusal_due(
         &self,
         event: usize,
         offset: usize,
         before: usize,
-    ) -> Option<usize> {
-        let action = format!(
-            "Model action: {}",
-            serde_json::to_string(&Step::Inspect { event, offset }).ok()?
-        );
+        shown: &str,
+    ) -> bool {
+        let earlier = self.inspect_requests_before(event, offset, before);
+        !earlier.is_empty()
+            && (!inspect_reserve_enabled()
+                || Self::inspect_page_showing(event, offset, shown)
+                || earlier.len() >= 2)
+    }
+
+    /// The earlier requests for exactly this page in the current run of
+    /// inspects (back to the last other model action or human progress),
+    /// latest first.
+    fn inspect_requests_before(&self, event: usize, offset: usize, before: usize) -> Vec<usize> {
+        let Ok(action) = serde_json::to_string(&Step::Inspect { event, offset }) else {
+            return Vec::new();
+        };
+        let action = format!("Model action: {action}");
+        let mut found = Vec::new();
         for (index, earlier) in self.task.events[..before].iter().enumerate().rev() {
             let message = earlier.message.as_str();
             if message == action {
-                return Some(index);
-            }
-            if review::is_human_progress(message)
+                found.push(index);
+            } else if review::is_human_progress(message)
                 || (message.starts_with("Model action: ")
                     && !message.starts_with("Model action: {\"action\":\"inspect\""))
             {
-                return None;
+                break;
             }
         }
-        None
+        found
     }
 
-    /// Refuse an inspect of a page already delivered in this run of inspects.
-    /// A second refusal in the run parks the task for the human, as a
-    /// repeated command does. True when the page must not be shown again.
-    /// badciv f2fe1f61: qwen alternated two pages of one event 132 times.
-    fn refuse_repeated_inspect(&mut self, event: usize, offset: usize) -> bool {
-        let Some(earlier) = self.repeated_inspect(event, offset) else {
+    /// Refuse an inspect of a page the prompt still shows, or of one already
+    /// served twice in this run of inspects. A page served once and since
+    /// replaced by another is served again: the model no longer has it
+    /// (badciv replicates, 3 of 6: a page refused as "already shown" after
+    /// it had left the prompt, then parked). The two-serve bound keeps an
+    /// alternation of pages closed (badciv f2fe1f61 alternated two pages 132
+    /// times). A second refusal in the run parks the task for the human, as
+    /// a repeated command does. True when the page must not be shown again.
+    fn refuse_repeated_inspect(&mut self, event: usize, offset: usize, shown: &str) -> bool {
+        // The last event is this step's own journaled action.
+        let before = self.task.events.len().saturating_sub(1);
+        let earlier = self.inspect_requests_before(event, offset, before);
+        let Some(&latest) = earlier.first() else {
             return false;
         };
-        let refused_before = self.task.events[earlier + 1..]
+        let showing = Self::inspect_page_showing(event, offset, shown);
+        if !self.inspect_refusal_due(event, offset, before, shown) {
+            self.intent_event(
+                "inspect_served_again",
+                &format!("event {event} offset {offset}, first at event {latest}"),
+            );
+            return false;
+        }
+        let first = *earlier.last().unwrap_or(&latest);
+        let refused_before = self.task.events[first + 1..]
             .iter()
             .any(|later| later.message.starts_with(INSPECT_REFUSED));
         self.intent_event(
             "inspect_repeat_refused",
-            &format!("event {event} offset {offset}, first at event {earlier}"),
+            &format!("event {event} offset {offset}, first at event {first}"),
         );
         if refused_before {
             self.event(format!(
@@ -1559,25 +1614,45 @@ impl Runner {
             self.park_under_approved_plan();
             return true;
         }
-        let message = format!(
-            "{INSPECT_REFUSED} event {event} at offset {offset} was already shown at event {earlier}, and journal events never change. Take a different step: edit, run a command, search, or ask the human with question. The current source of every file you read or edited is already in this prompt; an Applied edit event only repeats it."
-        );
+        let next = if self.task.mode == Mode::Plan {
+            "Take a different step: propose the plan, or ask the human with question."
+        } else {
+            "Take a different step: edit, run a check, search, or finish if the work is done."
+        };
+        let message = if showing {
+            format!(
+                "{INSPECT_REFUSED} event {event} at offset {offset} is the Last result above, and journal events never change. {next}"
+            )
+        } else {
+            format!(
+                "{INSPECT_REFUSED} event {event} at offset {offset} was already shown {} times in this run, most recently at event {latest}; showing it again will not change it. {next}",
+                earlier.len()
+            )
+        };
         self.event(message.clone());
         self.task.last_response = message;
         true
     }
 
     /// Refuse a read whose file the prompt already covers, leaving the source
-    /// tiers as they were. A second refusal while the model is only looking
-    /// (reads, inspects and searches since the last human message, edit or
-    /// other action) parks the task for the human, so refusals cannot become
-    /// the next loop.
+    /// tiers as they were. A second refusal of the same file while the model
+    /// is only looking (reads, inspects and searches since the last human
+    /// message, edit or other action) parks the task for the human, so
+    /// refusals cannot become the next loop. Refusals of different files do
+    /// not add up: a planner reading several files in turn is not looping
+    /// (badciv replicates: one counter for every file parked 5 of 6).
     fn refuse_read(&mut self, file: &str, reason: &str) {
         // The last event is this step's own journaled action.
         let before = self.task.events.len().saturating_sub(1);
-        let refused_before = self
-            .looking_run(before)
-            .any(|(_, earlier)| earlier.message.starts_with(READ_REFUSED));
+        let this_file = [
+            format!("{READ_REFUSED} `{file}` "),
+            format!("{READ_REFUSED} {file} "),
+        ];
+        let refused_before = self.looking_run(before).any(|(_, earlier)| {
+            this_file
+                .iter()
+                .any(|prefix| earlier.message.starts_with(prefix))
+        });
         self.intent_event("read_repeat_refused", &format!("{file}: {reason}"));
         if refused_before {
             self.event(format!("{READ_REFUSED} parked for guidance ({file})."));
@@ -2097,13 +2172,18 @@ mod human_progress_tests {
         let first = runner.task.events.len() - 1;
         runner.event(CONFIRMED);
         runner.event(ACCEPTED);
-        // This step's own journaled action.
+        // This step's own journaled action, while the page is the Last
+        // result: the confirmation and review between did not end the run.
         runner.event(inspect.clone());
-        assert_eq!(runner.repeated_inspect(0, 0), Some(first));
-        assert!(runner.refuse_repeated_inspect(0, 0));
+        runner.task.last_response = "Journal event 0, bytes 0..10 of 10:\n0123456789".into();
+        let before = runner.task.events.len() - 1;
+        assert_eq!(runner.inspect_requests_before(0, 0, before), [first]);
+        let shown = runner.task.last_response.clone();
+        assert!(runner.refuse_repeated_inspect(0, 0, &shown));
         runner.event(ANSWER);
         runner.event(inspect);
-        assert_eq!(runner.repeated_inspect(0, 0), None);
+        let before = runner.task.events.len() - 1;
+        assert!(runner.inspect_requests_before(0, 0, before).is_empty());
         server.abort();
     }
 

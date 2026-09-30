@@ -317,6 +317,7 @@ mod tests {
             addresses: vec![],
             satisfied: vec![],
             stubs: vec![],
+            unchanged: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

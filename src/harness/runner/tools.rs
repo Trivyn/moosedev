@@ -31,20 +31,14 @@ pub(super) fn names(schema: &Value) -> Vec<String> {
         .collect()
 }
 
-fn description(name: &str) -> &'static str {
+fn description(name: &str) -> String {
+    if name == "plan" {
+        return plan_description();
+    }
     match name {
         "read" => "Read a project file together with its governing knowledge.",
         "search" => "Search accepted project knowledge first, then repository matches.",
         "inspect" => "Page the complete output of a journal event.",
-        "plan" => match (
-            super::rule_state::plan_satisfied_enabled(),
-            super::symbolic::plan_stubs_enabled(),
-        ) {
-            (true, true) => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and those the existing code already satisfies unchanged (satisfied), and any planned files it deliberately leaves as stubs for a later task (stubs).",
-            (true, false) => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and those the existing code already satisfies unchanged (satisfied).",
-            (false, true) => "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and any planned files it deliberately leaves as stubs for a later task (stubs).",
-            (false, false) => "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses).",
-        },
         "replace" => "Replace exactly one unique literal occurrence of old_text in a file.",
         "write" => "Write a file's whole UTF-8 content, creating missing parent directories; null content requests deletion.",
         "apply_fix" => "Apply a quick fix the language server offered, by the number listed under an error or lint.",
@@ -58,6 +52,31 @@ fn description(name: &str) -> &'static str {
         "finish" => "Declare the requested changes applied; the harness runs the required checks.",
         "edit" => "Legacy whole-file edit.",
         _ => "A harness action.",
+    }
+    .to_owned()
+}
+
+/// The plan tool's description, naming each optional field the schema
+/// offers now.
+fn plan_description() -> String {
+    let mut fields = Vec::new();
+    if super::rule_state::plan_satisfied_enabled() {
+        fields.push("those the existing code already satisfies unchanged (satisfied)");
+    }
+    if super::symbolic::plan_stubs_enabled() {
+        fields.push("any planned files it deliberately leaves as stubs for a later task (stubs)");
+    }
+    if super::symbolic::plan_unchanged_enabled() {
+        fields
+            .push("any planned files it lists only for reference, which need no edit (unchanged)");
+    }
+    match fields.split_last() {
+        None => "Propose the plan: a summary, the permitted files, the required checks and the project rules it implements (addresses).".to_owned(),
+        Some((last, [])) => format!("Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and {last}."),
+        Some((last, rest)) => format!(
+            "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses), {}, and {last}.",
+            rest.join(", ")
+        ),
     }
 }
 

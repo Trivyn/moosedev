@@ -99,8 +99,7 @@ async fn plan_mode_preloads_the_spec_in_play_with_rules_not_dossiers() {
     assert!(source.get("other/notes.rs").is_none(), "{source}");
     assert!(runner.task.read_files.is_empty());
 
-    // A repeat while its text is still the Last result is refused, then
-    // parks.
+    // A repeat while its text is still the Last result is refused.
     fixture.conversational(json!({"action":"read","file":"other/notes.rs"}));
     runner.advance().await.unwrap();
     assert!(
@@ -115,9 +114,12 @@ async fn plan_mode_preloads_the_spec_in_play_with_rules_not_dossiers() {
         intent_details(&runner, "read_served_outside_scope").len(),
         1
     );
+    // The refusal replaced the served text, so the model no longer has it:
+    // asked again, the file joins the working set and stays in the prompt.
     fixture.conversational(json!({"action":"read","file":"other/notes.rs"}));
     runner.advance().await.unwrap();
-    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(runner.task.phase, Phase::Planning);
+    assert_eq!(runner.task.read_files, ["other/notes.rs"]);
 
     // The preload set did not change, so it was journaled once.
     assert_eq!(intent_details(&runner, "scope_preload").len(), 1);
@@ -169,11 +171,13 @@ async fn a_read_outside_the_scope_of_a_file_changed_since_it_was_served_is_serve
     );
 }
 
-/// badciv run 14: once the Last result has moved on, the served text is out
-/// of the prompt, so a re-read serves it again instead of sending the model
-/// to page the journal; once per looking run, so a loop still parks.
+/// Once the Last result has moved on, the served text is out of the prompt.
+/// Asked for again, the file joins the working set and stays in the prompt:
+/// a planner that needs it beside what came after (badciv replicates, 5 of
+/// 6) re-read out-of-scope files in turn from one Last result slot and
+/// parked. `MOOSEDEV_HARNESS_READ_ADMIT=off` serves it again instead, once.
 #[tokio::test]
-async fn a_read_outside_the_scope_is_served_again_once_the_last_result_moved_on() {
+async fn a_read_outside_the_scope_joins_the_working_set_once_the_last_result_moved_on() {
     let _env_lock = ENVIRONMENT.lock().await;
     let fixture = Fixture::new().await;
     spec_project(&fixture, true);
@@ -193,35 +197,49 @@ async fn a_read_outside_the_scope_is_served_again_once_the_last_result_moved_on(
         .starts_with("Journal event 0, bytes "));
     fixture.conversational(read.clone());
     runner.advance().await.unwrap();
-    assert_eq!(runner.task.last_response, served);
+    assert!(
+        runner.task.last_response.starts_with("Read other/notes.rs"),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(runner.task.read_files, ["other/notes.rs"]);
     assert_eq!(
         intent_details(&runner, "read_served_outside_scope").len(),
-        2
+        1
     );
 
-    // Still the Last result: the immediate repeat is refused.
+    // Now in the working set and shown in full: a repeat is refused, and a
+    // second refusal of the same file parks.
     fixture.conversational(read.clone());
     runner.advance().await.unwrap();
     assert!(
-        runner.task.last_response.starts_with(
-            "Not read again: `other/notes.rs` is unchanged and its current text is the Last result"
-        ),
+        runner
+            .task
+            .last_response
+            .starts_with("Not read again: other/notes.rs is shown in full"),
         "{}",
         runner.task.last_response
     );
     assert_eq!(runner.task.phase, Phase::Planning);
-
-    // Served twice in this looking run: with the Last result moved on
-    // again, the read is still refused, and being a second refusal it parks.
-    fixture.conversational(json!({"action":"inspect","event":1,"offset":0}));
-    runner.advance().await.unwrap();
-    fixture.conversational(read);
+    fixture.conversational(read.clone());
     runner.advance().await.unwrap();
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
-    assert_eq!(
-        intent_details(&runner, "read_served_outside_scope").len(),
-        2
-    );
+
+    // Switched off, the moved-on read is served again as the Last result.
+    std::env::set_var("MOOSEDEV_HARNESS_READ_ADMIT", "off");
+    let fixture = Fixture::new().await;
+    spec_project(&fixture, true);
+    let mut runner = planner(&fixture).await;
+    fixture.conversational(read.clone());
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"inspect","event":0,"offset":0}));
+    runner.advance().await.unwrap();
+    fixture.conversational(read);
+    let result = runner.advance().await;
+    std::env::remove_var("MOOSEDEV_HARNESS_READ_ADMIT");
+    result.unwrap();
+    assert_eq!(runner.task.last_response, served);
+    assert!(runner.task.read_files.is_empty());
 }
 
 /// badciv run 14: in Auto the scope was the plan's files, so the spec the
