@@ -820,6 +820,14 @@ fn plan_gate(task: &Task, plan: &super::runner::Plan, standing: &[String]) -> Ga
             stubs.join("\n"),
         );
     }
+    let unchanged = plan.unchanged_files();
+    if !unchanged.is_empty() {
+        // Listed for reference: finishing will not require them to be edited.
+        gate.block(
+            format!("Leaves unchanged {} file(s)", unchanged.len()),
+            unchanged.join("\n"),
+        );
+    }
     for (index, choice) in plan.open_choices.iter().enumerate() {
         let chosen = choice
             .answer
@@ -2862,6 +2870,7 @@ mod tests {
             addresses: vec![],
             satisfied: vec![],
             stubs: vec![],
+            unchanged: vec![],
             open_rules: vec![rule(1), rule(2)],
             open_choices: vec![super::super::runner::OpenChoice {
                 question: "Which separator?".into(),
@@ -2916,13 +2925,23 @@ mod tests {
         );
 
         let plan = task.plan.as_mut().unwrap();
+        plan.stubs.clear();
+        plan.unchanged = vec!["labels.py".into()];
+        let text = gate(&task, &[]).to_plain();
+        assert!(
+            text.contains("\nLeaves unchanged 1 file(s):\n  labels.py\n"),
+            "{text}"
+        );
+
+        let plan = task.plan.as_mut().unwrap();
         plan.open_rules.clear();
         plan.open_choices.clear();
         plan.satisfied.clear();
-        plan.stubs.clear();
+        plan.unchanged.clear();
         let text = gate(&task, &[]).to_plain();
         assert!(!text.contains("Leaves open") && !text.contains("Open choice"));
         assert!(!text.contains("Leaves stubs"), "{text}");
+        assert!(!text.contains("Leaves unchanged"), "{text}");
         assert!(!text.contains("/choose") && text.contains("/approve  execute the plan\n"));
     }
 
@@ -2937,6 +2956,7 @@ mod tests {
             addresses: vec![],
             satisfied: vec![],
             stubs: vec![],
+            unchanged: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });
@@ -3024,6 +3044,7 @@ mod tests {
             addresses: vec![],
             satisfied: vec![],
             stubs: vec![],
+            unchanged: vec![],
             open_rules: vec![],
             open_choices: vec![],
         });

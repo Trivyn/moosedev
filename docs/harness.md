@@ -80,6 +80,7 @@ index_refresh = "auto"                # auto | frozen-python | off
 response_policy = "auto"              # auto | provider-default | reasoning-off
 action_contract = "tools"             # tools | json_schema
 action_streaming = "auto"             # auto | always | never
+max_output_tokens = 16384             # max_tokens per response after the preflight; 0 = no cap
 # provider_routing = { order = ["CoreWeave"], allow_fallbacks = false }
 
 [harness.model.plan]                  # unset keys inherit [harness.model], then [model]
@@ -223,6 +224,32 @@ as it arrives (the interactive runner). `always` streams headless runs too, so
 `idle_timeout_secs` cuts a provider that stalls mid-response instead of the
 whole-request `first_chunk_timeout_secs`: 4 of 43 non-streamed OpenRouter
 requests hung for the full 300 s.
+
+A response's content (text, reasoning and tool-call arguments) is limited to
+4 MB. Stream framing counts only against a 64 MB transport guard: OpenRouter
+spends about 275 bytes of JSON on every streamed token, and counting framing
+against the content limit cut ordinary whole-file writes at about 15k tokens
+in 4 of 6 replicates. A response past the content limit is a runaway, which
+the same request would repeat, so the step parks with what happened
+(`response_size_exceeded`) instead of being resent.
+
+`max_output_tokens` (`MOOSEDEV_LLM_MAX_OUTPUT_TOKENS`, default 16,384, `0` for
+no cap; per role like the other model keys) is sent as `max_tokens` on every
+request after the preflight, which keeps its own small limits, and no request
+asks for more than the room its prompt leaves in the model's window
+(the prompt estimated at 3 bytes a token, never below 1,024). The largest
+legitimate responses seen were whole-file writes of about 14k tokens; without
+a cap, OpenRouter runaways ran to 30-105k tokens over 9-45 minutes a request
+and put steps past their hour in 5 of 6 replicates. Nearly all of them were
+repeated tool calls, not long answers, so planning gets no higher floor: a
+plan cut at the cap is repaired with a shorter summary, and a planner that
+needs more can set `max_output_tokens` in its role table. The llm layer reports a
+stop at the limit (`finish_reason: "length"`) as `CompletionError::OutputLimit`;
+the harness treats it as invalid model output for any request, journals
+`output_limit_reached`, and the repair asks for what fits: a shorter plan
+summary, a large file written in parts ("write its first part, then extend it
+with replace"), or a briefer answer. It parks once the repair budget is spent.
+The limit each request carried is journaled on its model request entry.
 
 `MOOSEDEV_HARNESS_ACTION_CONTRACT` selects how the model answers action
 decisions: `tools` (default) or `json_schema`. Any other value is a configuration
@@ -1062,10 +1089,16 @@ unclipped, so an event that fits arrives whole in one step; the
 recent-observations list marks the latest event shown as the Last result
 instead of previewing it again, and its six previews shrink together to stay
 within 3 KB, so a crowded prompt still leaves a page several KB. A page the
-model already had in the current run of inspects (back to its last other
-action or a human message) is not shown again: the first repeat is refused
-with a note, and the second parks the task for guidance
-(`inspect_repeat_refused`). Each prompt states how many distinct records the graph has
+model asks for again in the current run of inspects (back to its last other
+action or a human message) is served again once it has left the prompt
+(`inspect_served_again`): the model no longer has it. It is refused while it
+is still the Last result ("…is the Last result above"), or once it has been
+served twice in the run, with a next step the mode allows (propose the plan
+or ask in Plan mode; edit, check, search or finish while working). The second
+refusal parks the task for guidance (`inspect_repeat_refused`). The two-serve
+bound keeps badciv f2fe1f61's alternation of two pages (132 times) closed; the
+refusal of pages that had left the prompt parked 3 of 6 OpenRouter replicates.
+`MOOSEDEV_HARNESS_INSPECT_RESERVE=off` refuses every repeat in the run. Each prompt states how many distinct records the graph has
 delivered so far. A byte-identical repeat of an earlier query is answered from
 the stored result without re-running it, and consecutive searches matching
 nothing are counted: the second states that the channel is exhausted and names
@@ -1480,17 +1513,24 @@ contract 3 and intent contract 2.
   file outside it that the model has not read is served as the Last result,
   "Current text of `<file>` (outside this step's scope; not added to the
   working set):", journaled as `Served read outside scope:` with
-  `read_served_outside_scope`, paged and refused on repeat as a served
-  outlined read is: only while its text is still in the prompt. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches scope,
+  `read_served_outside_scope`, and refused on repeat only while its text is
+  still the Last result. Asked for again once the Last result has moved on,
+  the model no longer has it: the read joins the working set as an ordinary
+  read, so the file stays in the prompt. A planner holding several
+  out-of-scope files in one Last result slot re-read them in turn and parked
+  in 5 of 6 OpenRouter replicates. `MOOSEDEV_HARNESS_READ_ADMIT=off` serves it
+  again once instead, then refuses. `MOOSEDEV_HARNESS_SOURCE_SCOPE=off` switches scope,
   preloading and these serves off.
 - Redundant reads. A model `read` of a file the producing prompt already
   shows in full is refused without touching the tiers (the refusal gives the
   next action: plan in Plan mode; edit, check or finish while working). A
   changed file is read as before, and reads the guards make are never judged.
   The refusal is journaled as `Not read again:` with `read_repeat_refused`. A
-  second refusal while the model is only looking (reads, inspects and searches
-  since the last human message, applied edit, guarded edit attempt or other
-  action) parks the task for guidance. With more source than the budget
+  second refusal of the same file while the model is only looking (reads,
+  inspects and searches since the last human message, applied edit, guarded
+  edit attempt or other action) parks the task for guidance; refusals of
+  different files do not add up, since a planner reading several files in
+  turn is not looping. With more source than the budget
   holds, recency ranking outlines exactly the file a model reads next; badciv
   40cef4a5 rotated six files that way for about 40 planning steps.
 - Served outlined reads. A `read` of a file outlined only for space whose
@@ -1633,7 +1673,12 @@ contract 3 and intent contract 2.
   `refuse` returns to the model: "`<file>` stays outside the plan: remove its
   declaration or import from `<declared_in>`." The default is `add`.
   `MOOSEDEV_HARNESS_STRUCTURAL_ASK=off` asks nothing.
-- Unfinished plan. A finish while a planned file does not exist, or exists with
+- Unfinished plan. A plan may list planned files it names only for reference,
+  which need no edit (`unchanged`, resolved like `stubs`; `plan_unchanged`,
+  shown at the approval gate as "Leaves unchanged N file(s)"); they are not
+  asked for once another planned file has an edit this cycle, so a plan that
+  marks every file unchanged cannot finish having changed nothing. `MOOSEDEV_HARNESS_PLAN_UNCHANGED=off` removes the field. A finish
+  while a planned file does not exist, or exists with
   no edit of the model's in this approval cycle (a fix the harness applied is
   not the model's), is sent back once for that source state, naming the
   missing files and the unedited files separately and saying that a planned
@@ -1641,6 +1686,10 @@ contract 3 and intent contract 2.
   repair is spent. A repeat finish at the same source state asks the human.
   With only unedited files it asks `unedited_planned_files`: `work` returns to
   the model ("The human says the plan still needs these files edited: …"),
+  and a further finish with nothing edited since parks once with the files
+  named instead of asking again (`unedited_work_parked`; badciv run 17 asked
+  40 times on the same answer); after the human's answer the next finish asks
+  again, where `finish` verifies,
   and `finish` verifies on the human's word that they need no change
   (`finish_forced_unedited`), the default being `work`; a plan listing a file
   that needs no change still finishes (AD 9f5063d2), and badciv P5 attempt 3's
@@ -1714,15 +1763,15 @@ contract 3 and intent contract 2.
   plan leaves as stubs, and no required check
   already failed against this source (`auto_verify`). An approval keeps
   counting from the earlier approval (`symbolic.cycle_edit_start`), so only
-  added files wait for an edit, when the task re-entered Plan through a scope
-  escape (the automatic replan or the human's `replan`, `symbolic.scope_replan`)
-  and its plan only adds files to the plan approved before it, or when its plan
-  is that plan again (same files, same summary); badciv P5's additive
-  scope-escape replan reset the count and auto-verify never fired. An approval
-  withdrawn because source or accepted knowledge changed
-  (`symbolic.coverage_reset`), a plan that drops a file, and any other replan
-  (`/plan`, steering, the model's own), even over the same files, count
-  afresh: the unfinished-plan gate then sends the first finish back once for
+  added files wait for an edit, whenever its plan keeps every file of the plan
+  approved before it (the same files or more), whatever its summary or checks
+  say: the edits to those files still exist, and the checks judge the work.
+  badciv P5's additive scope-escape replan reset the count and auto-verify
+  never fired; run 17's replan that only corrected a check reset it and had
+  every planned file edited again. `MOOSEDEV_HARNESS_KEEP_COVERAGE=off` keeps
+  it only for a scope-escape replan that grows the plan, or the same plan
+  again. An approval withdrawn because source or accepted knowledge changed
+  (`symbolic.coverage_reset`) and a plan that drops a file count afresh: the unfinished-plan gate then sends the first finish back once for
   planned files not edited under the new approval. It fires once per source
   state, at most three times per approval cycle (`auto_verify_exhausted`), never
   without a fresh language-server result, and never right after a human

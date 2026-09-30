@@ -79,6 +79,9 @@ const OPEN_CHOICES_MEANING: &str = " Its open_choices lists up to 3 questions th
 const SATISFIED_MEANING: &str = " Its satisfied lists the label of each project rule the existing code already satisfies unchanged; a rule is in addresses or satisfied, not both.";
 /// Added to [`ACTION_MEANINGS`] while plans may name the files they leave as
 /// stubs ([`symbolic::plan_stubs_enabled`]).
+/// Added to [`ACTION_MEANINGS`] while plans may name files that need no edit
+/// ([`symbolic::plan_unchanged_enabled`]).
+const UNCHANGED_MEANING: &str = " Its unchanged lists the planned files it names only for reference, which need no edit (an existing test that already covers the change, a module it reads); finishing does not require them to be edited.";
 const STUBS_MEANING: &str = " Its stubs lists the planned files it deliberately leaves holding stubs for a later task, such as a scaffold's placeholder functions; finishing does not require their stubs to be written. Leave it empty when every planned file is to be written in full.";
 
 /// [`ACTION_MEANINGS`], with `satisfied`, `stubs` and `open_choices` while
@@ -94,6 +97,10 @@ fn action_meanings() -> String {
     if symbolic::plan_stubs_enabled() {
         fields.push_str(",stubs");
         meanings.push_str(STUBS_MEANING);
+    }
+    if symbolic::plan_unchanged_enabled() {
+        fields.push_str(",unchanged");
+        meanings.push_str(UNCHANGED_MEANING);
     }
     if plan_choices::enabled() {
         fields.push_str(",open_choices");
@@ -564,6 +571,40 @@ impl Runner {
         Ok(prepared.client)
     }
 
+    /// The `max_tokens` one request carries: the configured cap
+    /// ([`Self::output_cap`]), lowered to the room the prompt leaves in the
+    /// model's window (the prompt estimated at the prompt budget's 3 bytes a
+    /// token, never below 1,024), so a small model is not asked for more than
+    /// it can hold. `None` sends no cap. Planning gets no higher floor: in the
+    /// badciv replicates every long planning response was repeated tool
+    /// calls, never a long plan (Lesson a4a37768); a plan cut at the cap is
+    /// repaired with a shorter summary.
+    fn request_output_limit(&self, config: &LlmConfig, prompt_bytes: usize) -> Option<u32> {
+        let wanted = self.output_cap()?;
+        let room = config
+            .context_window_tokens
+            .saturating_sub(prompt_bytes / 3 + 1)
+            .max(1024);
+        Some(wanted.min(u32::try_from(room).unwrap_or(u32::MAX)))
+    }
+
+    /// The most tokens one model response may generate: the active role's
+    /// setting, else the runner's, else `MOOSEDEV_LLM_MAX_OUTPUT_TOKENS` and
+    /// its default ([`response::DEFAULT_MAX_OUTPUT_TOKENS`]). `None` sends no
+    /// cap.
+    pub(super) fn output_cap(&self) -> Option<u32> {
+        match (self.role_settings(), self.max_output_tokens) {
+            (Some(settings), _) => settings.max_output_tokens,
+            (None, Some(cap)) => cap,
+            (None, None) => response::parse_max_output_tokens(
+                std::env::var("MOOSEDEV_LLM_MAX_OUTPUT_TOKENS")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or(Some(response::DEFAULT_MAX_OUTPUT_TOKENS)),
+        }
+    }
+
     /// The governing rules with the claims the model already retrieved: a
     /// rule named without its claim takes the claim a search of this task
     /// returned for it, while all claims fit the rule-claim budget. A search
@@ -708,6 +749,13 @@ impl Runner {
             self.intent_event("context_plan", &plan.compact());
         }
         let context_plan = context_plan.map(serde_json::to_value).transpose()?;
+        // Every request carries the output cap, so a runaway generation stops
+        // at it instead of running for minutes (badciv orC: 30-105k tokens).
+        let output_limit = self.request_output_limit(&config, request.len());
+        let client = match output_limit {
+            Some(tokens) => client.with_output_limit(tokens),
+            None => client.without_output_limit(),
+        };
         {
             // Bind audit metadata to the source actually delivered, rather than
             // rereading files that may have changed while preparing the request.
@@ -717,7 +765,7 @@ impl Runner {
                 .iter()
                 .map(|(file, source)| (file, super::fingerprint(source)))
                 .collect();
-            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"context_plan":context_plan,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
+            self.task.model_requests.push(json!({"purpose":name,"decision_id":self.task.recovery.as_ref().map(|r|&r.id),"attempt":self.task.recovery.as_ref().map(|r|r.attempts),"revision":self.task.knowledge_revision,"source_hashes":source_hashes,"source_outlined":(name == "harness_action").then_some(&self.task.source_outlined),"source_full":(name == "harness_action").then_some(&self.task.source_full),"source_budget":(name == "harness_action").then_some(self.source_budget).flatten(),"context_plan":context_plan,"prompt":request,"response":null,"contract":contract.as_str(),"role":self.active_role().as_str(),"model":config.model,"endpoint":config.base_url,"context_window_tokens":config.context_window_tokens,"max_output_tokens":output_limit,"timeouts_secs":{"connect":config.timeouts.connect.as_secs(),"first_chunk":config.timeouts.first_chunk.as_secs(),"idle":config.timeouts.idle.as_secs(),"tool_arguments":config.timeouts.tool_arguments.as_secs()}}));
             self.persist()?;
             // A transport failure (connection, first output, idle stream) produced no
             // candidate. Send the same request once more without spending a model
@@ -760,6 +808,29 @@ impl Runner {
                     self.streaming = None;
                     self.journal_served_by(&client);
                     generated
+                }
+                // The provider stopped the response at the output limit: the
+                // candidate is incomplete, not missing. It is invalid model
+                // output, so the repair loop corrects it with how to fit, and
+                // a repeat parks once the repair budget is spent, whatever
+                // the request was.
+                Err(crate::llm::CompletionError::OutputLimit(_)) => {
+                    self.streaming = None;
+                    let limit = output_limit.map_or_else(
+                        || "the provider's output limit".to_owned(),
+                        |tokens| format!("the output limit of {tokens} tokens"),
+                    );
+                    let guidance = match (name, self.task.mode) {
+                        ("harness_action", Mode::Plan) => "Propose the plan again with a shorter summary: name each change and the files it touches, not the code",
+                        ("harness_action", _) => "Write a large file in parts: write its first part, then extend it with replace; or make the change with replace",
+                        _ => "Answer again more briefly",
+                    };
+                    self.intent_event("output_limit_reached", &format!("{name}: {limit}"));
+                    self.persist()?;
+                    return Err(anyhow::anyhow!(
+                        "the response stopped at {limit} before it was complete, so nothing was applied. {guidance}"
+                    )
+                    .context(InvalidModelOutput));
                 }
                 Err(error) => {
                     self.preserve_stream();
@@ -994,8 +1065,12 @@ impl Runner {
                         .and_then(Value::as_u64)
                         .and_then(|offset| usize::try_from(offset).ok())
                         .unwrap_or(0);
-                    self.repeated_inspect_before(event, offset, self.task.events.len())
-                        .is_some()
+                    self.inspect_refusal_due(
+                        event,
+                        offset,
+                        self.task.events.len(),
+                        &self.task.last_response,
+                    )
                 }),
             // As dispatch will run it: a leading `cd` to a missing directory
             // is dropped first (`without_missing_cd`).
@@ -1168,6 +1243,9 @@ impl Runner {
                 }
                 if !symbolic::plan_stubs_enabled() {
                     plan.stubs.clear();
+                }
+                if !symbolic::plan_unchanged_enabled() {
+                    plan.unchanged.clear();
                 }
                 plan
             });
@@ -1625,6 +1703,8 @@ pub(super) enum Action {
         #[serde(default)]
         stubs: Vec<String>,
         #[serde(default)]
+        unchanged: Vec<String>,
+        #[serde(default)]
         open_choices: Vec<ProposedChoice>,
     },
     Edit {
@@ -1898,7 +1978,7 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
     }
     let s = json!({"type":"string"});
     let a = json!({"type":"array","items":{"type":"string"}});
-    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone()),("satisfied",a.clone()),("stubs",a.clone()),("open_choices",plan_choices::schema())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("apply_fix",&[("fix",json!({"type":"integer","minimum":1}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
+    let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone()),("satisfied",a.clone()),("stubs",a.clone()),("unchanged",a.clone()),("open_choices",plan_choices::schema())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("apply_fix",&[("fix",json!({"type":"integer","minimum":1}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
     if mode == Mode::Plan {
         retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
     }
@@ -1910,6 +1990,9 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
     }
     if !symbolic::plan_stubs_enabled() {
         without_plan_field(&mut actions, "stubs");
+    }
+    if !symbolic::plan_unchanged_enabled() {
+        without_plan_field(&mut actions, "unchanged");
     }
     if !fixes {
         retain_actions(&mut actions, |name| name != "apply_fix");
@@ -2615,11 +2698,13 @@ mod tests {
                 "addresses",
                 "satisfied",
                 "stubs",
+                "unchanged",
                 "open_choices"
             ]
         );
         assert_eq!(on["properties"]["satisfied"], on["properties"]["addresses"]);
         assert_eq!(on["properties"]["stubs"], on["properties"]["addresses"]);
+        assert_eq!(on["properties"]["unchanged"], on["properties"]["addresses"]);
         without_plan_field(&mut actions, "satisfied");
         let no_satisfied = plan(&actions);
         assert!(no_satisfied["properties"].get("satisfied").is_none());
@@ -2633,11 +2718,14 @@ mod tests {
                 "checks",
                 "addresses",
                 "stubs",
+                "unchanged",
                 "open_choices"
             ]
         );
         without_plan_field(&mut actions, "stubs");
         assert!(plan(&actions)["properties"].get("stubs").is_none());
+        without_plan_field(&mut actions, "unchanged");
+        assert!(plan(&actions)["properties"].get("unchanged").is_none());
         without_plan_field(&mut actions, "open_choices");
         assert_eq!(
             required(&plan(&actions)),
@@ -2645,11 +2733,11 @@ mod tests {
         );
 
         let meanings = action_meanings();
-        assert!(
-            meanings.contains("plan(summary,files,checks,addresses,satisfied,stubs,open_choices)")
-        );
+        assert!(meanings.contains(
+            "plan(summary,files,checks,addresses,satisfied,stubs,unchanged,open_choices)"
+        ));
         assert!(meanings.contains(&format!(
-            "and leave it empty when there are none.{SATISFIED_MEANING}{STUBS_MEANING}{OPEN_CHOICES_MEANING}"
+            "and leave it empty when there are none.{SATISFIED_MEANING}{STUBS_MEANING}{UNCHANGED_MEANING}{OPEN_CHOICES_MEANING}"
         )));
     }
 

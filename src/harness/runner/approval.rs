@@ -46,16 +46,23 @@ impl Runner {
         }
         self.derive_symbolic_scope(&context).await?;
         // Whether the edits made under the plan approved before this one
-        // still count: this plan only grows that one after a scope escape
-        // (the task re-entered Plan to add the file an edit needed), or it is
-        // that plan again (same files, same summary). Any other replan, even
-        // one over the same files, re-approves different work.
+        // still count: this plan keeps every file that one had (the same
+        // files, or more). The edits to those files still exist whatever the
+        // new summary or checks say, and the checks judge the work; a replan
+        // that only corrected a check reset coverage and had every planned
+        // file edited again (badciv run 17: 8 finishes refused).
+        // `MOOSEDEV_HARNESS_KEEP_COVERAGE=off` keeps coverage only for a
+        // scope-escape replan that grows the plan, or the same plan again.
         let scope_replan = std::mem::take(&mut self.symbolic_state_mut().scope_replan);
         let keeps_coverage = match (self.task.approved_plans.last(), self.task.plan.as_ref()) {
             (Some(previous), Some(plan)) => {
                 let grown = previous.files.iter().all(|file| plan.files.contains(file));
-                (scope_replan && grown)
-                    || (previous.files == plan.files && previous.summary == plan.summary)
+                if keep_coverage_enabled() {
+                    grown
+                } else {
+                    (scope_replan && grown)
+                        || (previous.files == plan.files && previous.summary == plan.summary)
+                }
             }
             _ => false,
         };
@@ -72,6 +79,7 @@ impl Runner {
         // count does not make this plan's first finish a repeat.
         state.unfinished_accepted_at = None;
         state.unfinished_refused_at = None;
+        state.unedited_work_at = None;
         // Missing modules are asked about once per approved plan.
         state.asked_missing.clear();
         // A new approval starts a new cycle, and no arm from before it may
@@ -675,6 +683,13 @@ const CONTINUE_WORDS: &[&str] = &[
     "with", "the", "plan", "please", "resume", "keep", "going", "do", "it", "that", "sounds",
     "good", "fine", "approved",
 ];
+
+/// Whether a re-approval keeps the edit coverage of the plan before it when
+/// the new plan keeps all its files. `MOOSEDEV_HARNESS_KEEP_COVERAGE=off`
+/// restores the narrower rule.
+fn keep_coverage_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_KEEP_COVERAGE").map_or(true, |value| value.trim() != "off")
+}
 
 #[cfg(test)]
 mod disposition_tests {

@@ -2675,12 +2675,31 @@ async fn a_reapproval_that_drops_a_file_counts_afresh() {
 /// over the same files: only the very same plan (files and summary) keeps
 /// the edits made under the earlier approval.
 #[tokio::test]
-async fn a_human_replan_over_the_same_files_counts_afresh_unless_the_plan_is_unchanged() {
+async fn a_human_replan_over_the_same_files_keeps_coverage_unless_switched_off() {
+    // badciv run 17: a replan that only corrected a check reset coverage, and
+    // the unfinished-plan gate then refused 8 finishes until every planned
+    // file was edited again. A plan that keeps the earlier plan's files keeps
+    // the edits made to them; switched off, only the same plan again does.
     let _env_lock = ENVIRONMENT.lock().await;
-    for (summary, kept) in [
-        ("Preserve display behavior and strip each name", false),
-        ("Preserve display behavior while adding a helper", true),
+    for (summary, off, kept) in [
+        ("Preserve display behavior and strip each name", false, true),
+        (
+            "Preserve display behavior while adding a helper",
+            false,
+            true,
+        ),
+        ("Preserve display behavior and strip each name", true, false),
+        (
+            "Preserve display behavior while adding a helper",
+            true,
+            true,
+        ),
     ] {
+        if off {
+            std::env::set_var("MOOSEDEV_HARNESS_KEEP_COVERAGE", "off");
+        } else {
+            std::env::remove_var("MOOSEDEV_HARNESS_KEEP_COVERAGE");
+        }
         let fixture = symbolic_fixture().await;
         let mut runner = planned_symbolic_runner(&fixture).await;
         runner.approve_plan().await.unwrap();
@@ -2701,8 +2720,9 @@ async fn a_human_replan_over_the_same_files_counts_afresh_unless_the_plan_is_unc
         }
         runner.approve_plan().await.unwrap();
         let start = runner.task.symbolic.as_ref().unwrap().cycle_edit_start;
-        assert_eq!(start, if kept { 0 } else { 1 }, "{summary}");
+        assert_eq!(start, if kept { 0 } else { 1 }, "{summary} (off: {off})");
     }
+    std::env::remove_var("MOOSEDEV_HARNESS_KEEP_COVERAGE");
 }
 
 /// An approved task that edited labels.py to a stub, passed its checks and
@@ -3820,6 +3840,52 @@ async fn edited_with_notes_missing(fixture: &Fixture) -> Runner {
     runner
 }
 
+/// A plan may list a file only for reference (`unchanged`): the unfinished
+/// plan gate does not ask for it to be edited, and the approval gate shows
+/// it. Switched off, the field is dropped and the file is asked for again.
+#[tokio::test]
+async fn a_planned_file_the_plan_leaves_unchanged_is_not_demanded() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for off in [false, true] {
+        if off {
+            std::env::set_var("MOOSEDEV_HARNESS_PLAN_UNCHANGED", "off");
+        }
+        let fixture = Fixture::new().await;
+        std::fs::write(fixture.root.join("notes.txt"), "Earlier notes.\n").unwrap();
+        let mut runner = fixture.interactive().await;
+        fixture.conversational(json!({"action":"read","file":"code.txt"}));
+        runner.advance().await.unwrap();
+        fixture.conversational(json!({"action":"plan","summary":"Repair code.txt; notes.txt already records the reasoning","files":["code.txt","notes.txt"],"checks":["true"],"unchanged":["notes.txt"]}));
+        runner.advance().await.unwrap();
+        assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+        let unchanged = runner.task.plan.as_ref().unwrap().unchanged.clone();
+        runner.approve_plan().await.unwrap();
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"replace","file":"code.txt","old_text":"original\n","new_text":"changed\n"}),
+        )
+        .await;
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"finish","summary":"Done."}),
+        )
+        .await;
+        let refused = intent_details(&runner, "finish_refused_unfinished");
+        std::env::remove_var("MOOSEDEV_HARNESS_PLAN_UNCHANGED");
+        if off {
+            assert!(unchanged.is_empty());
+            assert_eq!(refused, ["missing: []; unedited: [notes.txt]"]);
+        } else {
+            assert_eq!(unchanged, ["notes.txt"]);
+            assert_eq!(intent_details(&runner, "plan_unchanged"), ["notes.txt"]);
+            assert!(refused.is_empty(), "{refused:?}");
+            assert_ne!(runner.task.phase, Phase::Working);
+        }
+    }
+}
+
 /// Finish twice: sent back once naming notes.txt, then the question.
 async fn finished_with_notes_missing(fixture: &Fixture) -> Runner {
     let mut runner = edited_with_notes_missing(fixture).await;
@@ -4138,8 +4204,9 @@ async fn a_planned_file_left_unedited_is_sent_back_once_then_asked() {
     runner.advance().await.unwrap();
     assert_eq!(runner.task.check_results.len(), 1);
 
-    // `work` returns to the model; a further finish at the same source asks
-    // again.
+    // `work` returns to the model; a further finish at the same source, with
+    // nothing edited since, parks with the files named instead of asking
+    // again (badciv run 17 asked 40 times on the same answer).
     let fixture = Fixture::new().await;
     let mut runner = finished_with_notes_unedited(&fixture).await;
     runner.choose("work").await.unwrap();
@@ -4156,8 +4223,65 @@ async fn a_planned_file_left_unedited_is_sent_back_once_then_asked() {
         json!({"action":"finish","summary":"Done."}),
     )
     .await;
-    assert_eq!(runner.task.phase, Phase::AwaitingChoice);
-    assert_eq!(intent_details(&runner, "choice_asked").len(), 2);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "choice_asked").len(), 1);
+    assert_eq!(
+        intent_details(&runner, "unedited_work_parked"),
+        ["notes.txt"]
+    );
+    assert!(
+        runner.task.last_response.contains("notes.txt")
+            && runner.task.last_response.contains("Guidance is needed"),
+        "{}",
+        runner.task.last_response
+    );
+    // After the human's answer the next finish asks again, where the human
+    // can choose to verify as it stands.
+    runner
+        .submit_message("Continue with the approved plan.".into())
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        if runner.task.phase == Phase::AwaitingChoice {
+            break;
+        }
+        fixture.conversational(json!({"action":"finish","summary":"Done."}));
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(
+        runner.task.phase,
+        Phase::AwaitingChoice,
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(intent_details(&runner, "unedited_work_parked").len(), 1);
+}
+
+/// A plan cannot mark every planned file unchanged and finish having changed
+/// nothing: `unchanged` exempts a file only once another planned file has an
+/// edit this cycle.
+#[tokio::test]
+async fn a_plan_marking_every_file_unchanged_is_still_asked_for_edits() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    std::fs::write(fixture.root.join("notes.txt"), "Earlier notes.\n").unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Repair code.txt and note it","files":["code.txt","notes.txt"],"checks":["true"],"unchanged":["code.txt","notes.txt"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"finish","summary":"Done."}),
+    )
+    .await;
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert_eq!(
+        intent_details(&runner, "finish_refused_unfinished"),
+        ["missing: []; unedited: [code.txt, notes.txt]"]
+    );
 }
 
 #[tokio::test]
@@ -4396,7 +4520,7 @@ async fn the_plan_choices_switch_removes_open_choices() {
         .contains(&json!("open_choices")));
     assert!(fixture
         .last_model_prompt("harness_action")
-        .contains("plan(summary,files,checks,addresses,satisfied,stubs,open_choices)"));
+        .contains("plan(summary,files,checks,addresses,satisfied,stubs,unchanged,open_choices)"));
     assert_eq!(runner.task.plan.as_ref().unwrap().open_choices.len(), 1);
 
     std::env::set_var("MOOSEDEV_HARNESS_PLAN_CHOICES", "off");
@@ -4419,7 +4543,7 @@ async fn the_plan_choices_switch_removes_open_choices() {
     assert!(off["properties"].get("satisfied").is_some());
     assert!(fixture
         .last_model_prompt("harness_action")
-        .contains("plan(summary,files,checks,addresses,satisfied,stubs)"));
+        .contains("plan(summary,files,checks,addresses,satisfied,stubs,unchanged)"));
     assert_eq!(runner.task.phase, Phase::AwaitingPlan);
     assert!(runner.task.plan.as_ref().unwrap().open_choices.is_empty());
 }
@@ -5249,7 +5373,8 @@ async fn a_plan_says_a_rule_already_holds_and_that_claim_mints_no_edge() {
     fixture.conversational(json!({"action":"read","file":"labels.py"}));
     runner.advance().await.unwrap();
     let planning = fixture.last_model_prompt("harness_action");
-    assert!(planning.contains("plan(summary,files,checks,addresses,satisfied,stubs,open_choices)"));
+    assert!(planning
+        .contains("plan(summary,files,checks,addresses,satisfied,stubs,unchanged,open_choices)"));
     assert!(planning.contains("that the existing code already satisfies it unchanged"));
     fixture.conversational(json!({"action":"plan","summary":"Add a normalize helper so labels never exceed one line","files":["labels.py"],"checks":["true"],"addresses":["[Constraint] Labels never exceed one line"],"satisfied":["Preserve display label behavior","No such rule",UNLINKED]}));
     runner.advance().await.unwrap();
@@ -5434,7 +5559,7 @@ async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() 
             .is_none());
         assert_eq!(
             plan_tool["function"]["description"],
-            "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses) and any planned files it deliberately leaves as stubs for a later task (stubs)."
+            "Propose the plan: a summary, the permitted files, the required checks, the project rules it implements (addresses), any planned files it deliberately leaves as stubs for a later task (stubs), and any planned files it lists only for reference, which need no edit (unchanged)."
         );
         prompts.push(fixture.last_model_prompt("harness_action"));
     }
@@ -5442,7 +5567,7 @@ async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() 
     let prompt = &prompts[0];
     assert!(!prompt.contains("satisfied"), "{prompt}");
     assert!(!prompt.contains("settled"), "{prompt}");
-    assert!(prompt.contains("plan(summary,files,checks,addresses,stubs,open_choices)"));
+    assert!(prompt.contains("plan(summary,files,checks,addresses,stubs,unchanged,open_choices)"));
     let rules = rules_section(prompt);
     let before = format!("hard requirements for any change that touches them; for each, your plan says it implements the rule, that the rule does not apply to this change, or that it is deferred because it lies outside this objective; list only the ones it implements in addresses):\n\n[Requirement] Preserve display label behavior ({PRESERVE})\nvia: linked to labels.py\nhasDescription: Display labels render exactly as before.\n\n[Constraint] Labels never exceed one line ({UNLINKED})\nvia: linked to labels.py\nhasDescription: A label is a single line.\n");
     let output_rule = rules

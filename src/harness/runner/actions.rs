@@ -68,6 +68,8 @@ pub(super) enum Step {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         stubs: Vec<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        unchanged: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         open_choices: Vec<OpenChoice>,
     },
     Edit {
@@ -298,6 +300,7 @@ impl Runner {
                 addresses,
                 satisfied,
                 stubs,
+                unchanged,
                 open_choices,
             } => {
                 // Switched off, a field is not offered; any sent anyway are
@@ -317,6 +320,11 @@ impl Runner {
                 } else {
                     Vec::new()
                 };
+                let unchanged = if super::symbolic::plan_unchanged_enabled() {
+                    unchanged
+                } else {
+                    Vec::new()
+                };
                 return Ok(Step::Plan {
                     summary,
                     files,
@@ -324,6 +332,7 @@ impl Runner {
                     addresses,
                     satisfied,
                     stubs,
+                    unchanged,
                     open_choices,
                 });
             }
@@ -653,6 +662,20 @@ fn serve_outlined_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_SERVE_OUTLINED").map_or(true, |value| value.trim() != "off")
 }
 
+/// Whether a file outside the step's scope, asked for again after its serve
+/// left the Last result, joins the working set instead of meeting a
+/// refusal. `MOOSEDEV_HARNESS_READ_ADMIT=off` restores the refusal.
+fn readmit_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_READ_ADMIT").map_or(true, |value| value.trim() != "off")
+}
+
+/// What [`Runner::serve_history`] found for one file.
+struct ServeHistory {
+    serves: Vec<usize>,
+    shown: bool,
+    refused_before: bool,
+}
+
 /// The journal prefix of an outlined read the harness served.
 pub(super) const OUTLINED_SERVED: &str = "Served outlined read:";
 
@@ -685,13 +708,28 @@ impl Runner {
     /// Last result has moved on from it ([`Self::served_repeat`]).
     pub(super) fn read_step(&self, file: String) -> Step {
         // Outside the step's scope a read shows the file as the Last result,
-        // and the working set stays the scope's.
+        // and the working set stays the scope's. Asked for again once the
+        // Last result has moved on, the model needs it beside what came
+        // after: the read joins the working set, so the file stays in the
+        // prompt, instead of being refused (badciv replicates, 5 of 6: a
+        // planner holding spec.md, badciv-map.md and CLAUDE.md in one Last
+        // result slot re-read them in turn and parked).
         if self.outside_scope(&file) {
             let next = if self.task.mode == Mode::Plan {
                 "Propose the plan with what it showed"
             } else {
                 "Take the plan's next step with what it showed"
             };
+            // Admitted only while the working set has room; a full one keeps
+            // serving it as the Last result.
+            let history = self.serve_history(&file);
+            if readmit_enabled()
+                && !history.serves.is_empty()
+                && !history.shown
+                && self.task.read_files.len() < MAX_FILES
+            {
+                return Step::Read { file };
+            }
             return match self.served_repeat(&file, next) {
                 Some(reason) => Step::ReadRefused { file, reason },
                 None => Step::ReadOutsideScope { file },
@@ -712,6 +750,11 @@ impl Runner {
         } else {
             "Edit it"
         };
+        // Unlike a file outside the scope, an outlined file is not read back
+        // in full here: the budget outlined it, so reading it in would
+        // outline the next one, and alternating reads would rotate the tiers
+        // with no refusal to stop them (Lesson f5d2b5f9). It is served
+        // twice, then refused, and parks only on a second refusal of itself.
         match self.served_repeat(&file, next) {
             Some(reason) => Step::ReadRefused { file, reason },
             None => Step::ReadOutlined { file },
@@ -731,6 +774,34 @@ impl Runner {
     /// run: a model re-reading in a loop meets a refusal, then parks as any
     /// repeated refusal does.
     fn served_repeat(&self, file: &str, next: &str) -> Option<String> {
+        let ServeHistory {
+            serves,
+            shown,
+            refused_before,
+        } = self.serve_history(file);
+        let latest = *serves.first()?;
+        if !self.read_is_current(file) {
+            return None;
+        }
+        if shown {
+            return Some(format!(
+                "`{file}` is unchanged and its current text is the Last result (served at event {latest}). {next}, or inspect event {latest}."
+            ));
+        }
+        if refused_before || serves.len() > 1 {
+            return Some(format!(
+                "`{file}` is unchanged and was already served {} time(s), with only reads, inspects and searches since, most recently at event {latest}. {next}, or inspect event {latest}.",
+                serves.len()
+            ));
+        }
+        None
+    }
+
+    /// The serves of `file` (outlined, or outside the scope) in the current
+    /// looking run, latest first; whether the Last result, which the prompt
+    /// shows, is the served text or a page of a serve's journal event; and
+    /// whether a read of it was refused in the run.
+    fn serve_history(&self, file: &str) -> ServeHistory {
         let served = [
             format!("{OUTLINED_SERVED} {file} "),
             format!("{OUTSIDE_SCOPE_SERVED} {file} "),
@@ -744,11 +815,6 @@ impl Runner {
             }
             refused_before |= event.message.starts_with(&refused);
         }
-        let latest = *serves.first()?;
-        if !self.read_is_current(file) {
-            return None;
-        }
-        // The served text, or a page of a serve's journal event.
         let last = &self.task.last_response;
         let shown = [
             outlined_text_response(file, ""),
@@ -759,18 +825,11 @@ impl Runner {
             || serves
                 .iter()
                 .any(|event| last.starts_with(&format!("Journal event {event}, bytes ")));
-        if shown {
-            return Some(format!(
-                "`{file}` is unchanged and its current text is the Last result (served at event {latest}). {next}, or inspect event {latest}."
-            ));
+        ServeHistory {
+            serves,
+            shown,
+            refused_before,
         }
-        if refused_before || serves.len() > 1 {
-            return Some(format!(
-                "`{file}` is unchanged and was already served {} time(s), with only reads, inspects and searches since, most recently at event {latest}. {next}, or inspect event {latest}.",
-                serves.len()
-            ));
-        }
-        None
     }
 
     /// Whether the Last result is the whole current text of `file`, served

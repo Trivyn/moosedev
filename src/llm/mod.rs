@@ -9,7 +9,10 @@ mod completion;
 pub mod normalize;
 pub mod profile;
 mod usage;
-use completion::{complete_content, complete_tool_message, CompletionStream, MAX_STREAM_BYTES};
+use completion::{
+    complete_content, complete_tool_message, within_content_limit, CompletionStream,
+    MAX_STREAM_RAW_BYTES,
+};
 pub use completion::{
     parse_model_json, tool_call_from_text, CompletionError, JsonRecovery, ToolCall, ToolCompletion,
 };
@@ -918,8 +921,8 @@ impl OpenAiCompatClient {
                 };
                 started = true;
                 if is_json {
-                    if json_body.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
-                        return Err(CompletionError::message("LLM response exceeds size limit"));
+                    if json_body.len().saturating_add(chunk.len()) > MAX_STREAM_RAW_BYTES {
+                        return Err(CompletionError::TooLarge(format!("LLM response exceeds {MAX_STREAM_RAW_BYTES} bytes")));
                     }
                     json_body.extend_from_slice(&chunk);
                 } else {
@@ -946,14 +949,14 @@ impl OpenAiCompatClient {
                     })?;
                 observation.observe(&value);
                 self.record_usage(&value);
-                let completion = if shape.tools() {
+                let completion = within_content_limit(if shape.tools() {
                     complete_tool_message(&value)?
                 } else {
                     ToolCompletion {
                         content: complete_content(&value, self.strict_content)?.to_owned(),
                         ..ToolCompletion::default()
                     }
-                };
+                })?;
                 if !completion.content.is_empty() {
                     on_delta(&completion.content);
                 }
@@ -1104,10 +1107,10 @@ impl OpenAiCompatClient {
                 while let Some(chunk) = resp.chunk().await.map_err(|error| {
                     CompletionError::transport(format!("LLM response read: {error}"))
                 })? {
-                    if bytes.len().saturating_add(chunk.len()) > MAX_STREAM_BYTES {
-                        return Err(CompletionError::InvalidResponse(
-                            "LLM response exceeds size limit".into(),
-                        ));
+                    if bytes.len().saturating_add(chunk.len()) > MAX_STREAM_RAW_BYTES {
+                        return Err(CompletionError::TooLarge(format!(
+                            "LLM response exceeds {MAX_STREAM_RAW_BYTES} bytes"
+                        )));
                     }
                     bytes.extend_from_slice(&chunk);
                 }
@@ -1125,6 +1128,7 @@ impl OpenAiCompatClient {
                         ..ToolCompletion::default()
                     })
                 }
+                .and_then(within_content_limit)
             },
         )
         .await
@@ -1734,7 +1738,7 @@ mod tests {
         ));
         assert!(matches!(
             complete_content(&make(json!({"content":"{}"}), json!("length")), true),
-            Err(CompletionError::Incomplete(_))
+            Err(CompletionError::OutputLimit(_))
         ));
         assert!(matches!(
             complete_content(

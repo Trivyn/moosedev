@@ -243,6 +243,13 @@ fn stub_entries(entries: &[String], files: &[String]) -> (Vec<String>, Vec<Strin
     (resolved, unknown)
 }
 
+/// Whether plans may name the planned files that need no edit (`unchanged`).
+/// `MOOSEDEV_HARNESS_PLAN_UNCHANGED=off` removes the field from the schema,
+/// and every planned file must be edited again.
+pub(in crate::harness::runner) fn plan_unchanged_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_PLAN_UNCHANGED").map_or(true, |value| value.trim() != "off")
+}
+
 /// Whether plans may name the files they leave as stubs (`stubs`).
 /// `MOOSEDEV_HARNESS_PLAN_STUBS=off` removes the field from the schema, and
 /// every consumer then reads none, so every stub is judged.
@@ -250,7 +257,7 @@ pub(in crate::harness::runner) fn plan_stubs_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_PLAN_STUBS").map_or(true, |value| value.trim() != "off")
 }
 
-use super::super::Runner;
+use super::super::{Phase, Runner};
 use anyhow::Result;
 
 /// A stub left in a planned file: `(file, line, stub)`, 1-based line.
@@ -297,16 +304,38 @@ impl Runner {
         stubs: &[String],
         files: &[String],
     ) -> Vec<String> {
-        let (resolved, unknown) = stub_entries(stubs, files);
+        self.resolve_plan_files("stubs", stubs, files)
+    }
+
+    /// A proposed plan's `unchanged` entries resolved to its files, the way
+    /// [`Self::resolve_plan_stubs`] resolves `stubs`.
+    pub(in crate::harness::runner) fn resolve_plan_unchanged(
+        &mut self,
+        unchanged: &[String],
+        files: &[String],
+    ) -> Vec<String> {
+        self.resolve_plan_files("unchanged", unchanged, files)
+    }
+
+    /// `entries` of the plan field `field` resolved to the planned `files`
+    /// ([`stub_entries`]), journaled as `plan_{field}` and, for entries
+    /// naming no planned file, `plan_{field}_unresolved`.
+    fn resolve_plan_files(
+        &mut self,
+        field: &str,
+        entries: &[String],
+        files: &[String],
+    ) -> Vec<String> {
+        let (resolved, unknown) = stub_entries(entries, files);
         if !unknown.is_empty() {
-            self.intent_event("plan_stubs_unresolved", &unknown.join("; "));
+            self.intent_event(&format!("plan_{field}_unresolved"), &unknown.join("; "));
             self.event(format!(
-                "Plan stubs entries ignored: {} named no planned file.",
+                "Plan {field} entries ignored: {} named no planned file.",
                 unknown.join("; ")
             ));
         }
         if !resolved.is_empty() {
-            self.intent_event("plan_stubs", &resolved.join(" "));
+            self.intent_event(&format!("plan_{field}"), &resolved.join(" "));
         }
         resolved
     }
@@ -360,10 +389,20 @@ impl Runner {
                     &edit.file == file && !harness_fixes.is_some_and(|fixes| fixes.contains(&index))
                 })
         };
+        // A file the plan lists for reference needs no edit, once the model
+        // has edited some other planned file this cycle: a plan that marks
+        // every file unchanged cannot finish having changed nothing.
+        let unchanged = plan.unchanged_files();
+        let other_work = plan
+            .files
+            .iter()
+            .any(|file| !unchanged.contains(file) && edited_by_model(file));
         plan.files
             .iter()
             .filter(|file| {
-                matches!(self.workspace.read(file), Ok(Some(_))) && !edited_by_model(file)
+                !(other_work && unchanged.contains(file))
+                    && matches!(self.workspace.read(file), Ok(Some(_)))
+                    && !edited_by_model(file)
             })
             .cloned()
             .collect()
@@ -449,6 +488,27 @@ impl Runner {
             return Ok(true);
         }
         if missing.is_empty() {
+            // The human already said these files need work, and the model
+            // finished again without editing anything: asking once more would
+            // loop on the same answer (badciv run 17 asked 40 times), so stop
+            // for the human with the files named.
+            if self.symbolic_state_mut().unedited_work_at == Some(at) {
+                // Parked once: after the human's answer, a finish asks again,
+                // where the human can choose to verify as it stands.
+                self.symbolic_state_mut().unedited_work_at = None;
+                let files = unedited.join(", ");
+                self.intent_event("unedited_work_parked", &files);
+                self.task.last_response = format!(
+                    "The model finished again without editing {files}, after the human said the plan still needs them. Guidance is needed: say what each file needs; the next finish asks again, where finish verifies as it stands."
+                );
+                self.event(format!(
+                    "Finish refused: {files} still unedited after the human chose work; parked for guidance."
+                ));
+                self.task.phase = Phase::AwaitingInput;
+                self.task.turn_finished = true;
+                self.park_under_approved_plan();
+                return Ok(true);
+            }
             self.ask_unedited_planned_files(unedited)?;
         } else {
             self.ask_missing_planned_files(missing)?;

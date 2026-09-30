@@ -48,6 +48,12 @@ pub struct Plan {
     /// review evidence still names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stubs: Vec<String>,
+    /// Planned files the plan lists for reference that need no edit (a test
+    /// file that already covers the change, an existing module it reads),
+    /// each one of `files`. The unfinished-plan gate does not ask for them to
+    /// be edited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchanged: Vec<String>,
     /// The governing rules delivered for the plan files that the plan leaves
     /// open: not in `addresses` or `satisfied`, whatever its summary says of
     /// them. The approval gate names them; `/approve` records them as
@@ -78,6 +84,16 @@ impl Plan {
     pub fn stub_files(&self) -> &[String] {
         if super::symbolic::plan_stubs_enabled() {
             &self.stubs
+        } else {
+            &[]
+        }
+    }
+
+    /// The `unchanged` files every consumer reads: none while
+    /// `MOOSEDEV_HARNESS_PLAN_UNCHANGED=off`.
+    pub fn unchanged_files(&self) -> &[String] {
+        if super::symbolic::plan_unchanged_enabled() {
+            &self.unchanged
         } else {
             &[]
         }

@@ -79,6 +79,27 @@ impl ActionContract {
     }
 }
 
+/// The output cap the harness sends as `max_tokens` on every model request
+/// after the preflight, unless configured otherwise. The largest legitimate
+/// responses seen (whole-file writes) were about 14k tokens; OpenRouter
+/// runaways ran to 30-45k tokens over 9-45 minutes (badciv series orC).
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
+
+/// `MOOSEDEV_LLM_MAX_OUTPUT_TOKENS`: unset for the default, `0` for no cap,
+/// or a positive token count.
+pub(super) fn parse_max_output_tokens(value: Option<&str>) -> anyhow::Result<Option<u32>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(Some(DEFAULT_MAX_OUTPUT_TOKENS)),
+        Some(value) => match value.parse::<u32>() {
+            Ok(0) => Ok(None),
+            Ok(tokens) => Ok(Some(tokens)),
+            Err(_) => anyhow::bail!(
+                "MOOSEDEV_LLM_MAX_OUTPUT_TOKENS must be a token count, or 0 for no cap; got {value:?}"
+            ),
+        },
+    }
+}
+
 /// Whether action requests stream. `auto` streams them only when batch
 /// capture delivers assistant text as it arrives (the interactive runner);
 /// `always` streams headless runs too, so the idle timeout can cut a provider

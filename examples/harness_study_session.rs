@@ -69,6 +69,8 @@ fn provider_settings(model: &str, endpoint: &str) -> Result<ProviderSettings> {
         // One frozen model for every role; moosedev.toml is never read here.
         action_contract: None,
         action_streaming: None,
+        // The frozen study conditions predate the output cap.
+        max_output_tokens: None,
         plan: None,
         implement: None,
         // Studies index through the frozen producer only; a PATH producer

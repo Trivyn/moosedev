@@ -20,6 +20,12 @@ pub enum CompletionError {
     /// worth resending: the provider buffers the arguments, so the same request
     /// spends the same generation and meets the same bound.
     ToolArgumentsIncomplete(String),
+    /// The response's content passed the size limit: a runaway generation,
+    /// which resending would repeat.
+    TooLarge(String),
+    /// The provider stopped the response at its output token limit
+    /// (`finish_reason: "length"`): what came back is incomplete.
+    OutputLimit(String),
     Provider(EngineError),
 }
 
@@ -36,7 +42,9 @@ impl std::fmt::Display for CompletionError {
             Self::Incomplete(message)
             | Self::InvalidResponse(message)
             | Self::Transport(message)
-            | Self::ToolArgumentsIncomplete(message) => f.write_str(message),
+            | Self::ToolArgumentsIncomplete(message)
+            | Self::TooLarge(message)
+            | Self::OutputLimit(message) => f.write_str(message),
             Self::Provider(error) => std::fmt::Display::fmt(error, f),
         }
     }
@@ -88,6 +96,9 @@ pub(super) fn complete_content(
     let choice = &value["choices"][0];
     let message = &choice["message"];
     if strict {
+        if choice["finish_reason"] == "length" {
+            return Err(output_limit());
+        }
         if choice["finish_reason"].as_str() != Some("stop") {
             return Err(CompletionError::Incomplete(format!(
                 "LLM completion ended without successful stop: {}",
@@ -154,6 +165,9 @@ pub(super) fn complete_tool_message(
     }
     let choice = &value["choices"][0];
     let message = &choice["message"];
+    if choice["finish_reason"] == "length" {
+        return Err(output_limit());
+    }
     if !choice["finish_reason"].as_str().is_some_and(tool_finish) {
         return Err(CompletionError::Incomplete(format!(
             "LLM completion ended without successful stop: {}",
@@ -294,7 +308,39 @@ pub(super) fn first_json_object(text: &str) -> Option<&str> {
     None
 }
 
+/// A response the provider stopped at its output token limit.
+fn output_limit() -> CompletionError {
+    CompletionError::OutputLimit("LLM response stopped at the output token limit".into())
+}
+
+/// The most content (text, reasoning and tool-call arguments) one response
+/// may carry. A whole-file write of the largest source files is far below it.
 pub(super) const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
+/// The most raw stream bytes one response may take, framing included: a
+/// transport guard only. OpenRouter spends about 275 bytes of JSON framing on
+/// every streamed token, so counting framing against [`MAX_STREAM_BYTES`] cut
+/// ordinary whole-file writes at about 15k tokens (badciv replicates, 4 of 6).
+pub(super) const MAX_STREAM_RAW_BYTES: usize = 64 * 1024 * 1024;
+
+/// A decoded response whose content (text and tool-call names and
+/// arguments) passes [`MAX_STREAM_BYTES`]; a JSON body's escaping is not
+/// counted, only what it decodes to.
+pub(super) fn within_content_limit(
+    completion: ToolCompletion,
+) -> Result<ToolCompletion, CompletionError> {
+    let payload = completion.content.len()
+        + completion
+            .tool_calls
+            .iter()
+            .map(|call| call.name.len() + call.arguments.len())
+            .sum::<usize>();
+    if payload > MAX_STREAM_BYTES {
+        return Err(CompletionError::TooLarge(format!(
+            "LLM response content exceeds {MAX_STREAM_BYTES} bytes"
+        )));
+    }
+    Ok(completion)
+}
 
 /// Parse SSE on byte boundaries, including CRLF and UTF-8 split across chunks.
 #[derive(Default)]
@@ -383,8 +429,10 @@ impl CompletionStream {
         on_delta: &impl Fn(&str),
     ) -> Result<(), CompletionError> {
         self.received = self.received.saturating_add(bytes.len());
-        if self.received > MAX_STREAM_BYTES {
-            return Err("LLM stream exceeds size limit".into());
+        if self.received > MAX_STREAM_RAW_BYTES {
+            return Err(CompletionError::TooLarge(format!(
+                "LLM stream exceeds {MAX_STREAM_RAW_BYTES} bytes"
+            )));
         }
         self.pending.extend_from_slice(bytes);
         while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
@@ -405,6 +453,17 @@ impl CompletionStream {
             if self.done {
                 break;
             }
+        }
+        let payload = self.content.len()
+            + self
+                .tool_calls
+                .values()
+                .map(|call| call.name.len() + call.arguments.len())
+                .sum::<usize>();
+        if payload > MAX_STREAM_BYTES {
+            return Err(CompletionError::TooLarge(format!(
+                "LLM response content exceeds {MAX_STREAM_BYTES} bytes"
+            )));
         }
         Ok(())
     }
@@ -470,6 +529,9 @@ impl CompletionStream {
                 }
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
+                if reason == "length" {
+                    return Err(output_limit());
+                }
                 if reason != "stop" && !(self.tools && tool_finish(reason)) {
                     return Err(CompletionError::Incomplete(format!(
                         "LLM stream ended with {reason}"
@@ -557,5 +619,61 @@ mod tests {
             parse_model_json::<Records>(r#"{"action":"a","records":[],"extra":1}"#).is_err(),
             "repair never loosens the schema's own rules"
         );
+    }
+
+    /// OpenRouter frames every streamed token in ~275 bytes of JSON: framing
+    /// counts only against the raw transport guard, content against the
+    /// content limit.
+    #[test]
+    fn stream_limits_count_content_not_framing() {
+        let frame = |content: &str, padding: usize| {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({"id": "x".repeat(padding), "choices":[{"index":0,"delta":{"content":content}}]})
+            )
+        };
+        let finish = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        // 6 MB of framing around 20 bytes of content passes.
+        let mut stream = CompletionStream::default();
+        for _ in 0..20 {
+            stream
+                .feed(frame("a", 300_000).as_bytes(), &|_| {})
+                .unwrap();
+        }
+        stream.feed(finish.as_bytes(), &|_| {}).unwrap();
+        stream.finish().unwrap();
+        assert_eq!(stream.content, "a".repeat(20));
+
+        // Content past the limit is a runaway, reported as such.
+        let mut stream = CompletionStream::default();
+        let chunk = "b".repeat(1024 * 1024);
+        let error = (0..5)
+            .find_map(|_| stream.feed(frame(&chunk, 0).as_bytes(), &|_| {}).err())
+            .expect("content past the limit is refused");
+        assert!(matches!(error, CompletionError::TooLarge(_)), "{error}");
+    }
+
+    /// A response the provider stopped at its output limit is a fact callers
+    /// act on (the harness repairs it): it is not a generic incomplete.
+    #[test]
+    fn a_length_stop_is_an_output_limit_on_every_path() {
+        let content = serde_json::json!({"choices":[{"message":{"content":"half a fi"},"finish_reason":"length"}]});
+        assert!(matches!(
+            complete_content(&content, true),
+            Err(CompletionError::OutputLimit(_))
+        ));
+        let tools = serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"write","arguments":"{\"file\":\"a"}}]},"finish_reason":"length"}]});
+        assert!(matches!(
+            complete_tool_message(&tools),
+            Err(CompletionError::OutputLimit(_))
+        ));
+        let mut stream = CompletionStream::default();
+        let error = stream
+            .feed(
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"length\"}]}\n\n",
+                &|_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(error, CompletionError::OutputLimit(_)), "{error}");
     }
 }
