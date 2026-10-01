@@ -791,3 +791,58 @@ async fn a_rendered_request_is_the_request_the_next_step_sends() {
         "{error}"
     );
 }
+
+/// A provider that refuses for payment stops the step once, saying what to
+/// fix, and nothing is sent again until a human answers (badciv orG2: HTTP 402
+/// on every request, the compatibility probe re-sent 600+ times a replicate).
+#[tokio::test]
+async fn a_refusal_for_payment_stops_the_step_without_retrying() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.shared.lock().unwrap().refuse_status = Some(402);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(
+        runner.task.last_response.contains("HTTP 402"),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner.task.last_response.contains("add credit"));
+    assert_eq!(intent_details(&runner, "provider_refused"), ["HTTP 402"]);
+    let sent = fixture.shared.lock().unwrap().refused_requests;
+    assert!(sent >= 1);
+    let _ = runner.advance().await;
+    assert_eq!(fixture.shared.lock().unwrap().refused_requests, sent);
+}
+
+/// An insertion the file already holds is not applied again: it is a no-op,
+/// not an edit (badciv orL: one replace applied 30-77 times, each counted as
+/// progress, so the loop detector never saw the failure come back).
+#[tokio::test]
+async fn an_insertion_the_file_already_holds_is_not_applied_again() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let insert = json!({"action":"replace","file":"code.txt","old_text":"original\n","new_text":"original\nadded\n"});
+    fixture.conversational(insert.clone());
+    runner.advance().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\nadded\n"
+    );
+    let edits = runner.task.edits.len();
+    fixture.conversational(insert);
+    for _ in 0..3 {
+        if fixture.shared.lock().unwrap().replies.is_empty() {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("code.txt")).unwrap(),
+        "original\nadded\n"
+    );
+    assert_eq!(runner.task.edits.len(), edits);
+    assert_eq!(intent_details(&runner, "reapplied_insertion").len(), 1);
+}

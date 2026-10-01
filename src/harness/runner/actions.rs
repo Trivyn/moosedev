@@ -396,6 +396,33 @@ impl Runner {
                     .then(|| decode_json_escapes(&old_text))
                     .flatten();
                 let (old_text, new_text) = if count == 1 {
+                    // An insertion around old_text that the file already holds
+                    // there is made: applying it again appends another copy
+                    // (badciv orL, 4 of 5 local replicates: one replace 30-77
+                    // times, each counted as an edit, so the loop detector
+                    // never saw the failure come back unchanged).
+                    let applied =
+                        super::fingerprint(&Some(format!("{file}\0{old_text}\0{new_text}")))
+                            .unwrap_or_default();
+                    let seen = self
+                        .task
+                        .symbolic
+                        .as_ref()
+                        .is_some_and(|state| state.applied_replaces.contains(&applied));
+                    if reapplied_insertion_enabled()
+                        && seen
+                        && reapplied_insertion(source, &old_text, &new_text)
+                    {
+                        self.intent_event(
+                            "reapplied_insertion",
+                            &super::bounded(&format!("{file}: {new_text}"), 300),
+                        );
+                        return Err(anyhow::Error::new(super::model::NoopEdit));
+                    }
+                    let applied_replaces = &mut self.symbolic_state_mut().applied_replaces;
+                    if !applied_replaces.contains(&applied) {
+                        applied_replaces.push(applied);
+                    }
                     (old_text, new_text)
                 } else if count == 0 && already_applied(source, &old_text, &new_text) {
                     // The model is proposing an edit it applied earlier (badciv
@@ -1039,6 +1066,31 @@ fn whole_file_rewrite(source: &str, old_text: &str, new_text: &str) -> Option<St
     })
 }
 
+/// `MOOSEDEV_HARNESS_REAPPLIED_INSERTION=off` applies an insertion the file
+/// already holds again, as before.
+fn reapplied_insertion_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_REAPPLIED_INSERTION")
+        .map_or(true, |value| value.trim() != "off")
+}
+
+/// Whether `new_text` is `old_text` with text added around it, and the file
+/// already holds that whole `new_text` where its one `old_text` sits: the
+/// insertion was made, and making it again would add a second copy.
+fn reapplied_insertion(source: &str, old_text: &str, new_text: &str) -> bool {
+    if new_text.len() <= old_text.len() {
+        return false;
+    }
+    let Some(position) = source.find(old_text) else {
+        return false;
+    };
+    new_text.match_indices(old_text).any(|(offset, _)| {
+        position
+            .checked_sub(offset)
+            .and_then(|start| source.get(start..))
+            .is_some_and(|rest| rest.starts_with(new_text))
+    })
+}
+
 /// Whether a replace whose `old_text` is gone has already been made. The
 /// evidence is structural, never a lone `new_text` match: `new_text` is in the
 /// file exactly once, `old_text` is nowhere, the two are related (they share a
@@ -1388,6 +1440,25 @@ mod tests {
         let new = "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]\npub enum Faction {\n    Terrans,\n    Saurids,\n    Greys,\n}";
         let applied = format!("use std::fmt;\n\n{new}\n\nimpl Faction {{}}\n");
         assert!(already_applied(&applied, old, new));
+        // An insertion around old_text, already made, is made; once is not.
+        let old = "    let mut seen = false;";
+        let new = "    let mut seen = false;\n    let _ = &mut seen;";
+        let made = format!("fn f() {{\n{new}\n}}\n");
+        assert!(reapplied_insertion(&made, old, new));
+        assert!(!reapplied_insertion(
+            &format!("fn f() {{\n{old}\n}}\n"),
+            old,
+            new
+        ));
+        // Text added before old_text counts the same way.
+        let before = "    // keep\n    let mut seen = false;";
+        assert!(reapplied_insertion(
+            &format!("fn f() {{\n{before}\n}}\n"),
+            old,
+            before
+        ));
+        // A plain change (new does not contain old) is not an insertion.
+        assert!(!reapplied_insertion(&made, old, "    let seen = true;"));
         // The removed derive line is still in the file (another type keeps
         // it): the change is not evidently made, so it stays a miss.
         let still = format!(

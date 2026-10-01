@@ -363,13 +363,20 @@ pub async fn prepare_for_contract(
                 let passed = &receipt.attempts[receipt.attempts.len() - 2..];
                 let multiple_calls_seen = match contract {
                     ActionContract::Tools => {
-                        let seen = tokio::time::timeout(
+                        let probed = tokio::time::timeout(
                             probe_time_bound(limit),
                             probe_multiple_calls(&client, &config.model),
                         )
-                        .await
-                        .ok()
-                        .and_then(Result::ok);
+                        .await;
+                        // Optional, so its failures are ignored, except a
+                        // refusal: the action after it would be refused too.
+                        if let Ok(Err(refused @ CompletionError::Refused { .. })) = probed {
+                            return Err(ProbeError {
+                                receipt: Box::new(receipt),
+                                cause: refused,
+                            });
+                        }
+                        let seen = probed.ok().and_then(Result::ok);
                         // Its usage is the probe's, not the first action's.
                         client.take_usage_observation();
                         seen

@@ -1875,6 +1875,30 @@ contract 3 and intent contract 2.
   pytest's `E` lines), its source and the code it calls, and "edit the code
   the test exercises, or the test". A further look at the same source state
   parks as before. `MOOSEDEV_HARNESS_STEER=off` parks at once.
+- Each observation once. A recent event or check output that the Last result
+  holds whole appears in Recent observations and Check output previews as one
+  line ("Event N: Command: cargo test (failed) - its whole output is the Last
+  result below."), not as a second, shortened copy. A copy that is still cut
+  names what is missing and where to read it ("[bytes 600..2,900 of 3,111 not
+  shown here; inspect(192, 600) pages them]"); the general paging instruction
+  is gone. In badciv orE and orF, the shortened copies, cut just before the
+  `FAILED` lines under "use inspect(event,offset) to page them", drew an
+  inspect of the output already in view: 48/48 replays of the stall decision,
+  against 56/72 productive actions on OpenRouter without them (Lesson
+  c3ee818a). `MOOSEDEV_HARNESS_OBSERVATIONS_ONCE=off` restores the old lists.
+- A re-applied insertion is already applied. A `replace` whose `new_text` is
+  its `old_text` with text added around it, where the file already holds that
+  whole `new_text` at the `old_text`, is a no-op (`reapplied_insertion`), not a
+  second copy. It runs the checks like any no-op, and it is not an edit, so the
+  loop detector sees the same failure come back. In badciv orL one such replace
+  ran 30-77 times in 4 of 5 local replicates. `MOOSEDEV_HARNESS_REAPPLIED_INSERTION=off`
+  applies it again.
+- A provider refusal stops the step. HTTP 401, 402 or 403 from the provider,
+  for an action or for the compatibility probe, is `CompletionError::Refused`
+  in the llm layer, and it is not transient: the harness journals
+  `provider_refused`, says what to fix (for 402, add credit) and waits for the
+  human, without re-sending anything. In badciv orG2 a 402 from an exhausted
+  account was re-sent 600+ times a replicate.
 - A `write` without `content` is invalid output, repaired within the budget:
   `null` deletes the file, and a missing field means the model meant to write
   and left the text out (Qwen3.5-9B on badciv sent `write` with only `file`,

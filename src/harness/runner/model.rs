@@ -475,6 +475,77 @@ pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     format!("{}{NOTICE}{}", &text[..head], &text[tail..])
 }
 
+/// `MOOSEDEV_HARNESS_OBSERVATIONS_ONCE=off` lists recent events and check
+/// outputs as before: cut previews under a general paging instruction, even
+/// of an output the Last result holds whole.
+fn observations_once_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_OBSERVATIONS_ONCE").map_or(true, |value| value.trim() != "off")
+}
+
+/// A command event's output: what follows its command (which may span
+/// lines), grants and success lines.
+fn command_output(message: &str) -> Option<&str> {
+    message.strip_prefix("Command: ")?;
+    let grants = message.find("\nPermission grants: ")?;
+    let success = grants + message[grants..].find("\nSuccess: ")?;
+    let line_end = success + 1 + message[success + 1..].find('\n')?;
+    Some(&message[line_end + 1..])
+}
+
+/// Below this an output is shown whole wherever it appears: it is never cut,
+/// and a short one can occur in the Last result by chance (`ok`).
+const POINTER_MIN_BYTES: usize = 200;
+
+/// Whether the Last result holds `text` whole: the event itself, or a
+/// command's output (the Last result after a failed check frames the output
+/// with the harness's own lines, so the event never equals it).
+fn shown_whole(last: &str, text: &str) -> bool {
+    let text = text.trim();
+    text.len() >= POINTER_MIN_BYTES && last.contains(text)
+}
+
+/// A recent event's one-line pointer at the Last result that holds it.
+fn pointer_line(index: usize, message: &str) -> String {
+    let head = message.lines().next().unwrap_or_default();
+    let failed = command_output(message).is_some() && message.contains("\nSuccess: false\n");
+    format!(
+        "Event {index}: {}{} - its whole output is the Last result below.",
+        super::bounded(head, 200),
+        if failed { " (failed)" } else { "" }
+    )
+}
+
+/// `text` within `budget` bytes, its head and tail kept; a cut names the
+/// bytes left out and the exact page to read them from: `text` begins at
+/// byte `base` of journal event `event`.
+fn paged_preview(text: &str, budget: usize, event: usize, base: usize) -> String {
+    const RESERVE: usize = 96;
+    if text.len() <= budget {
+        return text.to_owned();
+    }
+    if budget < RESERVE {
+        return String::new();
+    }
+    let room = budget - RESERVE;
+    let mut head = room / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (room - head);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n[bytes {}..{} of {} not shown here; inspect({event}, {}) pages them]\n{}",
+        &text[..head],
+        base + head,
+        base + tail,
+        base + text.len(),
+        base + head,
+        &text[tail..]
+    )
+}
+
 /// Distinct models a runner keeps verified at once; two roles need two.
 const MAX_MODEL_CLIENTS: usize = 4;
 
@@ -1659,6 +1730,10 @@ impl Runner {
             .map(|(i, e)| (i, e.message.as_str()))
             .collect();
         recent.reverse();
+        // Each event once (Lesson c3ee818a): one the Last result holds whole
+        // is a pointer, and a cut one names the page that holds the rest.
+        let once = observations_once_enabled();
+        let last = self.task.last_response.as_str();
         let mut limit = RECENT_PREVIEW_BYTES;
         loop {
             let list: Vec<String> = recent
@@ -1666,6 +1741,12 @@ impl Runner {
                 .map(|(i, message)| {
                     if Some(*i) == shown {
                         format!("Event {i}: [shown as the Last result below]")
+                    } else if once
+                        && command_output(message).is_some_and(|output| shown_whole(last, output))
+                    {
+                        pointer_line(*i, message)
+                    } else if once {
+                        format!("Event {i}: {}", paged_preview(message, limit, *i, 0))
                     } else {
                         format!("Event {i}: {}", observation_preview(message, limit))
                     }
@@ -1680,16 +1761,55 @@ impl Runner {
     }
 
     fn observations_prefix(&self) -> Result<String> {
+        let once = observations_once_enabled();
+        let last = self.task.last_response.as_str();
         let outputs: Vec<_> = self
             .task
             .check_results
             .iter()
             .enumerate()
-            .map(|(index, c)| format!("Check {index}: {}", observation_preview(&c.output, 800)))
+            .map(|(index, c)| {
+                if !once {
+                    return format!("Check {index}: {}", observation_preview(&c.output, 800));
+                }
+                if shown_whole(last, &c.output) {
+                    return format!(
+                        "Check {index}: `{}` {} - its whole output is the Last result below.",
+                        super::bounded(&c.command, 200),
+                        if c.success { "passed" } else { "failed" }
+                    );
+                }
+                // The journal event that holds this run's output, so a cut
+                // names the page to read; without one, the plain preview.
+                let event = self.task.events.iter().rposition(|event| {
+                    event
+                        .message
+                        .starts_with(&format!("Command: {}\n", c.command))
+                        && command_output(&event.message) == Some(c.output.as_str())
+                });
+                match event {
+                    Some(event) => {
+                        let base = self.task.events[event].message.len() - c.output.len();
+                        format!(
+                            "Check {index}: {}",
+                            paged_preview(&c.output, 800, event, base)
+                        )
+                    }
+                    None => format!("Check {index}: {}", observation_preview(&c.output, 800)),
+                }
+            })
             .collect();
-        Ok(format!("{}Recent observations (complete outputs remain in journal events; use inspect(event,offset) to page them):\n{}\nCheck output previews:\n{}\nLast result:\n",
+        let header = if once {
+            "Recent observations (complete outputs remain in journal events):"
+        } else {
+            "Recent observations (complete outputs remain in journal events; use inspect(event,offset) to page them):"
+        };
+        Ok(format!(
+            "{}{header}\n{}\nCheck output previews:\n{}\nLast result:\n",
             delivered_evidence(&self.task.knowledge_searches),
-            self.recent_observations()?, outputs.join("\n")))
+            self.recent_observations()?,
+            outputs.join("\n")
+        ))
     }
 
     /// Bytes the next prompt can show from `last_response` without invoking

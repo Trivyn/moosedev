@@ -114,6 +114,10 @@ pub(super) struct Script {
     pub(super) capture_type_status: Option<u16>,
     /// Action requests with `tool_choice: "required"` are refused (HTTP 400).
     pub(super) reject_required_tool_choice: bool,
+    /// Every model request, the compatibility probe included, is refused with
+    /// this status (a provider out of credit answers 402); each is counted.
+    pub(super) refuse_status: Option<u16>,
+    pub(super) refused_requests: usize,
     /// The upstream provider a routing endpoint names in action responses.
     pub(super) provider: Option<String>,
 }
@@ -214,6 +218,13 @@ pub(super) fn model_response(state: Shared, body: Value) -> (StatusCode, Json<Va
     let schema = request_schema(&body);
     let name = schema.as_str();
     let tools = body["tools"].is_array();
+    if let Some(status) = script.refuse_status {
+        script.refused_requests += 1;
+        return (
+            StatusCode::from_u16(status).unwrap(),
+            Json(json!({"error":{"message":"Insufficient credits","code":status}})),
+        );
+    }
     if name == "harness_response_probe" {
         // The multiple-call probe: this provider enforces one call.
         let check = body["tools"][0]["function"]["name"] == "first_check";
