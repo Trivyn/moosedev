@@ -53,6 +53,10 @@ pub struct SymbolicState {
     /// source state parks ([`super::stall`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steered_at: Option<usize>,
+    /// Fingerprints of the replaces applied in this task, so an insertion is
+    /// called re-applied only when this same replace was applied before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied_replaces: Vec<String>,
     /// The edit count a clean, freshly checked edit armed auto-verify at; taken
     /// by the next advance whether it fires or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]

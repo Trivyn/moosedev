@@ -26,12 +26,22 @@ pub enum CompletionError {
     /// The provider stopped the response at its output token limit
     /// (`finish_reason: "length"`): what came back is incomplete.
     OutputLimit(String),
+    /// The provider refused the request for payment, authentication or
+    /// permission (HTTP 401, 402 or 403): sending it again changes nothing
+    /// until the account or the key does.
+    Refused {
+        status: u16,
+        message: String,
+    },
     Provider(EngineError),
 }
 
 impl std::fmt::Display for CompletionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Refused { status, message } => {
+                write!(f, "LLM provider refused the request: HTTP {status}: {message}")
+            }
             Self::UsageReportingUnsupported => f.write_str("LLM provider does not support optional stream usage reporting"),
             Self::StructuredOutputUnsupported => f.write_str("LLM provider does not support required JSON-schema output"),
             Self::ReasoningOnly => f.write_str("LLM completed with reasoning only and no executable message content; check the model response policy"),

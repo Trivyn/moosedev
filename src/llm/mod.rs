@@ -285,6 +285,15 @@ pub struct OpenAiCompatClient {
     stream_stop: Option<StreamStop>,
 }
 
+/// A refusal for payment, authentication or permission (HTTP 401, 402,
+/// 403): not transient, so never worth sending again unchanged.
+fn refusal(status: u16, text: &str) -> Option<CompletionError> {
+    matches!(status, 401..=403).then(|| CompletionError::Refused {
+        status,
+        message: text.chars().take(400).collect(),
+    })
+}
+
 /// What a request asks the provider for: plain or schema-constrained content, or tool calls.
 #[derive(Clone)]
 enum RequestShape {
@@ -879,6 +888,9 @@ impl OpenAiCompatClient {
                 {
                     return Err(CompletionError::StructuredOutputUnsupported);
                 }
+                if let Some(refused) = refusal(status.as_u16(), &text) {
+                    return Err(refused);
+                }
                 return Err(CompletionError::message(format!(
                     "LLM endpoint returned HTTP {status}: {text}"
                 )));
@@ -1113,6 +1125,9 @@ impl OpenAiCompatClient {
                             || lower.contains("structured"))
                     {
                         return Err(CompletionError::StructuredOutputUnsupported);
+                    }
+                    if let Some(refused) = refusal(status.as_u16(), &text) {
+                        return Err(refused);
                     }
                     return Err(CompletionError::Provider(EngineError::InternalError(
                         format!("LLM endpoint returned HTTP {status}: {text}"),

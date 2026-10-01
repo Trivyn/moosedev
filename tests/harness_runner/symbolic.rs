@@ -3428,7 +3428,12 @@ async fn a_required_check_failing_the_same_way_is_focused() {
 /// A required check that fails `test_render` with its values, as libtest
 /// reports an `assert_eq!`.
 fn failing_check_with_values() -> String {
-    "printf \"test test_render ... FAILED\\nthread 'test_render' panicked at tests/test_labels.py:2:5:\\nassertion failed\\n  left: 1\\n right: 2\\n\"; exit 101 # check".to_string()
+    // Passing tests first, as libtest lists them: the output is long enough to
+    // be cut in a preview, which is where pointing at the Last result matters.
+    let passing: String = (1..=8)
+        .map(|n| format!("test render_case_{n} ... ok\\n"))
+        .collect();
+    format!("printf \"{passing}test test_render ... FAILED\\nthread 'test_render' panicked at tests/test_labels.py:2:5:\\nassertion failed\\n  left: 1\\n right: 2\\n\"; exit 101 # check")
 }
 
 /// An approved plan whose required check fails, its planned file edited and
@@ -3546,6 +3551,51 @@ async fn a_look_that_would_park_while_a_check_fails_is_steered_once() {
             usize::from(steer)
         );
     }
+}
+
+/// Each observation once (Lesson c3ee818a): after a failed required check,
+/// the next prompt points at the Last result for the check's output instead
+/// of showing it again cut, and pages only what is actually cut. The cut
+/// copies under a general paging instruction drew an inspect of the output
+/// already in view (48/48 replays).
+#[tokio::test]
+async fn a_failed_checks_output_is_shown_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = failed_required_check(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"read","file":"labels.py"}),
+    )
+    .await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    let observations = prompt.split("Last result:").next().unwrap();
+    assert!(
+        observations.contains("(failed) - its whole output is the Last result below."),
+        "{observations}"
+    );
+    assert!(
+        observations.contains("passed - its whole output is the Last result below.")
+            || observations.contains("failed - its whole output is the Last result below."),
+        "{observations}"
+    );
+    assert!(!observations.contains("use inspect(event,offset) to page them"));
+    assert!(!observations.contains("[observation shortened"));
+
+    // Switched off, the old cut copies and paging line come back.
+    let fixture = symbolic_fixture().await;
+    std::env::set_var("MOOSEDEV_HARNESS_OBSERVATIONS_ONCE", "off");
+    let mut runner = failed_required_check(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"read","file":"labels.py"}),
+    )
+    .await;
+    std::env::remove_var("MOOSEDEV_HARNESS_OBSERVATIONS_ONCE");
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(prompt.contains("use inspect(event,offset) to page them"));
 }
 
 /// `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` tracks nothing, shows nothing and

@@ -2,6 +2,24 @@
 //! execute the resulting step under the approval and policy gates.
 use super::*;
 
+/// The status and message of a provider refusal (payment, authentication
+/// or permission), whether an action request or the compatibility probe met it.
+fn refusal_of(error: &anyhow::Error) -> Option<(u16, String)> {
+    let cause = error
+        .downcast_ref::<crate::llm::CompletionError>()
+        .or_else(|| {
+            error
+                .downcast_ref::<crate::harness::response::ProbeError>()
+                .map(|probe| &probe.cause)
+        })?;
+    match cause {
+        crate::llm::CompletionError::Refused { status, message } => {
+            Some((*status, message.clone()))
+        }
+        _ => None,
+    }
+}
+
 impl Runner {
     fn repository_search_hits(&self, query: &str, files: &[String]) -> Vec<String> {
         const COLLECTION_LIMIT: usize = 12_000;
@@ -228,6 +246,23 @@ impl Runner {
                 self.task.last_response = overflow.guidance();
                 self.event(self.task.last_response.clone());
                 self.task.phase = Phase::AwaitingInput;
+                self.persist()?;
+                return Ok(());
+            }
+            // The provider refused for payment, authentication or permission:
+            // every request, the next compatibility probe included, would be
+            // refused the same way (badciv orG2: 402 Payment Required, retried
+            // 600+ times a replicate). Stop for the human with what to fix.
+            if let Some((status, message)) = refusal_of(error) {
+                self.intent_event("provider_refused", &format!("HTTP {status}"));
+                self.task.last_response = format!(
+                    "The model provider refused the request (HTTP {status}: {}). Nothing was sent again. Fix the account, key or model access (for HTTP 402, add credit), then continue.",
+                    super::bounded(&message, 300)
+                );
+                self.event(self.task.last_response.clone());
+                self.task.phase = Phase::AwaitingInput;
+                self.task.turn_finished = true;
+                self.park_under_approved_plan();
                 self.persist()?;
                 return Ok(());
             }
