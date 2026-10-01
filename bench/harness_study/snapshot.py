@@ -43,6 +43,8 @@ DEFAULT_ROOT = Path.home() / "code" / "badciv-snapshots"
 # Live process files: never part of a snapshot.
 EXCLUDED = ("moosedev.sock", "moosedev-lsp.sock", "http.addr", "moosedev-serve.pid")
 TASKS = Path(".moosedev/harness/tasks")
+# A Unix socket path must fit sun_path (104 bytes on macOS, 108 on Linux).
+SOCKET_PATH_LIMIT = 104
 
 
 def clone_tree(source, dest):
@@ -182,6 +184,10 @@ def restore(name, dest, port, root=DEFAULT_ROOT, exe=None, index=True, start=Tru
     snapshot = Path(root) / name
     metadata = json.loads((snapshot / "snapshot.json").read_text())
     dest = Path(dest).resolve()
+    socket = dest / ".moosedev/moosedev.sock"
+    if len(str(socket).encode()) >= SOCKET_PATH_LIMIT:
+        raise ValueError(f"{dest} is too deep for the daemon's Unix socket ({len(str(socket))} bytes; "
+                         f"under {SOCKET_PATH_LIMIT} needed): restore to a shorter path")
     clone_tree(snapshot / "project", dest)
     rewrite_roots(dest, metadata["source"], str(dest))
     set_port(dest, port)

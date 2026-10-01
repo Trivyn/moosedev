@@ -146,7 +146,11 @@ def journal_request(case):
 def render_request(case, exe, port, root=snapshot.DEFAULT_ROOT, keep=False):
     """Restore the case's snapshot to a scratch directory, render its next
     request with `exe`, stop the daemon, and return the rendered request."""
-    scratch = Path(tempfile.mkdtemp(prefix="decision-bench-")) / "project"
+    # Short on purpose: the daemon's socket lives under the restored project,
+    # and macOS's per-user temp directory is too deep for a Unix socket path.
+    base = Path(os.environ.get("DECISION_BENCH_SCRATCH", "/tmp"))
+    base.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix="db-", dir=base)) / "project"
     pid = snapshot.restore(case["snapshot"], scratch, port, root=root, exe=exe)
     try:
         out = scratch.parent / "rendered.json"

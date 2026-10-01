@@ -79,6 +79,12 @@ class SnapshotTest(unittest.TestCase):
         self.assertIn('[daemon]\nhttp_addr = "127.0.0.1:7498"', config)
         self.assertIn('model = "m"', config)
 
+    def test_a_restore_too_deep_for_the_socket_is_refused(self):
+        snapshot.save(self.source, "s3", root=self.store)
+        deep = self.dir / ("d" * 120)
+        with self.assertRaises(ValueError):
+            snapshot.restore("s3", deep, 7497, root=self.store, index=False, start=False)
+
     def test_restoring_with_a_daemon_or_index_needs_the_binary(self):
         snapshot.save(self.source, "s1", root=self.store)
         with self.assertRaises(ValueError):
