@@ -39,6 +39,10 @@ Usage: moosedev code [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] 
   answer ID TEXT           Answer the runner's pending question or park
   rework ID TEXT           At the final review, send the work back with a note
   tui ID                   Open the interactive task interface
+  render ID [FILE]         Build the next model request as it would be sent and
+                           print it (or write FILE) instead of sending it; the
+                           journal is not written, but steps before the request
+                           run, so use it on a restored snapshot copy
 
 Headless commands print JSON and require a running daemon.
 Interactive startup discovers the local model and connects or starts moosedev.
@@ -223,6 +227,24 @@ async fn run(args: Vec<String>) -> Result<()> {
         .arguments
         .first()
         .context("command requires a task ID")?;
+    if args.command == "render" {
+        anyhow::ensure!(
+            matches!(args.arguments.len(), 1 | 2),
+            "render requires a task ID and optionally an output file"
+        );
+        let mut runner = Runner::load(root.clone(), daemon, id)?;
+        let provider = ProviderSettings::load(&root).context("model configuration")?;
+        runner.configure_provider(&provider, None);
+        let rendered = runner.render_next_request(tui::MAX_RUN_STEPS).await?;
+        let text = serde_json::to_string_pretty(&rendered)?;
+        match args.arguments.get(1) {
+            Some(file) => {
+                std::fs::write(file, text + "\n").with_context(|| format!("write {file}"))?
+            }
+            None => println!("{text}"),
+        }
+        return Ok(());
+    }
     // Validate the complete invocation before opening the task or performing work.
     let operation = match args.command.as_str() {
         "tui" | "status" => {

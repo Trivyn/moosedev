@@ -6,7 +6,7 @@ use super::source::{protected_source, source_budget, SourceView};
 use super::symbolic;
 use super::task::KnowledgeSearchResult;
 use super::tools;
-use super::{ContextResponse, Mode, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
+use super::{ContextResponse, Mode, ResponsePolicy, Runner, DEFAULT_GUIDANCE, MAX_PLAN_SUMMARY};
 use crate::harness::config::ModelRole;
 use crate::harness::progress::Progress;
 use crate::harness::protocol::GoverningRule;
@@ -246,6 +246,17 @@ fn json_request_bytes(prompt: &str, schema: &Value) -> Result<usize> {
         .and_then(|size| size.checked_add(schema.len()))
         .context("model JSON request byte count overflow")
 }
+
+/// The next action request was rendered instead of sent
+/// (`moosedev code render`); it is in the runner's `rendered`.
+#[derive(Debug)]
+pub struct RenderedRequest;
+impl std::fmt::Display for RenderedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the next model request was rendered, not sent")
+    }
+}
+impl std::error::Error for RenderedRequest {}
 
 #[derive(Debug)]
 pub(super) struct InvalidModelOutput;
@@ -518,11 +529,128 @@ impl Runner {
         }
     }
 
-    async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
-        let policy = match (self.role_settings(), self.response_policy) {
+    /// Keep the next action request as it would be sent, instead of sending
+    /// it (`moosedev code render`): the same request text (prompt, output
+    /// schema or tool definitions, repair note), output cap and wire options
+    /// the send path uses, without the response probes, a charged attempt or
+    /// a journal write. Returns [`RenderedRequest`], which stops the step.
+    #[allow(clippy::too_many_arguments)]
+    fn render_request<T>(
+        &mut self,
+        config: &LlmConfig,
+        name: &str,
+        prompt_len: usize,
+        base_request: String,
+        contract: ActionContract,
+        tool_definitions: Option<Value>,
+        mut context_plan: Option<super::context_plan::ContextPlan>,
+    ) -> Result<T> {
+        if let Some(repair) = self
+            .task
+            .recovery
+            .as_ref()
+            .filter(|repair| repair.purpose == name)
+        {
+            anyhow::ensure!(
+                repair.attempts < super::recovery::MAX_CANDIDATES,
+                "the next request would not be sent: the repair budget is spent and the task parks for guidance"
+            );
+        }
+        let base_request_len = base_request.len();
+        let mut request = base_request;
+        if let Some(note) = self.repair_note(name, tool_definitions.is_some()) {
+            request.push_str(&note);
+        }
+        if let Some(plan) = context_plan.as_mut() {
+            plan.schema_bytes = base_request_len.saturating_sub(prompt_len);
+            plan.repair_bytes = request.len().saturating_sub(base_request_len);
+            plan.total = request.len();
+        }
+        let policy = self.active_response_policy();
+        // Under `auto` the probe decides reasoning; this task's last probe
+        // receipt says how it resolved. A provider that refused a required
+        // tool choice was sent `auto` instead (journaled once per task).
+        let resolved = match policy {
+            ResponsePolicy::Auto => self
+                .task
+                .response_receipt
+                .as_ref()
+                .and_then(|receipt| receipt.resolved),
+            fixed => Some(fixed),
+        };
+        let output_limit = self.request_output_limit(config, request.len());
+        let tools = tool_definitions.is_some();
+        let tool_choice = if self
+            .task
+            .intent_events
+            .iter()
+            .any(|event| event.kind == "tool_choice_fallback")
+        {
+            "auto"
+        } else {
+            "required"
+        };
+        self.rendered = Some(json!({
+            "purpose": name,
+            "model": config.model,
+            "endpoint": config.base_url,
+            "role": self.active_role().as_str(),
+            "contract": contract.as_str(),
+            "response_policy": format!("{policy:?}"),
+            "resolved_policy": resolved.map(|policy| format!("{policy:?}")),
+            // Streaming changes delivery, not the generation; the harness may
+            // also stop a streamed action early once it holds the calls it runs.
+            "stream": self.action_streaming().streams(self.task.batch_capture),
+            "body": {
+                "model": config.model,
+                "messages": [{"role": "user", "content": request}],
+                "temperature": 0.0,
+                "reasoning_effort": (resolved == Some(ResponsePolicy::ReasoningOff)).then_some("none"),
+                "max_tokens": output_limit,
+                "provider": config.provider_routing,
+                "tools": tool_definitions,
+                "tool_choice": tools.then_some(tool_choice),
+                "parallel_tool_calls": tools.then_some(false),
+            },
+            "context_window_tokens": config.context_window_tokens,
+            "context_plan": context_plan,
+            "task": self.task.id,
+            "events": self.task.events.len(),
+            "model_requests": self.task.model_requests.len(),
+        }));
+        Err(anyhow::Error::new(RenderedRequest))
+    }
+
+    /// The response policy in force: the active role's, else the runner's.
+    fn active_response_policy(&self) -> ResponsePolicy {
+        match (self.role_settings(), self.response_policy) {
             (Some(settings), _) => settings.response_policy,
             (None, policy) => policy.unwrap_or_default(),
+        }
+    }
+
+    /// The correction a repeated candidate carries: the rejected one's
+    /// diagnostic, while the repair is for this purpose. The send path asks
+    /// after `begin_candidate`, which only clears a repair of another purpose.
+    fn repair_note(&self, name: &str, tools: bool) -> Option<String> {
+        let repair = self
+            .task
+            .recovery
+            .as_ref()
+            .filter(|repair| repair.purpose == name && !repair.diagnostic.is_empty())?;
+        let correction = if tools {
+            "Correct it and call exactly one allowed tool."
+        } else {
+            "Correct it and return one JSON object matching the schema, without markdown."
         };
+        Some(format!(
+            "\nYour last candidate was rejected: {}. {correction}",
+            repair.diagnostic
+        ))
+    }
+
+    async fn response_client(&mut self, config: &LlmConfig) -> Result<OpenAiCompatClient> {
+        let policy = self.active_response_policy();
         let contract = self.action_contract();
         let key = response::cache_key(config, policy, contract);
         if let Some((_, client)) = self.model_clients.iter().find(|(cached, _)| *cached == key) {
@@ -710,6 +838,23 @@ impl Runner {
             base_request_bytes <= limit.saturating_sub(REPAIR_RESERVE),
             "prompt plus output schema exceeds configured context budget"
         );
+        // A render builds only the action request; any other model request
+        // (a capture note) stops it before anything is sent.
+        anyhow::ensure!(
+            !self.render_only || name == "harness_action",
+            "render reached a {name} request before the next action request; it renders action requests only"
+        );
+        if self.render_only {
+            return self.render_request(
+                &config,
+                name,
+                prompt.len(),
+                base_request,
+                contract,
+                tool_definitions,
+                context_plan,
+            );
+        }
         let client = self.response_client(&config).await?;
         self.begin_candidate(name)?;
         let client = client.with_usage_observer(
@@ -726,18 +871,8 @@ impl Runner {
         );
         let base_request_len = base_request.len();
         let mut request = base_request;
-        if let Some(repair) = &self.task.recovery {
-            if !repair.diagnostic.is_empty() {
-                let correction = if tool_definitions.is_some() {
-                    "Correct it and call exactly one allowed tool."
-                } else {
-                    "Correct it and return one JSON object matching the schema, without markdown."
-                };
-                request.push_str(&format!(
-                    "\nYour last candidate was rejected: {}. {correction}",
-                    repair.diagnostic
-                ));
-            }
+        if let Some(note) = self.repair_note(name, tool_definitions.is_some()) {
+            request.push_str(&note);
         }
         // What was appended to the step prompt: the output schema (under
         // the json_schema contract; tool definitions travel beside the

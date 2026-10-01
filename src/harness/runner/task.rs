@@ -677,6 +677,10 @@ impl Runner {
     }
 
     pub(super) fn persist(&self) -> Result<()> {
+        // A render never writes the journal: it replays from a saved state.
+        if self.render_only {
+            return Ok(());
+        }
         let bytes = serde_json::to_vec_pretty(&self.task)?;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         let mut last_saved = self

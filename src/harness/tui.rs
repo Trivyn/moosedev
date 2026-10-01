@@ -47,7 +47,7 @@ use std::{
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const MAX_RUN_STEPS: usize = 32;
+pub(crate) const MAX_RUN_STEPS: usize = 32;
 const MOUSE_SCROLL_LINES: u16 = 1;
 
 #[derive(Debug)]

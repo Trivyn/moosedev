@@ -158,6 +158,29 @@ def main(argv=None):
     command.add_argument("--repeat", type=int, default=2, help="measurements per variant; the fastest is kept")
     command.add_argument("--endpoint", default=None, help="override the journal's endpoint")
     command.add_argument("--model", default=None, help="override the journal's model")
+    command = sub.add_parser("snapshot-save", help="copy a harness project's whole state (APFS clone) to replay from later")
+    command.add_argument("project", type=Path)
+    command.add_argument("name")
+    command.add_argument("--root", type=Path, default=None, help="snapshot store (default ~/code/badciv-snapshots)")
+    command.add_argument("--meta", action="append", default=[], help="KEY=VALUE recorded with the snapshot")
+    command.add_argument("--git", action="append", default=[], type=Path, help="a checkout whose HEAD and dirty diff to record")
+    command = sub.add_parser("snapshot-restore", help="copy a snapshot to a new path, rebuild its code index and start its daemon")
+    command.add_argument("name")
+    command.add_argument("dest", type=Path)
+    command.add_argument("--port", type=int, required=True, help="the restored daemon's HTTP port")
+    command.add_argument("--exe", type=Path, help="the moosedev binary (needed for the index and the daemon)")
+    command.add_argument("--root", type=Path, default=None)
+    command.add_argument("--no-start", action="store_true", help="do not start the daemon (the index is still rebuilt with --exe)")
+    command = sub.add_parser("snapshot-list", help="the snapshots in a store")
+    command.add_argument("--root", type=Path, default=None)
+    command = sub.add_parser("decision-bench", help="replay saved decisions (journal prompts or rendered snapshots) and count the actions")
+    command.add_argument("cases", type=Path, help="JSON list of cases (see decision_bench.py)")
+    command.add_argument("--provider", choices=["openrouter", "lmstudio"], required=True)
+    command.add_argument("-n", type=int, default=5, help="samples per case and transform")
+    command.add_argument("--exe", type=Path, help="moosedev binary that renders snapshot cases")
+    command.add_argument("--port", type=int, default=7480, help="port for restored snapshot daemons")
+    command.add_argument("--root", type=Path, default=None, help="snapshot store")
+    command.add_argument("--out", type=Path, help="raw answers (JSON)")
     command = sub.add_parser("crowding-report", help="offline delivery report over field-check run directories; no model calls")
     command.add_argument("runs", type=Path, nargs="+")
     command.add_argument("--scenario", default="late_fees_crowded")
@@ -285,6 +308,29 @@ def main(argv=None):
         from .prefill_probe import probe_file
         print(json.dumps(probe_file(args.journal, args.tools, pair=args.pair, repeat=args.repeat,
                                     endpoint=args.endpoint, model=args.model), indent=2))
+        return 0
+    elif args.command == "decision-bench":
+        from . import decision_bench, snapshot
+        cases = json.loads(args.cases.read_text())
+        results = decision_bench.run(cases, args.provider, n=args.n, exe=args.exe, port=args.port,
+                                     root=args.root or snapshot.DEFAULT_ROOT, out=args.out)
+        print(decision_bench.table(results))
+        return 0
+    elif args.command in {"snapshot-save", "snapshot-restore", "snapshot-list"}:
+        from . import snapshot
+        root = args.root or snapshot.DEFAULT_ROOT
+        if args.command == "snapshot-save":
+            meta = dict(item.partition("=")[::2] for item in args.meta)
+            result = snapshot.save(args.project, args.name, root=root, meta=meta, git_dirs=args.git)
+        elif args.command == "snapshot-restore":
+            # The index is rebuilt whenever the binary is given; the daemon
+            # starts unless --no-start (a caller that starts its own).
+            pid = snapshot.restore(args.name, args.dest, args.port, root=root, exe=args.exe,
+                                   index=args.exe is not None, start=not args.no_start)
+            result = {"dest": str(args.dest.resolve()), "daemon_pid": pid}
+        else:
+            result = snapshot.listing(root)
+        print(json.dumps(result, indent=2))
         return 0
     elif args.command == "crowding-report":
         from .crowding import report as crowding_report

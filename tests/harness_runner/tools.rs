@@ -729,3 +729,65 @@ async fn leading_reads_in_one_response_run_together() {
         }
     }
 }
+
+/// `moosedev code render`: the request it builds is the one the next real
+/// step sends, byte for byte (prompt, tools, output cap), and building it
+/// neither asks the model nor writes the journal.
+#[tokio::test]
+async fn a_rendered_request_is_the_request_the_next_step_sends() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let id = runner.task.id.clone();
+    drop(runner);
+    let journal = journal_path(&fixture, &id);
+    let before = std::fs::read(&journal).unwrap();
+    let sent_before = action_requests(&fixture).len();
+
+    let mut renderer = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    renderer.configure(fixture.config(), None);
+    let rendered = renderer.render_next_request(4).await.unwrap();
+    drop(renderer);
+    assert_eq!(
+        std::fs::read(&journal).unwrap(),
+        before,
+        "render wrote the journal"
+    );
+    assert_eq!(
+        action_requests(&fixture).len(),
+        sent_before,
+        "render asked the model"
+    );
+
+    let mut runner = Runner::load(fixture.root.clone(), fixture.url.clone(), &id).unwrap();
+    runner.configure(fixture.config(), None);
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    let sent = action_requests(&fixture).pop().unwrap();
+    let body = &rendered["body"];
+    assert_eq!(body["messages"], sent["body"]["messages"]);
+    assert_eq!(body["tools"], sent["body"]["tools"]);
+    assert_eq!(body["max_tokens"], sent["body"]["max_tokens"]);
+    assert_eq!(body["temperature"], sent["body"]["temperature"]);
+    let entry = runner
+        .task
+        .model_requests
+        .iter()
+        .rev()
+        .find(|entry| entry["purpose"] == "harness_action")
+        .unwrap();
+    assert_eq!(body["messages"][0]["content"], entry["prompt"]);
+    assert_eq!(rendered["task"], json!(id));
+
+    // A task at a human gate has no request to render.
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    runner.task.phase = Phase::AwaitingInput;
+    let error = runner.render_next_request(4).await.unwrap_err();
+    assert!(
+        error.to_string().contains("no model request to render"),
+        "{error}"
+    );
+}
