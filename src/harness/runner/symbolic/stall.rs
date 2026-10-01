@@ -6,6 +6,14 @@
 //! that the failure is the same and the source is not, so it decides
 //! (Constraint cd9f1a96): the second time it shows the failing test's source
 //! and the code it calls; the fourth time it parks for the human.
+//!
+//! A required check is the plan's own measure of done, so its failure shows
+//! the focus block the first time (badciv orE: the model paged a failed
+//! check's output until the inspect guard parked, in 3 of 6 replicates,
+//! before any failure came back). And while a required check fails, a
+//! repeated look that would park is steered once instead: the failing test,
+//! its values and its source, then a park only if the model keeps looking
+//! (the offloading plan's "steer before a park").
 
 use serde::{Deserialize, Serialize};
 
@@ -47,10 +55,52 @@ pub struct StalledFailure {
     pub command: String,
 }
 
+/// Lines of a failure's expected and actual values the steer quotes.
+const MAX_VALUE_LINES: usize = 6;
+/// Bytes those lines may take.
+const VALUE_BYTES: usize = 600;
+
 /// `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` switches the detector off for study
 /// variants: nothing is tracked, shown or parked.
 fn enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_LOOP_DETECTOR").map_or(true, |value| value.trim() != "off")
+}
+
+/// `MOOSEDEV_HARNESS_FOCUS_FIRST=off` keeps a required check's first failure
+/// to its output, as any command's.
+fn focus_first_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_FOCUS_FIRST").map_or(true, |value| value.trim() != "off")
+}
+
+/// `MOOSEDEV_HARNESS_STEER=off` parks a repeated look while a required check
+/// fails, as before the steer.
+fn steer_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_STEER").map_or(true, |value| value.trim() != "off")
+}
+
+/// The lines of a failure's output that state its expected and actual
+/// values: libtest's `assertion`, `left:` and `right:`, pytest's `E ` lines,
+/// and any line naming expected or actual, at most [`MAX_VALUE_LINES`].
+fn value_lines(output: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut bytes = 0;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let states_values = line.starts_with("E ")
+            || ["assertion", "left:", "right:", "expected", "actual"]
+                .iter()
+                .any(|start| lower.starts_with(start));
+        if !states_values || trimmed.is_empty() {
+            continue;
+        }
+        if lines.len() == MAX_VALUE_LINES || bytes + trimmed.len() > VALUE_BYTES {
+            break;
+        }
+        bytes += trimmed.len();
+        lines.push(trimmed.to_string());
+    }
+    lines
 }
 
 /// What makes two failures the same: the failed tests' names, sorted (a
@@ -166,6 +216,7 @@ fn section(definition: &Definition, role: &str, budget: usize) -> String {
 }
 
 const FOCUS_CLOSING: &str = "Rerunning or rereading without an edit shows this same failure again: edit the code it points at.]\n";
+const STEER_CLOSING: &str = "Edit the code the test exercises, or the test if it is wrong; a further look parks for the human.]\n";
 
 impl Runner {
     /// Track a failed command or required check against the edits applied so
@@ -183,6 +234,7 @@ impl Runner {
         let tests = failed_tests(output);
         let signature = signature(output, &tests);
         let edits = self.task.edits.len();
+        let required = self.is_required_check(command);
         let state = self.symbolic_state_mut();
         let count = match state.stalled_failure.as_mut() {
             Some(stall) if stall.edits == edits && stall.signature == signature => {
@@ -225,18 +277,95 @@ impl Runner {
                 "[Harness: the same failure ({what}) has come back {count} times with no edit in between; rerunning, reading and paging have not changed it. Guidance is needed: say what to change, or /plan to change the approach.]\n"
             ));
         }
-        if count != FOCUS_AT {
+        // A required check that names its failing test shows where to look
+        // the first time it fails.
+        let first = count == 1 && required && !tests.is_empty() && focus_first_enabled();
+        if count != FOCUS_AT && !first {
             return None;
         }
         self.intent_event(
             "stalled_failure_focus",
+            &format!(
+                "{what} at edit {edits}{}: {command}",
+                if first { ", first failure" } else { "" }
+            ),
+        );
+        let opening = if first {
+            format!("a required check failed: {what}")
+        } else {
+            format!("the same failure again with no edit since: {what}")
+        };
+        Some(match tests.first() {
+            Some(test) => self.focus_block(test, &opening, "", FOCUS_CLOSING),
+            None => format!("[Harness: {opening}. {FOCUS_CLOSING}"),
+        })
+    }
+
+    /// Whether `command` is one of the approved plan's required checks.
+    fn is_required_check(&self, command: &str) -> bool {
+        self.task
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.checks.iter().any(|check| check == command))
+    }
+
+    /// The steer before a park: while a required check is failing at this
+    /// source state, a repeated read or inspect that would park gets the
+    /// failing test, its expected and actual values and its source once
+    /// instead, with the next step that fits. `None` when no steer is due
+    /// (switched off, no required check failing here, no named test, or
+    /// already steered at this source state): the refusal parks as before.
+    pub(in crate::harness::runner) fn steer_before_park(&mut self) -> Option<String> {
+        if !enabled() || !steer_enabled() {
+            return None;
+        }
+        let edits = self.task.edits.len();
+        let state = self.task.symbolic.as_ref()?;
+        let stall = state.stalled_failure.as_ref()?;
+        if stall.edits != edits || state.steered_at == Some(edits) {
+            return None;
+        }
+        let command = stall.command.clone();
+        let signature = stall.signature.clone();
+        if !self.is_required_check(&command) {
+            return None;
+        }
+        let output = self.command_output(&command)?;
+        let tests = failed_tests(&output);
+        let test = tests.first()?;
+        let what = described(&tests, &signature);
+        let values = value_lines(&output);
+        let values = if values.is_empty() {
+            String::new()
+        } else {
+            format!("\nIts values:\n{}\n", values.join("\n"))
+        };
+        let steer = self.focus_block(
+            test,
+            &format!(
+                "the required check is still failing, and looking again will not change it: {what}"
+            ),
+            &values,
+            STEER_CLOSING,
+        );
+        self.symbolic_state_mut().steered_at = Some(edits);
+        self.intent_event(
+            "steer_before_park",
             &format!("{what} at edit {edits}: {command}"),
         );
-        Some(match tests.first() {
-            Some(test) => self.focus_block(test, &what),
-            None => format!(
-                "[Harness: the same failure again with no edit since: {what}. {FOCUS_CLOSING}"
-            ),
+        self.event(format!(
+            "Steer before park: the required check is still failing ({what}); showed its source instead of parking."
+        ));
+        Some(steer)
+    }
+
+    /// The output of the last run of `command`, from its journaled event.
+    fn command_output(&self, command: &str) -> Option<String> {
+        let prefix = format!("Command: {command}\n");
+        self.task.events.iter().rev().find_map(|event| {
+            let rest = event.message.strip_prefix(&prefix)?;
+            // Permission grants and Success lines precede the output.
+            rest.splitn(3, '\n').nth(2).map(str::to_string)
         })
     }
 
@@ -255,24 +384,28 @@ impl Runner {
     }
 
     /// The failing test's source and up to three definitions it calls, from
-    /// the files' current text, in at most [`FOCUS_BYTES`].
-    fn focus_block(&self, test: &FailedTest, what: &str) -> String {
+    /// the files' current text, in at most [`FOCUS_BYTES`]: `opening`, the
+    /// test's place, `detail`, the sources, then `closing`.
+    fn focus_block(&self, test: &FailedTest, opening: &str, detail: &str, closing: &str) -> String {
         let place = test
             .location
             .as_ref()
             .map(|(file, line)| format!(" ({file}:{line})"))
             .unwrap_or_default();
-        let mut block =
-            format!("[Harness: the same failure again with no edit since: {what}{place}.");
+        let mut block = format!("[Harness: {opening}{place}.{detail}");
         let (found, panicked_in) = self.find_test(test);
         if found.is_none() && panicked_in.is_none() {
             block.push_str(&format!(
-                " The test `{}` was not found in the plan's files or the working set. {FOCUS_CLOSING}",
+                " The test `{}` was not found in the plan's files or the working set. {closing}",
                 test.function()
             ));
             return block;
         }
-        block.push_str(" Its source and the code it calls:\n");
+        block.push_str(if block.ends_with('\n') {
+            "Its source and the code it calls:\n"
+        } else {
+            " Its source and the code it calls:\n"
+        });
         let mut shown: Vec<(Definition, &str)> = Vec::new();
         if let Some(panicked) = panicked_in {
             shown.push((panicked, " (where it panicked)"));
@@ -294,8 +427,7 @@ impl Runner {
         let mut omitted = Vec::new();
         let total = shown.len();
         for (index, (definition, role)) in shown.into_iter().enumerate() {
-            let room =
-                FOCUS_BYTES.saturating_sub(block.len() + FOCUS_CLOSING.len() + OMITTED_RESERVE);
+            let room = FOCUS_BYTES.saturating_sub(block.len() + closing.len() + OMITTED_RESERVE);
             let budget = room / (total - index);
             if budget < MIN_SECTION_BYTES {
                 omitted.push(format!("`{}`", definition.name));
@@ -306,7 +438,7 @@ impl Runner {
         if !omitted.is_empty() {
             block.push_str(&format!("[Not shown for room: {}]\n", omitted.join(", ")));
         }
-        block.push_str(FOCUS_CLOSING);
+        block.push_str(closing);
         block
     }
 

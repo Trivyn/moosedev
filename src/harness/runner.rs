@@ -110,6 +110,9 @@ pub struct Runner {
     indexed_edits: Option<usize>,
     progress: Option<ProgressSender>,
     streaming: Option<Arc<Mutex<StreamedMessage>>>,
+    /// The files of the leading reads after the first in the last action
+    /// response ([`tools::batched_reads`]), run after it by dispatch.
+    read_batch: Vec<String>,
     last_saved: Mutex<Option<[u8; 32]>>,
     /// Set for the rest of a step whose prompt overflowed with rule claims
     /// past the daemon's fixed floor: its refreshes ask for the floor alone
@@ -415,6 +418,7 @@ impl Runner {
             action_contract: None,
             action_streaming: None,
             max_output_tokens: None,
+            read_batch: Vec::new(),
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -474,6 +478,7 @@ impl Runner {
             action_contract: None,
             action_streaming: None,
             max_output_tokens: None,
+            read_batch: Vec::new(),
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,

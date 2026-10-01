@@ -343,6 +343,42 @@ pub(super) fn within_content_limit(
 }
 
 /// Parse SSE on byte boundaries, including CRLF and UTF-8 split across chunks.
+/// What a stream has delivered so far, as a caller deciding where to cut it
+/// sees it.
+pub struct StreamView<'a> {
+    /// The content so far.
+    pub content: &'a str,
+    /// The native tool calls whose arguments are complete: every call but
+    /// the one still being written.
+    pub calls: &'a [ToolCall],
+    /// Whether a native call after `calls` has started.
+    pub call_started: bool,
+}
+
+/// Where a caller cuts a stream: the content bytes and the native calls it
+/// keeps. The rest is never read; the connection is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamCut {
+    pub content: usize,
+    pub calls: usize,
+}
+
+/// The rule inside a [`StreamStop`].
+pub type StopRule = dyn Fn(&StreamView<'_>) -> Option<StreamCut> + Send + Sync;
+
+/// A caller's rule for ending a stream early, checked whenever a JSON
+/// object or a native call may have completed. The llm layer only reports
+/// what arrived and applies the cut; which calls are worth keeping is the
+/// caller's policy.
+#[derive(Clone)]
+pub struct StreamStop(pub std::sync::Arc<StopRule>);
+
+impl std::fmt::Debug for StreamStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamStop")
+    }
+}
+
 #[derive(Default)]
 pub(super) struct CompletionStream {
     pending: Vec<u8>,
@@ -359,6 +395,10 @@ pub(super) struct CompletionStream {
     /// Tool-contract streams accumulate `delta.tool_calls` by index instead of refusing them.
     tools: bool,
     tool_calls: std::collections::BTreeMap<u64, ToolCall>,
+    /// The caller's early stop, if any ([`StreamStop`]).
+    pub(super) stop: Option<StreamStop>,
+    /// The stream was ended by the caller's [`StreamStop`], not the provider.
+    pub(super) cut_by_caller: bool,
 }
 
 impl CompletionStream {
@@ -375,6 +415,43 @@ impl CompletionStream {
             tool_calls: self.tool_calls.into_values().collect(),
             tool_choice_fallback: None,
         }
+    }
+
+    /// Ask the caller's [`StreamStop`] whether to end the stream here, and
+    /// apply its cut. Asked only when something may have changed: an object
+    /// opening or closing in the content, or a native call delta.
+    fn check_stop(&mut self, content_delta: &str, call_delta: bool) {
+        let Some(stop) = &self.stop else {
+            return;
+        };
+        if self.stopped || !(content_delta.contains(['{', '}']) || call_delta) {
+            return;
+        }
+        let calls: Vec<ToolCall> = self.tool_calls.values().cloned().collect();
+        // A native call is complete once a later one has started and its
+        // own arguments parse: calls may interleave their deltas.
+        let complete = calls[..calls.len().saturating_sub(1)]
+            .iter()
+            .take_while(|call| serde_json::from_str::<serde_json::Value>(&call.arguments).is_ok())
+            .count();
+        let view = StreamView {
+            content: &self.content,
+            calls: &calls[..complete],
+            call_started: !calls.is_empty(),
+        };
+        let Some(cut) = (stop.0)(&view) else {
+            return;
+        };
+        let mut end = cut.content.min(self.content.len());
+        while !self.content.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.content.truncate(end);
+        let kept: Vec<u64> = self.tool_calls.keys().take(cut.calls).copied().collect();
+        self.tool_calls.retain(|index, _| kept.contains(index));
+        self.cut_by_caller = true;
+        self.stopped = true;
+        self.done = true;
     }
 
     /// A tool call has been announced but its arguments have not arrived. A
@@ -505,6 +582,7 @@ impl CompletionStream {
             }
             self.saw_reasoning |= has_payload(&choice["delta"]["reasoning_content"])
                 || has_payload(&choice["delta"]["reasoning"]);
+            let call_delta = self.tools && has_payload(&choice["delta"]["tool_calls"]);
             if self.tools {
                 if has_payload(&choice["delta"]["refusal"]) {
                     return Err("LLM stream returned a refusal instead of content".into());
@@ -527,6 +605,11 @@ impl CompletionStream {
                 if !content.is_empty() {
                     on_delta(content);
                 }
+            }
+            let delta = choice["delta"]["content"].as_str().unwrap_or_default();
+            self.check_stop(delta, call_delta);
+            if self.cut_by_caller {
+                return Ok(());
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
                 if reason == "length" {

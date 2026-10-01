@@ -116,13 +116,15 @@ async fn only_the_first_of_several_tool_calls_runs_and_the_rest_are_journaled() 
     let fixture = Fixture::new().await;
     std::fs::write(fixture.root.join("other.txt"), "other\n").unwrap();
     let mut runner = fixture.interactive().await;
+    // A read and a search: only leading reads batch, so the search does not
+    // run beside it.
     fixture.reply(
         "harness_action",
         tool_answer(
             "Reading both files.",
             &[
                 ("read", r#"{"file":"code.txt"}"#),
-                ("read", r#"{"file":"other.txt"}"#),
+                ("search", r#"{"query":"other"}"#),
             ],
         ),
     );
@@ -130,7 +132,7 @@ async fn only_the_first_of_several_tool_calls_runs_and_the_rest_are_journaled() 
     assert_eq!(runner.task.read_files, vec!["code.txt".to_string()]);
     let ignored = intent_details(&runner, "extra_tool_calls_ignored");
     assert_eq!(ignored.len(), 1, "{ignored:?}");
-    assert!(ignored[0].contains("read"), "{ignored:?}");
+    assert!(ignored[0].contains("search"), "{ignored:?}");
     assert!(runner
         .task
         .events
@@ -673,4 +675,57 @@ async fn a_reply_beside_an_action_becomes_its_message_and_the_action_runs() {
         response,
         json!({"message":"I will read code.txt first.","action":{"action":"read","file":"code.txt"}})
     );
+}
+
+/// A response that opens with several reads (badciv orC-orE: 3-21 reads,
+/// then searches) runs its leading distinct reads together: the first as the
+/// step's action, the rest into the working set, and nothing after them.
+#[tokio::test]
+async fn leading_reads_in_one_response_run_together() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let call = |name: &str, arguments: Value| {
+        format!(
+            "<tool_call>\n{}\n</tool_call>",
+            json!({"name": name, "arguments": arguments})
+        )
+    };
+    let raw = [
+        call("read", json!({"file":"code.txt"})),
+        call("read", json!({"file":"notes.txt"})),
+        call("read", json!({"file":"notes.txt"})),
+        call("read", json!({"file":"more.txt"})),
+        call("search", json!({"query":"x"})),
+    ]
+    .join("\n");
+    for batch in [true, false] {
+        let fixture = Fixture::new().await;
+        std::fs::write(fixture.root.join("notes.txt"), "notes\n").unwrap();
+        std::fs::write(fixture.root.join("more.txt"), "more\n").unwrap();
+        let mut runner = fixture.interactive().await;
+        if !batch {
+            std::env::set_var("MOOSEDEV_HARNESS_READ_BATCH", "1");
+        }
+        fixture.reply("harness_action", json!({"content": raw}));
+        runner.advance().await.unwrap();
+        std::env::remove_var("MOOSEDEV_HARNESS_READ_BATCH");
+        let read = |file: &str| runner.task.read_files.contains(&file.to_string());
+        assert!(!read("more.txt"));
+        if batch {
+            assert_eq!(
+                intent_details(&runner, "read_batch"),
+                ["read 1; not read 0"]
+            );
+            assert!(read("notes.txt"));
+            assert!(
+                runner.task.last_response.ends_with(
+                    "Also read from the same response, now in the working set with their governing knowledge: `notes.txt`."
+                ),
+                "{}",
+                runner.task.last_response
+            );
+        } else {
+            assert!(intent_details(&runner, "read_batch").is_empty());
+            assert!(!read("notes.txt"));
+        }
+    }
 }

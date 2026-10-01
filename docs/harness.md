@@ -282,7 +282,26 @@ would be refused, the first runs and meets its refusal. A provider that ignored
 `parallel_tool_calls: false` sent qwen's 3–6 reads with an already-read file
 first, and running the first parked the step three times in 45 s (OpenRouter,
 2026-09-29). `MOOSEDEV_HARNESS_MULTI_CALL=first` runs the first call whatever
-it is. Later calls are journaled as `extra_tool_calls_ignored`,
+it is, and nothing beside it.
+
+A response's leading distinct reads, up to 4 (`MOOSEDEV_HARNESS_READ_BATCH`;
+`1` runs one), run together: the first as the step's action, the rest into
+the working set while it has room, since several files cannot share the one
+Last result (`read_batch`). A refused or outlined file among them is named in
+the Last result, not shown, and never parks. Planners opened 25 of the 27
+long responses in badciv orC-orE with 3-21 reads.
+
+A streamed action stops once the harness holds the calls it will run
+(`stream_stopped`; the model request entry carries `stopped_by_caller`): any
+complete call after the first that is not one of those leading reads, a
+repeat, or a fifth read ends the stream there, and the rest is never read.
+27 of the 29 responses over 30 KB in badciv orC-orE were calls after the
+first (hundreds of searches, up to 445 KB), and each ran until the output cap.
+The llm layer offers the mechanism (`OpenAiCompatClient::with_stream_stop`,
+a rule over the complete JSON objects or native calls so far); which calls
+are kept is the harness's. A first call the harness would refuse is no longer
+passed over for a later one in a stopped stream: the later calls were never
+read. `MOOSEDEV_HARNESS_CALL_STOP=off` reads every response to its end. Later calls are journaled as `extra_tool_calls_ignored`,
 and the session notes that one action runs per step. The exception is a `reply`
 sent beside an action: that is the model narrating what it is about to do, so the
 action runs and the reply's text becomes its message (`reply_as_message`).
@@ -1843,6 +1862,19 @@ contract 3 and intent contract 2.
   reread, paged and reran `cargo test` for about twenty steps while
   `grid_too_few_rows` kept failing, each action different, so no repeat guard
   fired. `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` switches it off.
+  A required check is the plan's measure of done, so its first failure that
+  names a failing test shows the focus block at once ("a required check
+  failed: ...", `stalled_failure_focus` with `first failure`); in badciv orE
+  the model paged a failed check's output until the inspect guard parked, in
+  3 of 6 replicates, before any failure came back.
+  `MOOSEDEV_HARNESS_FOCUS_FIRST=off` waits for the second sighting.
+- The steer before a park. While a required check is failing at the current
+  edit count, the first read or inspect refusal that would park instead
+  steers once (`steer_before_park`): the failing test, its expected and
+  actual values from the output (libtest's `assertion`, `left:`, `right:`;
+  pytest's `E` lines), its source and the code it calls, and "edit the code
+  the test exercises, or the test". A further look at the same source state
+  parks as before. `MOOSEDEV_HARNESS_STEER=off` parks at once.
 - A `write` without `content` is invalid output, repaired within the budget:
   `null` deletes the file, and a missing field means the model meant to write
   and left the text out (Qwen3.5-9B on badciv sent `write` with only `file`,

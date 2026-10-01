@@ -256,3 +256,298 @@ pub(super) fn decode(
         passed_over,
     })
 }
+
+/// Reads one response may batch: the model asked for several files at once
+/// (badciv orC–orE: planning responses opened with 3–21 reads).
+const DEFAULT_READ_BATCH: usize = 4;
+
+/// `MOOSEDEV_HARNESS_CALL_STOP=off` reads every streamed response to its end,
+/// as before the stop.
+pub(super) fn call_stop_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_CALL_STOP").map_or(true, |value| value.trim() != "off")
+}
+
+/// The most leading reads one response runs (`MOOSEDEV_HARNESS_READ_BATCH`,
+/// default [`DEFAULT_READ_BATCH`]; `1` runs a single read, as before).
+pub(super) fn read_batch_limit() -> usize {
+    std::env::var("MOOSEDEV_HARNESS_READ_BATCH")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map_or(DEFAULT_READ_BATCH, |limit| limit.max(1))
+}
+
+/// One call of a response as the stop rule sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CallSeen {
+    pub(super) name: String,
+    /// The call's whole text, so a repeat is the same call.
+    key: String,
+    /// A read's file.
+    pub(super) file: Option<String>,
+}
+
+impl CallSeen {
+    fn new(name: &str, arguments: &Map<String, Value>) -> Self {
+        Self {
+            name: name.to_owned(),
+            key: format!("{name} {}", Value::Object(arguments.clone())),
+            file: (name == "read")
+                .then(|| arguments.get("file").and_then(Value::as_str))
+                .flatten()
+                .map(str::to_owned),
+        }
+    }
+
+    /// A call written as a JSON object: the json_schema action
+    /// (`{"action": "read", ...}`), the conversational shape (`{"message",
+    /// "action": {...}}`), or a text tool call (`{"name", "arguments"}`).
+    /// Anything else is a call of no known kind, which never batches.
+    pub(super) fn from_object(text: &str) -> Self {
+        let value: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        let action = match &value["action"] {
+            Value::Object(inner) => Some(inner.clone()),
+            Value::String(_) => value.as_object().cloned(),
+            _ => None,
+        };
+        if let Some(action) = action {
+            if let Some(name) = action.get("action").and_then(Value::as_str) {
+                return Self::new(name, &action);
+            }
+        }
+        if let Some(name) = value["name"].as_str() {
+            let arguments = match &value["arguments"] {
+                Value::Object(arguments) => arguments.clone(),
+                Value::String(text) => serde_json::from_str(text).unwrap_or_default(),
+                _ => Map::new(),
+            };
+            return Self::new(name, &arguments);
+        }
+        Self {
+            name: String::new(),
+            key: text.to_owned(),
+            file: None,
+        }
+    }
+
+    pub(super) fn normal(call: &NormalCall) -> Self {
+        let arguments = call.arguments.clone().unwrap_or_default();
+        Self::new(&call.name, &arguments)
+    }
+
+    pub(super) fn native(call: &crate::llm::ToolCall) -> Self {
+        let arguments = serde_json::from_str(&call.arguments).unwrap_or_default();
+        Self::new(&call.name, &arguments)
+    }
+}
+
+/// The calls among a response's JSON objects, each with where it ends. An
+/// object of no known call shape (a fenced example, prose) is not a call and
+/// never counts toward a stop.
+pub(super) fn text_calls(
+    content: &str,
+    objects: &[std::ops::Range<usize>],
+) -> Vec<(usize, CallSeen)> {
+    objects
+        .iter()
+        .map(|range| (range.end, CallSeen::from_object(&content[range.clone()])))
+        .filter(|(_, call)| !call.name.is_empty())
+        .collect()
+}
+
+/// How many leading calls the harness runs: a run of distinct reads up to
+/// `batch`, else the first call alone.
+pub(super) fn kept_calls(calls: &[CallSeen], batch: usize) -> usize {
+    let Some(first) = calls.first() else {
+        return 0;
+    };
+    if first.file.is_none() {
+        return 1;
+    }
+    let mut kept = 0;
+    for (index, call) in calls.iter().enumerate().take(batch) {
+        if call.file.is_none() || calls[..index].iter().any(|earlier| earlier.key == call.key) {
+            break;
+        }
+        kept += 1;
+    }
+    kept
+}
+
+/// Where to stop a response: once a complete call falls outside the calls
+/// the harness will run, or once those are complete and can grow no further
+/// while another call has started. `None` while the response may still add
+/// a call the harness runs.
+pub(super) fn stop_after(calls: &[CallSeen], started_next: bool, batch: usize) -> Option<usize> {
+    let kept = kept_calls(calls, batch);
+    if kept == 0 {
+        return None;
+    }
+    let full = if calls[0].file.is_some() { batch } else { 1 };
+    (calls.len() > kept || (kept == full && started_next)).then_some(kept)
+}
+
+/// Where to cut a stream, given how many calls it keeps.
+type Cut = Box<dyn Fn(usize) -> crate::llm::StreamCut>;
+
+/// The harness's [`crate::llm::StreamStop`]: cut the response after the
+/// calls it will run, recording what was kept in `record` for the journal.
+pub(super) fn stream_stop(
+    record: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> crate::llm::StreamStop {
+    let batch = read_batch_limit();
+    crate::llm::StreamStop(std::sync::Arc::new(
+        move |view: &crate::llm::StreamView<'_>| {
+            let (seen, started, cut): (Vec<CallSeen>, bool, Cut) = if view.call_started {
+                let seen = view.calls.iter().map(CallSeen::native).collect();
+                let content = view.content.len();
+                (
+                    seen,
+                    true,
+                    Box::new(move |kept| crate::llm::StreamCut {
+                        content,
+                        calls: kept,
+                    }),
+                )
+            } else {
+                let (objects, started) = crate::llm::normalize::json_objects(view.content);
+                let (ends, seen): (Vec<usize>, Vec<CallSeen>) =
+                    text_calls(view.content, &objects).into_iter().unzip();
+                (
+                    seen,
+                    started,
+                    Box::new(move |kept| crate::llm::StreamCut {
+                        content: ends[kept - 1],
+                        calls: 0,
+                    }),
+                )
+            };
+            let kept = stop_after(&seen, started, batch)?;
+            let names: Vec<&str> = seen[..kept].iter().map(|call| call.name.as_str()).collect();
+            if let Ok(mut record) = record.lock() {
+                *record = Some(format!(
+                    "kept {kept} call(s) ({}); stopped at {} content bytes",
+                    names.join(", "),
+                    view.content.len()
+                ));
+            }
+            Some(cut(kept))
+        },
+    ))
+}
+
+/// The files of the leading read batch in a finished response's calls,
+/// after the first (which runs as the step's action).
+pub(super) fn batched_reads(calls: &[CallSeen]) -> Vec<String> {
+    let kept = kept_calls(calls, read_batch_limit());
+    calls[..kept]
+        .iter()
+        .skip(1)
+        .filter_map(|call| call.file.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    fn read(file: &str) -> CallSeen {
+        CallSeen::from_object(&format!("{{\"action\":\"read\",\"file\":\"{file}\"}}"))
+    }
+
+    fn other(name: &str) -> CallSeen {
+        CallSeen::from_object(&format!("{{\"action\":\"{name}\",\"query\":\"x\"}}"))
+    }
+
+    #[test]
+    fn reads_batch_up_to_the_limit_and_anything_else_runs_alone() {
+        assert_eq!(stop_after(&[read("a")], true, 4), None);
+        assert_eq!(stop_after(&[read("a"), read("b")], false, 4), None);
+        assert_eq!(
+            stop_after(&[read("a"), read("b"), other("search")], false, 4),
+            Some(2)
+        );
+        assert_eq!(stop_after(&[read("a"), read("a")], false, 4), Some(1));
+        let four = [read("a"), read("b"), read("c"), read("d")];
+        assert_eq!(stop_after(&four, false, 4), None);
+        assert_eq!(stop_after(&four, true, 4), Some(4));
+        assert_eq!(stop_after(&[other("write")], false, 4), None);
+        assert_eq!(stop_after(&[other("write")], true, 4), Some(1));
+        assert_eq!(stop_after(&[other("search"), read("a")], false, 4), Some(1));
+        assert_eq!(stop_after(&[read("a")], true, 1), Some(1));
+        assert_eq!(
+            batched_reads(&[read("a"), read("b"), other("search")]),
+            vec!["b"]
+        );
+    }
+
+    /// The harness's stop on a stream as the llm layer shows it: text calls
+    /// are cut after the kept reads, native calls after the kept count, and
+    /// the cut is recorded for the journal.
+    #[test]
+    fn the_stream_stop_cuts_after_the_calls_that_run() {
+        let record = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stop = stream_stop(record.clone());
+        let content = "<tool_call>\n{\"action\":\"read\",\"file\":\"a\"}\n<tool_call>\n{\"action\":\"read\",\"file\":\"b\"}\n<tool_call>\n{\"action\":\"search\",\"query\":\"q\"}";
+        let view = crate::llm::StreamView {
+            content,
+            calls: &[],
+            call_started: false,
+        };
+        let cut = (stop.0)(&view).unwrap();
+        assert_eq!(
+            &content[..cut.content],
+            "<tool_call>\n{\"action\":\"read\",\"file\":\"a\"}\n<tool_call>\n{\"action\":\"read\",\"file\":\"b\"}"
+        );
+        assert!(record
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .starts_with("kept 2 call(s) (read, read)"));
+        let partial = crate::llm::StreamView {
+            content: &content[..40],
+            calls: &[],
+            call_started: false,
+        };
+        assert!((stop.0)(&partial).is_none());
+
+        let write = crate::llm::ToolCall {
+            id: None,
+            name: "write".into(),
+            arguments: "{\"file\":\"a\",\"content\":\"x\"}".into(),
+        };
+        let native = crate::llm::StreamView {
+            content: "",
+            calls: std::slice::from_ref(&write),
+            call_started: true,
+        };
+        assert_eq!((stop.0)(&native).unwrap().calls, 1);
+    }
+
+    /// An object that is not a call (a fenced example) never counts: the
+    /// read after it is the first call, and nothing is cut at the example.
+    #[test]
+    fn an_example_object_is_not_a_call() {
+        let stop = stream_stop(std::sync::Arc::new(std::sync::Mutex::new(None)));
+        let content = "Like this: ```{\"example\":1}```\n<tool_call>\n{\"action\":\"read\",\"file\":\"a\"}\n<tool_call>\n{\"action\":\"search\",\"query\":\"q\"}";
+        let view = crate::llm::StreamView {
+            content,
+            calls: &[],
+            call_started: false,
+        };
+        let cut = (stop.0)(&view).unwrap();
+        assert!(content[..cut.content].ends_with("\"file\":\"a\"}"));
+    }
+
+    #[test]
+    fn every_call_shape_is_recognised() {
+        let conversational = CallSeen::from_object(
+            "{\"message\":\"m\",\"action\":{\"action\":\"read\",\"file\":\"a\"}}",
+        );
+        assert_eq!(conversational.file.as_deref(), Some("a"));
+        let tool = CallSeen::from_object("{\"name\":\"read\",\"arguments\":{\"file\":\"a\"}}");
+        assert_eq!(tool.file.as_deref(), Some("a"));
+        let unknown = CallSeen::from_object("{\"x\":1}");
+        assert!(unknown.name.is_empty() && unknown.file.is_none());
+    }
+}
