@@ -243,11 +243,15 @@ def run(cases, profile_name, n=5, exe=None, port=7480, root=snapshot.DEFAULT_ROO
     profile = PROFILES[profile_name]
     results, raw = {}, []
     for case in cases:
-        if case.get("mode", "journal") == "render":
-            rendered = render_request(case, exe, port, root=root)
-            base = rendered["body"]
-        else:
-            base, _ = journal_request(case)
+        try:
+            if case.get("mode", "journal") == "render":
+                base = render_request(case, exe, port, root=root)["body"]
+            else:
+                base, _ = journal_request(case)
+        except Exception as error:  # noqa: BLE001 - one case that cannot be built must not end the bench
+            results[(case["name"], "unbuilt")] = collections.Counter({"unbuilt": 1})
+            raw.append({"case": case["name"], "transform": None, "class": "unbuilt", "text": str(error)[:1500]})
+            continue
         for transform in case.get("transforms") or ["as_is"]:
             body = json.loads(json.dumps(base))
             prompt = body["messages"][0]["content"]
