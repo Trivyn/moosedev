@@ -2180,6 +2180,30 @@ a task; interactive
 `resume-session ID` resumes a conversation. `--help` lists all commands. Options
 precede the command. Errors produce JSON on stderr and a nonzero exit status.
 
+`render ID [FILE]` builds the next model request as the next step would send
+it and prints it (or writes `FILE`) instead of sending it. It advances as
+`run` does until the step's action request is built. The output's `body` is
+the wire request: one user message holding the prompt, with the output schema
+or the tool definitions, and any repair note; temperature 0; `max_tokens`;
+`provider`; and `reasoning_effort`. The policy decides `reasoning_effort`:
+`none` under `reasoning-off`, unset under `provider-default`; under `auto` it
+is left unset, and the probe the send would run decides it. The task id, the
+journal position and the step's context plan come alongside the body.
+
+`render` skips the response probes, charges no repair attempt and never
+writes the task journal. The steps before the request still run, though: a
+required check, an auto-applied fix, the daemon's context call. So render a
+restored copy of a saved state, never the original. A runner test holds the
+rendered request equal to the one the following real step sends.
+
+The replay tooling builds on it (`bench/harness_study`):
+- `snapshot-save` copies a project's whole state with APFS clonefile.
+- `snapshot-restore` puts a copy at a new path: it rewrites each task's
+  `root`, sets the daemon port, rebuilds the code index (the SCIP index holds
+  absolute paths) and starts the daemon.
+- A decision is then replayed by rendering its request with any build and
+  sending it to any provider.
+
 ## Crash log
 
 `moosedev code` keeps evidence of how a process ended in

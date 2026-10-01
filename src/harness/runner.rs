@@ -55,6 +55,7 @@ mod usage;
 use actions::Step;
 pub use langserver::{DiagnosticsSnapshot, Finding, FixEdit, OfferedFix};
 pub use links::IntentEvent;
+pub use model::RenderedRequest;
 use model::{action_schema, conversational_schema, ModelOutput, ReplyThen, StreamedMessage};
 pub use recovery::{RecoveryStatus, RepairState};
 pub use scope::{ApprovedChangeScope, ApprovedDefinitionScope};
@@ -113,6 +114,11 @@ pub struct Runner {
     /// The files of the leading reads after the first in the last action
     /// response ([`tools::batched_reads`]), run after it by dispatch.
     read_batch: Vec<String>,
+    /// Request-only rendering (`moosedev code render`): the next action
+    /// request is built exactly as it would be sent and kept in `rendered`
+    /// instead of being sent, and nothing is written to the task journal.
+    render_only: bool,
+    rendered: Option<Value>,
     last_saved: Mutex<Option<[u8; 32]>>,
     /// Set for the rest of a step whose prompt overflowed with rule claims
     /// past the daemon's fixed floor: its refreshes ask for the floor alone
@@ -419,6 +425,8 @@ impl Runner {
             action_streaming: None,
             max_output_tokens: None,
             read_batch: Vec::new(),
+            render_only: false,
+            rendered: None,
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -479,6 +487,8 @@ impl Runner {
             action_streaming: None,
             max_output_tokens: None,
             read_batch: Vec::new(),
+            render_only: false,
+            rendered: None,
             index_refresh: None,
             standing_read_paths: Vec::new(),
             indexed_edits: None,
@@ -529,6 +539,40 @@ impl Runner {
 
     /// Apply every role's resolved settings. Both frontends configure a runner
     /// through here, so they cannot disagree about which model answers.
+    /// Request-only rendering (`moosedev code render`): advance as `run`
+    /// would, at most `max_steps` times, until the next action request is
+    /// built, and return it as it would be sent instead of sending it. The
+    /// task journal is never written; work the steps do before the request
+    /// (a required check, an auto-applied fix) does run, so render a
+    /// restored copy of a saved state, never the original.
+    pub async fn render_next_request(&mut self, max_steps: usize) -> Result<Value> {
+        self.render_only = true;
+        self.rendered = None;
+        for _ in 0..max_steps {
+            if !matches!(
+                self.task.phase,
+                Phase::Planning | Phase::Working | Phase::Verifying
+            ) {
+                break;
+            }
+            match self.advance().await {
+                Err(error) if error.downcast_ref::<RenderedRequest>().is_some() => {
+                    return self
+                        .rendered
+                        .take()
+                        .context("the rendered request was not kept");
+                }
+                Err(error) => return Err(error),
+                Ok(()) => {}
+            }
+        }
+        anyhow::bail!(
+            "no model request to render: the task is at {:?} ({:?} mode)",
+            self.task.phase,
+            self.task.mode
+        )
+    }
+
     pub fn configure_provider(
         &mut self,
         provider: &ProviderSettings,
