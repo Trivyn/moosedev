@@ -3425,6 +3425,129 @@ async fn a_required_check_failing_the_same_way_is_focused() {
         .contains("Required verification failed."));
 }
 
+/// A required check that fails `test_render` with its values, as libtest
+/// reports an `assert_eq!`.
+fn failing_check_with_values() -> String {
+    "printf \"test test_render ... FAILED\\nthread 'test_render' panicked at tests/test_labels.py:2:5:\\nassertion failed\\n  left: 1\\n right: 2\\n\"; exit 101 # check".to_string()
+}
+
+/// An approved plan whose required check fails, its planned file edited and
+/// a finish run, so the check has failed once.
+async fn failed_required_check(fixture: &Fixture) -> Runner {
+    std::fs::create_dir_all(fixture.root.join("tests")).unwrap();
+    std::fs::write(
+        fixture.root.join("tests/test_labels.py"),
+        "def test_render():\n    assert render_name(\" a \") == \"a\"\n",
+    )
+    .unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"labels.py"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Strip the rendered name","files":["labels.py"],"checks":[failing_check_with_values()]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    act(
+        fixture,
+        &mut runner,
+        json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.strip()\n"}),
+    )
+    .await;
+    for _ in 0..6 {
+        if runner
+            .task
+            .check_results
+            .last()
+            .is_some_and(|run| !run.success)
+        {
+            return runner;
+        }
+        if fixture.shared.lock().unwrap().replies.is_empty() {
+            fixture.conversational(json!({"action":"finish","summary":"Done."}));
+        }
+        runner.advance().await.unwrap();
+    }
+    panic!("the required check never failed");
+}
+
+/// badciv orE, 3 of 6: the model paged a failed required check's output until
+/// the inspect guard parked, before any failure came back. A required check
+/// is the plan's measure of done, so its first failure shows the failing
+/// test and the code it calls.
+#[tokio::test]
+async fn a_required_checks_first_failure_shows_where_to_look() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let runner = failed_required_check(&fixture).await;
+    assert_eq!(stall_count(&runner), Some(1));
+    let response = &runner.task.last_response;
+    assert!(
+        response.starts_with("[Harness: a required check failed: test `test_render` (tests/test_labels.py:2). Its source and the code it calls:\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("`render_name` (called by the test)"),
+        "{response}"
+    );
+    let focus = intent_details(&runner, "stalled_failure_focus");
+    assert_eq!(focus.len(), 1);
+    assert!(focus[0].contains("first failure"), "{focus:?}");
+
+    // Switched off, the first failure is its output alone.
+    let fixture = symbolic_fixture().await;
+    std::env::set_var("MOOSEDEV_HARNESS_FOCUS_FIRST", "off");
+    let runner = failed_required_check(&fixture).await;
+    std::env::remove_var("MOOSEDEV_HARNESS_FOCUS_FIRST");
+    assert!(intent_details(&runner, "stalled_failure_focus").is_empty());
+}
+
+/// The steer before a park: while a required check fails, a repeated look
+/// that would park gets the failing test, its values and its source once;
+/// the next one parks. Switched off, the repeat parks at once.
+#[tokio::test]
+async fn a_look_that_would_park_while_a_check_fails_is_steered_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let read = json!({"action":"read","file":"labels.py"});
+    for steer in [true, false] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = failed_required_check(&fixture).await;
+        if !steer {
+            std::env::set_var("MOOSEDEV_HARNESS_STEER", "off");
+        }
+        act(&fixture, &mut runner, read.clone()).await;
+        assert!(
+            runner.task.last_response.starts_with("Not read again"),
+            "{}",
+            runner.task.last_response
+        );
+        act(&fixture, &mut runner, read.clone()).await;
+        if steer {
+            assert_eq!(runner.task.phase, Phase::Working);
+            let response = runner.task.last_response.clone();
+            assert!(
+                response.starts_with("[Harness: the required check is still failing, and looking again will not change it: test `test_render` (tests/test_labels.py:2).\nIts values:\nassertion failed\nleft: 1\nright: 2\nIts source and the code it calls:\n"),
+                "{response}"
+            );
+            assert!(
+                response.ends_with("a further look parks for the human.]\n"),
+                "{response}"
+            );
+            assert_eq!(intent_details(&runner, "steer_before_park").len(), 1);
+            act(&fixture, &mut runner, read.clone()).await;
+        }
+        std::env::remove_var("MOOSEDEV_HARNESS_STEER");
+        assert_eq!(runner.task.phase, Phase::AwaitingInput, "steer {steer}");
+        assert!(runner
+            .task
+            .last_response
+            .starts_with("The model keeps asking to read files"));
+        assert_eq!(
+            intent_details(&runner, "steer_before_park").len(),
+            usize::from(steer)
+        );
+    }
+}
+
 /// `MOOSEDEV_HARNESS_LOOP_DETECTOR=off` tracks nothing, shows nothing and
 /// never parks, for study variants.
 #[tokio::test]

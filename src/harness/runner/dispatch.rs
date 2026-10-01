@@ -495,15 +495,19 @@ impl Runner {
             Step::Read { file } => {
                 self.read_into_working_set(&file).await?;
                 self.task.last_response = format!("Read {file} with its governing knowledge.");
+                self.serve_read_batch().await?;
             }
             Step::ReadRefused { file, reason } => {
                 self.refuse_read(&file, &reason);
+                self.serve_read_batch().await?;
             }
             Step::ReadOutlined { file } => {
                 self.serve_outlined_read(&file, &context, false)?;
+                self.serve_read_batch().await?;
             }
             Step::ReadOutsideScope { file } => {
                 self.serve_outlined_read(&file, &context, true)?;
+                self.serve_read_batch().await?;
             }
             Step::Search { query } => {
                 // A query already asked in this task returns the same records;
@@ -1603,6 +1607,12 @@ impl Runner {
             &format!("event {event} offset {offset}, first at event {first}"),
         );
         if refused_before {
+            // While a required check fails, the first look that would park
+            // gets the failure's source instead (the steer before a park).
+            if let Some(steer) = self.steer_before_park() {
+                self.task.last_response = steer;
+                return true;
+            }
             self.event(format!(
                 "{INSPECT_REFUSED} parked for guidance (event {event}, offset {offset})."
             ));
@@ -1634,6 +1644,59 @@ impl Runner {
         true
     }
 
+    /// The rest of a response's leading reads ([`tools::batched_reads`]), run
+    /// after its first. Several files cannot share the one Last result, so
+    /// each file a read would take in or serve joins the working set while
+    /// it has room, as a re-read outside the scope does; a file refused or
+    /// served outlined is named, not shown, and a refusal here never parks.
+    /// The Last result keeps the first read's answer, with a line for the
+    /// rest. Nothing runs once the first read parked the task.
+    async fn serve_read_batch(&mut self) -> Result<()> {
+        let files = std::mem::take(&mut self.read_batch);
+        if files.is_empty() || self.task.phase == Phase::AwaitingInput {
+            return Ok(());
+        }
+        let mut read = Vec::new();
+        let mut not_read = Vec::new();
+        for file in files {
+            let step = self.read_step(file.clone());
+            self.event(format!("Model action: {}", serde_json::to_string(&step)?));
+            let room =
+                self.task.read_files.len() < MAX_FILES || self.task.read_files.contains(&file);
+            match step {
+                Step::Read { .. } | Step::ReadOutsideScope { .. } if room => {
+                    self.read_into_working_set(&file).await?;
+                    read.push(format!("`{file}`"));
+                }
+                Step::ReadRefused { reason, .. } => {
+                    not_read.push(format!("`{file}` ({reason})"));
+                }
+                _ => not_read.push(format!(
+                    "`{file}` (outlined or no room in the working set; read it alone to see it)"
+                )),
+            }
+        }
+        self.intent_event(
+            "read_batch",
+            &format!("read {}; not read {}", read.len(), not_read.len()),
+        );
+        let mut line = String::new();
+        if !read.is_empty() {
+            line.push_str(&format!(
+                "\nAlso read from the same response, now in the working set with their governing knowledge: {}.",
+                read.join(", ")
+            ));
+        }
+        if !not_read.is_empty() {
+            line.push_str(&format!(
+                "\nNot read from the same response: {}.",
+                not_read.join("; ")
+            ));
+        }
+        self.task.last_response.push_str(&line);
+        Ok(())
+    }
+
     /// Refuse a read whose file the prompt already covers, leaving the source
     /// tiers as they were. A second refusal of the same file while the model
     /// is only looking (reads, inspects and searches since the last human
@@ -1655,6 +1718,10 @@ impl Runner {
         });
         self.intent_event("read_repeat_refused", &format!("{file}: {reason}"));
         if refused_before {
+            if let Some(steer) = self.steer_before_park() {
+                self.task.last_response = steer;
+                return;
+            }
             self.event(format!("{READ_REFUSED} parked for guidance ({file})."));
             self.task.last_response = format!(
                 "The model keeps asking to read files whose current text it already has ({file} last), without planning or editing. Guidance is needed: say what to do next, or /plan to change the approach."

@@ -103,6 +103,48 @@ pub fn text_call(content: &str) -> Option<(&'static str, ToolCall)> {
         .find_map(|dialect| Some((dialect.name(), dialect.text_call(content)?)))
 }
 
+/// The top-level JSON objects in `content`, in order, as byte ranges, and
+/// whether another object has started after the last complete one. Text
+/// between objects (dialect tags, fences, prose) is skipped; braces inside
+/// strings do not count. A model that writes several calls as text writes
+/// one object per call, so a caller can tell how many calls have arrived
+/// while a response is still streaming.
+pub fn json_objects(content: &str) -> (Vec<std::ops::Range<usize>>, bool) {
+    let mut objects = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, byte) in content.bytes().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' if depth > 0 => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = at;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    objects.push(start..at + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    (objects, depth > 0)
+}
+
 /// Normalize a tool-contract completion. Text is read as calls only when no
 /// native call came back: beside a native call, text is the model talking.
 /// The first dialect that finds any call in the text reads all of them, so a
@@ -187,6 +229,24 @@ fn arguments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_objects_finds_top_level_objects_between_tags() {
+        let content = "<tool_call>\n{\"action\": \"read\", \"note\": \"a } in a string\"}\n</tool_call>\n<tool_call>\n{\"action\": {\"nested\": 1}}\n<tool_call>\n{\"action\"";
+        let (objects, started) = json_objects(content);
+        assert_eq!(objects.len(), 2);
+        assert_eq!(
+            &content[objects[0].clone()],
+            "{\"action\": \"read\", \"note\": \"a } in a string\"}"
+        );
+        assert_eq!(
+            &content[objects[1].clone()],
+            "{\"action\": {\"nested\": 1}}"
+        );
+        assert!(started);
+        assert_eq!(json_objects("plain prose").0.len(), 0);
+        assert!(!json_objects("{\"a\":1}").1);
+    }
     use serde_json::json;
 
     fn native(name: &str, arguments: &str) -> ToolCall {

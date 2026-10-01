@@ -756,6 +756,17 @@ impl Runner {
             Some(tokens) => client.with_output_limit(tokens),
             None => client.without_output_limit(),
         };
+        // A streamed action stops once the harness holds the calls it will
+        // run: the long responses were calls after the first, which never
+        // ran (badciv orC-orE: 27 of 29 over 30 KB; Lesson a4a37768).
+        let stop_record = Arc::new(Mutex::new(None));
+        let client = client.with_stream_stop(
+            (name == "harness_action" && tools::call_stop_enabled())
+                .then(|| tools::stream_stop(stop_record.clone())),
+        );
+        if name == "harness_action" {
+            self.read_batch.clear();
+        }
         {
             // Bind audit metadata to the source actually delivered, rather than
             // rereading files that may have changed while preparing the request.
@@ -839,8 +850,24 @@ impl Runner {
                     return Err(error.into());
                 }
             };
+            if let Some(detail) = stop_record.lock().ok().and_then(|mut record| record.take()) {
+                self.intent_event("stream_stopped", &format!("{name}: {detail}"));
+                if let Some(entry) = self.task.model_requests.last_mut() {
+                    entry["stopped_by_caller"] = json!(true);
+                }
+            }
             let text = match generated {
-                Generated::Content(text) => text,
+                Generated::Content(text) => {
+                    if name == "harness_action" && !tools::first_call_only() {
+                        let (objects, _) = crate::llm::normalize::json_objects(&text);
+                        let calls: Vec<tools::CallSeen> = tools::text_calls(&text, &objects)
+                            .into_iter()
+                            .map(|(_, call)| call)
+                            .collect();
+                        self.read_batch = tools::batched_reads(&calls);
+                    }
+                    text
+                }
                 Generated::Tools(completion) => {
                     self.decode_tool_completion(completion, &schema, &client)?
                 }
@@ -952,6 +979,17 @@ impl Runner {
         };
         match tools::decode(&normalized, schema, self.task.batch_capture, &refused) {
             Ok(decoded) => {
+                // The leading reads after the first run with it, when the
+                // first is the call that runs; `MOOSEDEV_HARNESS_MULTI_CALL=
+                // first` keeps to the one call.
+                if !first_only && decoded.passed_over.is_empty() {
+                    let calls: Vec<tools::CallSeen> = normalized
+                        .calls
+                        .iter()
+                        .map(tools::CallSeen::normal)
+                        .collect();
+                    self.read_batch = tools::batched_reads(&calls);
+                }
                 for note in &normalized.notes {
                     match note {
                         Note::ArgumentsRepaired { tool, detail } => self.intent_event(
@@ -981,13 +1019,24 @@ impl Runner {
                         ),
                     );
                 }
-                if !decoded.ignored.is_empty() {
-                    let ignored = decoded.ignored.join(", ");
+                // The batched reads lead the calls after the first; they run.
+                let ignored_calls = decoded
+                    .ignored
+                    .get(self.read_batch.len()..)
+                    .unwrap_or_default();
+                if !ignored_calls.is_empty() {
+                    let ignored = ignored_calls.join(", ");
                     self.intent_event(
                         "extra_tool_calls_ignored",
                         &format!("ran {}; ignored {ignored}", decoded.name),
                     );
-                    self.event(if decoded.passed_over.is_empty() {
+                    self.event(if !self.read_batch.is_empty() {
+                        format!(
+                            "The leading reads ran ({} and {} more); other calls do not run beside them. Ignored: {ignored}.",
+                            decoded.name,
+                            self.read_batch.len()
+                        )
+                    } else if decoded.passed_over.is_empty() {
                         format!(
                             "Only the first tool call ran ({}); one action runs per step. Ignored: {ignored}.",
                             decoded.name

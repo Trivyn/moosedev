@@ -48,6 +48,11 @@ pub struct SymbolicState {
     /// of asking again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unedited_work_at: Option<usize>,
+    /// The edit count the harness last steered at instead of parking a
+    /// repeated look while a required check failed; the next refusal at that
+    /// source state parks ([`super::stall`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steered_at: Option<usize>,
     /// The edit count a clean, freshly checked edit armed auto-verify at; taken
     /// by the next advance whether it fires or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]

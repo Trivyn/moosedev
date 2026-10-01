@@ -14,7 +14,8 @@ use completion::{
     MAX_STREAM_RAW_BYTES,
 };
 pub use completion::{
-    parse_model_json, tool_call_from_text, CompletionError, JsonRecovery, ToolCall, ToolCompletion,
+    parse_model_json, tool_call_from_text, CompletionError, JsonRecovery, StreamCut, StreamStop,
+    StreamView, ToolCall, ToolCompletion,
 };
 use usage::{RequestObservation, UsageBinding};
 pub use usage::{RequestStatus, RequestUsage, TokenUsage, UsageContext, UsageObserver};
@@ -280,6 +281,8 @@ pub struct OpenAiCompatClient {
     /// responses (OpenRouter's top-level `provider`), in the order first seen.
     served_by: Arc<std::sync::Mutex<Vec<String>>>,
     timeouts: LlmTimeouts,
+    /// The caller's early stop for streamed responses ([`StreamStop`]).
+    stream_stop: Option<StreamStop>,
 }
 
 /// What a request asks the provider for: plain or schema-constrained content, or tool calls.
@@ -365,6 +368,7 @@ impl OpenAiCompatClient {
             provider_routing: None,
             served_by: Arc::default(),
             timeouts,
+            stream_stop: None,
         }
     }
 
@@ -429,6 +433,14 @@ impl OpenAiCompatClient {
         self
     }
 
+    /// End a streamed response where `stop` cuts it ([`StreamStop`]): the
+    /// completion holds what was kept and the rest is never read. A
+    /// non-streamed response is unaffected.
+    pub fn with_stream_stop(mut self, stop: Option<StreamStop>) -> Self {
+        self.stream_stop = stop;
+        self
+    }
+
     pub fn with_request_allowance(mut self, allowance: Option<Arc<AtomicU8>>) -> Self {
         self.request_allowance = allowance;
         self
@@ -483,6 +495,7 @@ impl OpenAiCompatClient {
             provider_routing: self.provider_routing.clone(),
             served_by: self.served_by.clone(),
             timeouts: self.timeouts,
+            stream_stop: self.stream_stop.clone(),
         }
     }
 
@@ -880,6 +893,7 @@ impl OpenAiCompatClient {
             } else {
                 CompletionStream::default()
             };
+            stream.stop = self.stream_stop.clone();
             let mut json_body = Vec::new();
             let mut started = false;
             loop {
@@ -930,7 +944,8 @@ impl OpenAiCompatClient {
                     if let Some(usage) = &stream.usage {
                         observation.observe(usage);
                     }
-                    if stream.done {
+                    // A caller's cut is not the provider's completion.
+                    if stream.done && !stream.cut_by_caller {
                         observation.response_complete();
                     }
                     fed?;
@@ -1178,6 +1193,142 @@ mod tests {
             json!({"choices":[{"index":0,"delta":{"content":content}}]}),
             json!({"choices":[{"index":0,"delta":{},"finish_reason":finish}]})
         )
+    }
+
+    /// Content deltas, one SSE event each, then a provider finish.
+    fn sse_deltas(deltas: &[&str]) -> String {
+        let mut body = String::new();
+        for delta in deltas {
+            body.push_str(&format!(
+                "data: {}\n\n",
+                json!({"choices":[{"index":0,"delta":{"content":delta}}]})
+            ));
+        }
+        body.push_str(&format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+        ));
+        body
+    }
+
+    /// A caller's stop ends the stream where it cuts, as a successful
+    /// completion holding what was kept; nothing after the cut is read.
+    #[test]
+    fn a_caller_stop_ends_the_stream_at_its_cut() {
+        let stop = StreamStop(Arc::new(|view: &StreamView<'_>| {
+            let (objects, _) = normalize::json_objects(view.content);
+            (objects.len() >= 2).then(|| StreamCut {
+                content: objects[0].end,
+                calls: 0,
+            })
+        }));
+        let body = sse_deltas(&[
+            "<tool_call>\n{\"action\": \"read\", \"file\": \"a\"}",
+            "\n</tool_call>\n<tool_call>\n{\"action\": ",
+            "\"search\", \"query\": \"x\"}",
+            "\n<tool_call>\n{\"action\": \"search\", \"query\": \"y\"}",
+        ]);
+        let mut stream = CompletionStream::default();
+        stream.stop = Some(stop.clone());
+        stream.feed(body.as_bytes(), &|_| {}).unwrap();
+        assert!(stream.done && stream.cut_by_caller);
+        stream.finish().unwrap();
+        assert_eq!(
+            stream.into_tool_completion().content,
+            "<tool_call>\n{\"action\": \"read\", \"file\": \"a\"}"
+        );
+
+        // No cut asked for: the whole response, as before.
+        let mut stream = CompletionStream::default();
+        stream.stop = Some(StreamStop(Arc::new(|_: &StreamView<'_>| None)));
+        stream.feed(body.as_bytes(), &|_| {}).unwrap();
+        stream.finish().unwrap();
+        assert!(!stream.cut_by_caller);
+        assert!(stream.into_tool_completion().content.ends_with("\"y\"}"));
+    }
+
+    /// The next call opening in its own event, with no `}` yet, is enough to
+    /// ask the caller: a long call after the kept one is never generated.
+    #[test]
+    fn a_caller_stop_is_asked_when_the_next_call_opens() {
+        let stop = StreamStop(Arc::new(|view: &StreamView<'_>| {
+            let (objects, started) = normalize::json_objects(view.content);
+            (objects.len() == 1 && started).then(|| StreamCut {
+                content: objects[0].end,
+                calls: 0,
+            })
+        }));
+        let body = sse_deltas(&[
+            "{\"action\": \"write\", \"file\": \"a\"}",
+            "\n{\"action\": \"write\", \"content\": \"",
+            "a very long text with no closing brace",
+        ]);
+        let mut stream = CompletionStream::default();
+        stream.stop = Some(stop);
+        stream.feed(body.as_bytes(), &|_| {}).unwrap();
+        assert!(stream.cut_by_caller);
+        assert_eq!(
+            stream.into_tool_completion().content,
+            "{\"action\": \"write\", \"file\": \"a\"}"
+        );
+    }
+
+    /// Interleaved native calls: one whose arguments do not parse yet is not
+    /// complete, whatever started after it.
+    #[test]
+    fn an_unfinished_native_call_is_not_complete() {
+        let piece = |index: u64, arguments: &str| {
+            format!(
+                "data: {}\n\n",
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":index,"id":format!("c{index}"),"function":{"name":"write","arguments":arguments}}]}}]})
+            )
+        };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let mut stream = CompletionStream::for_tools();
+        stream.stop = Some(StreamStop(Arc::new(move |view: &StreamView<'_>| {
+            record.lock().unwrap().push(view.calls.len());
+            None
+        })));
+        let body = format!(
+            "{}{}{}",
+            piece(0, "{\"file\":"),
+            piece(1, "{}"),
+            piece(0, "\"a\"}")
+        );
+        stream.feed(body.as_bytes(), &|_| {}).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![0, 0, 1]);
+    }
+
+    /// A native call is complete once the next one starts; the caller sees
+    /// only complete calls and keeps the ones it names.
+    #[test]
+    fn a_caller_stop_sees_native_calls_once_complete() {
+        let call = |index: u64, name: &str, arguments: &str| {
+            format!(
+                "data: {}\n\n",
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":index,"id":format!("c{index}"),"function":{"name":name,"arguments":arguments}}]}}]})
+            )
+        };
+        let body = format!(
+            "{}{}{}",
+            call(0, "write", "{\"file\":\"a\"}"),
+            call(1, "write", "{\"file\":\"b\"}"),
+            call(2, "write", "{\"file\":\"c\"}"),
+        );
+        let mut stream = CompletionStream::for_tools();
+        stream.stop = Some(StreamStop(Arc::new(|view: &StreamView<'_>| {
+            assert!(view.call_started);
+            (!view.calls.is_empty()).then_some(StreamCut {
+                content: view.content.len(),
+                calls: 1,
+            })
+        })));
+        stream.feed(body.as_bytes(), &|_| {}).unwrap();
+        stream.finish().unwrap();
+        let completion = stream.into_tool_completion();
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].arguments, "{\"file\":\"a\"}");
     }
 
     #[test]
@@ -1452,6 +1603,50 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    /// The client applies a caller's stop to a live stream: a provider that
+    /// keeps generating (this one never ends) is cut where the stop says, and
+    /// the call returns the kept content without waiting for the rest.
+    #[tokio::test]
+    async fn a_stream_stop_ends_a_live_response_early() {
+        let piece = |content: &str| tool_piece(json!({"index":0,"delta":{"content":content}}));
+        let (endpoint, server) = raw_stub(
+            SSE_HEADERS,
+            vec![
+                piece("<tool_call>\n{\"action\":\"read\",\"file\":\"a\"}\n"),
+                piece("<tool_call>\n{\"action\":\"search\",\"query\":\"q\"}"),
+                piece("<tool_call>\n{\"action\":\"search\",\"query\":\"r\"}"),
+            ],
+            std::time::Duration::from_millis(10),
+            None,
+        )
+        .await;
+        let stop = StreamStop(Arc::new(|view: &StreamView<'_>| {
+            let (objects, _) = normalize::json_objects(view.content);
+            (objects.len() >= 2).then(|| StreamCut {
+                content: objects[0].end,
+                calls: 0,
+            })
+        }));
+        let client = OpenAiCompatClient::new(endpoint, "test")
+            .with_timeouts(short_timeouts())
+            .with_stream_stop(Some(stop));
+        let started = std::time::Instant::now();
+        let content = client
+            .chat_completion_json_schema_streaming_checked(
+                "model",
+                "prompt",
+                None,
+                "shape",
+                json!({}),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(content, "<tool_call>\n{\"action\":\"read\",\"file\":\"a\"}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        server.abort();
     }
 
     fn tool_piece(delta: serde_json::Value) -> String {
