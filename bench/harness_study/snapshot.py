@@ -193,6 +193,7 @@ def restore(name, dest, port, root=DEFAULT_ROOT, exe=None, index=True, start=Tru
         return None
     # The restored daemon takes its address from moosedev.toml; an inherited
     # MOOSEDEV_HTTP_ADDR would override it.
+    exe = Path(exe).resolve()  # the commands below run inside the restored copy
     env = {key: value for key, value in os.environ.items() if key != "MOOSEDEV_HTTP_ADDR"}
     env["MOOSEDEV_DATA_DIR"] = ".moosedev"
     if index:
