@@ -2542,6 +2542,9 @@ async fn headless_answer_and_a_conversation_message_agree() {
 #[tokio::test]
 async fn answering_a_stall_park_or_a_read_repeat_park_continues_the_plan() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = stalled_failure_runner(&fixture).await;
     for variant in ["a", "b", "c", "d"] {
@@ -3363,6 +3366,73 @@ async fn an_applied_edit_starts_the_count_again() {
     );
 }
 
+/// A failure that keeps coming back while the source goes back and forth is
+/// not progress (badciv orH, 3 of 6: one test assertion alternated between
+/// two values for 2 h, each edit resetting the count). Coming back to a
+/// source the failure was seen in counts on, says so in the focus block, and
+/// parks by the fourth sighting; switched off, every edit starts again.
+#[tokio::test]
+async fn a_failure_in_a_source_seen_before_is_not_progress() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
+    let back = json!({"action":"replace","file":"labels.py","old_text":"    return name.lower()\n","new_text":"    return name\n"});
+    for by_state in [true, false] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = stalled_failure_runner(&fixture).await;
+        if !by_state {
+            std::env::set_var("MOOSEDEV_HARNESS_STALL_BY_STATE", "off");
+        }
+        act(&fixture, &mut runner, failing_test_command("a")).await;
+        act(&fixture, &mut runner, lower.clone()).await;
+        act(&fixture, &mut runner, failing_test_command("b")).await;
+        assert_eq!(stall_count(&runner), Some(1), "a new source is progress");
+        act(&fixture, &mut runner, back.clone()).await;
+        act(&fixture, &mut runner, failing_test_command("c")).await;
+        if by_state {
+            assert_eq!(stall_count(&runner), Some(2));
+            let response = runner.task.last_response.clone();
+            assert!(
+                response.starts_with(
+                    "[Harness: the failure is back with the source exactly as it was at event"
+                ),
+                "{response}"
+            );
+            assert!(response.contains("went back and forth"), "{response}");
+            // The event named is the command that first failed in this source.
+            let at: usize = response
+                .split("as it was at event ")
+                .nth(1)
+                .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|digits| digits.parse().ok())
+                .expect("an event index");
+            assert!(
+                runner.task.events[at].message.starts_with("Command: "),
+                "{}",
+                runner.task.events[at].message
+            );
+        } else {
+            assert_eq!(stall_count(&runner), Some(1));
+        }
+        act(&fixture, &mut runner, lower.clone()).await;
+        act(&fixture, &mut runner, failing_test_command("d")).await;
+        act(&fixture, &mut runner, back.clone()).await;
+        act(&fixture, &mut runner, failing_test_command("e")).await;
+        std::env::remove_var("MOOSEDEV_HARNESS_STALL_BY_STATE");
+        if by_state {
+            assert_eq!(runner.task.phase, Phase::AwaitingInput);
+            assert!(
+                runner.task.last_response.contains("gone back and forth"),
+                "{}",
+                runner.task.last_response
+            );
+            assert_eq!(intent_details(&runner, "stalled_failure_parked").len(), 1);
+        } else {
+            assert_eq!(runner.task.phase, Phase::Working);
+            assert!(intent_details(&runner, "stalled_failure_parked").is_empty());
+        }
+    }
+}
+
 /// A required check that fails the same way as the model's last command,
 /// with no edit between, is the second sighting too.
 #[tokio::test]
@@ -3512,6 +3582,9 @@ async fn a_required_checks_first_failure_shows_where_to_look() {
 #[tokio::test]
 async fn a_look_that_would_park_while_a_check_fails_is_steered_once() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let read = json!({"action":"read","file":"labels.py"});
     for steer in [true, false] {
         let fixture = symbolic_fixture().await;

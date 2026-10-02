@@ -53,6 +53,14 @@ pub struct StalledFailure {
     /// runs) says nothing about this failure.
     #[serde(default)]
     pub command: String,
+    /// The source the failure was last seen in: a fingerprint of the
+    /// working set's text ([`stall_by_state_enabled`]).
+    #[serde(default)]
+    pub state: String,
+    /// Every source it has been seen in, with the event that first showed it
+    /// there: coming back to one of these is not progress.
+    #[serde(default)]
+    pub seen: Vec<(String, usize)>,
 }
 
 /// Lines of a failure's expected and actual values the steer quotes.
@@ -64,6 +72,12 @@ const VALUE_BYTES: usize = 600;
 /// variants: nothing is tracked, shown or parked.
 fn enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_LOOP_DETECTOR").map_or(true, |value| value.trim() != "off")
+}
+
+/// `MOOSEDEV_HARNESS_STALL_BY_STATE=off` counts progress by edits, as before:
+/// any edit starts the count again.
+fn stall_by_state_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_STALL_BY_STATE").map_or(true, |value| value.trim() != "off")
 }
 
 /// `MOOSEDEV_HARNESS_FOCUS_FIRST=off` keeps a required check's first failure
@@ -235,21 +249,74 @@ impl Runner {
         let signature = signature(output, &tests);
         let edits = self.task.edits.len();
         let required = self.is_required_check(command);
+        // Progress is a source the failure has not been seen in, not an
+        // edit: badciv orH, 3 of 6 local replicates, alternated one test
+        // assertion between two values for 2 h, each edit resetting the count.
+        let by_state = stall_by_state_enabled();
+        let source = if by_state {
+            self.source_state()
+        } else {
+            String::new()
+        };
+        // The failing command's own event, journaled before it is noted.
+        let event = self
+            .task
+            .events
+            .iter()
+            .rposition(|event| event.message.starts_with("Command: "))
+            .unwrap_or_default();
+        let unchanged = |stall: &StalledFailure| {
+            if by_state {
+                stall.state == source
+            } else {
+                stall.edits == edits
+            }
+        };
         let state = self.symbolic_state_mut();
+        let mut revisited = None;
         let count = match state.stalled_failure.as_mut() {
-            Some(stall) if stall.edits == edits && stall.signature == signature => {
+            Some(stall) if unchanged(stall) && stall.signature == signature => {
                 stall.count += 1;
+                stall.edits = edits;
                 stall.command = command.to_string();
                 stall.count
             }
             // A failure that names no test and no error (a `grep` that
             // matched nothing) says nothing about the one being tracked.
             Some(stall)
-                if stall.edits == edits
+                if unchanged(stall)
                     && signature.starts_with(OUTPUT_SIGNATURE)
                     && !stall.signature.starts_with(OUTPUT_SIGNATURE) =>
             {
                 return None;
+            }
+            // The same failure in a source it was seen in before: the edits
+            // since went back and forth, which is not progress.
+            Some(stall)
+                if by_state
+                    && stall.signature == signature
+                    && stall.seen.iter().any(|(seen, _)| *seen == source) =>
+            {
+                revisited = stall
+                    .seen
+                    .iter()
+                    .find(|(seen, _)| *seen == source)
+                    .map(|(_, at)| *at);
+                stall.count += 1;
+                stall.state = source.clone();
+                stall.edits = edits;
+                stall.command = command.to_string();
+                stall.count
+            }
+            // The same failure in a new source: progress, so the count starts
+            // again, and this source joins the ones seen.
+            Some(stall) if by_state && stall.signature == signature => {
+                stall.count = 1;
+                stall.state = source.clone();
+                stall.edits = edits;
+                stall.command = command.to_string();
+                stall.seen.push((source.clone(), event));
+                1
             }
             _ => {
                 state.stalled_failure = Some(StalledFailure {
@@ -257,6 +324,12 @@ impl Runner {
                     edits,
                     count: 1,
                     command: command.to_string(),
+                    state: source.clone(),
+                    seen: if by_state {
+                        vec![(source.clone(), event)]
+                    } else {
+                        Vec::new()
+                    },
                 });
                 1
             }
@@ -273,9 +346,14 @@ impl Runner {
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
             self.park_under_approved_plan();
-            return Some(format!(
-                "[Harness: the same failure ({what}) has come back {count} times with no edit in between; rerunning, reading and paging have not changed it. Guidance is needed: say what to change, or /plan to change the approach.]\n"
-            ));
+            return Some(match revisited {
+                Some(at) => format!(
+                    "[Harness: the same failure ({what}) has come back {count} times, the last with the source exactly as it was at event {at}: the edits since have gone back and forth without changing the result. Guidance is needed: say which side is wrong, the test or the code it exercises, or /plan to change the approach.]\n"
+                ),
+                None => format!(
+                    "[Harness: the same failure ({what}) has come back {count} times with no edit in between; rerunning, reading and paging have not changed it. Guidance is needed: say what to change, or /plan to change the approach.]\n"
+                ),
+            });
         }
         // A required check that names its failing test shows where to look
         // the first time it fails.
@@ -292,6 +370,10 @@ impl Runner {
         );
         let opening = if first {
             format!("a required check failed: {what}")
+        } else if let Some(at) = revisited {
+            format!(
+                "the failure is back with the source exactly as it was at event {at}, when this check failed the same way: the edits since went back and forth without changing the result, so look at the code the test exercises: {what}"
+            )
         } else {
             format!("the same failure again with no edit since: {what}")
         };
@@ -299,6 +381,31 @@ impl Runner {
             Some(test) => self.focus_block(test, &opening, "", FOCUS_CLOSING),
             None => format!("[Harness: {opening}. {FOCUS_CLOSING}"),
         })
+    }
+
+    /// A fingerprint of the code the task works on: the current text, on
+    /// disk, of the plan's files and of every file it edited. Reading or
+    /// preloading another file is not a change of the code, so it is left
+    /// out.
+    fn source_state(&self) -> String {
+        let mut files: Vec<String> = self
+            .task
+            .plan
+            .as_ref()
+            .map(|plan| plan.files.clone())
+            .unwrap_or_default();
+        files.extend(self.task.edits.iter().map(|edit| edit.file.clone()));
+        files.sort();
+        files.dedup();
+        let state: Vec<(String, Option<String>)> = files
+            .into_iter()
+            .map(|file| {
+                let text = self.workspace.read(&file).ok().flatten();
+                (file, text)
+            })
+            .collect();
+        let text = serde_json::to_string(&state).unwrap_or_default();
+        super::super::fingerprint(&Some(text)).unwrap_or_default()
     }
 
     /// Whether `command` is one of the approved plan's required checks.

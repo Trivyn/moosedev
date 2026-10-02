@@ -1427,3 +1427,18 @@ impl JournalWatch {
         violations
     }
 }
+
+/// Sets `MOOSEDEV_HARNESS_SERVE_SHOWN=off` for a test's life: a read of a
+/// file shown in full is refused, as before batch 4. Hold `ENVIRONMENT`.
+pub(super) struct ServeShownOff;
+impl ServeShownOff {
+    pub(super) fn set() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_SERVE_SHOWN", "off");
+        Self
+    }
+}
+impl Drop for ServeShownOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_SERVE_SHOWN");
+    }
+}

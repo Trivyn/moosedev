@@ -159,6 +159,9 @@ async fn only_the_first_of_several_tool_calls_runs_and_the_rest_are_journaled() 
 #[tokio::test]
 async fn of_several_calls_the_first_the_harness_would_not_refuse_runs() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = Fixture::new().await;
     std::fs::write(fixture.root.join("other.txt"), "other\n").unwrap();
     let mut runner = fixture.interactive().await;

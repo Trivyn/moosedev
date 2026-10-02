@@ -2,6 +2,15 @@
 //! execute the resulting step under the approval and policy gates.
 use super::*;
 
+/// What a served read is: a file outlined for space, one outside the step's
+/// scope, or one the prompt already shows in full.
+#[derive(Debug, Clone, Copy)]
+enum Serve {
+    Outlined,
+    OutsideScope,
+    Shown,
+}
+
 /// The status and message of a provider refusal (payment, authentication
 /// or permission), whether an action request or the compatibility probe met it.
 fn refusal_of(error: &anyhow::Error) -> Option<(u16, String)> {
@@ -490,6 +499,7 @@ impl Runner {
                 | Step::ReadRefused { .. }
                 | Step::ReadOutlined { .. }
                 | Step::ReadOutsideScope { .. }
+                | Step::ReadShown { .. }
                 | Step::Search { .. }
         );
         match step {
@@ -537,11 +547,15 @@ impl Runner {
                 self.serve_read_batch().await?;
             }
             Step::ReadOutlined { file } => {
-                self.serve_outlined_read(&file, &context, false)?;
+                self.serve_outlined_read(&file, &context, Serve::Outlined)?;
+                self.serve_read_batch().await?;
+            }
+            Step::ReadShown { file } => {
+                self.serve_outlined_read(&file, &context, Serve::Shown)?;
                 self.serve_read_batch().await?;
             }
             Step::ReadOutsideScope { file } => {
-                self.serve_outlined_read(&file, &context, true)?;
+                self.serve_outlined_read(&file, &context, Serve::OutsideScope)?;
                 self.serve_read_batch().await?;
             }
             Step::Search { query } => {
@@ -1811,7 +1825,7 @@ impl Runner {
         &mut self,
         file: &str,
         context: &ContextResponse,
-        outside_scope: bool,
+        serve: Serve,
     ) -> Result<()> {
         let text = self
             .workspace
@@ -1820,21 +1834,35 @@ impl Runner {
         self.symbolic_state_mut()
             .read_snapshots
             .insert(file.to_string(), fingerprint(&Some(text.clone())));
-        let (respond, prefix, kind): (fn(&str, &str) -> String, _, _) = if outside_scope {
-            (
+        let (respond, prefix, kind): (fn(&str, &str) -> String, _, _) = match serve {
+            Serve::OutsideScope => (
                 actions::outside_scope_text_response,
                 actions::OUTSIDE_SCOPE_SERVED,
                 "read_served_outside_scope",
-            )
-        } else {
-            (
+            ),
+            Serve::Outlined => (
                 actions::outlined_text_response,
                 actions::OUTLINED_SERVED,
                 "outlined_read_served",
-            )
+            ),
+            Serve::Shown => (
+                actions::shown_text_response,
+                actions::SHOWN_SERVED,
+                "shown_read_served",
+            ),
         };
         let whole = respond(file, &text);
         let budget = self.next_inspect_budget(context)?;
+        // A file shown in full that the Last result cannot hold whole is not
+        // served a part of: the copy under Source is the whole text, and a
+        // part would then be refused as a repeat.
+        if matches!(serve, Serve::Shown) && whole.len() > budget {
+            let reason = self
+                .redundant_read(file)
+                .unwrap_or_else(|| format!("{file} is shown in full under Source."));
+            self.refuse_read(file, &reason);
+            return Ok(());
+        }
         let size = text.len();
         let header = format!("{prefix} {file} ({size} bytes):\n");
         let event = self.task.events.len();

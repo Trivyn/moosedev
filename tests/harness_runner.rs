@@ -3391,6 +3391,9 @@ async fn serving_outlined_reads_switched_off_refuses_them_then_parks() {
     // badciv 40cef4a5: the crate was larger than the source budget, and each
     // read outlined the file qwen read next, for about 40 planning steps.
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let _off = ServeOutlinedOff::new();
     let fixture = Fixture::new().await;
     let mut runner = outlined_a(&fixture).await;
@@ -3430,6 +3433,9 @@ async fn serving_outlined_reads_switched_off_refuses_them_then_parks() {
 #[tokio::test]
 async fn an_edit_attempt_between_refused_reads_does_not_park() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = Fixture::new().await;
     let mut runner = outlined_a(&fixture).await;
     let read = |file: &str| json!({"action":"read","file":file});
@@ -3477,6 +3483,10 @@ async fn an_edit_attempt_between_refused_reads_does_not_park() {
 
 #[tokio::test]
 async fn a_file_shown_in_full_is_not_read_again_and_the_planner_is_told_to_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     let read = json!({"action":"read","file":"code.txt"});
@@ -3496,6 +3506,41 @@ async fn a_file_shown_in_full_is_not_read_again_and_the_planner_is_told_to_plan(
         .task
         .last_response
         .contains("the next action is plan"));
+}
+
+/// A read of a file the prompt shows in full is served once, plain, as the
+/// Last result (badciv orI, 4 of 6: such reads were refused twice and
+/// parked); asking again while it is the Last result is refused, and a third
+/// ask parks, as for an outlined file.
+#[tokio::test]
+async fn a_read_of_a_file_shown_in_full_is_served_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let read = json!({"action":"read","file":"code.txt"});
+    fixture.conversational(read.clone());
+    runner.advance().await.unwrap();
+    fixture.conversational(read.clone());
+    runner.advance().await.unwrap();
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("Current text of `code.txt` (also shown in full under Source; served as asked):\noriginal"),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(intent_details(&runner, "shown_read_served").len(), 1);
+    fixture.conversational(read.clone());
+    runner.advance().await.unwrap();
+    assert!(
+        runner.task.last_response.starts_with("Not read again"),
+        "{}",
+        runner.task.last_response
+    );
+    fixture.conversational(read);
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
 }
 
 #[tokio::test]
