@@ -54,14 +54,24 @@ pub struct StalledFailure {
     #[serde(default)]
     pub command: String,
     /// The source the failure was last seen in: a fingerprint of the
-    /// working set's text ([`stall_by_state_enabled`]).
+    /// task's code ([`stall_by_state_enabled`]).
     #[serde(default)]
     pub state: String,
-    /// Every source it has been seen in, with the event that first showed it
-    /// there: coming back to one of these is not progress.
-    #[serde(default)]
-    pub seen: Vec<(String, usize)>,
 }
+
+/// A source state a command failed in: its fingerprint, the failure's
+/// signature, the command and the event that journaled it. A fact about that
+/// source, so a human answer, which restarts the count, keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedState {
+    pub state: String,
+    pub signature: String,
+    pub command: String,
+    pub event: usize,
+}
+
+/// Failed source states remembered; the oldest go first.
+const MAX_FAILED_STATES: usize = 64;
 
 /// Lines of a failure's expected and actual values the steer quotes.
 const MAX_VALUE_LINES: usize = 6;
@@ -273,6 +283,16 @@ impl Runner {
             }
         };
         let state = self.symbolic_state_mut();
+        // The event that first showed this failure in exactly this source.
+        let known = by_state
+            .then(|| {
+                state
+                    .failed_states
+                    .iter()
+                    .find(|failed| failed.state == source && failed.signature == signature)
+                    .map(|failed| failed.event)
+            })
+            .flatten();
         let mut revisited = None;
         let count = match state.stalled_failure.as_mut() {
             Some(stall) if unchanged(stall) && stall.signature == signature => {
@@ -292,16 +312,8 @@ impl Runner {
             }
             // The same failure in a source it was seen in before: the edits
             // since went back and forth, which is not progress.
-            Some(stall)
-                if by_state
-                    && stall.signature == signature
-                    && stall.seen.iter().any(|(seen, _)| *seen == source) =>
-            {
-                revisited = stall
-                    .seen
-                    .iter()
-                    .find(|(seen, _)| *seen == source)
-                    .map(|(_, at)| *at);
+            Some(stall) if stall.signature == signature && known.is_some() => {
+                revisited = known;
                 stall.count += 1;
                 stall.state = source.clone();
                 stall.edits = edits;
@@ -309,40 +321,75 @@ impl Runner {
                 stall.count
             }
             // The same failure in a new source: progress, so the count starts
-            // again, and this source joins the ones seen.
+            // again.
             Some(stall) if by_state && stall.signature == signature => {
                 stall.count = 1;
                 stall.state = source.clone();
                 stall.edits = edits;
                 stall.command = command.to_string();
-                stall.seen.push((source.clone(), event));
                 1
             }
             _ => {
+                revisited = known;
                 state.stalled_failure = Some(StalledFailure {
                     signature: signature.clone(),
                     edits,
                     count: 1,
                     command: command.to_string(),
                     state: source.clone(),
-                    seen: if by_state {
-                        vec![(source.clone(), event)]
-                    } else {
-                        Vec::new()
-                    },
                 });
                 1
             }
         };
+        if by_state && known.is_none() {
+            remember_failed_state(
+                state,
+                FailedState {
+                    state: source,
+                    signature: signature.clone(),
+                    command: command.to_string(),
+                    event,
+                },
+            );
+        }
         let what = described(&tests, &signature);
+        let first = count == 1 && required && !tests.is_empty() && focus_first_enabled();
+        self.stall_response(&what, &tests, count, command, revisited, first, None)
+    }
+
+    /// The harness text for the `count`th sighting of a failure: the park
+    /// message from the fourth, which also parks the task; the focus block on
+    /// the second, or on a required check's `first` failure; otherwise
+    /// nothing. `revisited` is the event that showed it in the current
+    /// source before. `known` is set when nothing ran: an edit returned the
+    /// source to that state, so its result is known, and every sighting says
+    /// so ([`Self::note_source_revisit`]).
+    #[allow(clippy::too_many_arguments)]
+    fn stall_response(
+        &mut self,
+        what: &str,
+        tests: &[FailedTest],
+        count: usize,
+        command: &str,
+        revisited: Option<usize>,
+        first: bool,
+        known: Option<usize>,
+    ) -> Option<String> {
+        let edits = self.task.edits.len();
         if count >= PARK_AT {
             self.intent_event(
                 "stalled_failure_parked",
                 &format!("{what}, {count} times at edit {edits}: {command}"),
             );
-            self.event(format!(
-                "Stalled failure: {what} came back {count} times with no edit between; parked for guidance."
-            ));
+            self.event(if revisited.is_some() {
+                format!(
+                    "Stalled failure: {what} came back {count} times as the source went back and forth; parked for guidance."
+                )
+            } else {
+                format!(
+                    "Stalled failure: {what} came back {count} times with no edit between; parked for guidance."
+                )
+            });
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
             self.park_under_approved_plan();
@@ -357,9 +404,13 @@ impl Runner {
         }
         // A required check that names its failing test shows where to look
         // the first time it fails.
-        let first = count == 1 && required && !tests.is_empty() && focus_first_enabled();
         if count != FOCUS_AT && !first {
-            return None;
+            // A source returned to with no run says what is known of it.
+            return known.map(|at| {
+                format!(
+                    "[Harness: this edit returns the source to exactly what it was at event {at}, where `{command}` failed: {what}. That result stands without a rerun; edit the code the test exercises, or the test if it is wrong.]\n"
+                )
+            });
         }
         self.intent_event(
             "stalled_failure_focus",
@@ -368,12 +419,12 @@ impl Runner {
                 if first { ", first failure" } else { "" }
             ),
         );
-        let opening = if first {
-            format!("a required check failed: {what}")
-        } else if let Some(at) = revisited {
+        let opening = if let Some(at) = revisited {
             format!(
                 "the failure is back with the source exactly as it was at event {at}, when this check failed the same way: the edits since went back and forth without changing the result, so look at the code the test exercises: {what}"
             )
+        } else if first {
+            format!("a required check failed: {what}")
         } else {
             format!("the same failure again with no edit since: {what}")
         };
@@ -381,6 +432,84 @@ impl Runner {
             Some(test) => self.focus_block(test, &opening, "", FOCUS_CLOSING),
             None => format!("[Harness: {opening}. {FOCUS_CLOSING}"),
         })
+    }
+
+    /// After an applied edit: an edit that returns the task's code to a source
+    /// a command already failed in is another sighting of that failure,
+    /// without running anything, since the result of exactly that source is
+    /// known. Past the auto-verify limit no check runs at all, so a model
+    /// alternating a file between two versions was never told its edits went
+    /// back and forth (badciv orH1: 104 edits, two states, no check after the
+    /// third). Counts toward the focus block and the park like a run; returns
+    /// the text to put before the Last result.
+    pub(in crate::harness::runner) fn note_source_revisit(&mut self) -> Option<String> {
+        if !enabled() || !stall_by_state_enabled() {
+            return None;
+        }
+        // An applied edit always changes the source, so the source it lands
+        // in is never the one already counted: A, then B unchecked, then A
+        // again is a return.
+        let source = self.source_state();
+        let known = self
+            .task
+            .symbolic
+            .as_ref()?
+            .failed_states
+            .iter()
+            .rev()
+            .find(|failed| failed.state == source)?
+            .clone();
+        let output = self
+            .task
+            .events
+            .get(known.event)
+            .and_then(|event| event.message.splitn(4, '\n').nth(3))
+            .unwrap_or_default()
+            .to_string();
+        let tests = failed_tests(&output);
+        let edits = self.task.edits.len();
+        let state = self.symbolic_state_mut();
+        // The result is known: the harness does not run the checks on it.
+        state.auto_verify_armed = None;
+        let count = match state.stalled_failure.as_mut() {
+            Some(stall) if stall.signature == known.signature => {
+                stall.count += 1;
+                stall.state = source;
+                stall.edits = edits;
+                stall.count
+            }
+            _ => {
+                state.stalled_failure = Some(StalledFailure {
+                    signature: known.signature.clone(),
+                    edits,
+                    count: 1,
+                    command: known.command.clone(),
+                    state: source,
+                });
+                1
+            }
+        };
+        let what = described(&tests, &known.signature);
+        self.intent_event(
+            "failed_source_revisited",
+            &format!(
+                "{what}: source as at event {}, sighting {count}",
+                known.event
+            ),
+        );
+        self.event(format!(
+            "Source revisited: the code is exactly as it was at event {}, where `{}` failed ({what}); not rerun.",
+            known.event, known.command
+        ));
+        self.stall_response(
+            &what,
+            &tests,
+            count,
+            &known.command,
+            Some(known.event),
+            false,
+            Some(known.event),
+        )
     }
 
     /// A fingerprint of the code the task works on: the current text, on
@@ -477,9 +606,17 @@ impl Runner {
     }
 
     /// A pass of the command that last failed clears the record: the failure
-    /// it tracked did not come back.
+    /// it tracked did not come back. A pass in a source remembered as failing
+    /// that command (after a grant, say) means that failure no longer stands
+    /// there.
     pub(in crate::harness::runner) fn note_pass(&mut self, command: &str) {
+        let source = (enabled() && stall_by_state_enabled()).then(|| self.source_state());
         if let Some(state) = self.task.symbolic.as_mut() {
+            if let Some(source) = source {
+                state
+                    .failed_states
+                    .retain(|failed| !(failed.state == source && failed.command == command));
+            }
             if state
                 .stalled_failure
                 .as_ref()
@@ -648,6 +785,13 @@ impl Runner {
         }
         callees
     }
+}
+
+/// Remember `failed`, dropping the oldest past [`MAX_FAILED_STATES`].
+fn remember_failed_state(state: &mut super::state::SymbolicState, failed: FailedState) {
+    state.failed_states.push(failed);
+    let excess = state.failed_states.len().saturating_sub(MAX_FAILED_STATES);
+    state.failed_states.drain(..excess);
 }
 
 #[cfg(test)]

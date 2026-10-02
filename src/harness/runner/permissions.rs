@@ -270,6 +270,11 @@ impl Runner {
         self.task.permission_grants.push(grant.clone());
         pending.approved_grant = Some(grant.id.clone());
         self.forget_failure();
+        // A grant changes what a command can do, so no remembered failure is
+        // known to stand any longer.
+        if let Some(state) = self.task.symbolic.as_mut() {
+            state.failed_states.clear();
+        }
         self.task.phase = Phase::Working;
         self.intent_event(
             "permission_approved",

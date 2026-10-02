@@ -179,6 +179,10 @@ pub struct SymbolicState {
     /// answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_failure: Option<super::stall::StalledFailure>,
+    /// Source states a command failed in, kept across human answers: an edit
+    /// back to one is a sighting of that failure without a run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_states: Vec<super::stall::FailedState>,
 }
 
 /// A required check that failed, how many edits the task had applied when

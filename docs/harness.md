@@ -1901,9 +1901,16 @@ contract 3 and intent contract 2.
   source came back, the focus block says so ("the failure is back with the
   source exactly as it was at event N ... the edits since went back and forth
   without changing the result, so look at the code the test exercises"), and
-  the park asks which side is wrong, the test or the code. In badciv orH, 3 of
-  6 local replicates alternated one test assertion between two values for
-  2 h. `MOOSEDEV_HARNESS_STALL_BY_STATE=off` counts by edits, as before.
+  the park asks which side is wrong, the test or the code. An edit that
+  returns the code to a source a command already failed in is itself a
+  sighting (`failed_source_revisited`): nothing is rerun, since that source's
+  result is known, and the Last result says so. This holds past the
+  auto-verify limit, where no check runs: in badciv orH1 the model made 104
+  edits alternating one test file between two versions, and after the third
+  auto-verify no check ran at all. Failed sources outlive a human answer,
+  which restarts only the count. In badciv orH, 3 of 6 local replicates
+  flip-flopped for 2 h. `MOOSEDEV_HARNESS_STALL_BY_STATE=off` counts by edits,
+  as before.
 - A read of a file shown in full is served once. Asked for a file the prompt
   already shows in full under Source, the harness serves its current text as
   the Last result, plain (`shown_read_served`), instead of refusing; a repeat

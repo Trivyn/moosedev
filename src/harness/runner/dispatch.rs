@@ -868,6 +868,9 @@ impl Runner {
         }
         self.arm_auto_fix(fresh);
         self.arm_auto_verify(fresh);
+        if let Some(note) = self.note_source_revisit() {
+            self.task.last_response = format!("{note}{}", self.task.last_response);
+        }
     }
 
     /// From finished work to the required checks. The language-server,
