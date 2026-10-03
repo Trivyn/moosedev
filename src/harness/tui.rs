@@ -70,6 +70,9 @@ pub enum Action {
     Resume,
     Answer(String),
     Rework(String),
+    /// With a path (and the paths it covers): extract and preview a spec for
+    /// approval. Alone: approve the pending preview.
+    ApproveSpec(Option<(String, Vec<String>)>),
 }
 
 fn can_advance(phase: &Phase) -> bool {
@@ -122,6 +125,16 @@ pub async fn execute(runner: &mut Runner, action: Action) -> Result<()> {
             runner.submit_message(text).await
         }
         Action::Rework(note) => runner.rework(note).await,
+        Action::ApproveSpec(Some((path, covers))) => {
+            runner.begin_spec_approval(&path, &covers).await
+        }
+        Action::ApproveSpec(None) => {
+            anyhow::ensure!(
+                runner.task.phase == Phase::AwaitingSpecApproval,
+                "there is no spec approval pending; use approve-spec ID PATH [COVERED...] first"
+            );
+            runner.approve_spec().await
+        }
     }
 }
 

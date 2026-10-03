@@ -37,6 +37,9 @@ Usage: moosedev code [--project DIR] [--daemon URL] [--daemon-exe PATH] [--new] 
   cancel ID                Cancel while preserving task state
   resume ID                Resume an interrupted or cancelled task
   answer ID TEXT           Answer the runner's pending question or park
+  approve-spec ID PATH [COVERED...]
+                            Extract a spec into a preview for approval (the task
+                            must be in Plan); approve-spec ID then approves it
   rework ID TEXT           At the final review, send the work back with a note
   tui ID                   Open the interactive task interface
   render ID [FILE]         Build the next model request as it would be sent and
@@ -104,6 +107,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
 }
 
 fn action(command: &str, args: &[String]) -> Result<Action> {
+    // approve-spec ID [PATH [COVERED...]]: begin with a path, accept without.
+    if command == "approve-spec" {
+        anyhow::ensure!(!args.is_empty(), "approve-spec requires a task ID");
+        return Ok(Action::ApproveSpec(
+            args.get(1).map(|path| (path.clone(), args[2..].to_vec())),
+        ));
+    }
     let expected = match command {
         "review" => 2,
         "answer" | "rework" => 2,
@@ -386,6 +396,20 @@ mod tests {
             Action::Choose(key) if key == "add"
         ));
         assert!(action("no-knowledge", &[]).is_err());
+        // approve-spec begins with a path and its covered paths, accepts without.
+        let begin = action(
+            "approve-spec",
+            &["t".into(), "spec.md".into(), "src/".into()],
+        )
+        .unwrap();
+        assert!(
+            matches!(begin, Action::ApproveSpec(Some((ref path, ref covers))) if path == "spec.md" && covers == &["src/".to_string()])
+        );
+        assert!(matches!(
+            action("approve-spec", &["t".into()]).unwrap(),
+            Action::ApproveSpec(None)
+        ));
+        assert!(action("approve-spec", &[]).is_err());
         assert!(action("run", &["task".into()]).is_ok());
     }
 
