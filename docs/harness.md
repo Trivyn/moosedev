@@ -1893,6 +1893,34 @@ contract 3 and intent contract 2.
   loop detector sees the same failure come back. In badciv orL one such replace
   ran 30-77 times in 4 of 5 local replicates. `MOOSEDEV_HARNESS_REAPPLIED_INSERTION=off`
   applies it again.
+- Progress is a new source, not an edit. The loop detector knows a source by
+  the current text of the plan's files and the files the task edited (reads
+  and preloads do not count). The same failure in a new source starts the
+  count again; in a source it was seen in before it counts on, so a flip-flop
+  between two versions is focused and parks by the fourth sighting. When the
+  source came back, the focus block says so ("the failure is back with the
+  source exactly as it was at event N ... the edits since went back and forth
+  without changing the result, so look at the code the test exercises"), and
+  the park asks which side is wrong, the test or the code. An edit that
+  returns the code to a source a command already failed in is itself a
+  sighting (`failed_source_revisited`): nothing is rerun, since that source's
+  result is known, and the Last result says so. While a failure stands, a
+  return to any source an edit produced before counts too, checked or not
+  (badciv orHA1 cycled through three versions of a test no check ran on); a
+  source a command passed in never counts. This holds past the
+  auto-verify limit, where no check runs: in badciv orH1 the model made 104
+  edits alternating one test file between two versions, and after the third
+  auto-verify no check ran at all. Failed sources outlive a human answer,
+  which restarts only the count. In badciv orH, 3 of 6 local replicates
+  flip-flopped for 2 h. `MOOSEDEV_HARNESS_STALL_BY_STATE=off` counts by edits,
+  as before.
+- A read of a file shown in full is served once. Asked for a file the prompt
+  already shows in full under Source, the harness serves its current text as
+  the Last result, plain (`shown_read_served`), instead of refusing; a repeat
+  while it is the Last result is refused, and a further refusal parks, as for
+  an outlined file. In badciv orI, 4 of 6 replicates asked for such a file
+  (the copy under Source is one JSON-escaped entry of a large map), were
+  refused twice and parked. `MOOSEDEV_HARNESS_SERVE_SHOWN=off` refuses it.
 - A provider refusal stops the step. HTTP 401, 402 or 403 from the provider,
   for an action or for the compatibility probe, is `CompletionError::Refused`
   in the llm layer, and it is not transient: the harness journals

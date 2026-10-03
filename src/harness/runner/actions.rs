@@ -55,6 +55,13 @@ pub(super) enum Step {
     ReadOutsideScope {
         file: String,
     },
+    /// A model read of a file the prompt already shows in full. It journals
+    /// as the read the model proposed; dispatch serves the file's current
+    /// text as the Last result, plain, leaving the working set as it is.
+    #[serde(rename = "read")]
+    ReadShown {
+        file: String,
+    },
     Search {
         query: String,
     },
@@ -714,6 +721,22 @@ pub(super) fn outlined_text_response(file: &str, text: &str) -> String {
     )
 }
 
+/// The journal prefix of a read of a file shown in full that the harness
+/// served.
+pub(super) const SHOWN_SERVED: &str = "Served read of a file shown in full:";
+
+/// The Last result serving `text`, the current text of `file`, which the
+/// prompt also shows in full under Source.
+pub(super) fn shown_text_response(file: &str, text: &str) -> String {
+    format!("Current text of `{file}` (also shown in full under Source; served as asked):\n{text}")
+}
+
+/// `MOOSEDEV_HARNESS_SERVE_SHOWN=off` refuses a read of a file the prompt
+/// shows in full, as before.
+fn serve_shown_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_SERVE_SHOWN").map_or(true, |value| value.trim() != "off")
+}
+
 /// The journal prefix of a read outside the step's scope the harness served.
 pub(super) const OUTSIDE_SCOPE_SERVED: &str = "Served read outside scope:";
 
@@ -766,17 +789,30 @@ impl Runner {
             None => return Step::Read { file },
             Some(reason) => reason,
         };
+        let next = if self.task.mode == Mode::Plan {
+            "Propose the plan from it"
+        } else {
+            "Edit it"
+        };
+        // A file shown in full is served once more as the Last result, plain,
+        // when asked for: coding models expect a read to return the file, and
+        // the copy under Source is one JSON-escaped entry of a large map
+        // (badciv orI: 4 of 6 replicates asked for such a file, were refused
+        // twice and parked; 2 of them ended the step there). It is served
+        // once per looking run, and a repeat while it is the Last result is
+        // refused, then parks, as for an outlined file.
+        if serve_shown_enabled() && self.task.source_full.contains(&file) {
+            return match self.served_repeat(&file, next) {
+                Some(reason) => Step::ReadRefused { file, reason },
+                None => Step::ReadShown { file },
+            };
+        }
         if !serve_outlined_enabled()
             || !self.task.source_outlined.contains(&file)
             || self.task.source_full.contains(&file)
         {
             return Step::ReadRefused { file, reason };
         }
-        let next = if self.task.mode == Mode::Plan {
-            "Propose the plan from it"
-        } else {
-            "Edit it"
-        };
         // Unlike a file outside the scope, an outlined file is not read back
         // in full here: the budget outlined it, so reading it in would
         // outline the next one, and alternating reads would rotate the tiers
@@ -832,6 +868,7 @@ impl Runner {
         let served = [
             format!("{OUTLINED_SERVED} {file} "),
             format!("{OUTSIDE_SCOPE_SERVED} {file} "),
+            format!("{SHOWN_SERVED} {file} "),
         ];
         let refused = format!("{READ_REFUSED} `{file}` ");
         let mut serves = Vec::new();
@@ -846,6 +883,7 @@ impl Runner {
         let shown = [
             outlined_text_response(file, ""),
             outside_scope_text_response(file, ""),
+            shown_text_response(file, ""),
         ]
         .iter()
         .any(|header| last.starts_with(header))
@@ -863,7 +901,10 @@ impl Runner {
     /// for a read of it: what the model proposing an edit now has seen.
     fn served_in_full(&self, file: &str) -> bool {
         match self.task.source.get(file) {
-            Some(Some(text)) => self.task.last_response == outlined_text_response(file, text),
+            Some(Some(text)) => {
+                self.task.last_response == outlined_text_response(file, text)
+                    || self.task.last_response == shown_text_response(file, text)
+            }
             _ => false,
         }
     }
@@ -876,7 +917,7 @@ impl Runner {
     /// than fits, a model reading each file in turn evicts exactly the file
     /// it reads next (badciv 40cef4a5, Lesson f5d2b5f9). Reads the guards
     /// make are never judged here.
-    fn redundant_read(&self, file: &str) -> Option<String> {
+    pub(super) fn redundant_read(&self, file: &str) -> Option<String> {
         // A preloaded file shown in full was seen as a read one is.
         let read =
             self.task.read_files.iter().any(|known| known == file) || self.preloaded_in_full(file);

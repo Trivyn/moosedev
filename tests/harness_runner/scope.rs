@@ -179,6 +179,9 @@ async fn a_read_outside_the_scope_of_a_file_changed_since_it_was_served_is_serve
 #[tokio::test]
 async fn a_read_outside_the_scope_joins_the_working_set_once_the_last_result_moved_on() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = Fixture::new().await;
     spec_project(&fixture, true);
     let mut runner = planner(&fixture).await;
@@ -248,6 +251,9 @@ async fn a_read_outside_the_scope_joins_the_working_set_once_the_last_result_mov
 #[tokio::test]
 async fn auto_mode_preloads_the_spec_in_play_with_the_plans_files() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = Fixture::new().await;
     spec_project(&fixture, true);
     std::fs::write(fixture.root.join("map/src/grid.rs"), NOTES).unwrap();
@@ -293,6 +299,9 @@ async fn auto_mode_preloads_the_spec_in_play_with_the_plans_files() {
 #[tokio::test]
 async fn a_read_of_a_preloaded_file_shown_in_full_is_not_repeated() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // These cover the refusal of a file shown in full, which a first read
+    // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
+    let _serve_off = ServeShownOff::set();
     let fixture = Fixture::new().await;
     spec_project(&fixture, true);
     let mut runner = planner(&fixture).await;
