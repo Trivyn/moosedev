@@ -437,6 +437,21 @@ impl Runner {
                     // and parked). That is a no-op, which runs the checks, not a
                     // failed match.
                     return Err(anyhow::Error::new(super::model::NoopEdit));
+                } else if let Some(stale) = (count == 0
+                    // A JSON-escaped copy of the current text is not stale.
+                    && decoded
+                        .as_deref()
+                        .is_none_or(|span| occurrences(source, span) != 1))
+                .then(|| self.stale_text_note(&file, source, &old_text))
+                .flatten()
+                {
+                    // Before the span repair: an earlier version's text is not
+                    // junk around the current text.
+                    self.intent_event(
+                        "stale_old_text",
+                        &super::bounded(&format!("{file}: {stale}"), 300),
+                    );
+                    anyhow::bail!("replace old_text must match exactly once; found 0: {STALE_TEXT} {stale}; select old_text from the current source");
                 } else if let (0, Some(repair)) = (count, repair_literal_span(source, &old_text)) {
                     let trimmed_new = strip_same_junk(&new_text, &repair);
                     let detail = super::bounded(
@@ -749,6 +764,74 @@ pub(super) fn outside_scope_text_response(file: &str, text: &str) -> String {
 }
 
 impl Runner {
+    /// When `old_text` matches nowhere in `file` but exactly once in an
+    /// earlier version of it (an applied edit's text before or after), what
+    /// the line that differs reads now. A model alternating a line between
+    /// two values proposed the other value's text as old_text, and its retry
+    /// repeated it until the repair guard parked (badciv orHA and orHB: the
+    /// first park in 6 of 6 runs).
+    fn stale_text_note(&self, file: &str, source: &str, old_text: &str) -> Option<String> {
+        if !stale_text_enabled() {
+            return None;
+        }
+        let earlier = self
+            .task
+            .edits
+            .iter()
+            .rev()
+            .filter(|edit| edit.file == file)
+            .flat_map(|edit| [edit.after.as_deref(), edit.before.as_deref()])
+            .flatten()
+            .find(|text| *text != source && occurrences(text, old_text) == 1)?;
+        // The first line of old_text the file no longer holds (whole lines:
+        // `return name` is inside `return name.lower()`), at its place in the
+        // earlier version: where old_text starts there, plus its offset.
+        let (offset, gone) = old_text
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .find(|(_, line)| !source.lines().any(|held| held == *line))?;
+        let start = earlier[..earlier.find(old_text)?].matches('\n').count();
+        let index = start + offset;
+        // The line at that place now: the versions aligned by the lines they
+        // share before it, else by those they share after it.
+        let old_lines: Vec<&str> = earlier.lines().collect();
+        let new_lines: Vec<&str> = source.lines().collect();
+        let before = old_lines
+            .iter()
+            .zip(&new_lines)
+            .take_while(|(old, new)| old == new)
+            .count();
+        let after = old_lines
+            .iter()
+            .rev()
+            .zip(new_lines.iter().rev())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let place = if before >= index {
+            Some(index)
+        } else if after >= old_lines.len().saturating_sub(index + 1) {
+            (new_lines.len() + index + 1).checked_sub(old_lines.len())
+        } else {
+            None
+        };
+        let now = place
+            .and_then(|place| new_lines.get(place))
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty());
+        Some(match now {
+            Some(now) => format!(
+                "the line {:?} now reads {:?}",
+                super::bounded(gone.trim(), 160),
+                super::bounded(now, 160)
+            ),
+            None => format!(
+                "the line {:?} is no longer in it",
+                super::bounded(gone.trim(), 160)
+            ),
+        })
+    }
+
     /// What a model read of `file` becomes: a read into the working set; a
     /// refusal when it would add nothing ([`Self::redundant_read`]); or, for a
     /// file outlined only for space whose earlier read is still current, its
@@ -1107,6 +1190,17 @@ fn whole_file_rewrite(source: &str, old_text: &str, new_text: &str) -> Option<St
     })
 }
 
+/// How a replace whose `old_text` is an earlier version of its file is
+/// rejected; the repeated-candidate park looks for it.
+pub(super) const STALE_TEXT: &str =
+    "old_text is from an earlier version of the file, not its current text";
+
+/// `MOOSEDEV_HARNESS_STALE_TEXT=off` rejects such a replace with the plain
+/// no-match error.
+fn stale_text_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_STALE_TEXT").map_or(true, |value| value.trim() != "off")
+}
+
 /// `MOOSEDEV_HARNESS_REAPPLIED_INSERTION=off` applies an insertion the file
 /// already holds again, as before.
 fn reapplied_insertion_enabled() -> bool {
@@ -1283,6 +1377,27 @@ pub(super) fn repair_literal_span(source: &str, literal: &str) -> Option<SpanRep
         }
         let span = &literal[p..literal.len() - s];
         if span.trim().is_empty() || occurrences(source, span) != 1 {
+            continue;
+        }
+        // Junk cut at a line ending leaves a span that stood on its own
+        // lines: it must stand on its own lines in the source too, or the
+        // repair lands mid-line (badciv orHB: `    return name\n` matched
+        // inside `    return name.lower()` and wrote `name.upper().lower()`).
+        let at = source.find(span).unwrap_or_default();
+        let end = at + span.len();
+        let ends_line = |text: &str| text.starts_with('\n') || text.starts_with("\r\n");
+        if ends_line(&literal[literal.len() - s..])
+            && !span.ends_with('\n')
+            && end < source.len()
+            && !ends_line(&source[end..])
+        {
+            continue;
+        }
+        if literal[..p].ends_with('\n')
+            && !span.starts_with('\n')
+            && at > 0
+            && !source[..at].ends_with('\n')
+        {
             continue;
         }
         match &found {
@@ -1605,6 +1720,12 @@ mod tests {
         assert!(repair_literal_span("ok ok", "ok}}").is_none());
         // Junk runs are bounded.
         assert!(repair_literal_span("ok\n", &format!("ok{}", "}".repeat(20))).is_none());
+        // A cut line ending never moves the span mid-line: an earlier
+        // version's whole line is not inside the current, longer one.
+        assert!(repair_literal_span("    return name.lower()\n", "    return name\n").is_none());
+        // At a line end it still repairs.
+        let repair = repair_literal_span("a\n    return name\nb", "    return name\n\n").unwrap();
+        assert_eq!(repair.span, "    return name\n");
     }
 
     #[test]

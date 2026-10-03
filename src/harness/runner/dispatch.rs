@@ -638,6 +638,9 @@ impl Runner {
                 if self.plan_coverage_return(&summary, &context, &claimed) {
                     return self.persist();
                 }
+                if self.spec_deferral_return(&files, &addresses, &claimed, &context) {
+                    return self.persist();
+                }
                 let addresses = self.resolve_plan_addresses(&addresses, &context);
                 let satisfied = self.resolve_plan_satisfied(&satisfied, &addresses, &context);
                 self.journal_rules_settled(&context.governing_rules, &satisfied);
@@ -646,6 +649,9 @@ impl Runner {
                 self.task.snapshots = self.snapshot(&files)?;
                 self.task.read_files.retain(|file| files.contains(file));
                 self.task.source.retain(|file, _| files.contains(file));
+                // A stored plan ends the planning round: its one return for
+                // the spec's open rules is spent or not needed.
+                self.symbolic_state_mut().spec_deferral_returns = 0;
                 self.task.plan = Some(Plan {
                     summary: summary.clone(),
                     files,

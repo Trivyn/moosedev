@@ -20,6 +20,16 @@ use super::super::{Mode, Phase, Runner};
 /// model's finish still works after the limit.
 pub(in crate::harness::runner) const AUTO_VERIFY_LIMIT: usize = 3;
 
+/// Auto-verify runs per approval cycle while a failure stands and the source
+/// is one no command has run on ([`verify_new_states_enabled`]).
+pub(in crate::harness::runner) const AUTO_VERIFY_FAILING_LIMIT: usize = 12;
+
+/// `MOOSEDEV_HARNESS_VERIFY_NEW_STATES=off` stops at [`AUTO_VERIFY_LIMIT`]
+/// whatever the source.
+fn verify_new_states_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_VERIFY_NEW_STATES").map_or(true, |value| value.trim() != "off")
+}
+
 /// What the model and the human are told when the harness runs the checks.
 pub(in crate::harness::runner) const AUTO_VERIFY_NOTE: &str = "All planned files are edited and the language server reports no problems: running the required checks.";
 
@@ -106,11 +116,22 @@ impl Runner {
         if !every_file_done || !self.planned_stubs_split().1.is_empty() {
             return false;
         }
+        // Past the limit, a source no command has run on still gets one run
+        // while a failure stands: in badciv orH1 no check ran after the third,
+        // and 101 edits went by with no result. A return to a version already
+        // held is answered without a run (`note_source_revisit`), so only new
+        // code costs a check.
+        let new_failing = verify_new_states_enabled()
+            && self.task.symbolic.as_ref().is_some_and(|state| {
+                state.stalled_failure.is_some()
+                    && state.auto_verifications < AUTO_VERIFY_FAILING_LIMIT
+            })
+            && self.source_unrun();
         let state = self.symbolic_state_mut();
-        if state.auto_verifications >= AUTO_VERIFY_LIMIT {
-            if state.auto_verifications == AUTO_VERIFY_LIMIT {
-                // Counted past the limit so this is journaled once per cycle.
-                state.auto_verifications += 1;
+        if state.auto_verifications >= AUTO_VERIFY_LIMIT && !new_failing {
+            if !state.auto_verify_exhausted {
+                // Journaled once per cycle.
+                state.auto_verify_exhausted = true;
                 self.intent_event(
                     "auto_verify_exhausted",
                     &format!("{AUTO_VERIFY_LIMIT} runs this approval cycle; the model finishes"),

@@ -5985,3 +5985,169 @@ async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() 
     );
     assert!(prompt.contains("\nYour plan summary must say, for each project rule, whether this change implements it, it does not apply, or it is deferred as outside this objective: Preserve display label behavior; Labels never exceed one line. List only the ones it implements in addresses."));
 }
+
+/// A replace whose old_text is an earlier version of its file says so and
+/// quotes what the line reads now; a repeat of it while a failure stands
+/// parks as the loop it is, not as a malformed action (badciv orHA and orHB:
+/// the first park in 6 of 6 runs). Switched off, the plain no-match error.
+#[tokio::test]
+async fn a_replace_of_an_earlier_version_says_so_and_a_repeat_parks_as_the_loop() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
+    let stale = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.upper()\n"});
+    for on in [true, false] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = stalled_failure_runner(&fixture).await;
+        if !on {
+            std::env::set_var("MOOSEDEV_HARNESS_STALE_TEXT", "off");
+        }
+        act(&fixture, &mut runner, failing_test_command("a")).await;
+        act(&fixture, &mut runner, lower.clone()).await;
+        fixture.conversational(stale.clone());
+        fixture.conversational(stale.clone());
+        for _ in 0..4 {
+            if runner.task.phase == Phase::AwaitingInput {
+                break;
+            }
+            let _ = runner.advance().await;
+        }
+        std::env::remove_var("MOOSEDEV_HARNESS_STALE_TEXT");
+        assert_eq!(runner.task.phase, Phase::AwaitingInput);
+        let response = runner.task.last_response.clone();
+        if on {
+            assert!(
+                response.contains("the edits are going back and forth"),
+                "{response}"
+            );
+            assert!(
+                response.contains("old_text is from an earlier version of the file, not its current text the line \"return name\" now reads \"return name.lower()\""),
+                "{response}"
+            );
+            assert!(!intent_details(&runner, "stale_old_text").is_empty());
+        } else {
+            assert!(
+                response.contains("repeated the same rejected candidate"),
+                "{response}"
+            );
+            assert!(intent_details(&runner, "stale_old_text").is_empty());
+        }
+    }
+}
+
+/// Past the auto-verify limit, a source no command has run on still gets
+/// its checks while a failure stands (badciv orH1: 101 edits with no check
+/// after the third run). Switched off, the fixed limit holds.
+#[tokio::test]
+async fn past_the_limit_a_new_source_gets_its_checks_while_a_failure_stands() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
+    for on in [true, false] {
+        let fixture = symbolic_fixture().await;
+        let mut runner = stalled_failure_runner(&fixture).await;
+        if !on {
+            std::env::set_var("MOOSEDEV_HARNESS_VERIFY_NEW_STATES", "off");
+        }
+        act(&fixture, &mut runner, failing_test_command("a")).await;
+        clean_edit(&fixture, &mut runner, lower.clone()).await;
+        runner.task.symbolic.as_mut().unwrap().auto_verifications = 3;
+        let ran = leaves_working_without_the_model(&fixture, &mut runner).await;
+        std::env::remove_var("MOOSEDEV_HARNESS_VERIFY_NEW_STATES");
+        assert_eq!(ran, on);
+        assert_eq!(
+            intent_details(&runner, "auto_verify").len(),
+            usize::from(on)
+        );
+        assert_eq!(
+            intent_details(&runner, "auto_verify_exhausted").len(),
+            usize::from(!on)
+        );
+    }
+    // The second cap holds.
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    clean_edit(&fixture, &mut runner, lower).await;
+    runner.task.symbolic.as_mut().unwrap().auto_verifications = 12;
+    assert!(!leaves_working_without_the_model(&fixture, &mut runner).await);
+}
+
+/// A plan that leaves open rules of the spec the step names goes back once,
+/// naming them; the same plan again is stored (badciv orJ3 and orJ6
+/// deferred 7 spec rules and completed). Switched off, it is stored at once.
+#[tokio::test]
+async fn a_plan_leaving_rules_of_the_named_spec_open_goes_back_once() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let plan = json!({"action":"plan","summary":"Write the reader. Labels are localized is deferred to a later step.","files":["code.txt"],"checks":["true"],"addresses":[]});
+    for on in [true, false] {
+        let fixture = Fixture::new().await;
+        {
+            let mut shared = fixture.shared.lock().unwrap();
+            shared.governing_rules = vec![GoverningRule {
+                iri: PRESERVE.into(),
+                label: "Labels are localized".into(),
+                kind: "Requirement".into(),
+                claim: "hasDescription: Labels are localized.\n".into(),
+                via: "via: linked to code.txt".into(),
+                decided_by: Vec::new(),
+            }];
+            shared.approved_specs = vec![ApprovedSpecStatus {
+                path: "spec.md".into(),
+                stale: false,
+                record_count: 1,
+                open_rules: Some(vec!["Labels are localized".into()]),
+                covers: vec!["code.txt".into()],
+            }];
+        }
+        if !on {
+            std::env::set_var("MOOSEDEV_HARNESS_SPEC_DEFERRAL", "off");
+        }
+        let mut runner = fixture.interactive_objective("Implement spec.md").await;
+        fixture.conversational(plan.clone());
+        runner.advance().await.unwrap();
+        if on {
+            assert!(runner.task.plan.is_none(), "the plan was returned");
+            assert!(
+                runner.task.last_response.starts_with("Plan not stored: this step implements spec.md, and the plan leaves these 1 of its rules open"),
+                "{}",
+                runner.task.last_response
+            );
+            assert!(runner.task.last_response.contains("Labels are localized"));
+            assert_eq!(intent_details(&runner, "spec_deferral_returned").len(), 1);
+            fixture.conversational(plan.clone());
+            runner.advance().await.unwrap();
+        }
+        std::env::remove_var("MOOSEDEV_HARNESS_SPEC_DEFERRAL");
+        assert!(runner.task.plan.is_some(), "stored");
+        assert_eq!(
+            intent_details(&runner, "spec_deferral_returned").len(),
+            usize::from(on)
+        );
+    }
+    // A word that only contains the spec's stem does not name it.
+    let fixture = Fixture::new().await;
+    {
+        let mut shared = fixture.shared.lock().unwrap();
+        shared.governing_rules = vec![GoverningRule {
+            iri: PRESERVE.into(),
+            label: "Labels are localized".into(),
+            kind: "Requirement".into(),
+            claim: "hasDescription: Labels are localized.\n".into(),
+            via: "via: linked to code.txt".into(),
+            decided_by: Vec::new(),
+        }];
+        shared.approved_specs = vec![ApprovedSpecStatus {
+            path: "spec.md".into(),
+            stale: false,
+            record_count: 1,
+            open_rules: Some(vec!["Labels are localized".into()]),
+            covers: vec!["code.txt".into()],
+        }];
+    }
+    let mut runner = fixture
+        .interactive_objective("Write the specification reader")
+        .await;
+    fixture.conversational(plan);
+    runner.advance().await.unwrap();
+    assert!(runner.task.plan.is_some(), "stored");
+    assert!(intent_details(&runner, "spec_deferral_returned").is_empty());
+}

@@ -153,6 +153,13 @@ impl Runner {
                 .as_ref()
                 .is_some_and(|repair| repair.purpose == "harness_action")
             && self.repeated_rejection();
+        // The failure that stands, if any, described for a park.
+        let stalled = self
+            .task
+            .symbolic
+            .as_ref()
+            .and_then(|state| state.stalled_failure.as_ref())
+            .map(|stall| stall.signature.clone());
         let unwritten = if repeated && error.downcast_ref::<NoopEdit>().is_some() {
             self.unwritten_planned_files()
         } else {
@@ -186,7 +193,19 @@ impl Runner {
             "harness_capture_note" => "capture note",
             other => other,
         };
-        let message = if repeat_parked {
+        // A repeated replace of an earlier version's text while a failure
+        // stands is the source going back and forth, not a malformed action:
+        // the park says so.
+        let back_and_forth = repeat_parked
+            && repair.diagnostic.contains(super::actions::STALE_TEXT)
+            && stalled.is_some();
+        let message = if back_and_forth {
+            format!(
+                "[Harness: the edits are going back and forth on {}: the same replace of an earlier version's text came twice. Guidance is needed: say which side is wrong, the test or the code it exercises, or /plan to change the approach.] {}",
+                stalled.as_deref().unwrap_or_default(),
+                repair.diagnostic
+            )
+        } else if repeat_parked {
             format!("{stage} repeated the same rejected candidate; the same prompt would only produce it again. Provide human guidance before retrying; pending work is preserved. {}", repair.diagnostic)
         } else if exhausted {
             format!("{stage} failed validation after three attempts. Provide human guidance before retrying; pending work is preserved. {}", repair.diagnostic)

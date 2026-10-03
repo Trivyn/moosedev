@@ -73,6 +73,8 @@ impl Runner {
         state.unchanged_since_approval = true;
         state.cycle_replan_continuations = 0;
         state.auto_verifications = 0;
+        state.auto_verify_exhausted = false;
+        state.spec_deferral_returns = 0;
         // A human choice to verify with planned files missing answered the
         // plan approved then; this approval's finish is gated again, first
         // with a send-back: a refusal under an earlier plan at the same edit

@@ -273,7 +273,10 @@ impl Runner {
     /// cover the most of `planned` (the plans' files), when any covers one.
     /// A spec covering the whole project names no place, so it is never in
     /// play here.
-    fn specs_in_play(&self, planned: &[String]) -> Vec<&ApprovedSpecStatus> {
+    pub(in crate::harness::runner) fn specs_in_play(
+        &self,
+        planned: &[String],
+    ) -> Vec<&ApprovedSpecStatus> {
         let Some(context) = self.context.as_ref() else {
             return Vec::new();
         };

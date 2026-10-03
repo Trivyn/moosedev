@@ -69,6 +69,9 @@ pub struct SymbolicState {
     /// approved.
     #[serde(default)]
     pub auto_verifications: usize,
+    /// `auto_verify_exhausted` was journaled this approval cycle.
+    #[serde(default)]
+    pub auto_verify_exhausted: bool,
     /// `Task::edits` index where the current approval cycle began. Unlike an
     /// approved plan's `edit_start`, it moves on every approval, even of the
     /// same plan.
@@ -154,6 +157,10 @@ pub struct SymbolicState {
     /// not address a governing rule. Reset when a plan is stored.
     #[serde(default)]
     pub coverage_returns: usize,
+    /// Plans returned this approval cycle for leaving rules of the spec in
+    /// play open ([`Runner::spec_deferral_return`]).
+    #[serde(default)]
+    pub spec_deferral_returns: usize,
     /// Digests of (file, grounding keys) whose grounding note was delivered;
     /// the same edit proposed again goes through.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]

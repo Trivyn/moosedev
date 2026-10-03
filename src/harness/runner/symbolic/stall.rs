@@ -635,6 +635,22 @@ impl Runner {
         self.stall_response(&what, &output, count, &command, Some(revisit), false, true)
     }
 
+    /// Whether no command has run on the current source: it is neither a
+    /// source a command failed in nor one a command passed in.
+    pub(in crate::harness::runner) fn source_unrun(&self) -> bool {
+        let source = self.source_state();
+        self.task.symbolic.as_ref().is_none_or(|state| {
+            !state
+                .failed_states
+                .iter()
+                .any(|failed| failed.state == source)
+                && !state
+                    .visited_states
+                    .iter()
+                    .any(|visited| visited.state == source && !visited.passed.is_empty())
+        })
+    }
+
     /// A fingerprint of the code the task works on: the current text, on
     /// disk, of the plan's files and of every file it edited. Reading or
     /// preloading another file is not a change of the code, so it is left

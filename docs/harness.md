@@ -1333,6 +1333,13 @@ contract 3 and intent contract 2.
   stored and `constraint_coverage_unmet` is journaled. Invalid thresholds are
   journaled and the defaults used. The check reads wording only; required checks
   judge the code.
+  A plan that leaves open rules of an approved spec the step's objective or
+  guidance names (by path or file stem), rules the spec still has open and
+  the plan neither addresses nor claims satisfied, goes back once per
+  planning round (until a plan is stored), naming them (`spec_deferral_returned`). The same plan
+  proposed again is stored. In badciv orJ, both base3 replicates planned
+  only the writer, deferred 7 of the spec's rules and completed.
+  `MOOSEDEV_HARNESS_SPEC_DEFERRAL=off` stores such a plan at once.
 - Plan addresses. A plan also lists, in `addresses`, the rules its change
   implements, by label or IRI. Each entry is resolved against the rules
   delivered for the plan files (IRI anywhere in the entry, else the label
@@ -1799,6 +1806,12 @@ contract 3 and intent contract 2.
   needing no change never fires it: the model finishes, and the unfinished-plan
   gate asks the human about that file.
   `MOOSEDEV_HARNESS_AUTO_VERIFY=off` switches it off for study variants.
+  Past those three runs, a source no command has run on still gets its
+  checks while a failure stands, up to 12 runs per approval cycle: in badciv
+  orH1, 101 edits went by with no check after the third. A return to a
+  version already held is answered without a run (the loop detector's
+  sightings), so only new code costs a check.
+  `MOOSEDEV_HARNESS_VERIFY_NEW_STATES=off` keeps the fixed three.
 - Auto-applied fixes (offloading change 2). After an applied edit, the harness
   applies a language server's quick fix itself, without a model step, when the
   result is settled and a finding that is an error or a lint (never a warning:
@@ -1889,6 +1902,18 @@ contract 3 and intent contract 2.
   inspect of the output already in view: 48/48 replays of the stall decision,
   against 56/72 productive actions on OpenRouter without them (Lesson
   c3ee818a). `MOOSEDEV_HARNESS_OBSERVATIONS_ONCE=off` restores the old lists.
+- A replace of an earlier version's text says so. A `replace` whose
+  `old_text` matches nowhere in the file but exactly once in an earlier
+  version of it (an applied edit's text before or after) is rejected with
+  "old_text is from an earlier version of the file, not its current text",
+  quoting what the line reads now (`stale_old_text`). This is checked before the
+  span repair, which also never moves a span mid-line when the junk it cut
+  was a line ending. In badciv orHB, `    return name\n` matched inside
+  `    return name.lower()` and wrote `name.upper().lower()`. A repeat of
+  such a replace while a failure stands parks with the loop message ("the
+  edits are going back and forth …"), not as a malformed action. In badciv
+  orHA and orHB it was the first park in 6 of 6 runs.
+  `MOOSEDEV_HARNESS_STALE_TEXT=off` keeps the plain no-match error.
 - A re-applied insertion is already applied. A `replace` whose `new_text` is
   its `old_text` with text added around it, where the file already holds that
   whole `new_text` at the `old_text`, is a no-op (`reapplied_insertion`), not a

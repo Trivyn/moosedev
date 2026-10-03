@@ -11,7 +11,121 @@ use crate::harness::protocol::{spec_title_key, GoverningRule};
 /// Claim bytes a coverage return may carry for the rules it names.
 const COVERAGE_NOTE_CLAIM_BYTES: usize = 8_000;
 
+/// `MOOSEDEV_HARNESS_SPEC_DEFERRAL=off` lets a plan defer rules of the spec it
+/// implements without a return, as before.
+fn spec_deferral_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_SPEC_DEFERRAL").map_or(true, |value| value.trim() != "off")
+}
+
 impl Runner {
+    /// True when the plan was returned because it leaves open rules of an
+    /// approved spec in play that the step's objective names: badciv orJ3 and
+    /// orJ6 planned only the writer, deferred 7 of the spec's rules
+    /// (parse warnings among them) and completed. Once per planning round (until a plan is stored); a
+    /// plan proposed again is stored whatever it defers, so the way out stays.
+    /// Plan mode only, and only rules the spec still has open.
+    pub(in crate::harness::runner) fn spec_deferral_return(
+        &mut self,
+        files: &[String],
+        addresses: &[String],
+        claimed: &[String],
+        context: &ContextResponse,
+    ) -> bool {
+        if !spec_deferral_enabled()
+            || self.task.mode != super::super::Mode::Plan
+            || self
+                .task
+                .symbolic
+                .as_ref()
+                .is_some_and(|state| state.spec_deferral_returns > 0)
+        {
+            return false;
+        }
+        // Only a spec the step names (by path or file stem): a step that
+        // scaffolds the spec's crate is not implementing its rules.
+        // Whole words: `map.md` is not named by "bitmap".
+        let asked = format!("{}\n{}", self.task.objective, self.task.guidance).to_lowercase();
+        let words: Vec<&str> = asked
+            .split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')))
+            .map(|word| word.trim_matches('.'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        let named = |path: &str| {
+            let path = path.to_lowercase();
+            let stem = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(&path)
+                .to_string();
+            words
+                .iter()
+                .any(|word| *word == path || (stem.len() >= 3 && *word == stem))
+        };
+        let specs: Vec<(String, Vec<String>)> = self
+            .specs_in_play(files)
+            .into_iter()
+            .filter(|spec| named(&spec.path))
+            .map(|spec| {
+                let open = spec
+                    .open_rules
+                    .iter()
+                    .flatten()
+                    .map(|title| spec_title_key(title))
+                    .collect();
+                (spec.path.clone(), open)
+            })
+            .collect();
+        if specs.is_empty() {
+            return false;
+        }
+        let (addressed, _) = resolve_entries(addresses, &context.governing_rules);
+        let left: Vec<GoverningRule> = self
+            .unsettled_rules(
+                context
+                    .governing_rules
+                    .iter()
+                    .filter(|rule| !addressed.contains(&rule.iri))
+                    .cloned()
+                    .collect(),
+                claimed,
+            )
+            .into_iter()
+            .filter(|rule| {
+                let key = spec_title_key(&rule.label);
+                specs.iter().any(|(_, open)| open.contains(&key))
+            })
+            .collect();
+        if left.is_empty() {
+            return false;
+        }
+        self.symbolic_state_mut().spec_deferral_returns += 1;
+        let spec_paths: Vec<&str> = specs.iter().map(|(path, _)| path.as_str()).collect();
+        let names: Vec<&str> = left.iter().map(|rule| rule.label.as_str()).collect();
+        self.intent_event(
+            "spec_deferral_returned",
+            &super::super::bounded(
+                &format!("{}: {}", spec_paths.join(", "), names.join("; ")),
+                2000,
+            ),
+        );
+        self.event(format!(
+            "Plan returned: it leaves {} rule(s) of {} open, which this step implements.",
+            left.len(),
+            spec_paths.join(", ")
+        ));
+        let mut note = format!(
+            "Plan not stored: this step implements {}, and the plan leaves these {} of its rules open (not in addresses or satisfied). Cover each in the plan: add the files it needs and list it in addresses, or, for one that truly belongs to a later step, name that step in the summary. A plan proposed again is stored as it stands.\n",
+            spec_paths.join(", "),
+            left.len()
+        );
+        for rule in &left {
+            note.push_str(&format!("\n[{}] {} ({})", rule.kind, rule.label, rule.iri));
+        }
+        note.push('\n');
+        self.task.last_response = note;
+        true
+    }
+
     /// True when the plan was returned; the caller stores nothing. A rule
     /// already settled needs no answer: decided, or settled by an approved
     /// plan of this task, or among the proposal's `satisfied` claims (see
