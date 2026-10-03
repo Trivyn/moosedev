@@ -183,6 +183,10 @@ pub struct SymbolicState {
     /// back to one is a sighting of that failure without a run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_states: Vec<super::stall::FailedState>,
+    /// Source states applied edits produced, kept across human answers:
+    /// while a failure stands, an edit back to one is a sighting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visited_states: Vec<super::stall::VisitedState>,
 }
 
 /// A required check that failed, how many edits the task had applied when

@@ -3468,6 +3468,63 @@ async fn a_return_to_a_failed_source_counts_with_nothing_checked_between() {
     assert_eq!(intent_details(&runner, "failed_source_revisited").len(), 1);
 }
 
+/// While a failure stands, a return to a source the task held before counts
+/// even when no check ever ran on it (badciv orHA1 cycled through three
+/// versions of a test that no check saw): the failure in A, edits to B and
+/// C with no run, and an edit back to B is the second sighting.
+#[tokio::test]
+async fn a_return_to_an_unchecked_source_counts_while_a_failure_stands() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
+    let upper = json!({"action":"replace","file":"labels.py","old_text":"    return name.lower()\n","new_text":"    return name.upper()\n"});
+    let lower_again = json!({"action":"replace","file":"labels.py","old_text":"    return name.upper()\n","new_text":"    return name.lower()\n"});
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    act(&fixture, &mut runner, lower).await;
+    let lower_edit = runner
+        .task
+        .events
+        .iter()
+        .rposition(|event| event.message.starts_with("Applied edit"))
+        .unwrap();
+    act(&fixture, &mut runner, upper).await;
+    assert_eq!(stall_count(&runner), Some(1));
+    act(&fixture, &mut runner, lower_again).await;
+    assert_eq!(stall_count(&runner), Some(2));
+    assert!(
+        runner.task.last_response.starts_with(&format!(
+            "[Harness: the source is back exactly as it was after the edit at event {lower_edit}"
+        )),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(intent_details(&runner, "failed_source_revisited").len(), 1);
+}
+
+/// A source produced before the failure began is not a return to one the
+/// failure was seen through: going back to it is a plausible repair.
+#[tokio::test]
+async fn a_return_to_a_source_from_before_the_failure_does_not_count() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
+    let upper = json!({"action":"replace","file":"labels.py","old_text":"    return name.lower()\n","new_text":"    return name.upper()\n"});
+    let lower_again = json!({"action":"replace","file":"labels.py","old_text":"    return name.upper()\n","new_text":"    return name.lower()\n"});
+    let fixture = symbolic_fixture().await;
+    let mut runner = stalled_failure_runner(&fixture).await;
+    act(&fixture, &mut runner, lower).await;
+    act(&fixture, &mut runner, upper).await;
+    act(&fixture, &mut runner, failing_test_command("a")).await;
+    act(&fixture, &mut runner, lower_again).await;
+    assert_eq!(stall_count(&runner), Some(1));
+    assert!(intent_details(&runner, "failed_source_revisited").is_empty());
+    assert!(
+        !runner.task.last_response.starts_with("[Harness:"),
+        "{}",
+        runner.task.last_response
+    );
+}
+
 /// What a source failed with outlives a human answer: the answer restarts
 /// the count, but an edit back to that source afterwards is still known to
 /// fail.

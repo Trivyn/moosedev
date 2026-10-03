@@ -1904,7 +1904,10 @@ contract 3 and intent contract 2.
   the park asks which side is wrong, the test or the code. An edit that
   returns the code to a source a command already failed in is itself a
   sighting (`failed_source_revisited`): nothing is rerun, since that source's
-  result is known, and the Last result says so. This holds past the
+  result is known, and the Last result says so. While a failure stands, a
+  return to any source an edit produced before counts too, checked or not
+  (badciv orHA1 cycled through three versions of a test no check ran on); a
+  source a command passed in never counts. This holds past the
   auto-verify limit, where no check runs: in badciv orH1 the model made 104
   edits alternating one test file between two versions, and after the third
   auto-verify no check ran at all. Failed sources outlive a human answer,
