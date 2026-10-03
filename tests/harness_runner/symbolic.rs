@@ -3288,7 +3288,7 @@ async fn the_same_failure_with_no_edit_between_is_focused_then_parks() {
     assert_eq!(intent_details(&runner, "stalled_failure_focus").len(), 1);
     let response = runner.task.last_response.clone();
     assert!(
-        response.starts_with("[Harness: the same failure again with no edit since: test `test_render` (tests/test_labels.py:2). Its source and the code it calls:\n"),
+        response.starts_with("[Harness: the same failure again with no edit since: test `test_render` (tests/test_labels.py:2). The line that failed: `assert render_name(\" a \") == \"a\"`. Its source and the code it calls:\n"),
         "{response}"
     );
     assert!(
@@ -3499,6 +3499,13 @@ async fn a_return_to_an_unchecked_source_counts_while_a_failure_stands() {
         "{}",
         runner.task.last_response
     );
+    // That version never ran, so no line of it is quoted as the one that
+    // failed.
+    assert!(
+        !runner.task.last_response.contains("The line that failed"),
+        "{}",
+        runner.task.last_response
+    );
     assert_eq!(intent_details(&runner, "failed_source_revisited").len(), 1);
 }
 
@@ -3683,7 +3690,7 @@ async fn a_required_checks_first_failure_shows_where_to_look() {
     assert_eq!(stall_count(&runner), Some(1));
     let response = &runner.task.last_response;
     assert!(
-        response.starts_with("[Harness: a required check failed: test `test_render` (tests/test_labels.py:2). Its source and the code it calls:\n"),
+        response.starts_with("[Harness: a required check failed: test `test_render` (tests/test_labels.py:2). The line that failed: `assert render_name(\" a \") == \"a\"`."),
         "{response}"
     );
     assert!(
@@ -3729,7 +3736,7 @@ async fn a_look_that_would_park_while_a_check_fails_is_steered_once() {
             assert_eq!(runner.task.phase, Phase::Working);
             let response = runner.task.last_response.clone();
             assert!(
-                response.starts_with("[Harness: the required check is still failing, and looking again will not change it: test `test_render` (tests/test_labels.py:2).\nIts values:\nassertion failed\nleft: 1\nright: 2\nIts source and the code it calls:\n"),
+                response.starts_with("[Harness: the required check is still failing, and looking again will not change it: test `test_render` (tests/test_labels.py:2). The line that failed: `assert render_name(\" a \") == \"a\"`.\nIts values:\nassertion failed\nleft: 1\nright: 2\nIts source and the code it calls:\n"),
                 "{response}"
             );
             assert!(
@@ -3886,6 +3893,33 @@ async fn a_panic_outside_the_test_shows_where_it_panicked() {
         "{response}"
     );
     assert!(!response.contains("(the test)"), "{response}");
+}
+
+/// The focus block quotes the line the runner says failed, and the values it
+/// reports: a test of many assertions shows them all, and badciv orH1's model
+/// edited the assertion above the failing one 104 times.
+#[tokio::test]
+async fn the_focus_block_quotes_the_line_that_failed_and_its_values() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    let command = |variant: &str| {
+        json!({"action":"command","command":format!(
+            "printf \"test test_render ... FAILED\\nthread 'test_render' panicked at labels.py:2:5:\\nassertion failed\\n  left: Plains\\n right: Mountains\\n\"; exit 101 # {variant}"
+        )})
+    };
+    act(&fixture, &mut runner, command("a")).await;
+    act(&fixture, &mut runner, command("b")).await;
+    let response = &runner.task.last_response;
+    assert!(
+        response.contains("(labels.py:2). The line that failed: `return name`"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Its values:\nassertion failed\nleft: Plains\nright: Mountains\n"),
+        "{response}"
+    );
 }
 
 // ---- Harness questions (PendingChoice): scope escapes and missing planned
