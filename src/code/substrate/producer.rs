@@ -788,6 +788,27 @@ mod tests {
     }
 
     #[test]
+    fn python_detection_accepts_a_root_package_but_not_a_stray_script() {
+        let repo_root = unique_temp_dir("python-package");
+        let python = &registry()[2];
+        fs::write(repo_root.join("tool.py"), "print(1)\n").unwrap();
+        fs::create_dir_all(repo_root.join(".venv/lib")).unwrap();
+        fs::write(repo_root.join(".venv/lib/__init__.py"), "").unwrap();
+        assert!((python.detect)(&repo_root).is_none());
+
+        fs::create_dir_all(repo_root.join("cafe_inventory")).unwrap();
+        fs::write(repo_root.join("cafe_inventory/__init__.py"), "").unwrap();
+        assert_eq!(
+            (python.detect)(&repo_root),
+            Some(ProducerTarget {
+                project_dir: repo_root.clone(),
+                path_prefix: None,
+            })
+        );
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
     fn rust_command_honors_binary_override() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("MOOSEDEV_SCIP_PRODUCER");

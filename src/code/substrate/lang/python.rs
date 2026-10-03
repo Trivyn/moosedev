@@ -359,13 +359,33 @@ fn detect(repo_root: &Path) -> Option<ProducerTarget> {
     // do: tooling-only requirements.txt files in subdirectories are common
     // (moosedev's own bench/requirements.txt) and must not spawn scip-python
     // over a directory that is not a Python project.
-    if is_project(repo_root) || repo_root.join("requirements.txt").is_file() {
+    // A package at the root (a directory holding `__init__.py`) counts there
+    // too: a standard-library project needs no manifest, and without one it
+    // was never indexed. A stray root script does not count.
+    if is_project(repo_root)
+        || repo_root.join("requirements.txt").is_file()
+        || has_root_package(repo_root)
+    {
         return Some(ProducerTarget {
             project_dir: repo_root.to_path_buf(),
             path_prefix: None,
         });
     }
     first_matching_subdir(repo_root, is_project)
+}
+
+/// Whether a visible directory directly under `root` is a Python package.
+fn has_root_package(root: &Path) -> bool {
+    std::fs::read_dir(root).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with('.')
+                && name != "node_modules"
+                && name != "target"
+                && entry.path().join("__init__.py").is_file()
+        })
+    })
 }
 
 fn is_project(path: &Path) -> bool {
