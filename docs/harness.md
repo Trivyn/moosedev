@@ -1855,7 +1855,10 @@ contract 3 and intent contract 2.
   (`stalled_failure_focus`): the failing test's source and up to three
   functions of the plan's non-test files it calls, located by the tree-sitter
   outline of the files' current text (by the panic location, else by the
-  test's name), within 4,000 bytes. The fourth parks for guidance
+  test's name), within 4,000 bytes. It quotes the line the runner says
+  failed next to its location, and the failure's expected and actual values
+  (badciv orH1's model edited the assertion above the failing one 104
+  times, while the panic named a different line). The fourth parks for guidance
   (`stalled_failure_parked`). An applied edit, a pass of the command that
   failed, or a human answer starts the count again; a failure naming no test
   and no error (a `grep` matching nothing) leaves it alone. badciv run 12

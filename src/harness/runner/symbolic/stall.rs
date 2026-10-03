@@ -99,6 +99,19 @@ struct Revisit {
     failed_there: bool,
 }
 
+/// The longest failing line quoted in a focus block.
+const MAX_QUOTED_LINE: usize = 200;
+
+/// A failure's expected and actual values as a focus block's detail.
+fn values_detail(output: &str) -> String {
+    let values = value_lines(output);
+    if values.is_empty() {
+        String::new()
+    } else {
+        format!("\nIts values:\n{}\n", values.join("\n"))
+    }
+}
+
 /// Lines of a failure's expected and actual values the steer quotes.
 const MAX_VALUE_LINES: usize = 6;
 /// Bytes those lines may take.
@@ -385,7 +398,7 @@ impl Runner {
             at,
             failed_there: true,
         });
-        self.stall_response(&what, &tests, count, command, revisit, first, false)
+        self.stall_response(&what, output, count, command, revisit, first, false)
     }
 
     /// The harness text for the `count`th sighting of a failure: the park
@@ -398,13 +411,14 @@ impl Runner {
     fn stall_response(
         &mut self,
         what: &str,
-        tests: &[FailedTest],
+        output: &str,
         count: usize,
         command: &str,
         revisit: Option<Revisit>,
         first: bool,
         no_run: bool,
     ) -> Option<String> {
+        let tests = failed_tests(output);
         let revisited = revisit.map(|revisit| revisit.at);
         let edits = self.task.edits.len();
         if count >= PARK_AT {
@@ -472,7 +486,15 @@ impl Runner {
             format!("the same failure again with no edit since: {what}")
         };
         Some(match tests.first() {
-            Some(test) => self.focus_block(test, &opening, "", FOCUS_CLOSING),
+            // A version returned to that never ran is not the source the
+            // output came from: its line at that location did not fail.
+            Some(test) => self.focus_block(
+                test,
+                &opening,
+                &values_detail(output),
+                FOCUS_CLOSING,
+                revisit.is_none_or(|revisit| revisit.failed_there),
+            ),
             None => format!("[Harness: {opening}. {FOCUS_CLOSING}"),
         })
     }
@@ -610,7 +632,7 @@ impl Runner {
                 "Source revisited: the code is exactly as it was after the edit at event {at}; `{command}` has passed in no version since it failed ({what}); not rerun."
             )
         });
-        self.stall_response(&what, &tests, count, &command, Some(revisit), false, true)
+        self.stall_response(&what, &output, count, &command, Some(revisit), false, true)
     }
 
     /// A fingerprint of the code the task works on: the current text, on
@@ -671,19 +693,14 @@ impl Runner {
         let tests = failed_tests(&output);
         let test = tests.first()?;
         let what = described(&tests, &signature);
-        let values = value_lines(&output);
-        let values = if values.is_empty() {
-            String::new()
-        } else {
-            format!("\nIts values:\n{}\n", values.join("\n"))
-        };
         let steer = self.focus_block(
             test,
             &format!(
                 "the required check is still failing, and looking again will not change it: {what}"
             ),
-            &values,
+            &values_detail(&output),
             STEER_CLOSING,
+            self.failed_here(&signature),
         );
         self.symbolic_state_mut().steered_at = Some(edits);
         self.intent_event(
@@ -694,6 +711,22 @@ impl Runner {
             "Steer before park: the required check is still failing ({what}); showed its source instead of parking."
         ));
         Some(steer)
+    }
+
+    /// Whether the current source is one a command failed in with
+    /// `signature`, so a location in its output points into this text. With
+    /// the count by edits, the stall's edit count already says so.
+    fn failed_here(&self, signature: &str) -> bool {
+        if !stall_by_state_enabled() {
+            return true;
+        }
+        let source = self.source_state();
+        self.task.symbolic.as_ref().is_some_and(|state| {
+            state
+                .failed_states
+                .iter()
+                .any(|failed| failed.state == source && failed.signature == signature)
+        })
     }
 
     /// The output of the last run of `command`, from its journaled event.
@@ -752,11 +785,28 @@ impl Runner {
     /// The failing test's source and up to three definitions it calls, from
     /// the files' current text, in at most [`FOCUS_BYTES`]: `opening`, the
     /// test's place, `detail`, the sources, then `closing`.
-    fn focus_block(&self, test: &FailedTest, opening: &str, detail: &str, closing: &str) -> String {
+    /// `quote` says the current source is the one the failure ran on, so
+    /// the line its location names is the line that failed.
+    fn focus_block(
+        &self,
+        test: &FailedTest,
+        opening: &str,
+        detail: &str,
+        closing: &str,
+        quote: bool,
+    ) -> String {
+        // The line that failed, quoted where the runner names it: a test of
+        // many assertions shows them all, and badciv orH1's model edited the
+        // assertion above the failing one 104 times.
         let place = test
             .location
             .as_ref()
-            .map(|(file, line)| format!(" ({file}:{line})"))
+            .map(
+                |(file, line)| match quote.then(|| self.failing_line(file, *line)).flatten() {
+                    Some(text) => format!(" ({file}:{line}). The line that failed: `{text}`"),
+                    None => format!(" ({file}:{line})"),
+                },
+            )
             .unwrap_or_default();
         let mut block = format!("[Harness: {opening}{place}.{detail}");
         let (found, panicked_in) = self.find_test(test);
@@ -806,6 +856,27 @@ impl Runner {
         }
         block.push_str(closing);
         block
+    }
+
+    /// Line `line` (1-based) of `file`'s current text, trimmed, when it is
+    /// short enough to quote and the path names exactly one file: a suffix
+    /// two crates share (`src/lib.rs`) could quote the other one.
+    fn failing_line(&self, file: &str, line: u32) -> Option<String> {
+        let text = match self.current_text(file) {
+            Some(text) => text,
+            None => {
+                let mut matches = self.known_files().into_iter().filter(|known| {
+                    known.ends_with(&format!("/{file}")) || file.ends_with(&format!("/{known}"))
+                });
+                let only = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                self.current_text(&only)?
+            }
+        };
+        let quoted = text.lines().nth((line as usize).checked_sub(1)?)?.trim();
+        (!quoted.is_empty() && quoted.len() <= MAX_QUOTED_LINE).then(|| quoted.to_string())
     }
 
     /// A file's current text: the working set's copy, else the workspace's.
